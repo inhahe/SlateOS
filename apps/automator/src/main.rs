@@ -16,30 +16,36 @@
 //! - **Recording indicator**: visual feedback during recording
 //!
 //! Uses the guitk library for UI rendering with a Catppuccin Mocha dark theme.
+//!
+//! The window is real: a `Layout` is solved from the live size every frame, the
+//! drawing pass records the hit box of everything it paints, and a click is
+//! answered by the thing that was actually drawn under it. See the roadmap
+//! entry for the faults wiring it exposed -- chief among them that not one of
+//! the twenty-odd controls in the picture had ever been clickable, and that
+//! playback had no clock to advance it.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::return_self_not_must_use)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::unreadable_literal)]
-#![allow(clippy::doc_markdown)]
+//
+// There used to be thirteen crate-level `#![allow]`s here -- `too_many_lines`,
+// four `cast_*`, `similar_names`, `must_use_candidate`, `missing_panics_doc`
+// and the rest. A blanket allow is not a decision about a line of code; it is a
+// decision not to look at any of them, and this file has enough arithmetic in
+// it that the four `cast_*` allows alone were covering every f32/usize
+// conversion in the layout. They are all gone.
 
-use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::color::Color;
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
 
 use std::collections::BTreeMap;
+use std::process::ExitCode;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -64,24 +70,313 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 
 // ============================================================================
-// Layout constants
+// Window and clock
 // ============================================================================
 
+/// The size the window opens at. Nothing else in the program may assume it.
+///
+/// It used to be the size the *whole picture* was drawn at: `render` measured
+/// nothing vertical, so `HEADER_HEIGHT = 44`, `TOOLBAR_HEIGHT = 38`,
+/// `SIDEBAR_WIDTH = 240` and `PROPERTIES_WIDTH = 260` were the layout in every
+/// window there has ever been, and 240 + 260 of a 400-wide one is more than
+/// there is.
 const WINDOW_WIDTH: f32 = 1000.0;
 const WINDOW_HEIGHT: f32 = 700.0;
-const HEADER_HEIGHT: f32 = 44.0;
-const TOOLBAR_HEIGHT: f32 = 38.0;
-const SIDEBAR_WIDTH: f32 = 240.0;
-const PROPERTIES_WIDTH: f32 = 260.0;
-const STATUS_BAR_HEIGHT: f32 = 24.0;
-const ROW_HEIGHT: f32 = 30.0;
-const PADDING: f32 = 10.0;
-const FONT_SIZE: f32 = 13.0;
-const FONT_SIZE_SMALL: f32 = 11.0;
-const FONT_SIZE_HEADING: f32 = 16.0;
-const BUTTON_HEIGHT: f32 = 28.0;
-const CORNER_RADIUS: f32 = 4.0;
+
+const TITLE: &str = "Automator";
+
+/// How often the window asks for a frame.
+///
+/// Two things need it and neither had it: the recording indicator pulses on
+/// `elapsed_ms`, and playback advances on `tick_playback` -- which, in the
+/// program as shipped, had no caller outside the tests. A macro that had been
+/// started (had there been any way to start one) would have sat on its first
+/// action for ever.
+const TICK_MS: u64 = 16;
+
 const RECORDING_PULSE_PERIOD_MS: u64 = 1000;
+
+const CORNER_RADIUS: f32 = 4.0;
+
+/// The narrowest a side panel may be before it is left out rather than drawn.
+///
+/// A panel squeezed to forty pixels shows nobody anything; it just takes forty
+/// pixels off the list, which is the part of the window that is actually doing
+/// work. The old layout had no such rule -- both panels were drawn at their
+/// full fixed widths whatever was left over, so a 400-wide window got a centre
+/// panel a hundred pixels *wide in the negative*.
+const MIN_PANEL_W: f32 = 132.0;
+
+/// The narrowest the action list may be squeezed to by the two side panels.
+///
+/// The list is the part of the window doing the work; a side panel that would
+/// leave less than this is left out instead.
+const MIN_LIST_W: f32 = 120.0;
+
+// ============================================================================
+// What a click can land on
+// ============================================================================
+
+/// Everything in the picture a click can reach.
+///
+/// The program used to have no answer to that question at all. There was no
+/// `handle_event`, no mouse code and no key code: two tabs, eight transport
+/// buttons, every macro row, every action row, New, Delete, Up, Down, the
+/// action Delete, Apply Script, five speed buttons and three repeat buttons
+/// were all painted, and not one of them could be pressed. Hit boxes are
+/// recorded by the pass that paints them now, so a control is clickable exactly
+/// where its ink is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The `i`th macro of the library, as the sidebar currently lists it.
+    Macro(usize),
+    /// The `i`th action of the selected macro, as the list currently shows it.
+    Action(usize),
+    Tab(ActiveTab),
+    Button(Button),
+    Speed(PlaybackSpeed),
+    Repeat(RepeatMode),
+    /// The help card itself, which swallows the click that dismisses it.
+    Help,
+}
+
+/// A control that has both a button in the picture and a key on the keyboard.
+///
+/// The pairing is the point: `press` below is the single implementation, so a
+/// button and its key cannot drift apart, and the button's own label is what
+/// tells the user which key it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Record,
+    StopRecording,
+    Play,
+    PausePlayback,
+    StopPlayback,
+    CycleSpeed,
+    CycleRepeat,
+    NewMacro,
+    DeleteMacro,
+    MoveActionUp,
+    MoveActionDown,
+    DeleteAction,
+    ApplyScript,
+    Help,
+}
+
+impl Button {
+    /// The key that does the same thing, spelled the way the label spells it.
+    fn key(self) -> Key {
+        match self {
+            Self::Record => Key::R,
+            Self::StopRecording => Key::T,
+            Self::Play => Key::P,
+            Self::PausePlayback => Key::Space,
+            Self::StopPlayback => Key::S,
+            Self::CycleSpeed => Key::X,
+            Self::CycleRepeat => Key::E,
+            Self::NewMacro => Key::N,
+            Self::DeleteMacro => Key::Delete,
+            Self::MoveActionUp => Key::LeftBracket,
+            Self::MoveActionDown => Key::RightBracket,
+            Self::DeleteAction => Key::Backspace,
+            Self::ApplyScript => Key::A,
+            Self::Help => Key::F1,
+        }
+    }
+
+    /// How the key reads on a button face.
+    fn key_label(self) -> &'static str {
+        match self {
+            Self::Record => "R",
+            Self::StopRecording => "T",
+            Self::Play => "P",
+            Self::PausePlayback => "Space",
+            Self::StopPlayback => "S",
+            Self::CycleSpeed => "X",
+            Self::CycleRepeat => "E",
+            Self::NewMacro => "N",
+            Self::DeleteMacro => "Del",
+            Self::MoveActionUp => "[",
+            Self::MoveActionDown => "]",
+            Self::DeleteAction => "Bksp",
+            Self::ApplyScript => "A",
+            Self::Help => "F1",
+        }
+    }
+
+    /// What the button says it does.
+    fn action_label(self) -> &'static str {
+        match self {
+            Self::Record => "Record",
+            Self::StopRecording => "Stop Rec",
+            Self::Play => "Play",
+            Self::PausePlayback => "Pause",
+            Self::StopPlayback => "Stop",
+            Self::CycleSpeed => "Speed",
+            Self::CycleRepeat => "Repeat",
+            Self::NewMacro => "New",
+            Self::DeleteMacro => "Delete macro",
+            Self::MoveActionUp => "Move up",
+            Self::MoveActionDown => "Move down",
+            Self::DeleteAction => "Delete action",
+            Self::ApplyScript => "Apply Script",
+            Self::Help => "Help",
+        }
+    }
+
+    /// Every button, in the order the help card lists them.
+    fn all() -> &'static [Self] {
+        &[
+            Self::Record,
+            Self::StopRecording,
+            Self::Play,
+            Self::PausePlayback,
+            Self::StopPlayback,
+            Self::CycleSpeed,
+            Self::CycleRepeat,
+            Self::NewMacro,
+            Self::DeleteMacro,
+            Self::MoveActionUp,
+            Self::MoveActionDown,
+            Self::DeleteAction,
+            Self::ApplyScript,
+            Self::Help,
+        ]
+    }
+}
+
+// ============================================================================
+// Layout
+// ============================================================================
+
+/// Every rectangle in the picture, solved from the live window size.
+///
+/// What this replaced was eight compile-time sizes -- `HEADER_HEIGHT = 44`,
+/// `SIDEBAR_WIDTH = 240`, `PROPERTIES_WIDTH = 260` and the rest -- and a
+/// `render` that took a width and a height and then measured nothing vertical
+/// with either. The centre panel was literally `width - 240.0 - 260.0`, which
+/// is a *negative* width in any window narrower than five hundred pixels, and
+/// the properties panel began at `width - 260.0`, which is off the left edge of
+/// anything narrower than that.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    window: Rect,
+    /// The title bar: name, recording and playback indicators, the tab pair.
+    header: Rect,
+    /// The transport strip: record, play, speed, repeat.
+    toolbar: Rect,
+    /// The macro library. Empty when the window cannot pay for one.
+    sidebar: Rect,
+    /// The action list or the script, whichever tab is up. Never empty.
+    list: Rect,
+    /// The read-out and the speed/repeat pads. Empty when there is no room.
+    props: Rect,
+    /// The one line of prose along the bottom.
+    status: Rect,
+    /// The height of one heading strip, one list row, one property row.
+    row: f32,
+    /// The height of a button, in the toolbar and in every panel footer.
+    button: f32,
+    pad: f32,
+    heading: f32,
+    font: f32,
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        let window = Rect::new(0.0, 0.0, w, h);
+
+        let pad = (w.min(h) * 0.02).clamp(3.0, 12.0);
+        let font = (h / 52.0).clamp(9.0, 15.0);
+        let small = (font - 2.0).max(8.0);
+        let heading = (font * 1.25).clamp(11.0, 20.0);
+        let row = (font * 2.2).max(14.0);
+        let button = (small * 2.4).max(12.0);
+
+        let header = Rect::new(0.0, 0.0, w, (heading + pad * 2.2).min(h));
+        let toolbar_h = (button + pad * 1.4).min((h - header.h).max(0.0));
+        let toolbar = Rect::new(0.0, header.bottom(), w, toolbar_h);
+        let status_h = (small + pad * 1.2).min((h - header.h - toolbar_h).max(0.0));
+        let status = Rect::new(0.0, h - status_h, w, status_h);
+
+        let content_y = toolbar.bottom();
+        let content_h = (status.y - content_y).max(0.0);
+
+        // Two panels flank a list, and all three want the same pixels. The
+        // list is what is doing the work, so it is what is protected: a side
+        // panel is taken only if it is wide enough to read *and* leaves the
+        // list wide enough to read. Properties goes first when only one can
+        // stay, because the sidebar is how a macro is chosen and the
+        // properties panel only reports on the one already chosen.
+        let mut sidebar_w = (w * 0.24).clamp(0.0, 240.0);
+        if sidebar_w < MIN_PANEL_W || w - sidebar_w < MIN_LIST_W {
+            sidebar_w = 0.0;
+        }
+        let mut props_w = (w * 0.26).clamp(0.0, 280.0);
+        if props_w < MIN_PANEL_W || w - sidebar_w - props_w < MIN_LIST_W {
+            props_w = 0.0;
+        }
+
+        let sidebar = if sidebar_w > 0.0 && content_h > 0.0 {
+            Rect::new(0.0, content_y, sidebar_w, content_h)
+        } else {
+            Rect::EMPTY
+        };
+        let props = if props_w > 0.0 && content_h > 0.0 {
+            Rect::new(w - props_w, content_y, props_w, content_h)
+        } else {
+            Rect::EMPTY
+        };
+        let list = Rect::new(
+            sidebar_w,
+            content_y,
+            (w - sidebar_w - props_w).max(0.0),
+            content_h,
+        );
+
+        Self {
+            window,
+            header,
+            toolbar,
+            sidebar,
+            list,
+            props,
+            status,
+            row,
+            button,
+            pad,
+            heading,
+            font,
+            small,
+        }
+    }
+
+    /// Split a panel into a heading strip, a footer strip and the body between.
+    ///
+    /// The footer is taken only if the panel can pay for it *and* still leave a
+    /// body. The old sidebar drew its New/Delete bar at
+    /// `content_y + content_h - 36.0` unconditionally and the action list drew
+    /// its Up/Down/Delete bar the same way, so in a short window the bar was
+    /// not under the list, it was on top of it -- and the rows it covered were
+    /// drawn all the same, under a bar that hid them.
+    fn split(panel: Rect, head_h: f32, foot_h: f32) -> (Rect, Rect, Rect) {
+        if panel.is_empty() {
+            return (Rect::EMPTY, Rect::EMPTY, Rect::EMPTY);
+        }
+        let head_h = head_h.min(panel.h);
+        let rest = panel.h - head_h;
+        // Half the remainder is the most a footer may take: a footer that eats
+        // the body is a footer with nothing to be the foot of.
+        let foot_h = foot_h.min(rest * 0.5).max(0.0);
+        let head = Rect::new(panel.x, panel.y, panel.w, head_h);
+        let body = Rect::new(panel.x, panel.y + head_h, panel.w, rest - foot_h);
+        let foot = Rect::new(panel.x, panel.bottom() - foot_h, panel.w, foot_h);
+        (head, body, foot)
+    }
+}
 
 // ============================================================================
 // Mouse button (for macro actions -- distinct from guitk's MouseButton)
@@ -280,7 +575,7 @@ impl TimedAction {
 // ============================================================================
 
 /// Speed multiplier for macro playback.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaybackSpeed {
     Half,
     Normal,
@@ -707,7 +1002,10 @@ fn substitute_vars(line: &str, vars: &BTreeMap<String, String>) -> String {
                 end = end.saturating_add(1);
             }
             if end > start {
-                let var_name: String = chars.get(start..end).map(|s| s.iter().collect()).unwrap_or_default();
+                let var_name: String = chars
+                    .get(start..end)
+                    .map(|s| s.iter().collect())
+                    .unwrap_or_default();
                 if let Some(val) = vars.get(&var_name) {
                     result.push_str(val);
                 } else {
@@ -974,7 +1272,7 @@ impl PlaybackState {
 
 /// Which panel/tab is active in the main view.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ActiveTab {
+pub enum ActiveTab {
     Editor,
     Script,
 }
@@ -1004,8 +1302,24 @@ pub struct AutomatorApp {
     active_tab: ActiveTab,
     script_text: String,
     script_error: Option<String>,
-    sidebar_scroll: f32,
-    action_list_scroll: f32,
+    /// The first macro row the sidebar shows, as an index into the library.
+    ///
+    /// This and `action_scroll` used to be `f32` pixel offsets that nothing
+    /// ever wrote: initialised to zero in `new`, subtracted by the drawing
+    /// pass, and assigned nowhere else in the program. A row index cannot be
+    /// half a row, and it can be clamped against the list it indexes.
+    sidebar_scroll: usize,
+    /// The first action row the list shows.
+    action_scroll: usize,
+    /// Whether the key card is up.
+    show_help: bool,
+    /// The size the last frame was drawn at.
+    ///
+    /// A click arrives in window coordinates and has to be tested against the
+    /// picture the user was looking at, which is the one drawn at this size.
+    size: (f32, f32),
+    /// Wheel notches earned but not yet spent as whole rows.
+    wheel: guitk::wheel::Accumulator,
     elapsed_ms: u64,
     status_message: String,
 }
@@ -1023,11 +1337,100 @@ impl AutomatorApp {
             active_tab: ActiveTab::Editor,
             script_text: String::new(),
             script_error: None,
-            sidebar_scroll: 0.0,
-            action_list_scroll: 0.0,
+            sidebar_scroll: 0,
+            action_scroll: 0,
+            show_help: false,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            wheel: guitk::wheel::Accumulator::default(),
             elapsed_ms: 0,
             status_message: "Ready".to_string(),
         }
+    }
+
+    /// A library with two macros in it, so the window opens with something to
+    /// look at rather than an empty list and no clue what a macro looks like.
+    ///
+    /// This is what `main` used to be: eighteen `add_action` calls in the
+    /// program's entry point, feeding a picture that was rendered once into a
+    /// `Vec` and dropped on the next line. Naming it makes it a fixture a test
+    /// can build.
+    pub fn with_demo_library() -> Self {
+        let mut app = Self::new();
+        app.new_macro("Login Sequence");
+        app.add_action(
+            MacroAction::MouseClick {
+                x: 500.0,
+                y: 300.0,
+                button: MacroMouseButton::Left,
+            },
+            0,
+        );
+        app.add_action(
+            MacroAction::TypeText {
+                text: "admin".to_string(),
+            },
+            100,
+        );
+        app.add_action(
+            MacroAction::KeyPress {
+                key_name: "Tab".to_string(),
+            },
+            50,
+        );
+        app.add_action(
+            MacroAction::KeyRelease {
+                key_name: "Tab".to_string(),
+            },
+            50,
+        );
+        app.add_action(
+            MacroAction::TypeText {
+                text: "password123".to_string(),
+            },
+            100,
+        );
+        app.add_action(
+            MacroAction::KeyPress {
+                key_name: "Enter".to_string(),
+            },
+            200,
+        );
+        app.add_action(
+            MacroAction::KeyRelease {
+                key_name: "Enter".to_string(),
+            },
+            50,
+        );
+        app.set_trigger(Hotkey::from_str("Ctrl+Alt+L"));
+
+        app.new_macro("Screenshot Workflow");
+        app.add_action(MacroAction::Delay { ms: 500 }, 0);
+        app.add_action(
+            MacroAction::KeyPress {
+                key_name: "PrintScreen".to_string(),
+            },
+            500,
+        );
+        app.add_action(
+            MacroAction::KeyRelease {
+                key_name: "PrintScreen".to_string(),
+            },
+            50,
+        );
+        app.add_action(MacroAction::MouseMove { x: 100.0, y: 100.0 }, 200);
+        app.add_action(
+            MacroAction::MouseClick {
+                x: 100.0,
+                y: 100.0,
+                button: MacroMouseButton::Left,
+            },
+            100,
+        );
+
+        app.select_macro_by_index(0);
+        app.select_action(2);
+        app.status_message = "Ready".to_string();
+        app
     }
 
     // -----------------------------------------------------------------------
@@ -1443,1295 +1846,1545 @@ impl AutomatorApp {
             && let Some(mac) = self.library.get_mut(id)
         {
             mac.repeat_mode = mode;
+            self.status_message = format!("Repeat: {}", mac.repeat_mode.label());
         }
     }
 
-    /// Advance elapsed time.
-    pub fn tick(&mut self, delta_ms: u64) {
+    /// Step the repeat mode round its three settings.
+    pub fn cycle_repeat_mode(&mut self) {
+        if let Some(id) = self.selected_macro_id
+            && let Some(mac) = self.library.get_mut(id)
+        {
+            mac.repeat_mode = match mac.repeat_mode {
+                RepeatMode::Once => RepeatMode::Times(5),
+                RepeatMode::Times(_) => RepeatMode::Forever,
+                RepeatMode::Forever => RepeatMode::Once,
+            };
+            self.status_message = format!("Repeat: {}", mac.repeat_mode.label());
+        }
+    }
+
+    /// Advance the clock, and with it whatever is running.
+    ///
+    /// Returns whether anything moved, so a window that has nothing to show can
+    /// stay idle rather than repaint sixty times a second for ever.
+    ///
+    /// `tick_playback` used to have no caller anywhere but the tests. `tick`
+    /// advanced `elapsed_ms` and stopped there, so playback -- had there been
+    /// any way to start it, which there was not -- would have sat on its first
+    /// action until the program was closed.
+    pub fn tick(&mut self, delta_ms: u64) -> bool {
         self.elapsed_ms = self.elapsed_ms.saturating_add(delta_ms);
+        let was_playing = self.playback_state.is_playing();
+        let fired = self.tick_playback(delta_ms).is_some();
+        // The recording indicator pulses, so a recording window is always
+        // asking for the next frame; nothing else is.
+        fired || was_playing || self.recording_state.is_recording()
     }
 
     // -----------------------------------------------------------------------
-    // Rendering
+    // Drawing
     // -----------------------------------------------------------------------
 
-    /// Render the entire UI, returning a list of `RenderCommand`s.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        self.render_header(&mut cmds, width);
-        self.render_toolbar(&mut cmds, width);
-
-        let content_y = HEADER_HEIGHT + TOOLBAR_HEIGHT;
-        let content_h = height - content_y - STATUS_BAR_HEIGHT;
-
-        self.render_sidebar(&mut cmds, content_y, content_h);
-        self.render_action_list(&mut cmds, content_y, content_h, width);
-        self.render_properties_panel(&mut cmds, content_y, content_h, width);
-        self.render_status_bar(&mut cmds, width, height);
-
-        cmds
+    /// Draw the whole window, recording the hit box of everything drawn.
+    ///
+    /// One pass paints and hit-boxes together, so a control is clickable
+    /// exactly where its ink is. The program this replaced had no hit boxes at
+    /// all -- and no mouse handler to consult them.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let l = Layout::solve(width, height);
+        let mut f = Frame::new(width, height);
+        fill(&mut f, l.window, BASE, CornerRadii::ZERO);
+        self.draw_header(&mut f, &l);
+        self.draw_toolbar(&mut f, &l);
+        self.draw_sidebar(&mut f, &l);
+        self.draw_list(&mut f, &l);
+        self.draw_props(&mut f, &l);
+        self.draw_status(&mut f, &l);
+        if self.show_help {
+            self.draw_help(&mut f, &l);
+        }
+        f
     }
 
-    /// Render the title header bar.
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
-        // Header background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: HEADER_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 14.0,
-            text: "Automator".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Recording indicator.
-        if self.recording_state.is_recording() {
-            let pulse = (self.elapsed_ms % RECORDING_PULSE_PERIOD_MS) as f32
-                / RECORDING_PULSE_PERIOD_MS as f32;
-            let alpha = if pulse < 0.5 {
-                (pulse * 2.0 * 255.0) as u8
-            } else {
-                ((1.0 - (pulse - 0.5) * 2.0) * 255.0) as u8
-            };
-            let indicator_color = Color::rgba(RED.r, RED.g, RED.b, alpha);
-
-            cmds.push(RenderCommand::FillRect {
-                x: 110.0,
-                y: 14.0,
-                width: 12.0,
-                height: 12.0,
-                color: indicator_color,
-                corner_radii: CornerRadii::all(6.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: 128.0,
-                y: 14.0,
-                text: "REC".to_string(),
-                color: RED,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    /// The title bar: the name, the two live indicators, and the tab pair.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        let head = l.header;
+        if head.is_empty() {
+            return;
         }
+        fill(f, head, CRUST, CornerRadii::ZERO);
 
-        // Playback state indicator.
-        if self.playback_state.is_playing() {
-            let play_x = if self.recording_state.is_recording() {
-                175.0
-            } else {
-                110.0
-            };
-            cmds.push(RenderCommand::Text {
-                x: play_x,
-                y: 14.0,
-                text: format!("PLAYING ({})", self.playback_state.label()),
-                color: GREEN,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Tab bar at the right side of the header.
+        // The tabs are laid out from the right edge inwards, and the title and
+        // the indicators get what is left. The old header did the reverse and
+        // did it with literals: the title at x = 10, the recording dot at
+        // x = 110, "REC" at x = 128 and "PLAYING (...)" at either 110 or 175
+        // depending on whether the dot was showing -- 175 being a guess at how
+        // wide "REC" is. Nothing measured anything, so a longer indicator ran
+        // straight through the tabs.
         let tabs = [ActiveTab::Editor, ActiveTab::Script];
-        let tab_w = 80.0;
-        let tab_start_x = width - (tabs.len() as f32 * tab_w) - PADDING;
-        for (i, tab) in tabs.iter().enumerate() {
-            let tx = tab_start_x + i as f32 * tab_w;
-            let selected = *tab == self.active_tab;
-            let bg = if selected { SURFACE0 } else { CRUST };
-            let fg = if selected { BLUE } else { SUBTEXT0 };
+        let tab_w = tabs
+            .iter()
+            .map(|t| text::padded_width(t.label(), l.pad * 1.6, l.font, FontWeightHint::Bold))
+            .fold(0.0_f32, f32::max);
+        let tab_h = (head.h - l.pad).max(0.0);
+        let tab_y = head.y + (head.h - tab_h) / 2.0;
+        let tabs_w = tab_w * 2.0 + l.pad;
+        // Tabs are drawn only if they fit beside a readable title. A tab pad
+        // squeezed over the title is two controls in one place.
+        let mut tabs_x = head.right();
+        if tabs_w + l.pad * 2.0 <= head.w * 0.55 {
+            tabs_x = head.right() - l.pad - tabs_w;
+            for (i, tab) in tabs.iter().enumerate() {
+                let rect = Rect::new(
+                    (tab_w + l.pad).mul_add(usize_f32(i), tabs_x),
+                    tab_y,
+                    tab_w,
+                    tab_h,
+                );
+                let selected = *tab == self.active_tab;
+                fill(
+                    f,
+                    rect,
+                    if selected { SURFACE0 } else { CRUST },
+                    CornerRadii::all(CORNER_RADIUS),
+                );
+                centred(
+                    f,
+                    rect.x,
+                    rect.w,
+                    rect.y + (rect.h - l.font) / 2.0,
+                    tab.label(),
+                    if selected { BLUE } else { SUBTEXT0 },
+                    l.font,
+                    if selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                );
+                f.hit(Target::Tab(*tab), rect);
+            }
+        }
 
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: 10.0,
-                width: tab_w - 4.0,
-                height: 26.0,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+        // Everything on the left marches from a measurement, not a literal.
+        let room_end = tabs_x - l.pad;
+        let mut cx = head.x + l.pad;
+        let ty = head.y + (head.h - l.heading) / 2.0;
+        bounded(
+            f,
+            (cx, ty),
+            room_end - cx,
+            TITLE,
+            TEXT,
+            l.heading,
+            FontWeightHint::Bold,
+        );
+        cx += text::measure(TITLE, l.heading, FontWeightHint::Bold) + l.pad * 1.5;
 
-            cmds.push(RenderCommand::Text {
-                x: tx + 12.0,
-                y: 15.0,
-                text: tab.label().to_string(),
-                color: fg,
-                font_size: FONT_SIZE,
-                font_weight: if selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(tab_w - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let sy = head.y + (head.h - l.font) / 2.0;
+        if self.recording_state.is_recording() {
+            let dot = l.small * 0.9;
+            let pulse = u64_f32(self.elapsed_ms % RECORDING_PULSE_PERIOD_MS)
+                / u64_f32(RECORDING_PULSE_PERIOD_MS);
+            // A triangle wave: bright at the half-period, dark at both ends.
+            let level = 1.0 - (pulse * 2.0 - 1.0).abs();
+            let alpha = f32_u8(level * 255.0);
+            if cx + dot <= room_end {
+                fill(
+                    f,
+                    Rect::new(cx, head.y + (head.h - dot) / 2.0, dot, dot),
+                    Color::rgba(RED.r, RED.g, RED.b, alpha),
+                    CornerRadii::all(dot / 2.0),
+                );
+                cx += dot + l.pad * 0.5;
+            }
+            bounded(
+                f,
+                (cx, sy),
+                room_end - cx,
+                "REC",
+                RED,
+                l.font,
+                FontWeightHint::Bold,
+            );
+            cx += text::measure("REC", l.font, FontWeightHint::Bold) + l.pad;
+        }
+        if self.playback_state.is_playing() {
+            let label = format!("PLAYING ({})", self.playback_state.label());
+            bounded(
+                f,
+                (cx, sy),
+                room_end - cx,
+                &label,
+                GREEN,
+                l.font,
+                FontWeightHint::Bold,
+            );
         }
     }
 
-    /// Render the toolbar with recording/playback controls.
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
-        let y = HEADER_HEIGHT;
+    /// The transport strip.
+    fn draw_toolbar(&self, f: &mut Frame<Target>, l: &Layout) {
+        let bar = l.toolbar;
+        if bar.is_empty() {
+            return;
+        }
+        fill(f, bar, MANTLE, CornerRadii::ZERO);
+        hline(f, bar.x, bar.right(), bar.bottom() - 1.0, SURFACE0);
 
-        // Toolbar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y,
-            width,
-            height: TOOLBAR_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        let btn_h = l.button.min(bar.h);
+        let btn_y = bar.y + (bar.h - btn_h) / 2.0;
+        let mut bx = bar.x + l.pad;
+        for (button, label, bg, fg) in self.toolbar_buttons() {
+            let w = text::padded_width(&label, l.pad * 1.4, l.small, FontWeightHint::Regular);
+            // A button that does not fit is left out, and so is every button
+            // after it. The old toolbar marched `bx` from `PADDING` through
+            // eight buttons with no bound of any kind, so in a window narrower
+            // than about five hundred and seventy pixels the last controls were
+            // simply painted past the right-hand edge -- present in the command
+            // list, absent from the screen.
+            if bx + w > bar.right() - l.pad {
+                break;
+            }
+            let rect = Rect::new(bx, btn_y, w, btn_h);
+            fill(f, rect, bg, CornerRadii::all(CORNER_RADIUS));
+            centred(
+                f,
+                rect.x,
+                rect.w,
+                rect.y + (rect.h - l.small) / 2.0,
+                &label,
+                fg,
+                l.small,
+                FontWeightHint::Regular,
+            );
+            f.hit(Target::Button(button), rect);
+            bx += w + l.pad * 0.6;
+        }
+    }
 
-        // Separator line.
-        cmds.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: y + TOOLBAR_HEIGHT - 1.0,
-            x2: width,
-            y2: y + TOOLBAR_HEIGHT - 1.0,
-            color: SURFACE0,
-            width: 1.0,
-        });
-
-        let btn_y = y + 5.0;
-        let mut bx = PADDING;
-
-        // Record button.
-        let rec_color = if self.recording_state.is_recording() {
+    /// The toolbar's buttons, with the labels that name their keys.
+    fn toolbar_buttons(&self) -> Vec<(Button, String, Color, Color)> {
+        let selected = self.selected_macro_id.and_then(|id| self.library.get(id));
+        let speed = selected.map_or(PlaybackSpeed::Normal, |m| m.speed);
+        let repeat = selected.map_or(RepeatMode::Once, |m| m.repeat_mode);
+        let rec_bg = if self.recording_state.is_recording() {
             RED
         } else {
             SURFACE1
         };
-        bx = self.render_toolbar_button(cmds, bx, btn_y, "Record", rec_color, TEXT);
-
-        // Stop recording.
-        bx = self.render_toolbar_button(cmds, bx, btn_y, "Stop Rec", SURFACE1, TEXT);
-
-        // Separator.
-        bx += 8.0;
-        cmds.push(RenderCommand::Line {
-            x1: bx,
-            y1: btn_y,
-            x2: bx,
-            y2: btn_y + BUTTON_HEIGHT,
-            color: SURFACE2,
-            width: 1.0,
-        });
-        bx += 8.0;
-
-        // Play button.
-        let play_color = if self.playback_state.is_playing() {
+        let play_bg = if self.playback_state.is_playing() {
             GREEN
         } else {
             SURFACE1
         };
-        bx = self.render_toolbar_button(cmds, bx, btn_y, "Play", play_color, TEXT);
-
-        // Pause.
-        bx = self.render_toolbar_button(cmds, bx, btn_y, "Pause", SURFACE1, TEXT);
-
-        // Stop.
-        bx = self.render_toolbar_button(cmds, bx, btn_y, "Stop", SURFACE1, TEXT);
-
-        // Separator.
-        bx += 8.0;
-        cmds.push(RenderCommand::Line {
-            x1: bx,
-            y1: btn_y,
-            x2: bx,
-            y2: btn_y + BUTTON_HEIGHT,
-            color: SURFACE2,
-            width: 1.0,
-        });
-        bx += 8.0;
-
-        // Speed label.
-        let speed_label = self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
-            .map_or("1x", |m| m.speed.label());
-        bx = self.render_toolbar_button(
-            cmds,
-            bx,
-            btn_y,
-            &format!("Speed: {speed_label}"),
-            SURFACE1,
-            PEACH,
-        );
-
-        // Repeat mode label.
-        let repeat_label = self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
-            .map_or_else(|| "Once".to_string(), |m| m.repeat_mode.label());
-        let _ = self.render_toolbar_button(
-            cmds,
-            bx,
-            btn_y,
-            &format!("Repeat: {repeat_label}"),
-            SURFACE1,
-            LAVENDER,
-        );
+        vec![
+            (Button::Record, faced(Button::Record), rec_bg, TEXT),
+            (
+                Button::StopRecording,
+                faced(Button::StopRecording),
+                SURFACE1,
+                TEXT,
+            ),
+            (Button::Play, faced(Button::Play), play_bg, TEXT),
+            (
+                Button::PausePlayback,
+                faced(Button::PausePlayback),
+                SURFACE1,
+                TEXT,
+            ),
+            (
+                Button::StopPlayback,
+                faced(Button::StopPlayback),
+                SURFACE1,
+                TEXT,
+            ),
+            (
+                Button::CycleSpeed,
+                format!(
+                    "Speed: {} ({})",
+                    speed.label(),
+                    Button::CycleSpeed.key_label()
+                ),
+                SURFACE1,
+                PEACH,
+            ),
+            (
+                Button::CycleRepeat,
+                format!(
+                    "Repeat: {} ({})",
+                    repeat.label(),
+                    Button::CycleRepeat.key_label()
+                ),
+                SURFACE1,
+                LAVENDER,
+            ),
+            (Button::Help, faced(Button::Help), SURFACE1, TEAL),
+        ]
     }
 
-    /// Render a toolbar button, returning the x position after the button.
-    fn render_toolbar_button(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        label: &str,
-        bg: Color,
-        fg: Color,
-    ) -> f32 {
-        let btn_w = text::padded_width(label, 8.0, FONT_SIZE_SMALL, FontWeightHint::Regular);
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: btn_w,
-            height: BUTTON_HEIGHT,
-            color: bg,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + 8.0,
-            y: y + 7.0,
-            text: label.to_string(),
-            color: fg,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(btn_w - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        x + btn_w + 6.0
-    }
+    /// The macro library down the left-hand side.
+    fn draw_sidebar(&self, f: &mut Frame<Target>, l: &Layout) {
+        let panel = l.sidebar;
+        if panel.is_empty() {
+            return;
+        }
+        fill(f, panel, MANTLE, CornerRadii::ZERO);
+        let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
 
-    /// Render the macro list sidebar.
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, content_y: f32, content_h: f32) {
-        // Sidebar background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: content_y,
-            width: SIDEBAR_WIDTH,
-            height: content_h,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        fill(f, head, CRUST, CornerRadii::ZERO);
+        bounded(
+            f,
+            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
+            head.w - l.pad * 2.0,
+            &format!("Macros ({})", self.library.count()),
+            TEXT,
+            l.font,
+            FontWeightHint::Bold,
+        );
 
-        // Sidebar header.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: content_y,
-            width: SIDEBAR_WIDTH,
-            height: ROW_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: content_y + 8.0,
-            text: format!("Macros ({})", self.library.count()),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(SIDEBAR_WIDTH - 2.0 * PADDING),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Macro list.
-        cmds.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: content_y + ROW_HEIGHT,
-            width: SIDEBAR_WIDTH,
-            height: content_h - ROW_HEIGHT,
-        });
-
-        let list_y_start = content_y + ROW_HEIGHT;
-        for (i, mac) in self.library.list().iter().enumerate() {
-            let row_y = list_y_start + i as f32 * ROW_HEIGHT - self.sidebar_scroll;
-            if row_y + ROW_HEIGHT < list_y_start || row_y > content_y + content_h {
-                continue;
+        let macros = self.library.list();
+        let first = self.sidebar_scroll.min(macros.len());
+        for (slot, (i, mac)) in macros.iter().enumerate().skip(first).enumerate() {
+            let row_y = l.row.mul_add(usize_f32(slot), body.y);
+            // The row is drawn only if the whole of it is inside the body. A
+            // row half under the footer is a row whose hit box is half under
+            // the footer, which is two controls claiming the same pixels.
+            if row_y + l.row > body.bottom() + 0.01 {
+                break;
             }
-
+            let rect = Rect::new(body.x + 2.0, row_y, (body.w - 4.0).max(0.0), l.row - 2.0);
             let selected = self.selected_macro_id == Some(mac.id);
-            let bg = if selected { SURFACE0 } else { MANTLE };
-            let fg = if selected { TEXT } else { SUBTEXT1 };
+            fill(
+                f,
+                rect,
+                if selected { SURFACE0 } else { MANTLE },
+                CornerRadii::all(CORNER_RADIUS),
+            );
 
-            cmds.push(RenderCommand::FillRect {
-                x: 4.0,
-                y: row_y,
-                width: SIDEBAR_WIDTH - 8.0,
-                height: ROW_HEIGHT - 2.0,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-
-            // Macro name.
-            cmds.push(RenderCommand::Text {
-                x: PADDING + 4.0,
-                y: row_y + 4.0,
-                text: mac.name.clone(),
-                color: fg,
-                font_size: FONT_SIZE,
-                font_weight: if selected {
+            // The count sits at the right-hand end, measured; the trigger dot
+            // beside it; the name gets what is left. The old row put the count
+            // at `SIDEBAR_WIDTH - 40.0` and the dot at `SIDEBAR_WIDTH - 56.0`,
+            // both literal offsets from a width that no longer exists.
+            let count = format!("{}", mac.action_count());
+            let count_w = text::measure(&count, l.small, FontWeightHint::Regular);
+            let mut right = rect.right() - l.pad * 0.5;
+            bounded(
+                f,
+                (right - count_w, rect.y + (rect.h - l.small) / 2.0),
+                count_w,
+                &count,
+                OVERLAY0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+            right -= count_w + l.pad * 0.5;
+            if mac.trigger.is_some() {
+                let dot = l.small * 0.8;
+                fill(
+                    f,
+                    Rect::new(right - dot, rect.y + (rect.h - dot) / 2.0, dot, dot),
+                    PEACH,
+                    CornerRadii::all(dot / 2.0),
+                );
+                right -= dot + l.pad * 0.5;
+            }
+            let name_x = rect.x + l.pad * 0.6;
+            bounded(
+                f,
+                (name_x, rect.y + (rect.h - l.font) / 2.0),
+                right - name_x,
+                &mac.name,
+                if selected { TEXT } else { SUBTEXT1 },
+                l.font,
+                if selected {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(SIDEBAR_WIDTH - 3.0 * PADDING),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Action count badge.
-            let count_text = format!("{}", mac.action_count());
-            cmds.push(RenderCommand::Text {
-                x: SIDEBAR_WIDTH - 40.0,
-                y: row_y + 4.0,
-                text: count_text,
-                color: OVERLAY0,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(30.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Trigger indicator.
-            if mac.trigger.is_some() {
-                cmds.push(RenderCommand::FillRect {
-                    x: SIDEBAR_WIDTH - 56.0,
-                    y: row_y + 8.0,
-                    width: 10.0,
-                    height: 10.0,
-                    color: PEACH,
-                    corner_radii: CornerRadii::all(5.0),
-                });
-            }
+            );
+            f.hit(Target::Macro(i), rect);
         }
 
-        cmds.push(RenderCommand::PopClip);
+        vline(f, panel.right(), panel.y, panel.bottom(), SURFACE0);
 
-        // Sidebar border (right edge).
-        cmds.push(RenderCommand::Line {
-            x1: SIDEBAR_WIDTH,
-            y1: content_y,
-            x2: SIDEBAR_WIDTH,
-            y2: content_y + content_h,
-            color: SURFACE0,
-            width: 1.0,
-        });
-
-        // New / Delete buttons at bottom of sidebar.
-        let btn_area_y = content_y + content_h - 36.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: btn_area_y,
-            width: SIDEBAR_WIDTH,
-            height: 36.0,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let half = (SIDEBAR_WIDTH - 3.0 * PADDING) / 2.0;
-        // New button.
-        cmds.push(RenderCommand::FillRect {
-            x: PADDING,
-            y: btn_area_y + 4.0,
-            width: half,
-            height: BUTTON_HEIGHT,
-            color: BLUE,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: PADDING + half / 2.0 - 12.0,
-            y: btn_area_y + 11.0,
-            text: "+ New".to_string(),
-            color: CRUST,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(half - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Delete button.
-        let del_x = PADDING * 2.0 + half;
-        cmds.push(RenderCommand::FillRect {
-            x: del_x,
-            y: btn_area_y + 4.0,
-            width: half,
-            height: BUTTON_HEIGHT,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: del_x + half / 2.0 - 16.0,
-            y: btn_area_y + 11.0,
-            text: "Delete".to_string(),
-            color: RED,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(half - 8.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        fill(f, foot, CRUST, CornerRadii::ZERO);
+        self.draw_button_row(f, l, foot, &[Button::NewMacro, Button::DeleteMacro]);
     }
 
-    /// Render the action list (center panel).
-    fn render_action_list(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        content_y: f32,
-        content_h: f32,
-        width: f32,
-    ) {
-        let list_x = SIDEBAR_WIDTH;
-        let list_w = width - SIDEBAR_WIDTH - PROPERTIES_WIDTH;
+    /// A row of equal buttons filling a panel footer.
+    ///
+    /// One implementation for the sidebar's pair, the action list's trio and
+    /// the script tab's single Apply, so none of them can be the one that
+    /// forgets to divide the room by the number of buttons in it.
+    fn draw_button_row(&self, f: &mut Frame<Target>, l: &Layout, foot: Rect, buttons: &[Button]) {
+        if foot.is_empty() || buttons.is_empty() {
+            return;
+        }
+        let gaps = l.pad * usize_f32(buttons.len().saturating_sub(1));
+        let each = (foot.w - l.pad * 2.0 - gaps) / usize_f32(buttons.len());
+        if each <= 0.0 {
+            return;
+        }
+        let h = l.button.min(foot.h);
+        let y = foot.y + (foot.h - h) / 2.0;
+        for (i, button) in buttons.iter().enumerate() {
+            let rect = Rect::new(
+                (each + l.pad).mul_add(usize_f32(i), foot.x + l.pad),
+                y,
+                each,
+                h,
+            );
+            let (bg, fg) = match button {
+                Button::NewMacro | Button::ApplyScript => (BLUE, CRUST),
+                Button::DeleteMacro | Button::DeleteAction => (SURFACE1, RED),
+                _ => (SURFACE1, TEXT),
+            };
+            fill(f, rect, bg, CornerRadii::all(CORNER_RADIUS));
+            centred(
+                f,
+                rect.x,
+                rect.w,
+                rect.y + (rect.h - l.small) / 2.0,
+                &faced(*button),
+                fg,
+                l.small,
+                FontWeightHint::Bold,
+            );
+            f.hit(Target::Button(*button), rect);
+        }
+    }
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: list_x,
-            y: content_y,
-            width: list_w,
-            height: content_h,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The centre panel: the action list or the script, whichever tab is up.
+    fn draw_list(&self, f: &mut Frame<Target>, l: &Layout) {
+        let panel = l.list;
+        if panel.is_empty() {
+            return;
+        }
+        fill(f, panel, BASE, CornerRadii::ZERO);
+        let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
 
-        // Panel header.
-        cmds.push(RenderCommand::FillRect {
-            x: list_x,
-            y: content_y,
-            width: list_w,
-            height: ROW_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let header_text = match self.active_tab {
-            ActiveTab::Editor => "Actions",
-            ActiveTab::Script => "Script",
-        };
-        cmds.push(RenderCommand::Text {
-            x: list_x + PADDING,
-            y: content_y + 8.0,
-            text: header_text.to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(list_w - 2.0 * PADDING),
-            overflow: TextOverflow::Ellipsis,
-        });
+        fill(f, head, SURFACE0, CornerRadii::ZERO);
+        bounded(
+            f,
+            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
+            head.w - l.pad * 2.0,
+            match self.active_tab {
+                ActiveTab::Editor => "Actions",
+                ActiveTab::Script => "Script",
+            },
+            TEXT,
+            l.font,
+            FontWeightHint::Bold,
+        );
 
         match self.active_tab {
             ActiveTab::Editor => {
-                self.render_action_editor(
-                    cmds,
-                    list_x,
-                    content_y + ROW_HEIGHT,
-                    list_w,
-                    content_h - ROW_HEIGHT,
+                self.draw_actions(f, l, body);
+                fill(f, foot, SURFACE0, CornerRadii::ZERO);
+                self.draw_button_row(
+                    f,
+                    l,
+                    foot,
+                    &[
+                        Button::MoveActionUp,
+                        Button::MoveActionDown,
+                        Button::DeleteAction,
+                    ],
                 );
             }
             ActiveTab::Script => {
-                self.render_script_editor(
-                    cmds,
-                    list_x,
-                    content_y + ROW_HEIGHT,
-                    list_w,
-                    content_h - ROW_HEIGHT,
-                );
+                self.draw_script(f, l, body);
+                fill(f, foot, SURFACE0, CornerRadii::ZERO);
+                self.draw_button_row(f, l, foot, &[Button::ApplyScript]);
             }
         }
 
-        // Right border.
-        cmds.push(RenderCommand::Line {
-            x1: list_x + list_w,
-            y1: content_y,
-            x2: list_x + list_w,
-            y2: content_y + content_h,
-            color: SURFACE0,
-            width: 1.0,
-        });
+        if !l.props.is_empty() {
+            vline(f, panel.right(), panel.y, panel.bottom(), SURFACE0);
+        }
     }
 
-    /// Render the visual action editor.
-    fn render_action_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let actions = if let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id))
-        {
-            &mac.actions
-        } else {
-            // Empty state.
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0,
-                y: y + h / 2.0 - 10.0,
-                text: "Select a macro to edit".to_string(),
-                color: OVERLAY0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 2.0 * PADDING),
-                overflow: TextOverflow::Ellipsis,
-            });
+    /// The rows of the selected macro's actions.
+    fn draw_actions(&self, f: &mut Frame<Target>, l: &Layout, body: Rect) {
+        if body.is_empty() {
+            return;
+        }
+        let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id)) else {
+            centred(
+                f,
+                body.x + l.pad,
+                (body.w - l.pad * 2.0).max(0.0),
+                body.y + (body.h - l.font) / 2.0,
+                "Select a macro to edit",
+                OVERLAY0,
+                l.font,
+                FontWeightHint::Regular,
+            );
             return;
         };
-
-        if actions.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 100.0,
-                y: y + h / 2.0 - 10.0,
-                text: "No actions. Start recording or add manually.".to_string(),
-                color: OVERLAY0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 2.0 * PADDING),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if mac.actions.is_empty() {
+            centred(
+                f,
+                body.x + l.pad,
+                (body.w - l.pad * 2.0).max(0.0),
+                body.y + (body.h - l.font) / 2.0,
+                "No actions. Start recording or add manually.",
+                OVERLAY0,
+                l.font,
+                FontWeightHint::Regular,
+            );
             return;
         }
 
-        // Clip to panel area.
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y,
-            width: w,
-            height: h,
-        });
-
-        for (i, timed) in actions.iter().enumerate() {
-            let row_y = y + i as f32 * ROW_HEIGHT - self.action_list_scroll;
-            if row_y + ROW_HEIGHT < y || row_y > y + h {
-                continue;
+        let first = self.action_scroll.min(mac.actions.len());
+        for (slot, (i, timed)) in mac.actions.iter().enumerate().skip(first).enumerate() {
+            let row_y = l.row.mul_add(usize_f32(slot), body.y);
+            if row_y + l.row > body.bottom() + 0.01 {
+                break;
             }
-
+            let rect = Rect::new(body.x + 2.0, row_y, (body.w - 4.0).max(0.0), l.row - 2.0);
             let selected = self.selected_action_idx == Some(i);
-            let bg = if selected { SURFACE0 } else { BASE };
-            let fg = if selected { TEXT } else { SUBTEXT1 };
+            fill(
+                f,
+                rect,
+                if selected { SURFACE0 } else { BASE },
+                CornerRadii::all(CORNER_RADIUS),
+            );
 
-            // Row background.
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: row_y,
-                width: w - 8.0,
-                height: ROW_HEIGHT - 2.0,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-
-            // Index number.
-            let num_text = format!("{:>3}", i.saturating_add(1));
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: row_y + 8.0,
-                text: num_text,
-                color: OVERLAY0,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(30.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Action type badge.
-            let badge_color = timed.action.badge_color();
-            cmds.push(RenderCommand::FillRect {
-                x: x + 38.0,
-                y: row_y + 5.0,
-                width: 24.0,
-                height: 18.0,
-                color: badge_color,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + 41.0,
-                y: row_y + 8.0,
-                text: timed.action.icon().to_string(),
-                color: CRUST,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Action label.
-            cmds.push(RenderCommand::Text {
-                x: x + 70.0,
-                y: row_y + 8.0,
-                text: timed.action.label(),
-                color: fg,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 160.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Delay badge.
-            if timed.delay_ms > 0 {
-                let delay_text = format_duration_ms(timed.delay_ms);
-                cmds.push(RenderCommand::Text {
-                    x: x + w - 70.0,
-                    y: row_y + 8.0,
-                    text: delay_text,
-                    color: YELLOW,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(60.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-
-            // Playback position indicator.
             if let PlaybackState::Playing { action_idx, .. } = &self.playback_state
                 && *action_idx == i
             {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 2.0,
-                    y: row_y,
-                    width: 3.0,
-                    height: ROW_HEIGHT - 2.0,
-                    color: GREEN,
-                    corner_radii: CornerRadii::ZERO,
-                });
+                fill(
+                    f,
+                    Rect::new(rect.x, rect.y, 3.0, rect.h),
+                    GREEN,
+                    CornerRadii::ZERO,
+                );
             }
+
+            // Four columns, every one of them measured. The old row put the
+            // number at `x + 8`, the badge at `x + 38`, the label at `x + 70`
+            // bounded by `w - 160`, and the delay at `x + w - 70` -- five
+            // literals that between them assume a particular font at a
+            // particular size in a particular panel width.
+            let ty = rect.y + (rect.h - l.small) / 2.0;
+            let num = format!("{:>3}", i.saturating_add(1));
+            let num_w = text::measure("000", l.small, FontWeightHint::Regular);
+            let mut cx = rect.x + l.pad * 0.6;
+            bounded(
+                f,
+                (cx, ty),
+                num_w,
+                &num,
+                OVERLAY0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+            cx += num_w + l.pad * 0.5;
+
+            let badge_w = text::padded_width(
+                timed.action.icon(),
+                l.pad * 0.8,
+                l.small,
+                FontWeightHint::Bold,
+            );
+            let badge_h = (rect.h - 4.0).max(0.0);
+            let badge = Rect::new(cx, rect.y + 2.0, badge_w, badge_h);
+            fill(f, badge, timed.action.badge_color(), CornerRadii::all(3.0));
+            centred(
+                f,
+                badge.x,
+                badge.w,
+                ty,
+                timed.action.icon(),
+                CRUST,
+                l.small,
+                FontWeightHint::Bold,
+            );
+            cx += badge_w + l.pad * 0.6;
+
+            let mut right = rect.right() - l.pad * 0.6;
+            if timed.delay_ms > 0 {
+                let delay = format_duration_ms(timed.delay_ms);
+                let delay_w = text::measure(&delay, l.small, FontWeightHint::Regular);
+                bounded(
+                    f,
+                    (right - delay_w, ty),
+                    delay_w,
+                    &delay,
+                    YELLOW,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+                right -= delay_w + l.pad * 0.5;
+            }
+            bounded(
+                f,
+                (cx, rect.y + (rect.h - l.font) / 2.0),
+                right - cx,
+                &timed.action.label(),
+                if selected { TEXT } else { SUBTEXT1 },
+                l.font,
+                FontWeightHint::Regular,
+            );
+            f.hit(Target::Action(i), rect);
         }
-
-        cmds.push(RenderCommand::PopClip);
-
-        // Action toolbar at bottom (move up/down, delete).
-        let btn_y = y + h - 36.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: btn_y,
-            width: w,
-            height: 36.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let mut bx = x + PADDING;
-        let small_btn_w = 50.0;
-
-        // Move Up button.
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: btn_y + 4.0,
-            width: small_btn_w,
-            height: BUTTON_HEIGHT,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: bx + 10.0,
-            y: btn_y + 11.0,
-            text: "Up".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(small_btn_w - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        bx += small_btn_w + 4.0;
-
-        // Move Down button.
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: btn_y + 4.0,
-            width: small_btn_w,
-            height: BUTTON_HEIGHT,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: bx + 10.0,
-            y: btn_y + 11.0,
-            text: "Down".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(small_btn_w - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        bx += small_btn_w + 4.0;
-
-        // Delete button.
-        cmds.push(RenderCommand::FillRect {
-            x: bx,
-            y: btn_y + 4.0,
-            width: small_btn_w + 10.0,
-            height: BUTTON_HEIGHT,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: bx + 8.0,
-            y: btn_y + 11.0,
-            text: "Delete".to_string(),
-            color: RED,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(small_btn_w),
-            overflow: TextOverflow::Ellipsis,
-        });
     }
 
-    /// Render the script text editor tab.
-    fn render_script_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        // Script text area background.
-        cmds.push(RenderCommand::FillRect {
-            x: x + 4.0,
-            y: y + 4.0,
-            width: w - 8.0,
-            height: h - 44.0,
-            color: MANTLE,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+    /// The script tab's numbered lines and its parse error.
+    fn draw_script(&self, f: &mut Frame<Target>, l: &Layout, body: Rect) {
+        if body.is_empty() {
+            return;
+        }
+        // The error message is a strip along the bottom of the body, taken out
+        // of the body before the lines are laid out rather than painted over
+        // them afterwards.
+        let err_h = if self.script_error.is_some() {
+            (l.small + l.pad).min(body.h * 0.5)
+        } else {
+            0.0
+        };
+        let text_area = Rect::new(
+            body.x + 2.0,
+            body.y + 2.0,
+            (body.w - 4.0).max(0.0),
+            (body.h - err_h - 4.0).max(0.0),
+        );
+        fill(f, text_area, MANTLE, CornerRadii::all(CORNER_RADIUS));
 
-        // Render script lines.
-        cmds.push(RenderCommand::PushClip {
-            x: x + 4.0,
-            y: y + 4.0,
-            width: w - 8.0,
-            height: h - 44.0,
-        });
-
-        let line_height = 18.0;
+        let line_h = l.font * 1.35;
+        let gutter = text::measure("000", l.small, FontWeightHint::Regular) + l.pad;
         for (i, line) in self.script_text.lines().enumerate() {
-            let ly = y + 8.0 + i as f32 * line_height;
-            if ly > y + h - 44.0 {
+            let ly = line_h.mul_add(usize_f32(i), text_area.y + l.pad * 0.4);
+            if ly + line_h > text_area.bottom() + 0.01 {
                 break;
             }
-
-            // Line number.
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: ly,
-                text: format!("{:>3}", i.saturating_add(1)),
-                color: OVERLAY0,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(30.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Line content -- color based on content type.
-            let line_color = if line.starts_with('#') {
-                OVERLAY0
-            } else if line.starts_with('$') {
-                PEACH
-            } else if line.starts_with(':') {
-                YELLOW
-            } else {
-                TEXT
+            bounded(
+                f,
+                (text_area.x + l.pad * 0.5, ly),
+                gutter,
+                &format!("{:>3}", i.saturating_add(1)),
+                OVERLAY0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+            let color = match line.as_bytes().first() {
+                Some(b'#') => OVERLAY0,
+                Some(b'$') => PEACH,
+                Some(b':') => YELLOW,
+                _ => TEXT,
             };
-
-            cmds.push(RenderCommand::Text {
-                x: x + 42.0,
-                y: ly,
-                text: line.to_string(),
-                color: line_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 54.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let lx = text_area.x + l.pad * 0.5 + gutter;
+            bounded(
+                f,
+                (lx, ly),
+                text_area.right() - l.pad * 0.5 - lx,
+                line,
+                color,
+                l.font,
+                FontWeightHint::Regular,
+            );
         }
 
-        cmds.push(RenderCommand::PopClip);
-
-        // Error display.
-        if let Some(ref err) = self.script_error {
-            cmds.push(RenderCommand::FillRect {
-                x: x + 4.0,
-                y: y + h - 62.0,
-                width: w - 8.0,
-                height: 20.0,
-                color: Color::rgba(RED.r, RED.g, RED.b, 40),
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-            cmds.push(RenderCommand::Text {
-                x: x + 8.0,
-                y: y + h - 58.0,
-                text: err.clone(),
-                color: RED,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if let Some(err) = self.script_error.as_ref() {
+            let strip = Rect::new(
+                body.x + 2.0,
+                text_area.bottom(),
+                (body.w - 4.0).max(0.0),
+                err_h,
+            );
+            fill(
+                f,
+                strip,
+                Color::rgba(RED.r, RED.g, RED.b, 40),
+                CornerRadii::all(CORNER_RADIUS),
+            );
+            bounded(
+                f,
+                (strip.x + l.pad * 0.5, strip.y + (strip.h - l.small) / 2.0),
+                strip.w - l.pad,
+                err,
+                RED,
+                l.small,
+                FontWeightHint::Regular,
+            );
         }
-
-        // Apply button.
-        let btn_y = y + h - 36.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: btn_y,
-            width: w,
-            height: 36.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        let apply_w = 100.0;
-        cmds.push(RenderCommand::FillRect {
-            x: x + PADDING,
-            y: btn_y + 4.0,
-            width: apply_w,
-            height: BUTTON_HEIGHT,
-            color: BLUE,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: x + PADDING + 18.0,
-            y: btn_y + 11.0,
-            text: "Apply Script".to_string(),
-            color: CRUST,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(apply_w - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
     }
 
-    /// Render the properties panel (right side).
-    fn render_properties_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        content_y: f32,
-        content_h: f32,
-        width: f32,
-    ) {
-        let panel_x = width - PROPERTIES_WIDTH;
+    /// The read-out down the right-hand side, and the speed/repeat pads.
+    fn draw_props(&self, f: &mut Frame<Target>, l: &Layout) {
+        let panel = l.props;
+        if panel.is_empty() {
+            return;
+        }
+        fill(f, panel, MANTLE, CornerRadii::ZERO);
+        // The pads are a *reserved* strip, so the rows above cannot run into
+        // them. The old panel put the speed section at
+        // `content_y + content_h - 100.0` and grew the property rows downwards
+        // from the top with no idea the section was there, so a macro with a
+        // selected action wrote its last rows straight over the heading; and
+        // the repeat buttons, at `speed_section_y + 80.0` and 24 tall, ended
+        // four pixels *below* the content area, in the status bar.
+        let (head, body, pads) = Layout::split(panel, l.row, l.row * 4.0);
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: content_y,
-            width: PROPERTIES_WIDTH,
-            height: content_h,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        fill(f, head, CRUST, CornerRadii::ZERO);
+        bounded(
+            f,
+            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
+            head.w - l.pad * 2.0,
+            "Properties",
+            TEXT,
+            l.font,
+            FontWeightHint::Bold,
+        );
 
-        // Panel header.
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: content_y,
-            width: PROPERTIES_WIDTH,
-            height: ROW_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
+        let mut cy = body.y + l.pad * 0.5;
 
-        cmds.push(RenderCommand::Text {
-            x: panel_x + PADDING,
-            y: content_y + 8.0,
-            text: "Properties".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let prop_y = content_y + ROW_HEIGHT + PADDING;
-
-        // Show macro properties if a macro is selected.
         if let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id)) {
-            let mut cy = prop_y;
-
-            // Macro name.
-            cy = self.render_property_row(cmds, panel_x, cy, "Name", &mac.name);
-
-            // Description.
             let desc = if mac.description.is_empty() {
                 "(none)"
             } else {
-                &mac.description
+                mac.description.as_str()
             };
-            cy = self.render_property_row(cmds, panel_x, cy, "Description", desc);
-
-            // Action count.
-            cy = self.render_property_row(
-                cmds,
-                panel_x,
-                cy,
-                "Actions",
-                &mac.action_count().to_string(),
-            );
-
-            // Total duration.
-            cy = self.render_property_row(
-                cmds,
-                panel_x,
-                cy,
-                "Duration",
-                &format_duration_ms(mac.total_duration_ms()),
-            );
-
-            // Speed.
-            cy = self.render_property_row(cmds, panel_x, cy, "Speed", mac.speed.label());
-
-            // Repeat mode.
-            cy = self.render_property_row(cmds, panel_x, cy, "Repeat", &mac.repeat_mode.label());
-
-            // Trigger.
-            let trigger_text = mac
+            let trigger = mac
                 .trigger
                 .as_ref()
                 .map_or_else(|| "(none)".to_string(), Hotkey::label);
-            cy = self.render_property_row(cmds, panel_x, cy, "Trigger", &trigger_text);
+            let mut more = prop_row(f, l, body, &mut cy, "Name", &mac.name);
+            more = more && prop_row(f, l, body, &mut cy, "Description", desc);
+            more = more
+                && prop_row(
+                    f,
+                    l,
+                    body,
+                    &mut cy,
+                    "Actions",
+                    &mac.action_count().to_string(),
+                );
+            more = more
+                && prop_row(
+                    f,
+                    l,
+                    body,
+                    &mut cy,
+                    "Duration",
+                    &format_duration_ms(mac.total_duration_ms()),
+                );
+            more = more && prop_row(f, l, body, &mut cy, "Speed", mac.speed.label());
+            more = more && prop_row(f, l, body, &mut cy, "Repeat", &mac.repeat_mode.label());
+            more = more && prop_row(f, l, body, &mut cy, "Trigger", &trigger);
 
-            // Separator.
-            cy += 8.0;
-            cmds.push(RenderCommand::Line {
-                x1: panel_x + PADDING,
-                y1: cy,
-                x2: panel_x + PROPERTIES_WIDTH - PADDING,
-                y2: cy,
-                color: SURFACE0,
-                width: 1.0,
-            });
-            cy += 8.0;
-
-            // Selected action properties.
-            if let Some(action_idx) = self.selected_action_idx {
-                if let Some(timed) = mac.actions.get(action_idx) {
-                    cmds.push(RenderCommand::Text {
-                        x: panel_x + PADDING,
-                        y: cy,
-                        text: "Action Properties".to_string(),
-                        color: BLUE,
-                        font_size: FONT_SIZE,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    cy += 22.0;
-
-                    cy = self.render_property_row(cmds, panel_x, cy, "Type", timed.action.icon());
-                    cy = self.render_property_row(
-                        cmds,
-                        panel_x,
-                        cy,
-                        "Delay",
-                        &format!("{}ms", timed.delay_ms),
-                    );
-
-                    // Type-specific properties.
-                    match &timed.action {
-                        MacroAction::KeyPress { key_name }
-                        | MacroAction::KeyRelease { key_name } => {
-                            self.render_property_row(cmds, panel_x, cy, "Key", key_name);
-                        }
-                        MacroAction::MouseClick { x, y, button }
-                        | MacroAction::MouseDoubleClick { x, y, button } => {
-                            cy = self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Position",
-                                &format!("({x:.0}, {y:.0})"),
-                            );
-                            self.render_property_row(cmds, panel_x, cy, "Button", button.label());
-                        }
-                        MacroAction::MouseMove { x, y } => {
-                            self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Target",
-                                &format!("({x:.0}, {y:.0})"),
-                            );
-                        }
-                        MacroAction::Scroll { direction, amount } => {
-                            cy = self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Direction",
-                                direction.label(),
-                            );
-                            self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Amount",
-                                &amount.to_string(),
-                            );
-                        }
-                        MacroAction::TypeText { text } => {
-                            let preview: String = text.chars().take(30).collect();
-                            self.render_property_row(cmds, panel_x, cy, "Text", &preview);
-                        }
-                        MacroAction::Delay { ms } => {
-                            self.render_property_row(cmds, panel_x, cy, "Wait", &format!("{ms}ms"));
-                        }
-                        MacroAction::IfPixelColor {
-                            x,
-                            y,
-                            r,
-                            g,
-                            b,
-                            tolerance,
-                        } => {
-                            cy = self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Pixel",
-                                &format!("({x:.0}, {y:.0})"),
-                            );
-                            cy = self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Color",
-                                &format!("#{r:02X}{g:02X}{b:02X}"),
-                            );
-                            self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Tolerance",
-                                &tolerance.to_string(),
-                            );
+            if more {
+                cy += l.pad * 0.5;
+                hline(f, body.x + l.pad, body.right() - l.pad, cy, SURFACE0);
+                cy += l.pad * 0.5;
+            }
+            match self
+                .selected_action_idx
+                .and_then(|i| mac.actions.get(i))
+                .filter(|_| more)
+            {
+                Some(timed) => {
+                    if prop_row(f, l, body, &mut cy, "Action", timed.action.icon()) {
+                        let mut ok = prop_row(
+                            f,
+                            l,
+                            body,
+                            &mut cy,
+                            "Delay",
+                            &format!("{}ms", timed.delay_ms),
+                        );
+                        for (label, value) in action_rows(&timed.action) {
+                            ok = ok && prop_row(f, l, body, &mut cy, label, &value);
                         }
                     }
                 }
-            } else {
-                cmds.push(RenderCommand::Text {
-                    x: panel_x + PADDING,
-                    y: cy,
-                    text: "Select an action to see details".to_string(),
-                    color: OVERLAY0,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-                    overflow: TextOverflow::Ellipsis,
-                });
+                None if more => {
+                    prop_row(f, l, body, &mut cy, "Action", "(none selected)");
+                }
+                None => {}
             }
         } else {
-            // No macro selected.
-            cmds.push(RenderCommand::Text {
-                x: panel_x + PADDING,
-                y: prop_y + 20.0,
-                text: "No macro selected".to_string(),
-                color: OVERLAY0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-                overflow: TextOverflow::Ellipsis,
-            });
+            prop_row(f, l, body, &mut cy, "Macro", "(none selected)");
         }
 
-        // Speed control section at bottom.
-        let speed_section_y = content_y + content_h - 100.0;
-        cmds.push(RenderCommand::Line {
-            x1: panel_x + PADDING,
-            y1: speed_section_y,
-            x2: panel_x + PROPERTIES_WIDTH - PADDING,
-            y2: speed_section_y,
-            color: SURFACE0,
-            width: 1.0,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: panel_x + PADDING,
-            y: speed_section_y + 8.0,
-            text: "Playback Speed".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let selected_speed = self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
-            .map_or(PlaybackSpeed::Normal, |m| m.speed);
-
-        let speed_btn_w = 44.0;
-        let speed_y = speed_section_y + 28.0;
-        for (i, speed) in PlaybackSpeed::all().iter().enumerate() {
-            let sx = panel_x + PADDING + i as f32 * (speed_btn_w + 4.0);
-            let is_selected = *speed == selected_speed;
-            let bg = if is_selected { BLUE } else { SURFACE1 };
-            let fg = if is_selected { CRUST } else { TEXT };
-
-            cmds.push(RenderCommand::FillRect {
-                x: sx,
-                y: speed_y,
-                width: speed_btn_w,
-                height: 24.0,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-            cmds.push(RenderCommand::Text {
-                x: sx + 6.0,
-                y: speed_y + 5.0,
-                text: speed.label().to_string(),
-                color: fg,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(speed_btn_w - 8.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Repeat mode.
-        cmds.push(RenderCommand::Text {
-            x: panel_x + PADDING,
-            y: speed_y + 32.0,
-            text: "Repeat Mode".to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(PROPERTIES_WIDTH - 2.0 * PADDING),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let selected_repeat = self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
-            .map_or(RepeatMode::Once, |m| m.repeat_mode);
-        let repeat_modes = [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever];
-        let repeat_y = speed_y + 52.0;
-        for (i, mode) in repeat_modes.iter().enumerate() {
-            let rx = panel_x + PADDING + i as f32 * 76.0;
-            let is_selected = *mode == selected_repeat;
-            let bg = if is_selected { LAVENDER } else { SURFACE1 };
-            let fg = if is_selected { CRUST } else { TEXT };
-
-            cmds.push(RenderCommand::FillRect {
-                x: rx,
-                y: repeat_y,
-                width: 70.0,
-                height: 24.0,
-                color: bg,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-            cmds.push(RenderCommand::Text {
-                x: rx + 8.0,
-                y: repeat_y + 5.0,
-                text: mode.label(),
-                color: fg,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: if is_selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(60.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
+        self.draw_pads(f, l, pads);
     }
 
-    /// Render a single property row (label + value). Returns next y position.
-    fn render_property_row(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        y: f32,
-        label: &str,
-        value: &str,
-    ) -> f32 {
-        cmds.push(RenderCommand::Text {
-            x: panel_x + PADDING,
-            y,
-            text: label.to_string(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(80.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: panel_x + 90.0,
-            y,
-            text: value.to_string(),
-            color: TEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(PROPERTIES_WIDTH - 100.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        y + 20.0
+    /// The speed and repeat pads at the foot of the properties panel.
+    fn draw_pads(&self, f: &mut Frame<Target>, l: &Layout, pads: Rect) {
+        if pads.is_empty() {
+            return;
+        }
+        let selected = self.selected_macro_id.and_then(|id| self.library.get(id));
+        let speed = selected.map_or(PlaybackSpeed::Normal, |m| m.speed);
+        let repeat = selected.map_or(RepeatMode::Once, |m| m.repeat_mode);
+        let quarter = pads.h / 4.0;
+
+        bounded(
+            f,
+            (pads.x + l.pad, pads.y + (quarter - l.small) / 2.0),
+            pads.w - l.pad * 2.0,
+            "Playback Speed",
+            TEXT,
+            l.small,
+            FontWeightHint::Bold,
+        );
+        let speeds = PlaybackSpeed::all();
+        pad_row(
+            f,
+            l,
+            Rect::new(pads.x, pads.y + quarter, pads.w, quarter),
+            speeds.len(),
+            |f, i, rect| {
+                let Some(&s) = speeds.get(i) else { return };
+                let on = s == speed;
+                paint_pad(f, l, rect, s.label(), on, BLUE);
+                f.hit(Target::Speed(s), rect);
+            },
+        );
+
+        bounded(
+            f,
+            (
+                pads.x + l.pad,
+                quarter.mul_add(2.0, pads.y) + (quarter - l.small) / 2.0,
+            ),
+            pads.w - l.pad * 2.0,
+            "Repeat Mode",
+            TEXT,
+            l.small,
+            FontWeightHint::Bold,
+        );
+        let modes = [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever];
+        pad_row(
+            f,
+            l,
+            Rect::new(pads.x, quarter.mul_add(3.0, pads.y), pads.w, quarter),
+            modes.len(),
+            |f, i, rect| {
+                let Some(&m) = modes.get(i) else { return };
+                let on = m == repeat;
+                paint_pad(f, l, rect, &m.label(), on, LAVENDER);
+                f.hit(Target::Repeat(m), rect);
+            },
+        );
     }
 
-    /// Render the status bar at the bottom.
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
-        let bar_y = height - STATUS_BAR_HEIGHT;
+    /// The one line of prose along the bottom.
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
+        let bar = l.status;
+        if bar.is_empty() {
+            return;
+        }
+        fill(f, bar, CRUST, CornerRadii::ZERO);
+        let ty = bar.y + (bar.h - l.small) / 2.0;
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: bar_y,
-            width,
-            height: STATUS_BAR_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Status message.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: bar_y + 6.0,
-            text: self.status_message.clone(),
-            color: SUBTEXT0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width / 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Recording state on right.
-        let state_text = format!(
+        // The right-hand read-out is placed by measuring it, and the left-hand
+        // message is bounded by what the read-out leaves. The old bar drew the
+        // read-out at a literal `width - 200.0` -- off the left edge of any
+        // window narrower than two hundred pixels -- and bounded the message at
+        // `width / 2.0` regardless, so at four hundred wide the two overlapped.
+        let state = format!(
             "Rec: {} | Play: {}",
             self.recording_state.label(),
             self.playback_state.label()
         );
-        cmds.push(RenderCommand::Text {
-            x: width - 200.0,
-            y: bar_y + 6.0,
-            text: state_text,
-            color: OVERLAY0,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let state_w = text::measure(&state, l.small, FontWeightHint::Regular)
+            .min((bar.w - l.pad * 2.0).max(0.0) * 0.6);
+        let right = bar.right() - l.pad;
+        bounded(
+            f,
+            (right - state_w, ty),
+            state_w,
+            &state,
+            OVERLAY0,
+            l.small,
+            FontWeightHint::Regular,
+        );
+        let mx = bar.x + l.pad;
+        bounded(
+            f,
+            (mx, ty),
+            right - state_w - l.pad - mx,
+            &self.status_message,
+            SUBTEXT0,
+            l.small,
+            FontWeightHint::Regular,
+        );
+    }
+
+    /// The card that lists every button and the key that does the same thing.
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
+        let rows = Button::all();
+        let line = l.font * 1.5;
+        let wanted_h = line.mul_add(usize_f32(rows.len()) + 2.0, l.pad * 2.0);
+        let wanted_w = rows
+            .iter()
+            .map(|b| {
+                text::measure(b.action_label(), l.font, FontWeightHint::Regular)
+                    + text::measure(b.key_label(), l.font, FontWeightHint::Bold)
+                    + l.pad * 4.0
+            })
+            .fold(0.0_f32, f32::max);
+        let card = Rect::new(0.0, 0.0, wanted_w.min(l.window.w), wanted_h.min(l.window.h));
+        let card = Rect::new(
+            ((l.window.w - card.w) / 2.0).max(0.0),
+            ((l.window.h - card.h) / 2.0).max(0.0),
+            card.w,
+            card.h,
+        );
+        fill(f, card, CRUST, CornerRadii::all(CORNER_RADIUS));
+        outline(f, card, SURFACE2);
+
+        let mut y = card.y + l.pad;
+        centred(
+            f,
+            card.x + l.pad,
+            (card.w - l.pad * 2.0).max(0.0),
+            y,
+            "Keys",
+            TEAL,
+            l.font,
+            FontWeightHint::Bold,
+        );
+        y += line * 1.5;
+        let key_w = (card.w - l.pad * 2.0) * 0.3;
+        for button in rows {
+            if y + line > card.bottom() {
+                break;
+            }
+            bounded(
+                f,
+                (card.x + l.pad, y),
+                key_w,
+                button.key_label(),
+                YELLOW,
+                l.font,
+                FontWeightHint::Bold,
+            );
+            let ax = card.x + l.pad + key_w;
+            bounded(
+                f,
+                (ax, y),
+                card.right() - l.pad - ax,
+                button.action_label(),
+                TEXT,
+                l.font,
+                FontWeightHint::Regular,
+            );
+            y += line;
+        }
+        // The card swallows the click that dismisses it, so a click meant for
+        // the card is not also a click on whatever it is covering.
+        f.hit(Target::Help, card);
+    }
+
+    // -----------------------------------------------------------------------
+    // Events
+    // -----------------------------------------------------------------------
+
+    /// Answer one event from the window.
+    fn handle_event(&mut self, event: &Event) -> EventResult {
+        match event {
+            Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            _ => EventResult::Ignored,
+        }
+    }
+
+    fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        // A release is not a press. Handling both runs every binding twice,
+        // which for a toggle means it toggles back before the frame is drawn.
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
+        // A key with a modifier on it belongs to the window manager, not to us.
+        if key.modifiers.ctrl || key.modifiers.alt || key.modifiers.super_key {
+            return EventResult::Ignored;
+        }
+        if self.show_help {
+            // Any key at all dismisses the card, so a user who opened it by
+            // accident is not stuck reading it.
+            self.show_help = false;
+            self.status_message = "Ready".to_string();
+            return EventResult::Consumed;
+        }
+        match key.key {
+            Key::Escape => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Key::Tab => {
+                self.active_tab = match self.active_tab {
+                    ActiveTab::Editor => ActiveTab::Script,
+                    ActiveTab::Script => ActiveTab::Editor,
+                };
+                self.status_message = format!("{} tab", self.active_tab.label());
+                EventResult::Consumed
+            }
+            Key::Up => self.move_action_selection(-1),
+            Key::Down => self.move_action_selection(1),
+            Key::Left => self.move_macro_selection(-1),
+            Key::Right => self.move_macro_selection(1),
+            k => {
+                for button in Button::all() {
+                    if button.key() == k {
+                        self.press(*button);
+                        return EventResult::Consumed;
+                    }
+                }
+                EventResult::Ignored
+            }
+        }
+    }
+
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
+        let (w, h) = self.size;
+        match mouse.kind {
+            MouseEventKind::Press(MouseButton::Left) => {
+                let frame = self.frame(w, h);
+                // A click is answered by what was drawn under it in the frame
+                // this window is showing -- and by nothing if nothing was.
+                let Some(target) = frame.hit_test(mouse.x, mouse.y) else {
+                    return EventResult::Ignored;
+                };
+                self.click(target)
+            }
+            MouseEventKind::Scroll { dy, .. } => {
+                let rows = self.wheel.rows(dy);
+                if rows == 0 {
+                    return EventResult::Ignored;
+                }
+                let l = Layout::solve(w, h);
+                if l.sidebar.contains(mouse.x, mouse.y) {
+                    self.scroll_sidebar(rows)
+                } else if l.list.contains(mouse.x, mouse.y) {
+                    self.scroll_actions(rows)
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Do what a click on `target` means.
+    fn click(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::Help => {
+                self.show_help = false;
+                EventResult::Consumed
+            }
+            Target::Tab(tab) => {
+                self.active_tab = tab;
+                self.status_message = format!("{} tab", tab.label());
+                EventResult::Consumed
+            }
+            Target::Button(button) => {
+                self.press(button);
+                EventResult::Consumed
+            }
+            Target::Macro(i) => {
+                self.select_macro_by_index(i);
+                EventResult::Consumed
+            }
+            Target::Action(i) => {
+                self.select_action(i);
+                EventResult::Consumed
+            }
+            Target::Speed(speed) => {
+                self.set_speed(speed);
+                EventResult::Consumed
+            }
+            Target::Repeat(mode) => {
+                self.set_repeat_mode(mode);
+                EventResult::Consumed
+            }
+        }
+    }
+
+    /// Do what a button means -- the one implementation its key shares.
+    ///
+    /// A button and its key cannot drift apart because there is only one of
+    /// them: `handle_key` looks the button up by its key and calls this.
+    fn press(&mut self, button: Button) {
+        match button {
+            Button::Record => self.start_recording(),
+            Button::StopRecording => self.stop_recording(),
+            Button::Play => self.start_playback(),
+            Button::PausePlayback => {
+                if matches!(self.playback_state, PlaybackState::PausedPlayback { .. }) {
+                    self.resume_playback();
+                } else {
+                    self.pause_playback();
+                }
+            }
+            Button::StopPlayback => self.stop_playback(),
+            Button::CycleSpeed => self.cycle_speed(),
+            Button::CycleRepeat => self.cycle_repeat_mode(),
+            Button::NewMacro => {
+                let n = self.library.count().saturating_add(1);
+                self.new_macro(&format!("Macro {n}"));
+            }
+            Button::DeleteMacro => {
+                self.delete_selected_macro();
+            }
+            Button::MoveActionUp => {
+                self.move_action_up();
+            }
+            Button::MoveActionDown => {
+                self.move_action_down();
+            }
+            Button::DeleteAction => {
+                self.delete_selected_action();
+            }
+            Button::ApplyScript => {
+                self.active_tab = ActiveTab::Script;
+                self.apply_script();
+            }
+            Button::Help => {
+                self.show_help = !self.show_help;
+                if self.show_help {
+                    self.status_message = "Any key or click closes the card".to_string();
+                }
+            }
+        }
+        self.clamp_scrolls();
+    }
+
+    fn move_action_selection(&mut self, delta: isize) -> EventResult {
+        let Some(n) = self
+            .selected_macro_id
+            .and_then(|id| self.library.get(id))
+            .map(|m| m.actions.len())
+        else {
+            return EventResult::Ignored;
+        };
+        if n == 0 {
+            return EventResult::Ignored;
+        }
+        let next = step(self.selected_action_idx, delta, n);
+        if self.selected_action_idx == Some(next) {
+            return EventResult::Ignored;
+        }
+        self.select_action(next);
+        self.clamp_scrolls();
+        EventResult::Consumed
+    }
+
+    fn move_macro_selection(&mut self, delta: isize) -> EventResult {
+        let n = self.library.count();
+        if n == 0 {
+            return EventResult::Ignored;
+        }
+        let current = self
+            .selected_macro_id
+            .and_then(|id| self.library.list().iter().position(|m| m.id == id));
+        let next = step(current, delta, n);
+        if current == Some(next) {
+            return EventResult::Ignored;
+        }
+        self.select_macro_by_index(next);
+        self.clamp_scrolls();
+        EventResult::Consumed
+    }
+
+    fn scroll_sidebar(&mut self, rows: isize) -> EventResult {
+        let before = self.sidebar_scroll;
+        self.sidebar_scroll = shift(self.sidebar_scroll, rows, self.library.count());
+        self.clamp_scrolls();
+        if self.sidebar_scroll == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    fn scroll_actions(&mut self, rows: isize) -> EventResult {
+        let n = self
+            .selected_macro_id
+            .and_then(|id| self.library.get(id))
+            .map_or(0, |m| m.actions.len());
+        let before = self.action_scroll;
+        self.action_scroll = shift(self.action_scroll, rows, n);
+        self.clamp_scrolls();
+        if self.action_scroll == before {
+            EventResult::Ignored
+        } else {
+            EventResult::Consumed
+        }
+    }
+
+    /// Keep both scroll offsets pointing at rows that exist, and keep the
+    /// selection on screen.
+    ///
+    /// The two offsets used to be `f32` fields written by nothing at all: they
+    /// were read by the drawing pass, initialised to zero in `new`, and never
+    /// assigned again anywhere in the program. A library with more macros than
+    /// fit was permanently truncated at whatever the window could show.
+    fn clamp_scrolls(&mut self) {
+        self.sidebar_scroll = self
+            .sidebar_scroll
+            .min(self.library.count().saturating_sub(1));
+        let actions = self
+            .selected_macro_id
+            .and_then(|id| self.library.get(id))
+            .map_or(0, |m| m.actions.len());
+        self.action_scroll = self.action_scroll.min(actions.saturating_sub(1));
+        if let Some(i) = self.selected_action_idx
+            && i < self.action_scroll
+        {
+            self.action_scroll = i;
+        }
+        if let Some(i) = self
+            .selected_macro_id
+            .and_then(|id| self.library.list().iter().position(|m| m.id == id))
+            && i < self.sidebar_scroll
+        {
+            self.sidebar_scroll = i;
+        }
     }
 }
 
 impl Default for AutomatorApp {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// Drawing helpers
+// ============================================================================
+
+/// One filled rectangle.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii,
+    });
+}
+
+/// A one-pixel horizontal rule.
+fn hline(f: &mut Frame<Target>, x1: f32, x2: f32, y: f32, color: Color) {
+    if x2 <= x1 {
+        return;
+    }
+    f.push(RenderCommand::Line {
+        x1,
+        y1: y,
+        x2,
+        y2: y,
+        color,
+        width: 1.0,
+    });
+}
+
+/// A one-pixel vertical rule.
+fn vline(f: &mut Frame<Target>, x: f32, y1: f32, y2: f32, color: Color) {
+    if y2 <= y1 {
+        return;
+    }
+    f.push(RenderCommand::Line {
+        x1: x,
+        y1,
+        x2: x,
+        y2,
+        color,
+        width: 1.0,
+    });
+}
+
+/// A one-pixel border round a rectangle.
+fn outline(f: &mut Frame<Target>, r: Rect, color: Color) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width: 1.0,
+        corner_radii: CornerRadii::all(CORNER_RADIUS),
+    });
+}
+
+/// One run of text, cut with an ellipsis rather than allowed to run on.
+fn bounded(
+    f: &mut Frame<Target>,
+    at: (f32, f32),
+    width: f32,
+    s: &str,
+    color: Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+) {
+    // No room, no run. A caller squeezed to nothing hands on a width of zero
+    // while its origin is still wherever the layout put it, which in a window
+    // too small for the widget is outside the widget. Such a run paints
+    // nothing either way, but a command outside the frame is a claim the
+    // picture does not make, and it is the claim a test has to read.
+    if width <= 0.0 || width.is_nan() {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x: at.0,
+        y: at.1,
+        text: String::from(s),
+        color,
+        font_size,
+        font_weight,
+        max_width: Some(width),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// A run of text centred in `[x, x + w)`, by measuring it.
+///
+/// The old program centred by subtracting a literal -- `x + w / 2.0 - 80.0`
+/// for "Select a macro to edit" and `- 100.0` for the longer empty-state line,
+/// each of them a guess at half of one particular string at one particular size
+/// in a program that links `guitk::text`.
+fn centred(
+    f: &mut Frame<Target>,
+    x: f32,
+    w: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) {
+    let measured = text::measure(s, size, weight);
+    // The offset is floored at zero so a run too wide to centre starts at the
+    // left edge rather than hanging off both sides, and the width handed on is
+    // the room left from where the run starts, not the whole box -- a bound of
+    // `w` measured from `x + offset` reaches `offset` pixels past the box's own
+    // right edge.
+    let offset = ((w - measured) / 2.0).max(0.0);
+    bounded(
+        f,
+        (x + offset, y),
+        (w - offset).max(0.0),
+        s,
+        color,
+        size,
+        weight,
+    );
+}
+
+/// One `label: value` row of the properties panel.
+///
+/// Returns whether it was drawn -- a row that would fall past the bottom of the
+/// body is left out, and so is every row after it. The old panel had no such
+/// check: it grew rows downwards from the top of a panel whose bottom hundred
+/// pixels were separately claimed by the speed and repeat sections, so a macro
+/// with a selected action wrote its last rows over that heading.
+fn prop_row(
+    f: &mut Frame<Target>,
+    l: &Layout,
+    body: Rect,
+    cy: &mut f32,
+    label: &str,
+    value: &str,
+) -> bool {
+    let row_h = l.small * 1.6;
+    if *cy + row_h > body.bottom() + 0.01 {
+        return false;
+    }
+    // The label column is a share of the panel, not a literal eighty pixels,
+    // and the value starts where the label column ends rather than at a literal
+    // `panel_x + 90.0` -- which in a panel narrower than a hundred pixels put
+    // the value past the panel's own right edge.
+    let label_w = (body.w - l.pad * 2.0) * 0.38;
+    bounded(
+        f,
+        (body.x + l.pad, *cy),
+        label_w,
+        label,
+        SUBTEXT0,
+        l.small,
+        FontWeightHint::Regular,
+    );
+    let vx = body.x + l.pad + label_w + l.pad * 0.4;
+    bounded(
+        f,
+        (vx, *cy),
+        body.right() - l.pad - vx,
+        value,
+        TEXT,
+        l.small,
+        FontWeightHint::Regular,
+    );
+    *cy += row_h;
+    true
+}
+
+/// Lay `n` equal cells across a row and paint each through `each`.
+fn pad_row<F>(f: &mut Frame<Target>, l: &Layout, row: Rect, n: usize, mut each: F)
+where
+    F: FnMut(&mut Frame<Target>, usize, Rect),
+{
+    if row.is_empty() || n == 0 {
+        return;
+    }
+    let gap = l.pad * 0.4;
+    let cell = (row.w - l.pad * 2.0 - gap * usize_f32(n.saturating_sub(1))) / usize_f32(n);
+    if cell <= 0.0 {
+        return;
+    }
+    let h = (row.h - 2.0).max(0.0);
+    for i in 0..n {
+        each(
+            f,
+            i,
+            Rect::new(
+                (cell + gap).mul_add(usize_f32(i), row.x + l.pad),
+                row.y + (row.h - h) / 2.0,
+                cell,
+                h,
+            ),
+        );
+    }
+}
+
+/// One cell of a speed or repeat pad.
+fn paint_pad(f: &mut Frame<Target>, l: &Layout, rect: Rect, label: &str, on: bool, accent: Color) {
+    fill(
+        f,
+        rect,
+        if on { accent } else { SURFACE1 },
+        CornerRadii::all(CORNER_RADIUS),
+    );
+    centred(
+        f,
+        rect.x,
+        rect.w,
+        rect.y + (rect.h - l.small) / 2.0,
+        label,
+        if on { CRUST } else { TEXT },
+        l.small,
+        if on {
+            FontWeightHint::Bold
+        } else {
+            FontWeightHint::Regular
+        },
+    );
+}
+
+/// A button's face: what it does, and the key that does the same thing.
+///
+/// The old program had no buttons at all -- every control was a key, and the
+/// only record of which keys those were was nowhere. A label that names its own
+/// key is what stops the two drifting apart in the user's head as well as in
+/// the code.
+fn faced(button: Button) -> String {
+    format!("{} ({})", button.action_label(), button.key_label())
+}
+
+/// The property rows peculiar to one kind of action.
+fn action_rows(action: &MacroAction) -> Vec<(&'static str, String)> {
+    match action {
+        MacroAction::KeyPress { key_name } | MacroAction::KeyRelease { key_name } => {
+            vec![("Key", key_name.clone())]
+        }
+        MacroAction::MouseClick { x, y, button }
+        | MacroAction::MouseDoubleClick { x, y, button } => {
+            vec![
+                ("Position", format!("({x:.0}, {y:.0})")),
+                ("Button", button.label().to_string()),
+            ]
+        }
+        MacroAction::MouseMove { x, y } => vec![("Target", format!("({x:.0}, {y:.0})"))],
+        MacroAction::Scroll { direction, amount } => vec![
+            ("Direction", direction.label().to_string()),
+            ("Amount", amount.to_string()),
+        ],
+        MacroAction::TypeText { text } => {
+            vec![("Text", text.chars().take(30).collect())]
+        }
+        MacroAction::Delay { ms } => vec![("Wait", format!("{ms}ms"))],
+        MacroAction::IfPixelColor {
+            x,
+            y,
+            r,
+            g,
+            b,
+            tolerance,
+        } => vec![
+            ("Pixel", format!("({x:.0}, {y:.0})")),
+            ("Color", format!("#{r:02X}{g:02X}{b:02X}")),
+            ("Tolerance", tolerance.to_string()),
+        ],
+    }
+}
+
+/// Move a selection by `delta` within `0..n`, starting one from nothing.
+///
+/// Both ends are bounded here, once, rather than one end in a match guard and
+/// the other in the arm body: two spellings of one rule is one spelling too
+/// many for a rule that has to hold at both ends.
+fn step(current: Option<usize>, delta: isize, n: usize) -> usize {
+    let Some(i) = current else {
+        return if delta < 0 { n.saturating_sub(1) } else { 0 };
+    };
+    if delta < 0 {
+        i.saturating_sub(delta.unsigned_abs())
+    } else {
+        i.saturating_add(delta.unsigned_abs())
+            .min(n.saturating_sub(1))
+    }
+}
+
+/// Move a scroll offset by `rows` within `0..n`.
+fn shift(current: usize, rows: isize, n: usize) -> usize {
+    let moved = if rows < 0 {
+        current.saturating_sub(rows.unsigned_abs())
+    } else {
+        current.saturating_add(rows.unsigned_abs())
+    };
+    moved.min(n.saturating_sub(1))
+}
+
+/// `usize` as `f32`, saturating rather than wrapping.
+///
+/// Every one of these used to be a bare `as f32` under a crate-level
+/// `#![allow(clippy::cast_precision_loss)]`.
+fn usize_f32(n: usize) -> f32 {
+    u32::try_from(n).map_or(f32::from(u16::MAX), |n| n as f32)
+}
+
+/// `u64` milliseconds as `f32`, for the pulse phase.
+fn u64_f32(n: u64) -> f32 {
+    u32::try_from(n).map_or(f32::from(u16::MAX), |n| n as f32)
+}
+
+/// A `0.0..=255.0` level as a byte, with both ends bounded.
+fn f32_u8(v: f32) -> u8 {
+    if v.is_nan() {
+        return 0;
+    }
+    let v = v.clamp(0.0, 255.0);
+    // SAFETY-of-arithmetic: clamped to the byte range and not NaN, so the
+    // truncation below cannot saturate or wrap.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamped to 0..=255 and checked for NaN on the line above"
+    )]
+    {
+        v as u8
     }
 }
 
@@ -2749,94 +3402,73 @@ fn format_duration_ms(ms: u64) -> String {
     guitk::duration::units_ms(ms)
 }
 
+impl App for AutomatorApp {
+    fn title(&self) -> String {
+        String::from(TITLE)
+    }
+
+    fn app_id(&self) -> String {
+        String::from("automator")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        // Without a clock the recording indicator does not pulse and, more to
+        // the point, playback does not advance: `tick_playback` had no caller
+        // outside the tests.
+        Some(std::time::Duration::from_millis(TICK_MS))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.size = (width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for AutomatorApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
 // ============================================================================
 // Main
 // ============================================================================
 
-fn main() {
-    let mut app = AutomatorApp::new();
-
-    // Create some demo macros.
-    let id = app.new_macro("Login Sequence");
-    app.add_action(
-        MacroAction::MouseClick {
-            x: 500.0,
-            y: 300.0,
-            button: MacroMouseButton::Left,
-        },
-        0,
-    );
-    app.add_action(
-        MacroAction::TypeText {
-            text: "admin".to_string(),
-        },
-        100,
-    );
-    app.add_action(
-        MacroAction::KeyPress {
-            key_name: "Tab".to_string(),
-        },
-        50,
-    );
-    app.add_action(
-        MacroAction::KeyRelease {
-            key_name: "Tab".to_string(),
-        },
-        50,
-    );
-    app.add_action(
-        MacroAction::TypeText {
-            text: "password123".to_string(),
-        },
-        100,
-    );
-    app.add_action(
-        MacroAction::KeyPress {
-            key_name: "Enter".to_string(),
-        },
-        200,
-    );
-    app.add_action(
-        MacroAction::KeyRelease {
-            key_name: "Enter".to_string(),
-        },
-        50,
-    );
-
-    // Set trigger for the login macro (using Hotkey::from_str for text-based configuration).
-    app.set_trigger(Hotkey::from_str("Ctrl+Alt+L"));
-
-    let _ = id;
-    let _id2 = app.new_macro("Screenshot Workflow");
-    app.add_action(MacroAction::Delay { ms: 500 }, 0);
-    app.add_action(
-        MacroAction::KeyPress {
-            key_name: "PrintScreen".to_string(),
-        },
-        500,
-    );
-    app.add_action(
-        MacroAction::KeyRelease {
-            key_name: "PrintScreen".to_string(),
-        },
-        50,
-    );
-    app.add_action(MacroAction::MouseMove { x: 100.0, y: 100.0 }, 200);
-    app.add_action(
-        MacroAction::MouseClick {
-            x: 100.0,
-            y: 100.0,
-            button: MacroMouseButton::Left,
-        },
-        100,
-    );
-
-    // Select the first macro.
-    app.select_macro_by_index(0);
-    app.select_action(2);
-
-    let cmds = app.render(WINDOW_WIDTH, WINDOW_HEIGHT);
-    let _ = cmds.len();
+fn main() -> ExitCode {
+    let mut app = AutomatorApp::with_demo_library();
+    app::launch("automator", &mut app)
 }
 
 // ============================================================================
@@ -3658,8 +4290,8 @@ mod tests {
     #[test]
     fn test_app_render_empty() {
         let app = AutomatorApp::new();
-        let cmds = app.render(800.0, 600.0);
-        assert!(!cmds.is_empty());
+        let frame = app.frame(800.0, 600.0);
+        assert!(!frame.commands().is_empty());
     }
 
     #[test]
@@ -3668,8 +4300,8 @@ mod tests {
         app.new_macro("Test Macro");
         app.add_action(MacroAction::Delay { ms: 100 }, 0);
         app.select_action(0);
-        let cmds = app.render(1000.0, 700.0);
-        assert!(!cmds.is_empty());
+        let frame = app.frame(1000.0, 700.0);
+        assert!(!frame.commands().is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -3918,9 +4550,10 @@ mod tests {
         let mut app = AutomatorApp::new();
         app.new_macro("Test");
         app.start_recording();
-        let cmds = app.render(800.0, 600.0);
+        let frame = app.frame(800.0, 600.0);
         // Should have REC text somewhere.
-        let has_rec = cmds
+        let has_rec = frame
+            .commands()
             .iter()
             .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "REC"));
         assert!(has_rec);
@@ -3932,7 +4565,7 @@ mod tests {
         app.new_macro("Test");
         app.active_tab = ActiveTab::Script;
         app.set_script_text("wait 100\nclick 50 60");
-        let cmds = app.render(1000.0, 700.0);
-        assert!(!cmds.is_empty());
+        let frame = app.frame(1000.0, 700.0);
+        assert!(!frame.commands().is_empty());
     }
 }

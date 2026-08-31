@@ -102758,6 +102758,71 @@ property of the design.
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
 
+## B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS (lane B, 2026-08-31) — filed to lane A
+
+**In short.** Two defects in the kernel's extended-attribute path, both found
+while giving `cp` xattr support, both in `kernel/**` and so filed rather than
+fixed: `requests/b-a-a-missing-xattr-and-a-missing-file-are-the-same-error.md`.
+
+**1. "No such attribute" and "no such file" are one error code.** `KernelError`
+(`kernel/src/error.rs`, Filesystem band 500–599) has no variant for "the object
+exists, the attribute does not", so `ext4/vfs_impl.rs:1527` and
+`memfs.rs:122` both return `NotFound` after having successfully found the
+inode. `posix/src/errno.rs` maps that to `ENOENT`; Linux says `ENODATA`.
+
+Costs today, all live:
+
+- `posix/src/xattr.rs:182–202` implements `XATTR_CREATE`/`XATTR_REPLACE` with a
+  get-then-set probe, because it cannot get the flag semantics from one call.
+  Two syscalls where Linux does one, with a race window between them in which
+  the two outcomes the flags exist to forbid can both happen.
+- That probe reads *any* negative return as "attribute absent", so
+  `setxattr("/no/such/file", …, XATTR_REPLACE)` reports `ENODATA` — an answer
+  about an attribute — when the truth is `ENOENT`.
+- `cp --preserve=all` suppresses `ENOTSUP`/`ENODATA` and reports everything
+  else, which is GNU's policy (`copy.c`'s `copy_attr`) and is now ours. An
+  attribute removed by another process between `cp`'s `listxattr` and its
+  `getxattr` is `ENODATA` on Linux and silent; here it arrives as `ENOENT` and
+  prints `cp: getting attribute 'user.tag' of 'a': No such file or directory`
+  about a file that is fine.
+
+**2. An attribute name is typed as UTF-8, and one bad name fails the whole
+inode.** `FileSystem::get_xattr(…, key: &str)`, `list_xattrs → Vec<String>`,
+and `read_user_cstring` (`handlers.rs:139`) all require UTF-8. An xattr name on
+Linux is an opaque NUL-terminated byte string. The damage is at
+`ext4/driver.rs:3508`:
+
+```rust
+let name = core::str::from_utf8(name_bytes).map_err(|_| KernelError::IoError)?;
+```
+
+inside the loop over *every* attribute on the inode, so one non-UTF-8 name
+makes `read_all_xattrs` return `EIO` and takes `get_xattr`, `list_xattrs` and
+`set_xattr` down with it for that file — including for the attributes whose
+names are ordinary. `cp -a` of such a file reports an I/O error on a healthy
+filesystem, and the offending attribute cannot be read or removed.
+
+This is CLAUDE.md self-review item 7, and it is the same defect this tree
+already fixed for directory entries — the comment left at
+`ext4/driver.rs:5081` records that lesson in almost these words. The xattr path
+never got the same pass, and its failure mode is louder: the directory fix was
+recovering from *skipping* one entry, this one fails the inode.
+
+Realistic source: a filesystem written by Linux. Nothing here produces a
+non-ASCII attribute name; `setfattr` on a Linux host will, and `rootfs.ext4` is
+built on one.
+
+**Lane B's side is already right** and needs no change when this lands:
+`userspace/coreutils/src/fsattr.rs` passes and returns `&[u8]` throughout, and
+`cp` quotes attribute names as bytes.
+
+**Not a blocker.** `cp`'s xattr support shipped 2026-08-31 without either fix.
+Defect 1's cases are races and unusual arguments; defect 2 needs a file this
+tree cannot yet create. Filed now because the cost of 1 grows quietly with each
+new caller that reads `ENOENT` from an xattr call, and because `--preserve=mode`
+ACL support — which needs `removexattr` to answer "already absent" distinctly —
+is the next thing due on `cp`.
+
 ## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A)
 
 **Status:** OPEN 2026-08-31
@@ -102903,3 +102968,49 @@ divided by the window — negligible for multi-second benchmark windows, large
 for short ones. Historical readings near 0.98 were *under*-stating a
 correctly-applied load, not over-stating it, so no past grading verdict flips;
 but do not mine pre-2026-08-31 occupancy figures for precision.
+
+## B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE (lane B, 2026-08-31) — OPEN
+
+**In short.** `cp -b` (and, shortly, `mv -b`, `ln -b`, `install -b`) picks the
+name for a backup by reading the directory — `f.~1~`, `f.~2~`, … — and then
+renaming the old file onto it. Between the reading and the renaming another
+process can create that same name, and on Linux that cannot cost anything
+because the rename is told to refuse an existing target. Our kernel has no way
+to say that, so the rename overwrites instead, and whatever the other process
+put there is gone. It takes two processes backing up in one directory at the
+same instant, so it is unlikely; it is also silent and destroys a file, which
+is why it is written down rather than shrugged at.
+
+**Where.** `userspace/coreutils/src/backup.rs`, `rename_maybe_noreplace`. It
+asks for `renameat2(…, RENAME_NOREPLACE)` first, exactly as gnulib's
+`renameatu` does, and falls back to `lstat`-then-`rename` when the flag is
+refused with `EINVAL`, `ENOSYS` or `ENOTSUP` — which is gnulib's own fallback,
+and carries gnulib's own race.
+
+On this target the fallback is not a fallback but the only path:
+`posix/src/file.rs:3469` returns `EINVAL` for any non-zero flag word, with the
+comment "Our kernel doesn't support these flags yet". So every numbered backup
+`cp -b` makes goes through the racy branch, on every run.
+
+**What the window costs.** The `lstat` says the name is free, the `rename`
+takes it. If the name stopped being free in between, the `rename` silently
+replaces a file that a *different* process had just written its backup to. The
+loser's original is unrecoverable — it was the source of that rename, so it no
+longer exists under its own name either. Simple (`-b --backup=simple`) backups
+are not affected: those deliberately replace a previous backup of the same
+name, and pass no flag even on Linux.
+
+**The fix is not lane B's.** `RENAME_NOREPLACE` has to exist in the kernel's
+`rename` path — the check belongs under the same lock that performs the
+directory update, which is precisely why userspace cannot emulate it. Once
+`kernel/src/fs/vfs.rs` takes a flags word and `posix/src/file.rs:3469` stops
+short-circuiting, `backup.rs` needs no change at all: it already asks for the
+flag first and only degrades when told the flag is unavailable.
+
+`mv -n` wants the same thing for the same reason, and `mv` is the next utility
+on lane B's list, so the request will be filed with both callers named.
+
+**Priority: low, and stable.** It does not get worse with time and no new
+caller bakes it in — every caller goes through `backup.rs`'s one function. It
+is a genuine data-loss window rather than a wrong message, which is the only
+reason it is above "cosmetic".

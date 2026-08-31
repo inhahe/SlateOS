@@ -85,6 +85,9 @@ use coreutils::errmsg::{self, strerror};
 use coreutils::quote::os_bytes;
 use coreutils::quote::{self, os_from_bytes, quote};
 use coreutils::stdfd;
+// `-ok`'s prompt lives on the `#[cfg(unix)]` executor, the only thing that can
+// run a child, so elsewhere this import is unused rather than merely unreached.
+#[cfg(unix)]
 use coreutils::yesno;
 use coreutils::{cfmt, extfloat, fnmatch, pathname};
 #[cfg(unix)]

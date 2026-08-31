@@ -56510,3 +56510,556 @@ made the same choice for the same reason, so the two agree.
   end of input, and end of input is indistinguishable from a failed read* —
   which is gnulib's contract, since `getline` returns `-1` for both — and a
   `BufRead` parameter states none of that.
+
+---
+
+## 735. `cp --preserve=links` reproduces GNU's "a linked destination was never created" gap, and the harness grew a column that can see hard links at all
+
+**Date:** 2026-08-30
+**Lane:** B
+**Decided by:** Claude (autonomous)
+
+**In short:** `cp --preserve=links a b d` notices that `a` and `b` are two
+names for one file and makes `d/b` a second name for `d/a` rather than a
+second copy of the bytes. GNU has a small hole in that: a destination it
+created by *linking* is not written down in its list of "files this command
+just made", so a later operand can silently overwrite it, where the same
+command without the option stops and says `will not overwrite just-created`.
+We copy the hole. Separately, the differential harness could not previously
+see a hard link at all — two names for one file look identical to two copies
+in every column it printed — so a new column lists which paths share an inode.
+
+### The gap, measured
+
+GNU's `copy_internal` announces the copy, then reaches the `earlier_file`
+branch (`copy.c:2655`), calls `create_hard_link`, and **returns** at
+`copy.c:2746`. `record_file (dest_info, dst_name, …)` is 470 lines further
+down at `copy.c:3217` and never runs. So `dest_info` — the set that powers the
+`will not overwrite just-created` refusal — has an entry for every destination
+that was *copied* and none for a destination that was *linked*.
+
+Measured against coreutils 9.4, with `a` and `b` hard-linked and `o/b` a
+different file:
+
+| command | result |
+|---|---|
+| `cp --preserve=links a b o/b d` | exit 0, silence, `d/b` holds `o/b`'s bytes |
+| `cp a b o/b d` | `cp: will not overwrite just-created 'd/b' with 'o/b'`, exit 1 |
+
+The option changes whether a third operand is allowed to destroy the second
+one's work, which is not something `--preserve=links` is about.
+
+### Why reproduce it
+
+- **The harness is the specification.** `scripts/cp-diff.sh` compares stdout,
+  stderr, exit status, the resulting tree, the file bodies and now the link
+  groups. A destination that GNU overwrites and we refuse differs in all but
+  one of those. Every deliberate divergence has to be argued for in a
+  `xfail_case` line, and this one would be arguing that our `cp` is safer than
+  the `cp` every script on the system was written against.
+- **The "safer" direction is not obviously safer.** Recording the linked
+  destination turns a silent overwrite into an exit-1 failure *in the middle of
+  a multi-operand copy*, after some operands have already landed. A script that
+  today ends with `d/b` holding `o/b` would instead end with a non-zero status
+  and the same `d/b`, because the refusal happens before the write but after
+  the earlier operands. That is a different partial state, not a complete one.
+- **It is a gap, not a policy, and upstream may close it.** If GNU moves
+  `record_file` above the `earlier_file` return, the harness reports the case
+  as a difference on the next run and we follow. Diverging now would mean
+  carrying a permanent `xfail` that hides that signal.
+
+The cost is a `Placed` enum with three variants where a `bool` would do:
+`copy_one` records a destination in `Seen` for `Placed::Copied` and not for
+`Placed::Linked`, so the variant exists solely to carry this distinction. It is
+documented at the type with the transcript above, because a future reader who
+"simplifies" it back to a boolean would silently change behaviour and the unit
+test `a_linked_destination_is_not_recorded_as_created` is what would catch it.
+
+### The harness column
+
+`snapshot` prints each path's mode, size, symlink text and bytes. None of those
+differ between two names for one file and two copies of it, so before this
+change every `--preserve=links` case would have passed against a `cp` that
+ignored the option outright — the harness would have certified the option
+without testing it.
+
+`hardlinks` prints one line per hard-link group, listing that group's member
+paths. Not the inode numbers: the two sides run in two directories and have two
+disjoint sets of inodes, so the numbers are the one fact about a hard link that
+cannot be compared. The membership is the same on both sides whenever the two
+programs agree, and differs whenever they do not.
+
+It is empty for every case that creates no hard links, which is every case
+outside section 18 — so the column costs nothing where it says nothing, and the
+other 400-odd cases were unaffected by its introduction.
+
+### What was rejected
+
+- **Recording the linked destination anyway, and documenting the divergence.**
+  Above. It replaces a silent overwrite with a mid-copy failure, which is not
+  strictly better, and it costs a permanent `xfail` that would mask upstream
+  closing the gap.
+- **A `bool` return from `place_entity`, with the caller re-deriving whether a
+  link happened.** The caller would have to ask "does this destination now have
+  more than one link?", which is true for reasons that have nothing to do with
+  this command — a destination that already had two links before the copy
+  answers yes.
+- **Printing `%n` (the link count) in `snapshot` instead of a group column.**
+  Cheaper, and wrong: it says a file has two names without saying *which* other
+  path is the second one, so a `cp` that linked `d/a` to the wrong file would
+  produce the same counts as one that linked it to the right one.
+
+---
+
+## 736. The "have I copied this inode?" table is one table shared by the walk, not two split by who asks — the split was hiding a directory the walk could not see
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `cp` has to remember which files it has already copied and where it
+put them, so that a file named twice on one command line is not copied twice.
+This `cp` kept two such notebooks: one for the "same file named twice" rule and
+one for the "same *directory* named twice" rule. The second notebook was in a
+place the code that walks *inside* a directory could not read. So when a
+directory turned up a second time because `cp` walked into a folder that
+contained it, nothing noticed: `cp -r parent/child parent d` copied `child`
+twice and reported success, where GNU refuses the second one and exits 1. The
+two notebooks are now one, kept where both the operand loop and the walk can
+read it — which is where GNU has always kept its single one.
+
+### What was measured
+
+With `parent/child` a directory holding `f` and `g`, and `parent` also holding
+`top`:
+
+```
+$ cp -rv parent/child parent d          # GNU 9.4
+'parent/child' -> 'd/child'
+'parent/child/f' -> 'd/child/f'
+'parent/child/g' -> 'd/child/g'
+'parent' -> 'd/parent'
+cp: will not create hard link 'd/parent/child' to directory 'd/child'
+'parent/top' -> 'd/parent/top'
+rc=1
+```
+
+Ours, before this change, printed the four lines, then copied `parent/child`
+into `d/parent/child` a second time, and exited 0. The divergence had nothing
+to do with `--preserve=links`, which was the option being worked on when it was
+found: a plain `cp -r` diverged identically.
+
+Three further facts came out of the same measurement and are all reproduced:
+
+| Command | GNU | Why |
+|---|---|---|
+| `cp -r tree tree/sub dst` | both copies made, rc 0 | the walk reaches `tree/sub` *first*, and a walked directory is looked up and never recorded, so the operand that names it afterwards finds an empty table |
+| `cp -rL tree/sub tree dst` | both copies made, rc 0 | `-L` asks for every name to be followed, so one directory reached twice is a request for two independent copies |
+| `cp -rH tree/sub tree dst` | refused, rc 1 | `-H` follows *operands* only; the walk is still `DEREF_NEVER` |
+
+### The decision
+
+Merge `Seen`'s `dirs` field into the `Links` table, rename the result `Copied`
+after what it now holds, hang it off `Job` (which the walk can reach) rather
+than off `Seen` (which it cannot), and give it GNU's two distinct entry points:
+`remember` (insert on miss, return the earlier destination) for a command-line
+directory, and `lookup` (no insert) for one found by walking.
+
+This is not a new design; it is GNU's. `copy.c:2662` selects `earlier_file` from
+one `src_to_dest` table for both rules, and `hash_init` is called once in `main`
+(`cp.c:1284`). The comment that justified the split — "they can never collide, a
+directory and a non-directory are different inodes" — was true and beside the
+point. The cost of the split was never a collision; it was that one of the two
+tables sat behind an interface the walk had no route to.
+
+Three of GNU's four arms for the directory case are reproduced. The fourth,
+`cannot copy a directory, %s, into itself, %s`, is reachable in GNU only because
+it *also* records the inode of the first destination directory it creates
+(`copy.c:2982`) and then trips over it later in the walk. This `cp` deliberately
+refuses the into-itself case up front instead, which is §724's decision and is
+already covered by seven harness cases; adding the recording to reach the fourth
+arm would undo that.
+
+### Why the walk must look up and not record
+
+The asymmetry is the part that is easy to get wrong, and getting it wrong is
+silent: recording walked directories as well would make `cp -r tree tree/sub
+dst` — the reverse operand order, which GNU copies twice and calls success —
+into a spurious refusal. There is a unit test for exactly that
+(`a_walk_that_arrives_first_does_not_refuse_the_operand`) and a harness case
+beside it, because the failure mode is a *refusal that should not happen*, which
+no amount of testing the bug that motivated the change would catch.
+
+The rule underneath it: only a directory named on the command line can be named
+twice on the command line. A directory found by walking is found once by
+construction, so recording it buys nothing and risks the false positive above.
+
+### The comment that was wrong
+
+`copy_entry` carried this:
+
+> The refusals `copy_one` makes either side of this are deliberately not here,
+> and none of them can arise: a source found by walking cannot have been named
+> twice on the command line, and nothing this command created can be reached
+> inside the tree it is filling.
+
+Both halves of that sentence are true. The conclusion does not follow, because
+the directory rule is not asking whether *this* source was named twice — it is
+asking whether this *inode* has been copied before, by anyone, including an
+operand. The comment has been replaced with one that separates the file rules
+(which genuinely cannot arise in a walk) from the directory rule (which can),
+and the two absent arms are now justified individually rather than as a class.
+
+The general lesson, recorded because it has now cost two sessions: a comment
+asserting that a case "cannot arise" is a claim about the whole program, and the
+one place it cannot be checked is the function it is written in. Where such a
+claim is load-bearing, it needs a harness case that would fail if it were false.
+Sections 9b's six cases are that, for this one.
+
+### What was rejected
+
+- **Passing `Seen` down into the walk.** It would work, and it would carry three
+  fields into `copy_entry` of which two provably cannot fire there, plus the
+  `Option` wrapper that exists only because `Seen` is built for two-or-more
+  operands. The table the walk needs is unconditional; borrowing the one that
+  is not would mean making it unconditional too, at which point it is `Copied`
+  with extra steps.
+- **Keeping two tables and giving the walk its own.** Two tables that must never
+  disagree about the same question, which is the shape that produced the bug.
+- **Recording the created destination directory (`copy.c:2982`) to reach GNU's
+  fourth arm.** It would replace §724's up-front into-itself refusal with GNU's
+  refuse-after-copying-some behaviour, whose residue is inode-order-dependent
+  and is already an accepted `xfail`. Strictly worse in both directions.
+- **Adding `top_level_src_name`/`top_level_dst_name` to `Job` so the two absent
+  arms could be written out.** Two mutable fields on a struct eleven signatures
+  name, reset per operand, existing only to word diagnostics that cannot be
+  printed.
+
+## 737. Which extended attributes are "permissions" is decided in the program, not read from `/etc/xattr.conf` — a missing config file must not silently change what a copy carries
+
+**Date:** 2026-08-31
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** A file can carry extended attributes — small named blobs hung off
+the file, like `user.comment` — and a couple of those names are not data *about*
+the file but the file's own access list (an ACL: "and also let Bob read this").
+`cp` has to sort them, because `--preserve=xattr` is supposed to carry the first
+kind and `--preserve=mode` the second. On Linux the sorting is done by reading
+`/etc/xattr.conf`, a file shipped by the distribution. This OS has no such file
+and will not grow one for this: the two ACL names are written into the program.
+The cost is that a site cannot add its own rules. The benefit is that the
+sorting cannot go missing, which on Linux it demonstrably can — delete
+`/etc/xattr.conf` there and `cp --preserve=xattr` quietly starts copying ACLs
+that the user did not ask to copy.
+
+### Where the split comes from
+
+GNU does not have a list of permission-class names either. It has two callers of
+libattr's `attr_copy_file`, which takes a *filter* callback, and libattr's
+default filter (`attr_copy_action`) is a parser for `/etc/xattr.conf`:
+
+| Caller | Filter | What it copies |
+|---|---|---|
+| gnulib `qcopy_acl` (from `--preserve=mode`) | `is_attr_permissions` | only names the config marks `permissions` |
+| coreutils `copy_attr` (from `--preserve=xattr`) | `check_selinux_attr`, which defers to the config | everything the config does *not* mark `permissions`, minus SELinux's own |
+
+So the classification is one table, consulted from two directions, and it lives
+in a text file that neither program ships. The file distributions do ship marks
+these as `permissions`:
+
+```
+system.posix_acl_access    permissions
+system.posix_acl_default   permissions
+system.nfs4_acl            permissions
+system.nfs4acl             permissions
+trusted.SGI_ACL_FILE       permissions
+trusted.SGI_ACL_DEFAULT    permissions
+```
+
+### What the source says happens when the file is absent
+
+libattr's fallback is not "assume the usual names". `attr_parse_attr_conf`
+(`attr_copy_action.c`) opens `/etc/xattr.conf` and, on `ENOENT`, `return 0` —
+success, with an empty rule list. `attr_copy_action` then finds no matching
+pattern and returns `0`, which is neither `ATTR_ACTION_SKIP` (1) nor
+`ATTR_ACTION_PERMISSIONS` (2). Every name gets the same non-answer, and the two
+filters read that non-answer in opposite directions:
+
+| Filter | Definition | Verdict with no config |
+|---|---|---|
+| `is_attr_permissions` (`qcopy-acl.c:36`) | `attr_copy_action (name, ctx) == ATTR_ACTION_PERMISSIONS` | false for **every** name |
+| `check_selinux_attr` (`copy.c:751`) | not `security.selinux` **and** `attr_copy_check_permissions`, which is `attr_copy_action (name, ctx) == 0` | true for **every** other name |
+
+So on a Linux box with no `/etc/xattr.conf`:
+
+- `cp --preserve=xattr a b` copies `system.posix_acl_access` along with
+  everything else, giving `b` an access list the user never asked to carry —
+  `--preserve=xattr` is documented as precisely *not* being `--preserve=mode`.
+- `cp -p a b` copies no ACL at all, because the permissions copy's filter now
+  selects nothing: the ACL is silently dropped by the option whose whole job
+  was to carry it.
+
+The two failures point opposite ways from the same missing file, which is the
+part that makes it a bad place for the rule to live: nothing about either
+outcome announces that a config file was missing, and the two are not even
+consistent enough to produce one recognisable symptom.
+
+### The decision
+
+`fsattr::Xattrs` is a two-valued enum — `Ordinary` and `Permissions` — and
+`PERMISSION_XATTRS` is a two-element array of the names this kernel actually
+stores. `Xattrs::carries` is the whole filter. There is no file to read, no
+parse to fail, and no state in which the two halves overlap or leave a name to
+both.
+
+The array is two names and not the config file's six. The NFSv4 and SGI entries
+name ACL flavours nothing in this tree implements; no code here can produce
+those attributes, so listing them would be transcribing spellings that could
+only ever be wrong in a way nobody would notice.
+
+### Alternatives considered
+
+- **Ship an `/etc/xattr.conf` and parse it, as Linux does.** The faithful
+  choice, and the one to revisit if this OS ever grows a second ACL flavour or a
+  reason for a site to exclude a name from copies. Rejected now because it buys
+  configurability nobody has asked for at the price of a failure mode that is
+  silent in both directions, and because the file would have to be shipped,
+  found, versioned and documented — four moving parts to express six lines that
+  no two distributions disagree about.
+- **Parse it if present, fall back to the built-in list if not.** Strictly
+  better than pure parsing and still worse than this: it keeps the parse and the
+  divergence, and it means the answer to "what does `--preserve=xattr` carry?"
+  depends on the machine. A user comparing two machines would be debugging a
+  config file's absence, which is the exact thing the built-in list makes
+  impossible.
+- **No split at all — `--preserve=xattr` carries every attribute including
+  ACLs.** What Linux does when the file is missing, and it makes
+  `--preserve=xattr` quietly imply a slice of `--preserve=mode`. It also makes
+  the eventual `--preserve=mode` ACL support unimplementable without taking the
+  names back out again.
+
+### What this does not decide
+
+`--preserve=mode` does not yet carry the permission class; only `Ordinary` has a
+caller. The `Permissions` half exists, is tested, and is waiting on an
+attribute-*removal* primitive, because gnulib's `qset_acl` narrows a destination
+by deleting its ACL and not merely by overwriting it. See the comment on
+`narrow_before_chown` in `cp.rs`, which records the finding so that whoever
+picks it up does not re-derive it wrongly.
+
+---
+
+## 738. `--preserve=mode` replaces the destination's access-control list rather than merging the source's into it, which is GNU's careful branch and not its fast one
+
+**Date:** 2026-08-31
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** An access-control list, or ACL, is a per-file list of extra
+permission grants — "user carol may also write this file" — that sits beside
+the ordinary owner/group/other bits and can grant access those bits do not
+show. When you run `cp --preserve=mode a b` and `b` already exists, `b` may be
+carrying such a grant. GNU coreutils answers two different ways depending on
+which optional library it was compiled against: one build leaves carol's grant
+on `b`, the other takes it off. This `cp` takes it off. The reason is that
+`--preserve=mode` means "give `b` the permissions `a` has", and leaving a grant
+`a` does not have makes that sentence false in the direction that matters — `b`
+ends up readable or writable by somebody the user believes they have just
+locked out.
+
+### Where the two answers come from
+
+Both live in gnulib's `qcopy_acl` (`lib/qcopy-acl.c`), one in each half of a
+`#ifdef USE_XATTR`. `USE_XATTR` is on when the build found **libattr**, the
+library that copies extended attributes wholesale.
+
+| Build | What `--preserve=mode` does to the destination |
+|---|---|
+| **libattr present** | `chmod` to the source's mode, then `attr_copy_file(…, is_attr_permissions, …)` — copy the ACL attributes the *source* has. A name the source lacks is not mentioned, so a grant on the destination stays. |
+| **libattr absent** | `get_permissions` from the source, `set_permissions` onto the destination. That path *writes* the destination's access ACL — from the source's, or, when the source has none, from the mode — and so replaces whatever was there. |
+
+The comment above the first is candid about being a shortcut: *"Rather than
+fiddling with acls one by one, we just copy the whole ACL xattrs."* It is
+faster, and on the case it was written for — a destination this run just
+created, which has no ACL of its own — the two agree exactly. They part company
+only when the destination pre-exists and carries a grant the source does not.
+
+That the second branch is the intended semantics is not inference. gnulib's
+`qset_acl`, which the same file's sibling calls, documents itself as *"Set the
+access control lists of a file to match **exactly** MODE (this might remove
+inherited ACLs). Note chmod() tends to honor inherited/default ACLs."* Removal
+is the stated contract; the libattr branch simply does not implement it.
+
+### What the divergence costs
+
+A chmod does not take an ACL off. The kernel rewrites the list's owner, mask
+and other entries to match the new bits and **keeps every named-user and
+named-group entry** — that is what `qset_acl`'s "chmod() tends to honor
+inherited ACLs" is warning about. So under the libattr branch:
+
+```
+setfacl -m u:carol:rw b      # carol may write b
+chmod 600 a                  # a is the owner's alone, and has no ACL
+cp --preserve=mode a b       # "give b the permissions a has"
+```
+
+leaves `b` at mode 0600 *and* still writable by carol. Nothing printed, nothing
+in `ls -l` beyond a `+` most people do not read, and the `cp` reported success.
+Under the other branch carol's entry is gone.
+
+This is not a hypothetical shape. The same replacement is what makes the
+narrowing step in `set_owner` safe — `cp -p` onto an existing file drops the
+mode to `old & new & 0700` before handing the file to a new owner, precisely so
+the old permissions cannot outlive the old owner, and an ACL entry that survived
+that chmod would defeat the whole step. GNU narrows with `qset_acl` for exactly
+that reason, and its condition is `USE_ACL || …`: with ACLs compiled in it
+narrows *unconditionally*, because the mode-bit test it would otherwise use
+cannot see an ACL. This tree therefore already depends on removal being real in
+one place; having `--preserve=mode` not do it in another would be incoherent.
+
+### The decision
+
+`fsattr::copy_permissions` — `cp`'s `--preserve=mode` call — is chmod, then
+delete both `system.posix_acl_access` and `system.posix_acl_default` from the
+destination, then copy whichever of those two the source has. The end state is
+"the destination's ACLs are the source's ACLs", identical to the non-libattr
+branch and to the plain reading of the option.
+
+`fsattr::set_mode_exactly` — the narrowing, and `--no-preserve=mode` — is chmod
+plus deletion of the **access** list only. The default list, which decides what
+a directory hands to files created inside it later rather than who may use the
+directory now, is left alone. That is GNU's behaviour too, though by accident of
+a sort worth recording: its `set_acls` deletes the default list under
+`S_ISDIR (ctx->mode)`, and every one of `cp`'s calls passes permission bits with
+no file-type bits in them, so the test never fires.
+
+Deleting the attribute is how a minimal ACL is written here. gnulib builds a
+three-entry list from the mode and writes it; Linux and this kernel both store
+such a list as plain mode bits and drop the attribute, so the two are the same
+operation, and deletion is the one expressible without an ACL encoder this tree
+does not need for anything else.
+
+### Alternatives considered
+
+**Match the libattr branch exactly, since it is what a modern Linux `cp` does.**
+The argument for it is real: bug-compatibility is a feature in a compatibility
+utility, and a script that has learned GNU's behaviour is a script this would
+break. Rejected because the behaviours being matched *disagree with each other*
+— there is no single "what GNU does" here, so compatibility cannot be the
+deciding argument, and between two GNU answers the one to take is the one whose
+documentation says it is the intent. The cases where they differ are also the
+cases where the difference is a permission left standing, which is the failure
+direction that costs something.
+
+**Delete both names in `set_mode_exactly` too, so there is one operation
+instead of two.** Simpler, and on a regular file the extra deletion is a
+harmless `ENODATA`. Rejected because it is wrong on the one case it reaches: a
+directory created by `cp -r --no-preserve=mode` inherits a default ACL from its
+parent, that inheritance is the parent's deliberate policy about what goes
+inside it, and `--no-preserve=mode` says nothing about it. GNU keeps it, and so
+does this.
+
+**Leave `--preserve=mode` as a chmod and treat ACLs as out of scope.** This is
+what shipped until now, and the comment on `narrow_before_chown` recorded it as
+a known gap rather than a decision. Rejected because this kernel enforces POSIX
+ACLs (`kernel/src/fs/acl.rs`, checked from `vfs.rs`'s permission path), so an
+unrestored grant is a real grant here and not a portability abstraction.
+
+### What this does not decide
+
+Nothing reads or writes an ACL's *contents* — the two attributes are moved and
+deleted as opaque bytes. A future `setfacl`/`getfacl`, or a `cp` that had to
+translate between ACL flavours, would need an encoder; gnulib needs one only
+because it must produce a minimal list where this tree can delete instead.
+
+The differential harness cannot exercise any of this: the reference build has
+`USE_ACL 0` as well as no `USE_XATTR`, so it has no ACL behaviour to compare
+against, and the development host ships no `setfacl` to build a fixture with.
+The coverage is in `fsattr`'s tests, which synthesise the on-disk ACL by hand
+and skip themselves if the host filesystem refuses it.
+
+---
+
+## 739. The numbered-backup retry loop stops when it stops making progress, which gnulib's does not — a directory you can write but not read makes upstream spin forever
+
+**Date:** 2026-08-31
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `cp -b` keeps the previous contents of a file it is about to
+overwrite by moving them aside under a new name — `f.~1~`, `f.~2~` and so on.
+It picks the number by listing the directory, and then has to cope with another
+process taking that name in the instant between the listing and the move. GNU
+copes by trying again, on the reasoning that a fresh listing will show the new
+name and pick a higher number. That reasoning quietly assumes the directory can
+be listed. In a directory you are allowed to write but not to read — a drop box,
+mode `733`, which is a real and deliberate configuration — the listing shows
+nothing, so every attempt picks `f.~1~`, and GNU's `cp -b` hangs until it is
+killed. Ours makes one extra check: if the retry produced a name it has already
+tried, it stops and reports the collision. Everywhere GNU terminates, both do
+the same thing.
+
+### The situation
+
+`backupfile_internal` (`gnulib/lib/backupfile.c:390`) is a `while (true)` whose
+only exits are a successful rename and a failure that is not "the destination
+exists". The retry condition is `e == EEXIST && extended`, where `extended`
+means the chosen name was not shortened to fit the filesystem's length limit —
+a shortened name cannot be varied, so that case falls out. An *unshortened*
+name is assumed to be variable, because `numbered_backup` will next time see
+whatever took it and count past it.
+
+The assumption holds only if `opendir` succeeds. When it does not,
+`numbered_backup` returns `BACKUP_IS_NEW` and the name is `f.~1~` — the same
+`f.~1~` it returned last time, and will return next time. `rename` keeps
+answering `EEXIST`, `extended` stays true, and the loop never advances.
+
+Three things have to line up: `--backup=numbered` or `--backup=existing` (the
+default `--backup` control, once one numbered backup exists), a destination
+directory the caller can write but not read, and something already occupying
+`f.~1~`. That is not a contrived stack — mode `733` upload directories exist
+precisely so that writers cannot enumerate each other's files, and the whole
+point of a backup suffix is that its name is predictable.
+
+### The decision
+
+`Backup::build` remembers the name the previous attempt tried and treats a
+repeat as failure, returning `AlreadyExists` — which reaches the user as
+`cp: cannot backup 'f': File exists` and exit 1.
+
+The check is on *progress*, not on the readability of the directory. Stating it
+that way is what makes it safe: it cannot fire on any run where upstream would
+have terminated, because upstream terminating means some attempt produced a
+name that was free, and a name that was free is a name not equal to the last
+one tried. It also covers cases the readability test would miss — a directory
+that becomes unreadable midway, or any future scan that returns a constant for
+a reason not yet imagined.
+
+### Alternatives considered
+
+- **Reproduce the loop exactly.** The default position everywhere else in this
+  utility, and the reason it was not taken here is that the divergence is
+  invisible: a program that hangs produces no output to differ from GNU's, so
+  the differential harness could never see it either way. Fidelity is worth
+  having where it is observable; matching an infinite loop is matching nothing.
+- **Test the directory for readability up front and refuse.** Diagnoses the
+  cause more precisely, and is wrong in two directions: it refuses runs that
+  would have worked (nothing occupies `f.~1~`, so the first attempt succeeds),
+  and it still misses a directory whose permissions change mid-run.
+- **Cap the retries at some number.** Terminates, and picks an arbitrary
+  constant that is simultaneously too small for a genuinely contended directory
+  and too large to be reached quickly. The progress check needs no constant: one
+  wasted attempt is the whole cost.
+
+### Why this is a decision and not just a bug fix
+
+Deviating from GNU is normally the wrong answer in this utility, and the
+project's standing rule is to reproduce the reference rather than improve on
+it — an "improvement" is how a difference nobody asked for gets in. The
+counterweight is that this codebase already treats a reachable hang as a defect
+in its own right (`lib.rs` records the same judgement about `find`'s `fnmatch`),
+and a hang is not a behaviour a user can be bug-compatible with. The deviation
+is written down at the code, at the loop, so that a later reader comparing
+against `backupfile.c` finds the reason before concluding it is a porting
+mistake.

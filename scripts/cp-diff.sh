@@ -3,12 +3,21 @@
 #
 # ## What is compared
 #
-# Four things per case, all four of which have to agree: standard output,
-# standard error, the exit status, and *what the two directories hold
-# afterwards* — every surviving path with its octal mode and size, every
-# symlink with the text it points at, and the bytes of every regular file.
+# Five things per case, all five of which have to agree: standard output,
+# standard error, the exit status, *what the two directories hold afterwards* —
+# every surviving path with its octal mode and size, every symlink with the
+# text it points at, and the bytes of every regular file — and *which of those
+# paths are one file under two names*.
 #
-# The last two matter more for `cp` than for anything else in this family,
+# The last of those is [`hardlinks`], and it is a column no other harness in
+# this family needs. Everything else about a hard link is invisible: two names
+# for one file have the same mode, the same size and the same bytes as two
+# copies of it, so `--preserve=links` — whose entire effect is which of the two
+# a destination is — would be certified by a snapshot that cannot tell them
+# apart. It is empty for every case that creates no hard links, which is all
+# of them but section 18's.
+#
+# The tree and the bytes matter more for `cp` than for anything else in this family,
 # because `cp`'s whole observable effect is the tree it leaves and its stdout
 # is empty in every case below. A text-only harness would compare two empty
 # strings roughly ninety times and report a green column while certifying
@@ -33,9 +42,10 @@
 # sources ending in `..` below are always written `tree/..`, which resolves to
 # the case directory itself — so the worst a regression can do is fill that one
 # directory, and the `timeout` in [`run_one`] bounds even that. Both programs
-# are expected to refuse these outright, ours in `compute_target` and GNU in
-# its `src_info`/`dest_info` cycle check; the case exists to certify that they
-# still do.
+# are expected to refuse these outright, through the same check on both sides —
+# the destination resolves to a directory the walk is already inside, which
+# GNU catches in `src_info`/`dest_info` and ours in `Seen`; the case exists to
+# certify that they still do.
 #
 # **No case copies a FIFO or a device.** Reading a FIFO that nothing writes to
 # blocks until the timeout fires, which would cost thirty seconds per side and
@@ -53,13 +63,23 @@
 #
 # ## Cases that differ on purpose
 #
-# Two kinds. The family's two — `--help` omits the GNU project's `Report bugs
-# to:` block, and `--version` names SlateOS — and then one per option that GNU
-# has and this `cp` has not. That second group is an inventory, not a
-# permission: each entry names the option, and `xfail_case` reports an XPASS
-# the moment one starts agreeing, which is what will force it to be promoted to
-# a real case as the option lands. `cp.rs`'s module docs explain why those
-# options are *refused* rather than ignored.
+# Three kinds. The family's two — `--help` omits the GNU project's `Report bugs
+# to:` block, and `--version` names SlateOS — then one per option that GNU has
+# and this `cp` has not, and then the handful where the *reference* is the one
+# that cannot do the thing.
+#
+# The second group is an inventory, not a permission: each entry names the
+# option, and `xfail_case` reports an XPASS the moment one starts agreeing,
+# which is what will force it to be promoted to a real case as the option
+# lands. `cp.rs`'s module docs explain why those options are *refused* rather
+# than ignored.
+#
+# The third group is at present only `--preserve=xattr`, whose reason is in
+# section 17: the reference is built from source on a host with no libattr, so
+# its `cp` is compiled without extended-attribute support and refuses the word
+# outright. That one will not turn green by anything done here — it would take
+# a libattr on the build host — which is why it names the reference in its
+# reason rather than pretending to be an inventory entry.
 #
 # ## The reference is built, not found
 #
@@ -191,6 +211,35 @@ fold_now() {
     { if ($NF ~ /^[0-9]+\.[0-9]+$/ && $NF + 0 > cut) sub(/[^ ]+$/, "now"); print }'
 }
 
+# Which paths are one file under two names: one line per hard-link group,
+# listing that group's members. Empty when the case made no hard links.
+#
+# The names and not the inode numbers, because the numbers are the one thing
+# about a hard link that *cannot* be compared across the two sides — the two
+# case directories are two different sets of inodes. Printing the group's
+# membership instead says the only thing the harness needs to know, which is
+# whether `d/a` and `d/b` came out as one file, and says it identically on both
+# sides.
+#
+# `-links +1` selects the files with more than their own link, and `! -type d`
+# drops the directories, whose link count is one per subdirectory and so is
+# already implied by the snapshot's list of paths. A group therefore only
+# appears once it has two members, which is exactly when it is interesting.
+#
+# Sorted twice: by name before grouping so that a group's members are listed in
+# a fixed order, and by line afterwards so that the groups themselves are.
+# Neither sort can be dropped — `find` hands these over in inode order, which
+# is the order the files were *created*, and the two sides create the same
+# files in the same sequence only until one of them refuses a copy.
+hardlinks() {
+  ( cd "$1" 2>/dev/null || return 0
+    find . -mindepth 1 ! -type d -links +1 -printf '%i\t%P\n' 2>/dev/null \
+      | LC_ALL=C sort -t"$(printf '\t')" -k2 \
+      | awk -F'\t' '{ g[$1] = ($1 in g) ? g[$1] " " $2 : $2 }
+                    END { for (k in g) print g[k] }' \
+      | LC_ALL=C sort )
+}
+
 # And the bytes, so that a file which arrived with the right size and the wrong
 # contents is still caught. `-type f` does not follow, so a symlink is not read
 # here — its target is already in the snapshot above.
@@ -272,24 +321,28 @@ run_one() {
 
 judge() {
   local o_dir=$1 g_dir=$2 o_out=$3 g_out=$4 o_extra=$5 g_extra=$6 label=$7
-  local o_snap g_snap o_body g_body o_show g_show
+  local o_snap g_snap o_body g_body o_show g_show o_link g_link
   o_snap=$(snapshot "$o_dir"); g_snap=$(snapshot "$g_dir")
+  o_link=$(hardlinks "$o_dir"); g_link=$(hardlinks "$g_dir")
   o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | scrub "$g_dir")
   o_show=$(scrub "$o_dir" <"$o_out"); g_show=$(scrub "$g_dir" <"$g_out")
   o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir")
   g_extra=$(printf '%s' "$g_extra" | scrub "$g_dir")
 
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
-     && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ]; then
+     && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
+     && [ "$o_link" = "$g_link" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s}' \
+  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s}' \
     "$(printf '%s' "$o_extra" | tr '\n' '|')" "$(printf '%s' "$o_show" | tr '\n' '|')" \
     "$(printf '%s' "$o_snap" | tr '\n' '|')" "$(printf '%s' "$o_body" | tr '\n' '|')" \
+    "$(printf '%s' "$o_link" | tr '\n' '|')" \
     "$(printf '%s' "$g_extra" | tr '\n' '|')" "$(printf '%s' "$g_show" | tr '\n' '|')" \
-    "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')")
+    "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')" \
+    "$(printf '%s' "$g_link" | tr '\n' '|')")
   LABEL=$label
 }
 
@@ -619,8 +672,15 @@ TREE='mktree; ln -s tree treelink'
 run_case -r treelink/ dst
 
 # =============================================================================
-# 9. Copying a directory into itself
+# 9. One directory reached twice
 # =============================================================================
+# Two shapes, and one rule underneath them: a directory that would appear twice
+# in the destination can only do so by being hard-linked, and hard-linked
+# directories are what GNU refuses. The first half is the destination being
+# inside the source; the second is two paths on one command line arriving at
+# one directory.
+#
+# --- 9a. Into itself -----------------------------------------------------
 # Module docs, bug 2. Every spelling below resolves the destination to a path
 # inside the source, so a `cp` that went ahead would copy what it had just
 # written. Both sides are expected to refuse; the header explains why no case
@@ -658,6 +718,40 @@ TREE='mktree; mkdir treeish'
 run_case -r tree treeish
 TREE='mktree; mkdir treeish'
 run_case -r treeish tree
+
+# --- 9b. Twice over ------------------------------------------------------
+# The other way one directory is reached twice: an operand names it, and then
+# the walk of a *second* operand arrives at it from above. `tree/sub` and
+# `tree` are that pair, and the fixture already has them.
+#
+# This is the half a per-operand record cannot see. GNU keeps one table
+# (`src_to_dest`) that its walk reads too; ours kept the directory half where
+# only the operand loop could reach it, so until design-decisions.md 736 the
+# repeat below was copied a second time in silence and the status was 0.
+#
+# The order of the two operands decides whether there is a repeat at all,
+# because a directory found by *walking* is looked up and never recorded
+# (`copy.c:2670` takes `src_to_dest_lookup`, not `remember_copied`). Named
+# first, `tree/sub` is in the table and the walk refuses it; named second, the
+# walk that already passed it left nothing behind and both copies are made.
+run_case -r tree/sub tree dst
+run_case -r tree tree/sub dst
+# The refusal is not the end of the walk: the entries after the refused one are
+# still copied, and only the status carries the failure.
+run_case -rv tree/sub tree dst
+# `-L` is the answer that makes it legitimate — every name is followed, so one
+# directory reached twice is two independent copies of it, made silently
+# (`copy.c:2723`). `-H` is not: it follows operands only, so the walk still
+# refuses.
+run_case -rLv tree/sub tree dst
+run_case -rHv tree/sub tree dst
+# And with the option whose table this is, which changes nothing here: the rule
+# applies to directories whether or not `--preserve=links` was asked for.
+run_case -rv --preserve=links tree/sub tree dst
+# Deeper, so that the refusal happens below the top level of the walk rather
+# than at it.
+TREE='mktree; mkdir -p tree/sub/deeper; printf d > tree/sub/deeper/d.txt'
+run_case -rv tree/sub/deeper tree dst
 
 # =============================================================================
 # 10. Modes
@@ -1552,13 +1646,85 @@ STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case -p --no-preserve=timestamps file.txt new.txt
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case --preserve=mode --no-preserve=mode,timestamps file.txt new.txt
-# `--no-preserve=all` turns off the three that exist and is accepted for the
-# four that do not: refusing a word there would be refusing an instruction the
+# `--no-preserve=all` turns off the five that exist and is accepted for the one
+# that does not: refusing a word there would be refusing an instruction the
 # program has already obeyed by never having done the thing.
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case -p --no-preserve=all file.txt new.txt
 STAMPS=1 TREE='mkstamped'
 run_case --no-preserve=links,xattr,context file.txt new.txt
+
+# `--preserve=xattr`, `--preserve=all` and `-a`.
+#
+# What these cases can pin is the *option surface* — that the spellings are
+# accepted, that each asks for the attributes GNU says it asks for, and that a
+# copy under them lands identically. What they cannot pin is an extended
+# attribute actually crossing, and the reason is the reference: `diff-wsl.sh`
+# builds coreutils with a plain `./configure`, this host has no libattr headers,
+# and so the built `cp` has `USE_XATTR` undefined and a `copy_attr` whose whole
+# body is `return true`. The host has no `setfattr` to seed an attribute with
+# either. That half is covered where it can be: `cp.rs`'s tests write and read
+# real attributes through the syscalls on a real filesystem.
+#
+# `--preserve=xattr` therefore differs on purpose, and *loudly*: a `cp` built
+# without xattr support does not ignore the word, it refuses the run —
+#
+#   #if !USE_XATTR
+#     if (x.require_preserve_xattr)
+#       error (EXIT_FAILURE, 0, _("cannot preserve extended attributes, cp is "
+#                                 "built without xattr support"));
+#   #endif                                                      (cp.c:1276)
+#
+# — which is a shortfall in the reference and not in us, and is why these three
+# are `xfail_case` rather than `missing`: the option is implemented, and it is
+# the comparison that cannot be made.
+#
+# That same `#if` is also the sharpest available confirmation of what
+# `require_preserve_xattr` means, because `--preserve=all` and `-a` walk
+# straight past it in the very same binary. GNU's `PRESERVE_ALL` sets
+# `preserve_xattr` and deliberately not `require_preserve_xattr`, so only the
+# word typed by hand insists. Those cases below are real, and they agree.
+NO_XATTR_REF='the built reference has USE_XATTR undefined and refuses the word'
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+xfail_case "$NO_XATTR_REF" --preserve=xattr file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+xfail_case "$NO_XATTR_REF" --preserve=mode,xattr file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+xfail_case "$NO_XATTR_REF" --preserve=xattr -r tree dst
+# `--preserve=all` is every word GNU has, `context` included; on a host without
+# SELinux the security-context line is guarded by `if (selinux_enabled)` and so
+# asks for nothing. That is why `all` works here and `context` alone does not.
+# On a tree with no extended attributes these read as ordinary `-p` cases, and
+# that is the point: asking for them must change nothing else.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case --preserve=all file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case --preserve=all -r tree dst
+STAMPS=1 TREE='mkstamped; chmod 500 tree'
+run_case --preserve=all -r tree dst
+# `-a` is `-dR --preserve=all` plus `reduce_diagnostics`, which is why it has
+# its own arm rather than desugaring. Nothing here can fail to be carried, so
+# what the cases see is the `-dR --preserve=all` part: the symlink in the tree
+# is copied as itself, and the times and modes come across.
+STAMPS=1 TREE='mkstamped'
+run_case -a tree dst
+STAMPS=1 TREE='mkstamped'
+run_case --archive tree dst
+STAMPS=1 TREE='mkstamped'
+run_case -a tree/link dst
+STAMPS=1 TREE='mkstamped; chmod 500 tree'
+run_case -a tree dst
+# And the pair it is nearly the same as, so that a difference between them
+# would show. Both succeed on this fixture; only a failed attribute separates
+# them, which needs a second user to arrange.
+STAMPS=1 TREE='mkstamped'
+run_case -dR --preserve=all tree dst
+# Turning a word back off after `-a` works, because `-a` sets the fields rather
+# than standing for a word list that is read later.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case -a --no-preserve=mode file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case -a --no-preserve=timestamps -r tree dst
 
 # Words and lists that are refused, by both programs and in the same sentence.
 run_case --preserve=bogus file.txt new.txt
@@ -1572,7 +1738,149 @@ run_case file.txt new.txt --no-preserve
 run_case file.txt new.txt --preserve=
 
 # =============================================================================
-# 18. Options GNU has and this cp has not
+# 18. --preserve=links, and -d
+# =============================================================================
+# The one `--preserve` word that is not an attribute of a file but a
+# relationship between two of them: when two sources turn out to be one inode,
+# the second destination is made a hard link to the first rather than a second
+# copy of the bytes. It is the only option in this program whose whole effect
+# is invisible to `snapshot` — two names for one file have the same mode, size
+# and contents as two copies — which is why [`hardlinks`] exists, and why every
+# case here would pass against a `cp` that ignored the option entirely if it
+# did not.
+#
+# Its own section rather than more cases in 17, because it shares nothing with
+# the other three words but its spelling: it is not in `-p`, it acts during the
+# copy rather than after it, and every case needs a fixture that section 17's
+# `mkstamped` has no reason to build.
+
+# Two operands, one file. The plain case, then the same without the option, so
+# that the section is pinning the option and not observing a filesystem that
+# deduplicates — none does.
+TREE='mktree; printf body > a; ln a b'
+run_case --preserve=links a b dir
+TREE='mktree; printf body > a; ln a b'
+run_case a b dir
+# `-p` is the three POSIX attributes and does *not* include this one, which is
+# the difference most easily got wrong by grouping the words by spelling.
+TREE='mktree; printf body > a; ln a b'
+run_case -p a b dir
+# Abbreviates like every other word, and is turned off by name like every
+# other. Last mention wins.
+TREE='mktree; printf body > a; ln a b'
+run_case --preserve=li a b dir
+TREE='mktree; printf body > a; ln a b'
+run_case --preserve=links --no-preserve=links a b dir
+TREE='mktree; printf body > a; ln a b'
+run_case --preserve=mode,links a b dir
+# One source with a second link *outside* the copy is not a pair: nothing is
+# linked, because the option is about two operands naming one file and not
+# about a file that happens to have two names.
+TREE='mktree; printf body > a; ln a elsewhere'
+run_case --preserve=links a dir
+# Three names, one file. A group of three and not a chain of two pairs.
+TREE='mktree; printf body > a; ln a b; ln a c'
+run_case --preserve=links a b c dir
+
+# What `-v` says while doing it. The second operand is announced as a *copy*
+# and then linked: GNU's `emit_verbose` runs before the `earlier_file` branch
+# it never returns from.
+TREE='mktree; printf body > a; ln a b'
+run_case -v --preserve=links a b dir
+
+# An existing destination, in the two shapes that print `removed` on opposite
+# sides of the arrow. With only its own link it is replaced by `force_linkat`
+# renaming a fresh link over it, which reports *after* the copy was announced;
+# with a second link of its own the pre-copy unlink at `copy.c:2570` fires
+# first and reports *before*. The second case's `w` is the witness: it keeps
+# the old bytes, which is the entire reason that unlink exists.
+TREE='mktree; printf body > a; ln a b; printf old > dir/b'
+run_case -v --preserve=links a b dir
+TREE='mktree; printf body > a; ln a b; printf old > dir/b; ln dir/b w'
+run_case -v --preserve=links a b dir
+# And the same unlink with a single operand, where there is no pair at all —
+# the clause is about the *destination's* link count, not the source's.
+TREE='mktree; printf body > a; printf old > dir/b; ln dir/b w'
+run_case -v --preserve=links a dir/b
+
+# A pair found by walking rather than named on the command line. The table
+# spans the invocation, so `-r` links these too.
+TREE='mktree; mkdir s; printf x > s/x; ln s/x s/y'
+run_case -rv --preserve=links s dir
+# Two operands that are one *directory* are still the repeat-detection case and
+# not this one: a directory is never linked.
+TREE='mktree; mkdir s; printf x > s/x'
+run_case -r --preserve=links s s dir
+
+# Symlinks. With `-L` or `-H` the operands are what the links resolve to, which
+# is one file — so the two destinations are linked even though nothing in the
+# fixture has a second hard link at all. This is the half of the rule that does
+# not look at `st_nlink`.
+TREE='mktree; printf r > real; ln -s real la; ln -s real lb'
+run_case -L --preserve=links la lb dir
+TREE='mktree; printf r > real; ln -s real la; ln -s real lb'
+run_case -H --preserve=links la lb dir
+# With `-P` the operands are the links themselves, and two links with one
+# target are two files.
+TREE='mktree; printf r > real; ln -s real la; ln -s real lb'
+run_case -P --preserve=links la lb dir
+# Two hard links to one *symlink*, with `-P`. Now the pair is real, and what
+# has to come out is a second link to the copied symlink rather than a link
+# through it to `real` — `linkat` with flags 0 and not `AT_SYMLINK_FOLLOW`.
+TREE='mktree; printf r > real; ln -s real la; ln la lb'
+run_case -P --preserve=links la lb dir
+# `-H` follows the operand and keeps links found underneath it, so a pair of
+# symlinks *inside* the tree is not a pair.
+TREE='mktree; mkdir s; printf r > s/real; ln -s real s/la; ln -s real s/lb'
+run_case -Hrv --preserve=links s dir
+
+# A source that fails to copy is forgotten, so the second name for it is tried
+# on its own merits: the diagnostic is the same "cannot open for reading" twice
+# rather than a link failure naming a destination that was never written.
+if [ "$(id -u)" -ne 0 ]; then
+  TREE='mktree; printf body > a; ln a b; chmod 000 a'
+  run_case -v --preserve=links a b dir
+fi
+
+# A destination reached by linking is not recorded as one this command created,
+# so a later operand overwrites it silently where the same command without the
+# option refuses. A gap in GNU rather than a design — the non-directory
+# `earlier_file` branch returns before `record_file` — and one we reproduce.
+TREE='mktree; printf body > a; ln a b; mkdir o; printf other > o/b'
+run_case -v --preserve=links a b o/b dir
+TREE='mktree; printf body > a; ln a b; mkdir o; printf other > o/b'
+run_case -v a b o/b dir
+
+# The two cases this section was promoted from, kept verbatim: they were the
+# inventory entries for the option and are now real.
+run_case --preserve=links tree/a.txt new.txt
+run_case --preserve=mode,links file.txt new.txt
+
+# `-d` is this option and `-P` in one letter, so its cases belong here rather
+# than in section 15: what the letter adds to `-P` is the linking.
+run_case -d tree/link dst
+TREE='mktree; printf body > a; ln a b'
+run_case -dv a b dir
+TREE='mktree; printf r > real; ln -s real la; ln la lb'
+run_case -dv la lb dir
+# The two halves are assignments and override independently, in either order.
+TREE='mktree; printf r > real; ln -s real la; ln -s real lb'
+run_case -dL la lb dir
+TREE='mktree; printf body > a; ln a b'
+run_case -d --no-preserve=links a b dir
+TREE='mktree; printf body > a; ln a b'
+run_case -Ld a b dir
+# `-d` is not `-dR`: without `-r` a directory operand is still refused.
+run_case -d tree dst
+run_case -dr tree dst
+# And it does not set `require_preserve`, which is the one thing separating it
+# from the spelled-out pair. Both succeed here; the difference is only visible
+# when an attribute cannot be carried, which needs a second user to arrange.
+run_case -d file.txt new.txt
+run_case -P --preserve=links file.txt new.txt
+
+# =============================================================================
+# 19. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -1580,31 +1888,21 @@ run_case file.txt new.txt --preserve=
 # `cp.rs`'s module docs give the reason, which is that each one ignored
 # produces a destination that looks right and is not.
 
-missing -a tree dst
-missing --archive tree dst
 missing --attributes-only file.txt new.txt
 missing -b file.txt tree/a.txt
 missing --backup file.txt tree/a.txt
 missing --backup=numbered file.txt tree/a.txt
 missing --copy-contents -r tree dst
 missing --debug file.txt new.txt
-# `-d` outlives `-P`, which it contains: GNU's `-d` is `--no-dereference`
-# *and* `--preserve=links`, and honouring only the half that exists would turn
-# two hard-linked sources into two independent copies with nothing said.
-missing -d tree/link dst
 missing -l file.txt new.txt
 missing --link file.txt new.txt
 missing --one-file-system -r tree dst
-# The four `--preserve` words this cp has not, refused one word at a time
-# rather than by the option — `--preserve=mode` is honoured in the section
-# above and refusing it because `xattr` exists would be a lie. `--preserve=all`
-# is refused for containing `links`, which is the only one of the four that
-# changes what ends up on disk rather than what is attached to it.
-missing --preserve=links tree/a.txt new.txt
-missing --preserve=xattr file.txt new.txt
+# The one `--preserve` word this cp has not, refused a word at a time rather
+# than by the option — the other six are honoured in section 17, and refusing
+# `--preserve=mode` because `context` exists would be a lie. `--preserve=all`
+# is *not* here: GNU's own `PRESERVE_ALL` guards the security-context line
+# with `if (selinux_enabled)`, so `all` asks for nothing this cannot do.
 missing --preserve=context file.txt new.txt
-missing --preserve=all -r tree dst
-missing --preserve=mode,links file.txt new.txt
 missing --parents tree/a.txt dir
 missing --path tree/a.txt dir
 missing --reflink=auto file.txt new.txt
@@ -1621,7 +1919,64 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 19. --help and --version
+# 20. Where a source's last component lands
+# =============================================================================
+# Which name a source arrives under, when the destination is a directory and so
+# one has to be chosen. GNU chooses in four lines (`do_copy`, `cp.c:734`): take
+# the bytes after the source's last slash, strip any trailing slashes, and
+# append that to the destination verbatim — except that a component of exactly
+# `..` is replaced by `.`, so that `cp -r a/.. d` writes into `d` and never into
+# `d`'s *parent*.
+#
+# "Verbatim" is the whole of it. `.` is a component like any other, so `tree/.`
+# names `dir/.`, which is `dir` — the ordinary idiom for "copy the contents".
+# Ours reached for `Path::file_name`, which answers a *normalised* question:
+# `Some("tree")` for `tree/.` and `None` for `tree/..`. The first sent the
+# contents to `dir/tree`, the second collapsed to the destination by accident.
+# Module docs, bug 5.
+#
+# Every case here uses `dir`, which exists. That is not incidental: the appended
+# component is chosen only when the destination is a directory, so section 9's
+# `tree/. dst` variants — `dst` does not exist — take the whole-destination path
+# instead and passed throughout while this was wrong.
+
+run_case -r tree/. dir
+run_case -r tree/./ dir
+run_case -r tree/. dir/
+run_case -r tree/sub/. dir
+run_case -r tree/sub/.. dir
+run_case -r tree/// dir
+run_case -r tree/ dir
+# Only a component of exactly `..` is special; two that merely begin with it
+# are ordinary names and must arrive under them.
+TREE='mktree; mkdir tree/..x; printf x > tree/..x/f'
+run_case -r tree/..x dir
+TREE='mktree; mkdir "tree/..."; printf x > "tree/.../f"'
+run_case -r tree/... dir
+# The `..` rule turns these into copies of the case directory into `dir`, which
+# is inside it: refused by both, with the residue difference of section 9.
+xfail_case "$SELF_RESIDUE" -r tree/.. dir
+xfail_case "$SELF_RESIDUE" -r . dir
+xfail_case "$SELF_RESIDUE" -r ./ dir
+# One directory named twice under two spellings. `tree/.` and `tree` are one
+# inode reached two ways, and because the rule above keeps the `.`, they name
+# two *different* destinations — which is the one reachable way to ask for a
+# hard link to a directory, and is refused.
+run_case -r tree/. tree dir
+run_case -r tree tree/. dir
+# Unless following was asked for, where two names for one directory are a
+# request for two independent copies and both are made in silence.
+TREE='mktree; mkdir real; printf r > real/f; ln -s real la; ln -s real lb'
+run_case -RL la lb dir
+TREE='mktree; mkdir real; printf r > real/f; ln -s real la; ln -s real lb'
+run_case -RH la lb dir
+# The same source twice under the same spelling is the other branch: one
+# destination, so a warning rather than a refusal.
+run_case -r tree tree dir
+run_case -r tree ./tree dir
+
+# =============================================================================
+# 21. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

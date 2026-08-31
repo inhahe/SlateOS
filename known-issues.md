@@ -102526,6 +102526,91 @@ behind a state guard*, and *does any fixture enter it?* Prefer a list of
 fixtures over one, and prefer a direct test of a shared helper over inferring
 its behaviour from the pictures its callers happen to produce.
 
+### Lesson 100: when a true invariant fires on a legitimate case, split it -- do not dilute it, or you trade a false alarm for a silent hole (lane C, 2026-08-31)
+
+**In short:** `automator` had a test saying *a click at the centre of a hit box
+reaches the control that box belongs to*. That is the property you actually
+want. It also fails honestly when the help card is open, because the card is
+painted over the controls and is *supposed* to swallow the click. I repaired it
+by restating the claim in terms of paint order -- the topmost box containing the
+point wins -- which made the help card legal and made the test true. It was
+true because `Frame::hit_test` returns the last-painted match **by
+construction**: the reformulated test could no longer fail. Four mutations that
+move a hit box away from the rectangle its ink is drawn at walked straight
+through it.
+
+**The shape of the mistake.** A test asserted `A and B` where `A` (a hit box
+coincides with its ink) is the thing being tested and `B` (nothing legitimate
+is painted on top) is an assumption. `B` broke. The cheap repair weakens the
+conjunction until it passes; what survives is `B`-shaped and `A` is gone, and
+nothing in the suite says so, because the file still contains a test with `A`'s
+name on it. A weakened assertion is worse than a deleted one -- a deleted test
+leaves a gap somebody can see.
+
+**The tell: could this assertion fail at all?** Ask it of every invariant
+phrased in terms the implementation guarantees. "The topmost hit box wins the
+hit test" is a restatement of `hit_test`'s own loop; "the click reaches the
+control whose *ink* is under the point" is a claim about two independent things
+(where `Frame::hit` was called and where `FillRect` was emitted) and can be
+false. If the mutation you can imagine cannot break the assertion, the
+assertion is not the one you meant to write.
+
+**The repair is two tests, not one.** Split the conjunction along its seam:
+
+| Test | Claim | What it catches |
+|---|---|---|
+| `every_hit_box_has_ink_painted_at_exactly_that_rectangle` | every `frame.hits()` entry has a `FillRect` matching all four fields to 0.01 | a box translated, resized or emitted for something never drawn |
+| `every_hit_box_lies_in_the_band_of_the_pane_that_owns_it` | a `Macro` box is inside the sidebar body, an `Action` box inside the list body, a `Speed`/`Repeat` pad inside the pads strip, and so on | a box in the right *place* but belonging to the wrong panel -- which the ink test alone cannot see |
+
+Neither mentions occlusion, so the help card is not a special case in either;
+the case that broke the original claim simply is not part of what they say.
+
+**Where else to look.** Any test in the campaign whose name promises a
+behaviour but whose body was later loosened to accommodate a state that
+legitimately violates it -- overlays, modals, disabled controls, empty lists.
+Two questions: *what conjunct did the loosening drop*, and *is anything else in
+the suite still asserting it?* If the answer to the second is no, the loosening
+was a deletion in disguise.
+
+### Lesson 101: a clamp is only as strong as the directions it corrects and the paths that call it (lane C, 2026-08-31)
+
+**In short:** `automator`'s `clamp_scrolls` put a scroll offset back in range and
+pulled it up so the selection was not above the window. Two mutation rows found
+that it did not pull the offset **down** when the selection walked off the
+bottom, and that a **click** never called it at all. Both are the same fault
+seen twice: the code that restores an invariant was written against the cases
+the tests happened to walk, not against the invariant.
+
+| Fault | What a user saw | Why the suite was quiet |
+|---|---|---|
+| the offset followed the selection up but never down | holding <kbd>Down</kbd> walked the selection past the last visible row while the list sat still | the arrow-key test only ever walked the selection *upwards*, so the down half of the clamp was never asked for |
+| `click` did not re-clamp | clicking a 40-action macro, scrolling to the bottom, then clicking a 1-action macro left the list scrolled 30 rows past its only row -- blank | the button and key paths both clamped; the click path was the one way in that did not, and no test clicked *after* scrolling |
+
+**Two rules, one for each half.**
+
+*State the clamp as a two-sided containment and implement both sides.* "The
+selection is visible" is `offset <= i < offset + rows`. Code that only ever
+lowers `offset` implements the left inequality. The right one needs
+`offset = i + 1 - rows`, and the test needs to move the selection in the
+direction that reaches it -- which means a scrolling test that only walks one
+way is testing one inequality.
+
+*Give the invariant one funnel and route every entry point through it.* The
+repair was not "add a clamp call to the click arm"; it was to rename the body
+`click_inner` and make `click` a wrapper that calls it and then clamps. A new
+target added next month cannot forget. The general form: when an invariant must
+hold after *any* of N handlers, the handlers should not each be responsible for
+it -- one of them will be added without it, and that one will not be the one you
+test.
+
+**Where else to look.** Every app in the campaign with a scroll offset (this is
+most of the list-shaped ones: `filemanager`, `logviewer`, `procexplorer`,
+`notes`, ...). Three questions: *does the clamp move the offset both ways*,
+*does the scrolling test walk the selection both ways*, and *is there a path in
+-- a click, a tick, an external state change -- that mutates the list without
+passing through the clamp?* The third is the one that bites, because the state
+change and the clamp are usually in different files.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
@@ -102586,6 +102671,71 @@ property of the design.
 
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
+
+## B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS (lane B, 2026-08-31) — filed to lane A
+
+**In short.** Two defects in the kernel's extended-attribute path, both found
+while giving `cp` xattr support, both in `kernel/**` and so filed rather than
+fixed: `requests/b-a-a-missing-xattr-and-a-missing-file-are-the-same-error.md`.
+
+**1. "No such attribute" and "no such file" are one error code.** `KernelError`
+(`kernel/src/error.rs`, Filesystem band 500–599) has no variant for "the object
+exists, the attribute does not", so `ext4/vfs_impl.rs:1527` and
+`memfs.rs:122` both return `NotFound` after having successfully found the
+inode. `posix/src/errno.rs` maps that to `ENOENT`; Linux says `ENODATA`.
+
+Costs today, all live:
+
+- `posix/src/xattr.rs:182–202` implements `XATTR_CREATE`/`XATTR_REPLACE` with a
+  get-then-set probe, because it cannot get the flag semantics from one call.
+  Two syscalls where Linux does one, with a race window between them in which
+  the two outcomes the flags exist to forbid can both happen.
+- That probe reads *any* negative return as "attribute absent", so
+  `setxattr("/no/such/file", …, XATTR_REPLACE)` reports `ENODATA` — an answer
+  about an attribute — when the truth is `ENOENT`.
+- `cp --preserve=all` suppresses `ENOTSUP`/`ENODATA` and reports everything
+  else, which is GNU's policy (`copy.c`'s `copy_attr`) and is now ours. An
+  attribute removed by another process between `cp`'s `listxattr` and its
+  `getxattr` is `ENODATA` on Linux and silent; here it arrives as `ENOENT` and
+  prints `cp: getting attribute 'user.tag' of 'a': No such file or directory`
+  about a file that is fine.
+
+**2. An attribute name is typed as UTF-8, and one bad name fails the whole
+inode.** `FileSystem::get_xattr(…, key: &str)`, `list_xattrs → Vec<String>`,
+and `read_user_cstring` (`handlers.rs:139`) all require UTF-8. An xattr name on
+Linux is an opaque NUL-terminated byte string. The damage is at
+`ext4/driver.rs:3508`:
+
+```rust
+let name = core::str::from_utf8(name_bytes).map_err(|_| KernelError::IoError)?;
+```
+
+inside the loop over *every* attribute on the inode, so one non-UTF-8 name
+makes `read_all_xattrs` return `EIO` and takes `get_xattr`, `list_xattrs` and
+`set_xattr` down with it for that file — including for the attributes whose
+names are ordinary. `cp -a` of such a file reports an I/O error on a healthy
+filesystem, and the offending attribute cannot be read or removed.
+
+This is CLAUDE.md self-review item 7, and it is the same defect this tree
+already fixed for directory entries — the comment left at
+`ext4/driver.rs:5081` records that lesson in almost these words. The xattr path
+never got the same pass, and its failure mode is louder: the directory fix was
+recovering from *skipping* one entry, this one fails the inode.
+
+Realistic source: a filesystem written by Linux. Nothing here produces a
+non-ASCII attribute name; `setfattr` on a Linux host will, and `rootfs.ext4` is
+built on one.
+
+**Lane B's side is already right** and needs no change when this lands:
+`userspace/coreutils/src/fsattr.rs` passes and returns `&[u8]` throughout, and
+`cp` quotes attribute names as bytes.
+
+**Not a blocker.** `cp`'s xattr support shipped 2026-08-31 without either fix.
+Defect 1's cases are races and unusual arguments; defect 2 needs a file this
+tree cannot yet create. Filed now because the cost of 1 grows quietly with each
+new caller that reads `ENOENT` from an xattr call, and because `--preserve=mode`
+ACL support — which needs `removexattr` to answer "already absent" distinctly —
+is the next thing due on `cp`.
 
 ## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A) — FIXED 2026-08-31
 

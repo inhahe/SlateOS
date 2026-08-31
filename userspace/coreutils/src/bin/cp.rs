@@ -1072,10 +1072,14 @@ struct Seen {
     /// ./a d` is one file named twice, while `cp a hard-link-to-a d` is two
     /// entries that happen to share an inode and is a legitimate request.
     sources: HashSet<(FileId, EntryId)>,
-    /// Directory sources already copied, and which entry each was written to.
-    /// The destination is part of the answer here and not for files, because
-    /// GNU's directory rule asks a different question — see [`copy_one`].
-    dirs: HashMap<FileId, EntryId>,
+    /// Directory sources already copied, and *where* each was written. The
+    /// destination is part of the answer here and not for files, because GNU's
+    /// directory rule asks a different question — see [`copy_one`].
+    ///
+    /// A path rather than an [`EntryId`], because the refusal has to name it:
+    /// `will not create hard link 'd/s' to directory 'd/.'` quotes the earlier
+    /// destination, so the entry it identifies is not enough.
+    dirs: HashMap<FileId, PathBuf>,
     /// Destinations this command created, by path *and* identity. Both halves
     /// are needed: the path is what a later operand would collide with, and
     /// the identity is what says the thing at that path is still the one we
@@ -1665,26 +1669,43 @@ fn copy_one<O: Write, E: Write>(
     // operands rather than warning about the second.
     //
     // And the question asked is a different one. Two operands naming one
-    // directory are a repeat only if they were also going to the same place;
-    // where they are not, GNU refuses with a message about hard links instead,
-    // which this `cp` has no equivalent of yet.
+    // directory are a repeat only if they were also going to the *same place*;
+    // where they are not, the user has asked for one inode to appear twice in
+    // the destination tree, which for a directory can only be done by hard
+    // linking it — and hard-linked directories are what GNU refuses here, with
+    // its comment naming Netapp snapshot trees as where they turn up.
     if metadata.is_dir()
         && let Some(seen) = seen.as_deref_mut()
         && let Some(id) = file_id(src_path, &metadata)
-        && let Some(entry) = entry_id(&target)
     {
         match seen.dirs.get(&id) {
-            Some(earlier) if *earlier == entry => {
-                let _ = writeln!(
-                    job.err,
-                    "cp: warning: source directory {} specified more than once",
-                    quoteaf_os(src)
-                );
-                return true;
+            Some(earlier) => {
+                if same_entry(earlier, &target) {
+                    let _ = writeln!(
+                        job.err,
+                        "cp: warning: source directory {} specified more than once",
+                        quoteaf_os(src)
+                    );
+                    return true;
+                }
+                // Two *destinations* for one source directory is not an error
+                // when following symlinks was asked for: `cp -RL a b d`, where
+                // `a` and `b` are links to one directory, is a request for two
+                // independent copies of it and GNU makes them silently
+                // (`copy.c:2723`). `-H` says the same for operands, which is
+                // all [`copy_one`] handles.
+                if !flags.follow_operand() {
+                    let _ = writeln!(
+                        job.err,
+                        "cp: will not create hard link {} to directory {}",
+                        quoteaf_os(&target),
+                        quoteaf_os(earlier)
+                    );
+                    return false;
+                }
             }
-            Some(_) => {}
             None => {
-                seen.dirs.insert(id, entry);
+                seen.dirs.insert(id, target.clone());
             }
         }
     }
@@ -2102,6 +2123,20 @@ fn entry_id(path: &Path) -> Option<EntryId> {
     let (dir, name) = split_entry(path);
     let meta = fs::metadata(&dir).ok()?;
     Some((file_id(&dir, &meta)?, name))
+}
+
+/// Do two paths name the same directory entry? GNU's `same_nameat`.
+///
+/// `false` when either side cannot be identified, which is GNU's answer too —
+/// its `same_nameat` compares two `fstatat` results and reports "not the same"
+/// if either call fails. The callers all treat "cannot answer" as "assume they
+/// are different", which is the safe direction: it costs a refusal rather than
+/// a silent overwrite.
+fn same_entry(a: &Path, b: &Path) -> bool {
+    match (entry_id(a), entry_id(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => false,
+    }
 }
 
 /// A path's directory and final component, GNU's `dir_name`/`base_name` pair.
@@ -4496,6 +4531,57 @@ mod tests {
         assert!(ok, "a repeat is not an error: {e}");
         assert!(e.contains("specified more than once"), "{e}");
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// One directory named twice but landing in *two* places. The user has
+    /// asked for one inode to appear twice in the destination tree, which for a
+    /// directory could only be done by hard-linking it, and GNU refuses rather
+    /// than making a second copy. `src/.` and `src` are the same directory
+    /// reached by two spellings whose targets differ — `dest/.` and `dest/src`
+    /// — which is what makes it reachable at all without hard-linked
+    /// directories to hand.
+    #[test]
+    fn one_directory_going_to_two_places_will_not_be_hard_linked() {
+        let dir = scratch("two_places");
+        let dest = dir.join("dest");
+        let src = dir.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::create_dir(&dest).unwrap();
+
+        let (ok, e) = cp(&RECURSIVE, &[&src.join("."), &src, &dest]);
+        assert!(!ok, "{e}");
+        assert!(e.contains("will not create hard link"), "{e}");
+        // The first spelling was copied; only the second is refused.
+        assert!(dest.join("sub").is_dir(), "{e}");
+        assert!(!dest.join("src").exists(), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same two destinations are *not* refused when a dereference option
+    /// asked for them: `cp -RL a b d`, with `a` and `b` links to one directory,
+    /// is a request for two independent copies (`copy.c:2723`).
+    #[test]
+    #[cfg(unix)]
+    fn following_links_makes_two_copies_of_one_directory_instead() {
+        let dir = scratch("two_copies");
+        let dest = dir.join("dest");
+        let real = dir.join("real");
+        fs::create_dir(&dest).unwrap();
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("f"), b"body").unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("a")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.join("b")).unwrap();
+
+        let flags = CpFlags {
+            recursive: true,
+            dereference: Deref::Always,
+            ..CpFlags::default()
+        };
+        let (ok, e) = cp(&flags, &[&dir.join("a"), &dir.join("b"), &dest]);
+        assert!(ok, "{e}");
+        assert_eq!(fs::read(dest.join("a").join("f")).unwrap(), b"body");
+        assert_eq!(fs::read(dest.join("b").join("f")).unwrap(), b"body");
         let _ = fs::remove_dir_all(&dir);
     }
 

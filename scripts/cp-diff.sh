@@ -1661,6 +1661,22 @@ run_case -r tree/... dir
 xfail_case "$SELF_RESIDUE" -r tree/.. dir
 xfail_case "$SELF_RESIDUE" -r . dir
 xfail_case "$SELF_RESIDUE" -r ./ dir
+# One directory named twice under two spellings. `tree/.` and `tree` are one
+# inode reached two ways, and because the rule above keeps the `.`, they name
+# two *different* destinations — which is the one reachable way to ask for a
+# hard link to a directory, and is refused.
+run_case -r tree/. tree dir
+run_case -r tree tree/. dir
+# Unless following was asked for, where two names for one directory are a
+# request for two independent copies and both are made in silence.
+TREE='mktree; mkdir real; printf r > real/f; ln -s real la; ln -s real lb'
+run_case -RL la lb dir
+TREE='mktree; mkdir real; printf r > real/f; ln -s real la; ln -s real lb'
+run_case -RH la lb dir
+# The same source twice under the same spelling is the other branch: one
+# destination, so a warning rather than a refusal.
+run_case -r tree tree dir
+run_case -r tree ./tree dir
 
 # =============================================================================
 # 20. --help and --version

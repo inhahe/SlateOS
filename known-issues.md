@@ -159,6 +159,51 @@ those to `checked_*` buys correctness theatre rather than correctness. Take
 `indexing_slicing` to zero first; then judge `arithmetic_side_effects` on
 whether a per-crate `allow` with a justification beats 3161 mechanical edits.
 
+**The single largest cluster is one line repeated, and it is a false positive —
+do not "fix" it.** `kernel/src/syscall/dispatch.rs` accounts for **329** of the
+`indexing may panic` findings (measured 2026-08-30, lane A), ~17% of the whole
+`indexing_slicing` backlog. Every one of them is the syscall-table registration
+`handlers[SYS_FOO as usize] = Some(handlers::sys_foo);` inside
+`build_v1_table()`.
+
+That function is a **`const fn`**, and its only caller is
+`static V1_TABLE: SyscallTable = build_v1_table();` — so the whole table is
+evaluated **at compile time**. An out-of-range syscall number there is a
+*build error*, not a runtime panic. The lint is reporting a panic that cannot
+occur, because there is no run time in which it could.
+
+**The obvious refactor would make the kernel less safe, not more.** A
+`register(&mut handlers, SYS_FOO, f)` helper storing through `get_mut()` — the
+shape the three patterns above would suggest — converts a condition currently
+caught by `rustc` before the image is linked into one handled at run time,
+where the honest options are to panic in early boot or to silently leave a
+syscall unregistered. Trading a compile error for either is a regression.
+(`get_mut` is also not usable in a `const fn` today, so the helper would have
+to abandon compile-time construction to exist at all.)
+
+**Done 2026-08-30 (lane A):** a scoped `#[allow(clippy::indexing_slicing)]` on
+`build_v1_table`, carrying that reasoning as its comment — the same "an `allow`
+with a justification beats N mechanical edits" judgement the paragraph above
+reserves for `arithmetic_side_effects`, except the justification here is
+unusually strong: the compiler already proves the property the lint asks for.
+
+Measured before and after: kernel warnings **17999 → 17670**, a drop of exactly
+329, with **0** `indexing may panic` findings left anywhere in `dispatch.rs`.
+That residual zero is worth more than the count: the allow is scoped to the one
+function, so it could not have covered `dispatch()` — which indexes with a
+number that *came from userspace*. Zero there means that path was already
+bounds-checked (`if idx >= MAX_SYSCALL_NR`, dispatch.rs:705) rather than
+quietly suppressed. Deliberately not a module-level allow, for exactly that
+reason.
+
+**So the repo-wide `indexing_slicing` figure quoted above is stale in the
+useful direction: the real debt is ~1590, not 1919.** Anyone sizing the
+remaining per-crate sweep off 1919 is overestimating it by ~17%.
+
+This was also why adding a syscall *raised* the warning count by one per number
+registered — three, for `SYS_FS_UNLINKAT_PINNED` / `_FSTATAT_PINNED` /
+`_GETDENTS_PINNED` in §647. It no longer does.
+
 ### Sweep progress: `editor` 500 → 80, `indexing_slicing` 0 (2026-08-16)
 
 The worst crate is done. `apps/editor` went from ~200 `indexing_slicing`
@@ -99949,6 +99994,108 @@ defect into an unknown one.
 for isolation. If a program's correctness depends on a directory not moving
 under it, say so in a comment and treat it as a known gap, rather than reaching
 for `openat` and assuming it bought something.
+
+**Update 2026-08-30 (lane A).** The kernel half now exists for *three* of the
+calls — see `A-VFS-EIGHT-MORE-AT-CALLS-STILL-RESOLVE-BY-PATH` below and
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`.
+This entry stays OPEN because it is about `rm`, which lives in lane B's tree and
+still walks by path until it is ported onto `SYS_FS_UNLINKAT_PINNED` (662).
+
+---
+
+## A-VFS-EIGHT-MORE-AT-CALLS-STILL-RESOLVE-BY-PATH (lane A)
+
+**Status:** OPEN 2026-08-30
+
+Three of the `*at` family — unlink, stat, list — now have kernel primitives
+that resolve the *handle* rather than its name: `SYS_FS_UNLINKAT_PINNED` (662),
+`SYS_FS_FSTATAT_PINNED` (663), `SYS_FS_GETDENTS_PINNED` (664), backed by
+`Vfs::unlink_at_pinned` / `metadata_at_pinned` / `readdir_pinned` in
+`kernel/src/fs/vfs.rs`. See design-decisions.md §647.
+
+The other eight do not: `renameat`, `linkat`, `symlinkat`, `mkdirat`,
+`fchmodat`, `faccessat`, `readlinkat`, `utimensat`. They still reach the kernel
+as an already-concatenated path from `posix/src/file.rs::resolve_dirfd_path`,
+carrying the full defect this whole thread is about.
+
+**Why three and not eleven.** Lane B named exactly these three as what a
+recursive tool actually touches, and building the other eight speculatively
+would be eight ABI surfaces designed against no caller. The machinery
+generalises — `PinnedDir`, `Vfs::pin_dir`, `verify_pinned` and `check_at_name`
+are the whole of it, and each additional call is a short wrapper following
+`unlink_at_pinned`'s two-pass shape.
+
+**Proper fix.** Add them as lane B names them. The pattern to copy is
+`Vfs::unlink_at_pinned`: verify once before any side-effecting policy step,
+then verify *again* inside the same filesystem-lock hold as the operation. A
+version that verifies only once, outside the acting guard, narrows the race
+instead of closing it and will read as fixed — that is the trap.
+
+**Trigger:** a request from lane B naming which ones, or a ported tool that
+needs one.
+
+---
+
+## A-VFS-A-RENAME-DOES-NOT-MOVE-OPEN-HANDLES-SO-A-PINNED-DIRFD-GOES-STALE-INSTEAD-OF-FOLLOWING (lane A)
+
+**Status:** OPEN 2026-08-30
+
+`OpenFile::path` in `kernel/src/fs/handle.rs` records the path a handle was
+opened under and is never updated. `Vfs::rename` moves the object and leaves
+every open handle naming the old location.
+
+Before the pinned primitives, that made a descriptor silently *wrong* after a
+rename — lane B's "consequence 2", the one that needs no attacker and which
+they expected a ported build system to hit first. It is now *loud* instead:
+`verify_pinned` sees the mismatch and the call fails `ESTALE`.
+
+**That is better and still not POSIX.** A real `unlinkat` keeps working after
+its directory is renamed, because the fd refers to the inode, not the name. A
+tool that renames a directory it holds open will now get `ESTALE` where Linux
+gives success.
+
+**Proper fix.** Hook `Vfs::rename` / `rename_noreplace` / `rename_exchange` to
+rewrite the stored path prefix of every open handle whose pinned identity
+matches the moved object. This is *possible now and was not before*: it needs
+to identify which handles refer to the moved object, which is exactly what
+`OpenFile::dir_pin` supplies. It needs a lock-order decision — the rename holds
+the filesystem mutex and the rewrite needs `OPEN_FILES` — so the scan should
+collect under the fs lock and apply after, or the two must be ordered
+deliberately and documented.
+
+**Not done speculatively** because it is a user-visible behaviour fork: loud
+`ESTALE` versus POSIX follow-the-inode. Raised with lane B in
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`;
+if it bites a port, that is this entry.
+
+---
+
+## A-VFS-USERSPACE-CANNOT-ASK-WHETHER-A-DIRECTORY-PIN-IS-VERIFIABLE (lane A)
+
+**Status:** OPEN 2026-08-30
+
+`PinnedDir::id` is `None` on the six filesystems with no stable inode numbers
+(FAT, ISO9660, devfs, procfs, sysfs, overlay), and `verify_pinned` then skips
+the identity check — the single-component containment still holds, but the
+anti-TOCTOU guarantee does not. In-kernel this is askable via
+`Vfs::pinned_dir_is_verifiable`. **From userspace it is not.**
+
+So a program calling `SYS_FS_UNLINKAT_PINNED` on a FAT stick gets the weaker
+guarantee and cannot tell. That is not the invented-value defect — the kernel
+never claims verification it did not do, and skipping is the deliberate choice
+recorded in design-decisions.md §647 (refusing would break `ls` on FAT to
+defend against an attack FAT cannot express). But "correct and unaskable" is
+still a gap for a caller whose correctness depends on the answer.
+
+**Proper fix.** Either a flag bit on 662/663 that makes the call fail rather
+than proceed unverified, or a query returning whether a handle is pinnable.
+The flag is probably right — it keeps the decision at the call site instead of
+inviting a check-then-use of its own.
+
+**Not built** because no caller has asked, and an ABI invented for a
+hypothetical question is one more thing to keep in step. **Trigger:** lane B
+asking, or the first userspace caller whose correctness depends on it.
+
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 
 **In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only

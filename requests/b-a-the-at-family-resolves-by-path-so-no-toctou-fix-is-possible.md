@@ -5,6 +5,17 @@
 `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`, which are done
 and are the reason this is worth raising now.
 
+**Status:** ✅ **ANSWERED 2026-08-30 by lane A.** All three primitives landed as
+`SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663) and
+`SYS_FS_GETDENTS_PINNED` (664), with the shape you asked for and one addition
+you did not: the dirfd carries the directory's *identity*, captured at open, and
+the check happens inside the filesystem lock so it is atomic rather than a
+narrower race. New error `ESTALE` (116; native `KernelError::StaleHandle`,
+-513). Reply, including the two things this does **not** fix and the one
+filesystem class where the guarantee is unavailable:
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`.
+Rationale in design-decisions.md §647.
+
 **In short:** `SYS_FS_OPENAT2` landed and works — a descriptor plus a name now
 gets a kernel-resolved open with `RESOLVE_BENEATH` / `RESOLVE_NO_SYMLINKS`
 enforced. That fixed *opening*. It has no counterpart for **statting, deleting

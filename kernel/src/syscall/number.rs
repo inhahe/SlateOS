@@ -3265,6 +3265,78 @@ pub const RESOLVE_BENEATH: u64 = 1 << 17;
 /// changes it will change with a named caller attached.
 pub const RESOLVE_ALL: u64 = RESOLVE_NO_SYMLINKS | RESOLVE_BENEATH;
 
+// ---------------------------------------------------------------------------
+// Fd-relative calls that resolve *the handle*, not the handle's name
+//
+// The three below exist because the `*at` family cannot be built correctly on
+// top of the path-based calls.  A `dirfd` translated to text and concatenated
+// names whatever answers to that text *now*; these carry the directory's
+// identity as it was at open, and refuse with `ESTALE` when it has changed.
+// See design-decisions.md §647 and
+// `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
+//
+// All three take `name`/`dirfd` as flat arguments rather than a struct
+// pointer, following `SYS_FS_OPENAT2`: a struct would need its own validated
+// copy-in, and there is nothing here that does not fit in six registers.
+// ---------------------------------------------------------------------------
+
+/// [`SYS_FS_UNLINKAT_PINNED`] flag: remove a directory rather than a file.
+///
+/// Same value as Linux's `AT_REMOVEDIR`, because a caller translating
+/// `unlinkat(2)` should not have to remap it.
+pub const AT_REMOVEDIR_PINNED: u64 = 0x200;
+
+/// [`SYS_FS_FSTATAT_PINNED`] flag: do not follow a trailing symbolic link.
+///
+/// Same value as Linux's `AT_SYMLINK_NOFOLLOW`, for the same reason.
+pub const AT_SYMLINK_NOFOLLOW_PINNED: u64 = 0x100;
+
+/// Remove `name` from the directory a handle was opened on.
+///
+/// `arg0`: directory handle (0 = the process working directory).
+/// `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: flags — [`AT_REMOVEDIR_PINNED`] selects `rmdir` over `unlink`.
+///
+/// `name` must be exactly one component: no `/`, and neither `.` nor `..`.
+/// That restriction is what the containment rests on, so it is a hard
+/// `InvalidArgument` rather than something the kernel tries to normalise.
+///
+/// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
+/// directory it was opened on; otherwise a negative error code.
+pub const SYS_FS_UNLINKAT_PINNED: u64 = 662;
+
+/// Stat `name` within the directory a handle was opened on.
+///
+/// `arg0`: directory handle (0 = the process working directory).
+/// `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: flags — [`AT_SYMLINK_NOFOLLOW_PINNED`] selects `lstat`.
+/// `arg4`: output buffer, [`FS_META_SIZE`] bytes, in the same layout
+/// [`SYS_FS_METADATA`] writes.  Deliberately the same record: one decoder
+/// should serve both, and a second layout would be a second thing to keep
+/// in step.
+///
+/// Returns: 0 on success; `ESTALE` as above; otherwise a negative error code.
+pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
+
+/// List the directory a handle was opened on, resolving *the handle*.
+///
+/// `arg0`: directory handle (0 = the process working directory).
+/// `arg1`: output buffer.  `arg2`: output buffer capacity.
+///
+/// Entries are packed as `[u8 type][u32 name_len][name bytes][u64 size]`,
+/// the same encoding [`SYS_FS_READDIR_AT`] uses.  A buffer too small for the
+/// whole listing truncates it — at a record boundary, never mid-record —
+/// rather than failing.
+///
+/// Returns: on success, the bytes the *complete* listing occupies, which is
+/// not necessarily the number written.  `ret <= arg2` means the listing is
+/// complete; `ret > arg2` means it was truncated, and `ret` is the buffer
+/// size to re-issue with.  This call is unpaginated, so that return value is
+/// the only thing that distinguishes a directory which exactly filled the
+/// buffer from one that overflowed it.  Otherwise `ESTALE` if the handle no
+/// longer denotes the directory it was opened on, or a negative error code.
+pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
+
 /// Close an open file handle.
 ///
 /// `arg0`: file handle.

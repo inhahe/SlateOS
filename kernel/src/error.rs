@@ -121,6 +121,20 @@ pub enum KernelError {
     /// attempted across a mount boundary (e.g. `RENAME_EXCHANGE` or a hard
     /// link spanning two mounts).  Maps to `EXDEV`.
     CrossDevice = -512,
+    /// A directory handle no longer denotes the directory it was opened on.
+    ///
+    /// Returned only by the fd-relative primitives that verify a handle's
+    /// pinned identity before acting (`Vfs::unlink_at_pinned` and friends).
+    /// It means the name the handle was opened under has since been
+    /// re-pointed at a *different* object — a renamed or replaced directory,
+    /// or a swapped symlink on the way to it — so the operation was refused
+    /// rather than performed on whatever now answers to that name.
+    ///
+    /// This is the error that exists so those primitives never have to guess:
+    /// the alternative to reporting the mismatch is acting on the wrong
+    /// directory silently, which is the defect they were built to close.
+    /// Maps to `ESTALE`.
+    StaleHandle = -513,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -201,6 +215,7 @@ impl KernelError {
             Self::TooManyOpenFiles => "too many open files",
             Self::FileTooLarge => "file too large",
             Self::CrossDevice => "cross-device operation not permitted",
+            Self::StaleHandle => "directory handle no longer denotes the same directory",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

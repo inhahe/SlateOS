@@ -1059,6 +1059,62 @@ def append_record(path: str, record: dict) -> bool:
     return True
 
 
+def load_gated_markers(path: str) -> tuple[str, ...] | None:
+    """The `RAN-IF` literals emitted by `check-self-tests-wired.py`, or None.
+
+    None means "could not be established" and is deliberately distinct from an
+    empty tuple, which would mean "there are no gated call sites". The second is
+    a claim about the kernel; the first is a statement about this run. Collapsing
+    them would let a missing or malformed file read downstream as "nothing is
+    gated, so nothing can be un-run" -- an all-clear manufactured out of a
+    plumbing failure, which is the one answer a coverage check must never give
+    by accident.
+
+    Every diagnostic here goes to stderr and none is fatal: this runs at the end
+    of a boot that took twenty minutes, and losing the whole row over a JSON
+    parse error would throw away the wall time, the verdict and the skip lists
+    to punish a harness bug in a field none of them depend on.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError:
+        # Said out loud, unlike read_serial's silent None for the same cause.
+        # Nothing passes this argument by accident -- boot-test.sh sets it to a
+        # file it generated earlier in the same run -- so the file not being
+        # there is a harness fault, and the symptom is a field quietly missing
+        # from every row. That is invisible in the history and looks exactly
+        # like "this predates the field", which is how a check stops running
+        # without anyone noticing it stopped.
+        print(f"boot-history: gated markers {path} does not exist -- "
+              f"`gated_ran` will be omitted from this row", file=sys.stderr)
+        return None
+    except (OSError, ValueError) as exc:
+        print(f"boot-history: cannot read gated markers {path}: {exc}",
+              file=sys.stderr)
+        return None
+    markers = payload.get("markers") if isinstance(payload, dict) else None
+    if not isinstance(markers, dict):
+        print(f"boot-history: {path} has no `markers` object -- ignoring",
+              file=sys.stderr)
+        return None
+    return tuple(sorted(str(k) for k in markers))
+
+
+def gated_ran(serial: Serial, markers: tuple[str, ...]) -> dict[str, bool]:
+    """Which gated self-tests announced themselves in this boot.
+
+    A plain substring test, not a regex, and that is the point rather than a
+    shortcut: the marker is the exact `serial_println!` literal, and
+    `check-self-tests-wired.py` has already refused to emit one that no file
+    defining the suite can print. Treating it as a pattern would give `[acpi]`
+    and `(ring 3)` meaning they do not have, so the two markers with brackets or
+    parentheses in them -- which is all five -- would match nothing, and every
+    gated suite in the kernel would be reported as never-run.
+    """
+    return {m: (m in serial.text) for m in markers}
+
+
 def build_record(serial: Serial | None, verdict: str, args) -> dict:
     # `--commit`/`--branch` win over asking git, and boot-test.sh always passes
     # them.  It reads HEAD once, before the build, and hands that value down;
@@ -1166,6 +1222,25 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         # day one stops being covered is visible as a name moving between the
         # two lists rather than as a new accusation with no history.
         rec["skips_covered"] = list(serial.skips_covered)
+        # Which conditionally-called self-tests announced themselves, keyed by
+        # the serial line each declares in main.rs (`// RAN-IF: "..."`).
+        #
+        # `skips` above answers "did a suite say it was not running"; this
+        # answers the harder question next to it, "did a suite that never says
+        # anything simply not run". A self-test behind `if fat_ok` prints no SKIP
+        # when the condition is false -- it prints nothing at all, which is
+        # indistinguishable from a green boot unless something knows what its
+        # output would have looked like. Seven suites sat behind that one false
+        # condition for a year.
+        #
+        # Omitted, rather than written empty, when the marker file is absent or
+        # unreadable: see load_gated_markers. An empty object here would mean
+        # "the kernel has no gated call sites", which is a claim, and one that
+        # would read as an all-clear.
+        markers = (load_gated_markers(args.gated_markers)
+                   if getattr(args, "gated_markers", None) else None)
+        if markers is not None:
+            rec["gated_ran"] = gated_ran(serial, markers)
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps
@@ -1616,6 +1691,14 @@ def main(argv=None) -> int:
                         help="boot-test.sh's exit status for this run")
     parser.add_argument("--marker", default="BOOT_OK",
                         help="the marker the harness waited for")
+    parser.add_argument("--gated-markers", default=None, metavar="PATH",
+                        help="JSON from `check-self-tests-wired.py "
+                             "--emit-markers`. Each key is the serial line a "
+                             "conditionally-called self-test prints when its "
+                             "condition held; the row records which ones "
+                             "appeared. Without it the `gated_ran` field is "
+                             "omitted, not emptied -- absent means unknown, "
+                             "and unknown must not read as all-clear.")
     parser.add_argument("--wall-seconds", type=float, default=None)
     parser.add_argument("--build-seconds", type=float, default=None,
                         help="seconds cargo spent in Step 1, or omitted when "

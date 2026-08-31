@@ -2883,7 +2883,10 @@ impl AutomatorApp {
             Event::Tick { elapsed_ms } => {
                 // `tick` reports whether anything moved; a tick that changed
                 // nothing must not ask for a frame, or an idle automator
-                // repaints at the tick rate for ever.
+                // repaints at the tick rate for ever. That is the same
+                // distinction `on_event` maps onto `Redraw`/`Idle`, so the
+                // answer here needs nothing decided that `tick` has not
+                // already decided.
                 if self.tick(*elapsed_ms) {
                     EventResult::Consumed
                 } else {

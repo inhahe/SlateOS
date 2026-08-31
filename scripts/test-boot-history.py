@@ -776,6 +776,11 @@ class _Args:
     # Empty is the ordinary case -- a boot of the tree, not a probe. The
     # experiment path has its own tests below.
     experiment = ""
+    # None is the ordinary case for any caller that is not boot-test.sh: no
+    # marker file, so `gated_ran` stays out of the record. Spelled out rather
+    # than left to build_record's getattr default, so these tests exercise the
+    # same attribute lookup a real argparse namespace provides.
+    gated_markers = None
 
 
 # --------------------------------------------------------------------------
@@ -1703,6 +1708,137 @@ def test_the_real_history_has_a_uniform_utc_offset(bh):
     check("every real record's ts is a string", untyped, 0)
     check("every real record's ts carries the same UTC offset",
           offsets, {"+00:00"})
+
+
+# --------------------------------------------------------------------------
+# Gated self-tests: which conditionally-called suites announced themselves
+#
+# `skips` answers "did a suite say it was not running". This answers the harder
+# question beside it: "did a suite that says nothing at all simply not run?" A
+# self-test behind `if fat_ok` prints no SKIP when the condition is false -- it
+# prints nothing, which is indistinguishable from a green boot unless something
+# knows what its output would have looked like. Seven suites sat behind that one
+# false condition for a year.
+# --------------------------------------------------------------------------
+
+
+def _markers_file(tmpdir, *literals):
+    path = os.path.join(tmpdir, "gated-markers.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"root": "main.rs",
+                   "markers": {lit: {"sites": [1], "tests": ["x::self_test"]}
+                               for lit in literals}}, fh)
+    return path
+
+
+def test_gated_ran_reports_present_and_absent(bh):
+    s = _serial(bh, "[fat] Running mkfs/format self-test...\n" + S_PASS)
+    got = bh.gated_ran(s, ("[fat] Running mkfs/format self-test...",
+                           "[swap] Running disk backend self-test..."))
+    check("a marker in the log reads true",
+          got["[fat] Running mkfs/format self-test..."], True)
+    check("a marker absent from the log reads false",
+          got["[swap] Running disk backend self-test..."], False)
+
+
+def test_gated_markers_are_literals_not_patterns(bh):
+    """Every real marker contains `[`, and four contain `(` or `)` too.
+
+    Treated as a regex, `[acpi] Running self-test...` is a character class
+    followed by a literal, and matches nothing in the log -- so every gated
+    suite in the kernel would be reported as never-run, on every boot, forever.
+    That is a manufactured accusation against five working suites, which is
+    worse than the hole this field was added to close.
+    """
+    text = ("[spawn] Running netstack DNS-over-IPC (ring 3) integration "
+            "test...\n" + S_PASS)
+    s = _serial(bh, text)
+    got = bh.gated_ran(s, ("[spawn] Running netstack DNS-over-IPC (ring 3) "
+                           "integration test...",))
+    check("brackets and parentheses match themselves",
+          list(got.values()), [True])
+    # And the converse: the class the regex reading would have matched must not
+    # be mistaken for the marker.
+    s2 = _serial(bh, "aciRunning self-test...\n" + S_PASS)
+    check("a string that only a regex reading would match does not count",
+          bh.gated_ran(s2, ("[acpi] Running self-test...",)),
+          {"[acpi] Running self-test...": False})
+
+
+def test_gated_ran_is_recorded_when_markers_are_given(bh, tmpdir):
+    args = _Args()
+    args.gated_markers = _markers_file(
+        tmpdir, "[fat] Running mkfs/format self-test...",
+        "[swap] Running disk backend self-test...")
+    rec = bh.build_record(
+        _serial(bh, "[fat] Running mkfs/format self-test...\n" + S_PASS),
+        "PASS", args)
+    check("the field is written", "gated_ran" in rec, True)
+    check("with one entry per marker", sorted(rec["gated_ran"]),
+          ["[fat] Running mkfs/format self-test...",
+           "[swap] Running disk backend self-test..."])
+    check("recording which ran",
+          rec["gated_ran"]["[fat] Running mkfs/format self-test..."], True)
+    check("and which did not",
+          rec["gated_ran"]["[swap] Running disk backend self-test..."], False)
+    check("it survives the round trip that actually happens -- JSONL",
+          json.loads(json.dumps(rec))["gated_ran"], rec["gated_ran"])
+
+
+def test_gated_ran_omitted_not_emptied_without_markers(bh):
+    """Absent means unknown; `{}` would mean "the kernel gates nothing".
+
+    The same three-way distinction `sanitizer`, `accel` and `skips` all keep,
+    and for a sharper reason here: an empty object is an all-clear. Downstream
+    the gate counts only rows carrying the key, so a row written without a
+    marker file must not be countable as a boot on which some gated suite
+    failed to appear.
+    """
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("no marker file -> no field at all", "gated_ran" in rec, False)
+
+
+def test_a_missing_marker_file_is_unknown_not_all_clear(bh, tmpdir):
+    args = _Args()
+    args.gated_markers = os.path.join(tmpdir, "was-never-written.json")
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("a marker file that does not exist omits the field",
+          "gated_ran" in rec, False)
+    check("and the rest of the row is intact -- a harness fault must not "
+          "cost the verdict", rec["verdict"], "PASS")
+
+
+def test_malformed_marker_files_do_not_cost_the_row(bh, tmpdir):
+    """This runs at the end of a twenty-minute boot.
+
+    Raising here would throw away the wall time, the verdict, the skip lists and
+    the failure tail to punish a harness bug in a field none of them depend on.
+    """
+    bad = os.path.join(tmpdir, "bad.json")
+    for content in ("{not json", "[]", '{"markers": "not an object"}', "null"):
+        with open(bad, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        check(f"{content[:20]!r} yields unknown, not a crash",
+              bh.load_gated_markers(bad), None)
+    args = _Args()
+    args.gated_markers = bad
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("and the record still lands", rec["verdict"], "PASS")
+
+
+def test_empty_marker_object_is_distinct_from_a_missing_file(bh, tmpdir):
+    """A kernel with no gated call sites is a real state, and not an error.
+
+    It is also the state this whole mechanism is trying to reach. It must be
+    recordable as `{}` -- "asked, and there was nothing to ask about" -- and
+    stay distinguishable from the absent field, which means nobody asked.
+    """
+    args = _Args()
+    args.gated_markers = _markers_file(tmpdir)
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("an empty marker set is still an answer", rec.get("gated_ran"), {})
+    check("and the key is present, unlike the no-file case",
+          "gated_ran" in rec, True)
 
 
 def main():

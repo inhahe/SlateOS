@@ -96352,7 +96352,27 @@ they are listed so the count is honest rather than because they are urgent.
 
 ---
 
-## `A-THE-SHELLCHECK-GATE-DOES-NOT-CATCH-THE-BUG-CLASS-IT-WAS-BUILT-FOR` (lane A, 2026-08-29) — **open**, coverage gap with a named remedy
+## `A-THE-SHELLCHECK-GATE-DOES-NOT-CATCH-THE-BUG-CLASS-IT-WAS-BUILT-FOR` (lane A, 2026-08-29) — **FIXED 2026-08-29**, verified still closed 2026-08-31
+
+**Status: closed.** The gate reads `bash "$PROJECT_ROOT/scripts/shellcheck-all.sh"
+warning` at `scripts/boot-test.sh:3666`, and the tree clears it: 85 script(s), 0
+with findings at severity `warning`, 0 findings total (re-measured 2026-08-31).
+Both halves of "How to close this" below are done — lane B cleared all 44
+findings and quoted the template at `diff-wsl.sh:99` so the count does not
+regrow, and lane A made the one-word change. See
+`requests/a-b-shellcheck-floor-the-remaining-findings-are-all-yours.md` and
+`requests/b-a-shellcheck-is-clean-at-warning-raise-the-floor.md`.
+
+**Why this heading said "open" for two days.** The remedy landed the same day it
+was filed, in a different file, by a different lane; nothing then came back to
+this entry. That is the ordinary failure mode of a tracking file — an entry
+whose *fix* is recorded elsewhere stays open by default, and an open entry that
+is actually closed is worse than no entry, because it costs a reader the time to
+rediscover the fix before they can trust the file again. The remainder of this
+entry is kept verbatim for the reasoning, which is still the argument for why
+the floor belongs at `warning` rather than `error`.
+
+### Original entry (2026-08-29), unedited
 
 **What it is.** `check_shellcheck` in `scripts/boot-test.sh` refuses to build
 when `scripts/shellcheck-all.sh` reports a finding — but it asks for findings
@@ -102823,9 +102843,13 @@ new caller that reads `ENOENT` from an xattr call, and because `--preserve=mode`
 ACL support — which needs `removexattr` to answer "already absent" distinctly —
 is the next thing due on `cp`.
 
-## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A)
+## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A) — FIXED 2026-08-31
 
-**Status:** OPEN 2026-08-31
+**Status:** FIXED 2026-08-31, same day as found. The note is now data: each
+gated call site declares the serial line that proves it ran, the checker
+verifies the declaration is printable, every boot records which of them
+appeared, and a gate fails the build on one that has never appeared. See
+"What was done" at the end of this entry.
 
 `scripts/check-self-tests-wired.py` ends every run with a NOTE:
 
@@ -102875,18 +102899,59 @@ self-tests silently stop running** and nothing says so. The code comment at
 exclusive raw-NIC claim, §64) — which makes it a correct decision with no
 tripwire, not an accident.
 
-**Proper fix.** Do the correlation in the harness rather than in the reader's
-head. The wiring gate runs *pre*-build so it has no serial log at that point;
-the natural home is a post-boot check beside `check-boot-skips.py`, which
-already reads the serial log for exactly this kind of question. Have
-`check-self-tests-wired.py` emit its gated-site list as machine-readable output
-(it already computes it for `--list-gated`), and have the post-boot step assert
-each gated site produced *some* output in the log. Keying that on a per-site
-declared marker — not on the function's name — is the whole point, since the
-name-to-output mismatch above is the failure mode.
+**What was done.** Three commits, one per stage of the pipeline.
 
-**Until then, the netstack pair is the one to watch**, because its guard is a
-flag someone will eventually flip on purpose.
+1. **The declaration and its enforcement** (`395b7fc6a`). Each of the six gated
+   sites in `main.rs` carries a `// RAN-IF: "<literal>"` comment naming the
+   serial line that proves it ran. `check-self-tests-wired.py` requires one at
+   every gated site and — the part that matters — verifies the literal actually
+   occurs in the file that *defines* that suite. A marker that matches nothing
+   is worse than no marker: a missing one fails loudly here and now, whereas a
+   typo'd one passes this gate and then reports its suite as never-run on every
+   boot forever, which is an accusation against working code and therefore the
+   failure most likely to be believed and acted on. `--emit-markers` writes the
+   set as JSON. 34 tests in `scripts/test-check-self-tests-wired.py`.
+
+   Keyed by *literal*, not by site, so the `acpi` `if`/`else` pair maps to one
+   marker: seeing the line proves an arm ran without saying which, which is
+   exactly as much as the log can prove. Keying by site would report the losing
+   arm as never-seen on code that is correct by construction — the false alarm
+   this entry's own table warns about.
+
+2. **The recording** (`21fdf4527`). `boot-history.py` gains `--gated-markers`
+   and writes `gated_ran: {literal: bool}` per boot; `boot-test.sh` passes the
+   file only when *this run* regenerated it. Two details are load-bearing: the
+   field is **omitted**, never emptied, when the markers cannot be read (`{}`
+   is an all-clear and must not be forgeable by a plumbing failure), and the
+   match is a plain substring test rather than a regex, because every real
+   marker contains `[` and four contain `(`/`)` — read as a pattern they would
+   match nothing and report all five suites as never-run. 100 tests in
+   `scripts/test-boot-history.py`.
+
+3. **The gate** (`9ea7293c6`). `scripts/check-gated-selftests.py` fails the
+   build on a marker absent from 100% of the boots that recorded it, N ≥ 10,
+   mirroring `check-boot-skips.py`'s evidence discipline and allowlist rules.
+   27 tests.
+
+**Deliberate deviation from the fix proposed above:** this is a pre-build gate
+over `bench/boot-history.jsonl`, not the post-boot single-log check the OPEN
+text suggested. A gated site legitimately not running on *one* boot is not a
+defect — that is what "gated" means — so a post-boot check would either fail on
+correct code or assert nothing. Only *never* running is the defect, and "never"
+is a question about history, which is where `check-boot-skips.py` already lives.
+
+Two things the gate refuses to do, each a false accusation avoided: it measures
+each marker only against the boots that recorded *it* (the window as denominator
+would make a marker declared today read as never-run out of 25 — failing loudest
+at the moment someone does the right thing), and it excludes markers the newest
+boot no longer declares (an accusation whose only remedy is allowlisting a line
+that is not in the tree).
+
+**The netstack pair is now watched rather than merely noted.** Its guard is
+`!net.userspace`, a flag that defaults off and that someone will eventually flip
+on purpose; the day it flips, those two suites stop running and `gated_ran`
+starts recording `false` for them. Ten boots later the build fails and says so.
+That is the tripwire the original entry observed was missing.
 
 ## A-THE-LOAD-CANARY-COUNTED-ITS-OWN-STARTUP-AS-LOAD (lane A) — FIXED 2026-08-31
 
@@ -103014,3 +103079,42 @@ on lane B's list, so the request will be filed with both callers named.
 caller bakes it in — every caller goes through `backup.rs`'s one function. It
 is a genuine data-loss window rather than a wrong message, which is the only
 reason it is above "cosmetic".
+
+## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
+
+**What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
+`FileSystem::link`'s default applies and every hard link on a memfs mount
+returns `NotSupported`. `/tmp` is memfs, and `/tmp` is where the VFS self-tests
+run — so **no boot has ever exercised a hard link**, on either the path route
+(`SYS_FS_LINK`) or the new pinned one (`SYS_FS_LINKAT_PINNED`, §658).
+
+**How it was found.** The new pinned `*at` self-test asserted that
+`link_at_pinned` produces a second name for the *same inode*. It failed the
+boot with `NotSupported` — from memfs, not from the primitive. Until that
+assertion was written, nothing had ever asked memfs to make a link.
+
+**Why memfs cannot.** Its tree is nodes owned **by value**: a `Dir` holds
+`children: BTreeMap<String, MemFsNode>`. Two names sharing one node is
+therefore not expressible. Real hard links need an inode table — directory
+entries mapping name → ino, with the node bodies held separately and
+refcounted — which is a restructure of the module rather than an added method.
+Note memfs already allocates a unique synthetic `st_ino` per node
+(`alloc_memfs_ino`), precisely so `cp -a`/`tar` hard-link dedup can work; that
+promise is only half-kept, since `nlink` can never exceed 1.
+
+**Current state.** The pinned self-test treats `NotSupported` from
+`link_at_pinned` as a recorded skip (`pinned linkat: the positive
+same-inode/nlinks assertion`) and continues. This is safe but must not become
+permanent: everything that makes the primitive *safe* — `check_at_name` and
+both `verify_pinned` passes — runs before the filesystem is reached, so the
+containment and stale-handle assertions do run. What is unproven is that a
+link, when it succeeds, actually shares an inode and raises `nlink`.
+
+**Proper fix.** Give memfs an inode table and implement `link`/`link_no_follow`
+against it, then delete the skip. That also gives `SYS_FS_LINK` its first
+self-test coverage, and it makes `nlink` and `st_ino` mean on memfs what they
+already claim to mean.
+
+**Watch it.** `scripts/check-boot-skips.py` will start reporting this skip on
+100% of boots once ten qualifying boots are recorded — which is the mechanism
+for making sure the skip above does not quietly become the permanent answer.

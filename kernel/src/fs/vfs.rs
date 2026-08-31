@@ -3558,6 +3558,364 @@ impl Vfs {
         Ok(())
     }
 
+    /// Create a directory named `name` inside the directory `dir` denotes,
+    /// refusing if `dir` no longer denotes the directory it was opened on.
+    ///
+    /// This is the entry point `mkdirat` needs, and the first of the four the
+    /// `cp -r` shape requires. A recursive copy re-derives its *destination*
+    /// directory from that directory's text on every entry it writes, so a
+    /// swap performed partway through the walk silently redirects the whole
+    /// remainder of the tree — and unlike the source side, the destination is
+    /// where new objects get created, so the redirect is a write primitive.
+    /// Pinning the destination once and verifying it per operation is what
+    /// removes the re-derivation, and with it the race and the repeated
+    /// full-path walk.
+    ///
+    /// `mode` is treated exactly as [`mkdir_mode`](Self::mkdir_mode) treats
+    /// it: **already umask-masked by the caller**, since the umask lives in
+    /// the userspace POSIX layer, so the kernel stamps it as the final
+    /// on-disk permission bits.
+    ///
+    /// The parent is *not* re-resolved by name here, deliberately. Re-resolving
+    /// is the bug this replaces; the parent is established by identity instead,
+    /// and `mkdir` never follows the final component, so `dir.path.join(name)`
+    /// names the object the caller meant.
+    ///
+    /// Verified twice, for the reason
+    /// [`unlink_at_pinned`](Self::unlink_at_pinned) is: pass 1 refuses an
+    /// already-stale handle before any policy check or side effect runs, and
+    /// pass 2 happens under the same filesystem lock as the creation itself.
+    ///
+    /// The create and the permission stamp share that one lock, which is a
+    /// small improvement on the path-based route rather than a copy of it:
+    /// `mkdir_mode` chmods in a second, separate acquisition, leaving a window
+    /// in which the new directory is already visible carrying the filesystem's
+    /// 0o755 default before the caller's (possibly much narrower) mode lands.
+    /// Doing both under one hold closes it.
+    pub fn mkdir_at_pinned(dir: &PinnedDir, name: &[u8], mode: u16) -> KernelResult<()> {
+        check_at_name(name)?;
+
+        // Pass 1: refuse an already-stale handle before anything with a side
+        // effect runs, and before the policy checks below can report on a
+        // directory the caller no longer holds.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        }
+
+        // Same checks the path-based `mkdir_mode` runs, in the same order.
+        let child = dir.path.join(name);
+        crate::ipc::namespace::check_writable(&child)?;
+        check_path_access(&child, PathAccess::Write)?;
+        check_writable(&child)?;
+        super::intercept::pre_mkdir(&child)?;
+        enforce_quota_create(&child)?;
+
+        let perm = mode & 0o777;
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            // Pass 2, under the same guard as the creation itself. Anything
+            // that moved the directory since pass 1 is caught here, and
+            // nothing can move it between here and the `mkdir` below.
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            let child_rel = dir_rel.join(name);
+            guard.mkdir(&child_rel)?;
+            if perm != Self::DEFAULT_DIR_MODE {
+                // `no_follow`, though what was just created is a directory and
+                // cannot be a symlink: the following variant would be a second
+                // name lookup, and the whole reason this call sits inside the
+                // guard is that a name lookup is what an attacker gets to
+                // answer. Under this lock the two are the same operation, so
+                // the no-follow form costs nothing and asserts more.
+                guard.set_permissions_no_follow(&child_rel, perm)?;
+            }
+        }
+
+        super::quota::charge_inode(0, 0);
+        // A new directory invalidates negative cache entries that claimed this
+        // path (or children below it) did not exist. Positive entries are
+        // unaffected — existing resolutions remain valid.
+        VFS_DCACHE.lock().invalidate_negative_prefix(&child);
+        super::notify::emit_created_dir(&child);
+        super::index::on_file_changed(&child);
+        super::journal::record(super::journal::JournalEventType::Created, &child);
+        super::audit::log_ok(super::audit::AuditOp::Mkdir, 0, &child);
+        Ok(())
+    }
+
+    /// Create a symbolic link named `name` inside the directory `dir` denotes,
+    /// refusing if `dir` no longer denotes the directory it was opened on.
+    ///
+    /// This is the entry point `symlinkat` needs. `name` is the new link;
+    /// `target` is the text it will contain.
+    ///
+    /// **Only `name` is a single component — `target` is not, and must not be.**
+    /// [`check_at_name`] applies to the name being created inside the pinned
+    /// directory, because that is what the pin's containment guarantee covers.
+    /// A symlink target is arbitrary text that is stored verbatim and resolved
+    /// only when something later traverses the link; it may be relative, may
+    /// be absolute, may contain `..`, and may name something that does not
+    /// exist. Refusing those would not make anything safer — it would only
+    /// make `symlinkat` unable to reproduce the links `cp -r` is copying —
+    /// and it would be a check applied at the wrong time in any case, since
+    /// what the target resolves to is decided at traversal, not here. The
+    /// traversal-time checks are what govern the target, exactly as they do
+    /// for the path-based [`symlink`](Self::symlink).
+    ///
+    /// Verified twice, for the reason
+    /// [`unlink_at_pinned`](Self::unlink_at_pinned) is.
+    pub fn symlink_at_pinned(
+        dir: &PinnedDir,
+        name: &[u8],
+        target: impl AsRef<Path>,
+    ) -> KernelResult<()> {
+        let target = target.as_ref();
+        check_at_name(name)?;
+
+        // Pass 1: an already-stale handle is refused before the intercept
+        // hook — which is caller-supplied code that can observe being called —
+        // runs on a directory the caller no longer holds.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        }
+
+        // Same checks the path-based `symlink` runs, in the same order.
+        let child = dir.path.join(name);
+        crate::ipc::namespace::check_writable(&child)?;
+        check_writable(&child)?;
+        check_path_access(&child, PathAccess::Write)?;
+        super::intercept::pre_check(super::intercept::FsOp::Symlink, &child, Some(target))?;
+        enforce_quota_create(&child)?;
+
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            // Pass 2, under the same guard as the creation.
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            let child_rel = dir_rel.join(name);
+            guard.symlink(&child_rel, target)?;
+        }
+
+        super::quota::charge_inode(0, 0);
+        // A new symlink can change how any path *through* it resolves, so the
+        // whole parent prefix goes, not just the negative entries. The parent
+        // is the pinned directory itself — no `parent()` fallback is needed
+        // here, because a single-component name always has one.
+        VFS_DCACHE.lock().invalidate_prefix(&dir.path);
+        super::notify::emit_created(&child);
+        super::index::on_file_changed(&child);
+        super::journal::record(super::journal::JournalEventType::Created, &child);
+        super::audit::log_ok(super::audit::AuditOp::Symlink, 0, &child);
+        Ok(())
+    }
+
+    /// Set the timestamps of `name` within the directory `dir` denotes,
+    /// refusing if `dir` no longer denotes the directory it was opened on.
+    ///
+    /// This is the entry point `utimensat` needs — the last of the four the
+    /// `cp -r` shape requires, and the one that runs on *every* copied entry
+    /// rather than once per directory, since preserving mtime is what `cp -p`
+    /// and every archive extractor do last on each file.
+    ///
+    /// A zero leaves that timestamp unchanged, matching
+    /// [`set_times`](Self::set_times). `no_follow` selects
+    /// `AT_SYMLINK_NOFOLLOW`, stamping the link inode itself.
+    ///
+    /// As in [`set_permissions_at_pinned`](Self::set_permissions_at_pinned),
+    /// the pin protects the *directory*, and asking to follow is asking to
+    /// leave it: when `name` turns out to be a symlink and the caller did not
+    /// pass `no_follow`, the object being stamped is outside the pinned
+    /// directory and possibly on another mount, so the policy checks are run
+    /// against the resolved target and the write goes through the target's own
+    /// mount. That residual race on the link's own contents is the one plain
+    /// `utimensat` has too; what the pin removes is the far larger race on the
+    /// directory.
+    pub fn set_times_at_pinned(
+        dir: &PinnedDir,
+        name: &[u8],
+        accessed_ns: Timestamp,
+        modified_ns: Timestamp,
+        no_follow: bool,
+    ) -> KernelResult<()> {
+        check_at_name(name)?;
+
+        // Pass 1: refuse an already-stale handle before the policy checks can
+        // report on a directory the caller no longer holds.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        }
+
+        // The namespace check applies to the name as given, before any symlink
+        // is followed, so a link cannot be used to reach out of the caller's
+        // namespace.
+        let child = dir.path.join(name);
+        crate::ipc::namespace::check_writable(&child)?;
+
+        // The remaining checks must describe the object that actually changes,
+        // not the name used to reach it — same reasoning as
+        // `set_permissions_at_pinned`. Stamping times is a metadata write, so
+        // the gate is `PathAccess::Metadata` on a writable mount.
+        let target = if no_follow {
+            Self::resolve_no_follow(&child)?
+        } else {
+            Self::resolve_follow(&child)?
+        };
+        check_writable(&target)?;
+        check_path_access(&target, PathAccess::Metadata)?;
+
+        if target == child {
+            // The ordinary case: `name` is not a symlink, so the object being
+            // stamped is inside the directory the pin verified.
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            let child_rel = dir_rel.join(name);
+            // `no_follow` unconditionally: the resolution above established
+            // that `name` is not a symlink, and if it *became* one in the
+            // window since, a following write would stamp a target that was
+            // never checked. For a non-symlink the two are the same call.
+            guard.set_times_no_follow(&child_rel, accessed_ns, modified_ns)?;
+        } else {
+            // `name` is a symlink and the caller asked to follow it. Operating
+            // through the target's own mount also avoids holding two
+            // filesystem locks at once.
+            let (fs, _id, _opts, relative) = resolve_mount(&target)?;
+            let mut guard = fs.lock();
+            if no_follow {
+                guard.set_times_no_follow(&relative, accessed_ns, modified_ns)?;
+            } else {
+                guard.set_times(&relative, accessed_ns, modified_ns)?;
+            }
+        }
+        // No notify/journal — timestamp changes are metadata-only, matching
+        // the path-based `set_times`.
+        Ok(())
+    }
+
+    /// Hard-link `old_name` in the directory `old_dir` denotes to `new_name`
+    /// in the directory `new_dir` denotes, refusing if either handle no longer
+    /// denotes the directory it was opened on.
+    ///
+    /// This is the entry point `linkat` needs, and the first member of the
+    /// family that pins **two** directories rather than one. `follow` selects
+    /// `AT_SYMLINK_FOLLOW`: with it, a symlink at `old_name` is dereferenced
+    /// and the link is made to the underlying object; without it — which is
+    /// plain `link(2)`'s behaviour and `linkat`'s default — the symlink inode
+    /// itself gains a name.
+    ///
+    /// Hard links cannot cross mounts, and that is enforced here as it is on
+    /// the path route: two paths share a mount iff [`resolve_mount`] hands
+    /// back the same per-mount handle. That rule has a useful consequence for
+    /// this primitive — in every case where the link can succeed at all, both
+    /// directories are behind *one* filesystem lock, so both pins can be
+    /// verified and the link performed under a single hold. There is no lock
+    /// ordering to get wrong, because there are never two locks.
+    ///
+    /// The exception is a followed symlink, where the source object may be on
+    /// a different mount from `old_dir`. Following is a request to leave the
+    /// pinned directory, so `old_dir`'s pin is then checked only by pass 1 —
+    /// the same honest limit [`set_permissions_at_pinned`](Self::set_permissions_at_pinned)
+    /// documents. `new_dir`, where the entry is actually created, is verified
+    /// under the write's own lock either way.
+    pub fn link_at_pinned(
+        old_dir: &PinnedDir,
+        old_name: &[u8],
+        new_dir: &PinnedDir,
+        new_name: &[u8],
+        follow: bool,
+    ) -> KernelResult<()> {
+        check_at_name(old_name)?;
+        check_at_name(new_name)?;
+
+        // Pass 1, on both handles: a stale handle is refused before the
+        // intercept hook runs and before quota is charged. Each guard is
+        // taken and dropped in turn, so this cannot deadlock even when the
+        // two directories are on the same filesystem.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&old_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, old_dir)?;
+        }
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&new_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, new_dir)?;
+        }
+
+        let old_child = old_dir.path.join(old_name);
+        let new_child = new_dir.path.join(new_name);
+        crate::ipc::namespace::check_writable(&new_child)?;
+
+        // The source is resolved per `follow` so the intercept hook and the
+        // same-mount rule below both see the object that will actually gain a
+        // name, not the text used to reach it.
+        let source = if follow {
+            Self::resolve_follow(&old_child)?
+        } else {
+            Self::resolve_no_follow(&old_child)?
+        };
+        // `Read` on the source, `Write` on the destination — the asymmetry
+        // `link_inner` explains, and the same checks it runs, so the two routes
+        // enforce one policy rather than two.
+        check_path_access(&source, PathAccess::Read)?;
+        check_path_access(&new_child, PathAccess::Write)?;
+        check_writable(&new_child)?;
+        super::intercept::pre_check(super::intercept::FsOp::Link, &new_child, Some(&source))?;
+        enforce_quota_create(&new_child)?;
+
+        {
+            // Every mount-table lookup happens before any filesystem guard is
+            // taken, so no ordering between the VFS lock and a filesystem lock
+            // can arise.
+            let (fs_old, old_fs_id, _opts, old_dir_rel) = resolve_mount(&old_dir.path)?;
+            let (fs_src, _src_id, _opts, src_rel) = resolve_mount(&source)?;
+            let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
+            if !Arc::ptr_eq(&fs_src, &fs_new) {
+                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+            }
+            let new_rel = new_dir_rel.join(new_name);
+
+            let mut guard = fs_new.lock();
+            // Pass 2 on the destination, under the same guard as the creation.
+            verify_pinned(&mut guard, new_fs_id, &new_dir_rel, new_dir)?;
+            // And on the source directory too, whenever it is reachable
+            // through this same guard. It always is when the source is still
+            // inside it; only a followed symlink can put it elsewhere.
+            if Arc::ptr_eq(&fs_old, &fs_new) {
+                verify_pinned(&mut guard, old_fs_id, &old_dir_rel, old_dir)?;
+            }
+
+            if source == old_child {
+                // `old_name` is not a symlink, so the source is inside the
+                // verified directory. `link_no_follow` unconditionally, even
+                // when the caller asked to follow: the resolution above
+                // established there is nothing to follow, and if the name
+                // *became* a symlink in the window since, a following link
+                // would name an object that was never checked. For a
+                // non-symlink the two are the same operation.
+                guard.link_no_follow(&old_dir_rel.join(old_name), &new_rel)?;
+            } else {
+                // A symlink was followed out of the pinned directory; the
+                // source is wherever it resolved to, on this same mount.
+                guard.link(&src_rel, &new_rel)?;
+            }
+        }
+
+        super::quota::charge_inode(0, 0);
+        VFS_DCACHE.lock().invalidate_negative_prefix(&new_child);
+        super::notify::emit_created(&new_child);
+        super::index::on_file_changed(&new_child);
+        super::journal::record(super::journal::JournalEventType::Created, &new_child);
+        super::audit::log_ok(super::audit::AuditOp::Link, 0, &new_child);
+        Ok(())
+    }
+
     /// List the directory `dir` denotes, refusing if it no longer denotes the
     /// directory it was opened on.
     ///
@@ -3913,6 +4271,24 @@ impl Vfs {
     /// trailing symlink in `existing` is dereferenced before the hard link is
     /// created; everything else (namespace/write checks, same-mount rule,
     /// quota, notify/journal/audit) is identical.
+    ///
+    /// # Why the source is gated for *read* and the destination for *write*
+    ///
+    /// A hard link is the one mutation whose two paths want different
+    /// permissions.  `rename` takes `Write` on both, because a rename removes
+    /// the source name; a link does not touch the source name at all, only its
+    /// link count.  Demanding `Write` on the source would therefore forbid
+    /// hard-linking a read-only file — which is the *main* legitimate use of
+    /// hard links (content-addressed stores, `cp -l`, dedup-based backup), and
+    /// this tree has such a store in `pkg/`.
+    ///
+    /// `Read` on the source is nonetheless required, and is the check that
+    /// matters for containment: after the link exists, the caller reaches the
+    /// object through a name *they* chose, under whatever policy that name
+    /// carries.  Without this gate a sandbox that denies `/etc/shadow` is
+    /// defeated by linking it into a directory the sandbox does allow, and
+    /// nothing in the policy would notice — which is exactly the shape
+    /// `check-vfs-permission-gate.py` exists to catch.
     fn link_inner(
         existing: impl AsRef<Path>,
         new_path: impl AsRef<Path>,
@@ -3927,6 +4303,11 @@ impl Vfs {
             Self::resolve_no_follow(existing)?
         };
         let new_path = Self::resolve_no_follow(new_path)?;
+        // Both checks run against the *resolved* paths, so a symlink cannot be
+        // used to have the gate judge one object while the link is made to
+        // another.
+        check_path_access(&existing, PathAccess::Read)?;
+        check_path_access(&new_path, PathAccess::Write)?;
         check_writable(&new_path)?;
         // Intercept: let pre-operation handlers approve/deny link creation.
         super::intercept::pre_check(super::intercept::FsOp::Link, &new_path, Some(&existing))?;
@@ -5431,15 +5812,20 @@ pub fn self_test() -> KernelResult<()> {
 
     let has_tmp = mounts.iter().any(|(p, _)| p.as_path() == Path::new("/tmp"));
 
-    // Twelve of the sections below are gated on `has_tmp`. The gate itself is
+    // Fourteen of the sections below are gated on `has_tmp`. The gate itself is
     // honest — it is a mount-table fact, not a swallowed error — but without
     // this record the last line would read `Self-test PASSED` after a run that
     // skipped most of the suite, and a reader who scrolls to the bottom would
     // have no way to tell that from a full one.
     let mut skips = crate::fs::selftest::Skips::new();
     if !has_tmp {
+        // Three of the fourteen record themselves separately further down, so
+        // this one covers the other eleven. The split is not arbitrary: a
+        // section a reader would want named when it is missing — the two pinned
+        // families and `RESOLVE_BENEATH`, whose whole subject is a security
+        // property — says so itself, while the long tail is summarised.
         skips.record(
-            "symlink resolution, xattrs, ACLs, quotas, mount normalisation and 7 more",
+            "symlink resolution, xattrs, ACLs, quotas, mount normalisation and 6 more",
             "/tmp not mounted",
         );
     }
@@ -7207,6 +7593,377 @@ pub fn self_test() -> KernelResult<()> {
         skips.record("pinned fd-relative primitives", "/tmp not mounted");
     }
 
+    // --- The pinned set a recursive copy needs (mkdir/symlink/link/utimens) ---
+    //
+    // Separate from the section above because the failure it guards against is
+    // a different one.  For `unlink` and `chmod` a stale handle means the wrong
+    // *existing* object is modified.  For these four it means a new object is
+    // **created** somewhere the caller never named -- so "refused" is only
+    // half the assertion, and every stale case below also requires the impostor
+    // directory to be provably empty afterwards.  A primitive that reported
+    // StaleHandle after already creating the entry would satisfy the return
+    // value and fail at the only thing that matters.
+    if has_tmp {
+        let cleanup = || {
+            for p in [
+                "/tmp/_pin2/dst/hard",
+                "/tmp/_pin2/dst/link",
+                "/tmp/_pin2/dst/stamped",
+                "/tmp/_pin2/src/f",
+            ] {
+                let _ = Vfs::remove(p);
+            }
+            for d in [
+                "/tmp/_pin2/dst/made",
+                "/tmp/_pin2/dst",
+                "/tmp/_pin2/aside",
+                "/tmp/_pin2/src",
+                "/tmp/_pin2",
+            ] {
+                let _ = Vfs::rmdir(d);
+            }
+        };
+        cleanup();
+
+        // Reports whether the filesystem under `/tmp` could actually make the
+        // hard link, so the skip can be recorded outside the closure: `record`
+        // takes `&mut self`, and capturing `skips` here would make `run` an
+        // `FnMut` still borrowing it at the point the skip is written.
+        let run = || -> KernelResult<bool> {
+            Vfs::mkdir("/tmp/_pin2")?;
+            Vfs::mkdir("/tmp/_pin2/src")?;
+            Vfs::mkdir("/tmp/_pin2/dst")?;
+            Vfs::write_file("/tmp/_pin2/src/f", b"payload")?;
+
+            let src = Vfs::pin_dir("/tmp/_pin2/src")?;
+            let dst = Vfs::pin_dir("/tmp/_pin2/dst")?;
+            if !Vfs::pinned_dir_is_verifiable(&src) || !Vfs::pinned_dir_is_verifiable(&dst) {
+                serial_println!(
+                    "[vfs]   FAIL: /tmp/_pin2 has no pinnable identity — every stale-handle \
+                     assertion below would pass vacuously"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // mkdirat through a live pin, with a mode that is *not* the 0o755
+            // default.  Asserting the mode rather than only the existence is
+            // what proves the create-then-stamp pair happened at all: the
+            // filesystem's own `mkdir` stamps 0o755, so a primitive that forgot
+            // the stamp would still create the directory and still "pass" an
+            // existence check.
+            Vfs::mkdir_at_pinned(&dst, b"made", 0o700)?;
+            match Vfs::metadata_at_pinned(&dst, b"made", false) {
+                Ok(m) if m.entry_type == EntryType::Directory && m.permissions == 0o700 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned(0o700) then read back = {:?}, want a \
+                         directory with mode 0o700",
+                        other.map(|m| (m.entry_type, m.permissions))
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // symlinkat: the *name* is one component, the *target* is not
+            // constrained at all.  This is the asymmetry the design turns on,
+            // and it is asserted in both directions -- a target containing `..`
+            // and `/` is stored verbatim, while the same bytes as a *name* are
+            // refused.  An implementation that ran `check_at_name` over the
+            // target would pass every other test here and quietly make
+            // `symlinkat` unable to reproduce the relative links a recursive
+            // copy is copying.
+            Vfs::symlink_at_pinned(&dst, b"link", "../src/f")?;
+            match Vfs::readlink("/tmp/_pin2/dst/link") {
+                Ok(t) if t.as_path() == Path::new("../src/f") => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: symlink_at_pinned stored target = {:?}, want `../src/f` \
+                         verbatim",
+                        other.map(|t| t.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // linkat: the new name is a second name for the same inode, which
+            // is checked by inode equality and link count rather than by
+            // content -- two files that merely happen to hold the same bytes
+            // would pass a content check and be a completely different (and
+            // wrong) result.
+            //
+            // `NotSupported` is accepted here and *only* here. memfs, which is
+            // what `/tmp` is, stores its tree as owned nodes -- a directory
+            // holds its children by value -- so two names cannot denote one
+            // node and `FileSystem::link`'s default refusal stands. That is a
+            // real gap in memfs rather than a property of this primitive, so
+            // it is recorded as a skip rather than hidden: the rest of the
+            // linkat assertions below (containment, stale refusal) do not
+            // reach the filesystem at all and run unconditionally.
+            let linked = match Vfs::link_at_pinned(&src, b"f", &dst, b"hard", false) {
+                Ok(()) => true,
+                Err(KernelError::NotSupported) => false,
+                Err(e) => return Err(e),
+            };
+            if linked {
+                let src_meta = Vfs::metadata("/tmp/_pin2/src/f")?;
+                let hard_meta = Vfs::metadata("/tmp/_pin2/dst/hard")?;
+                if src_meta.ino == 0 || src_meta.ino != hard_meta.ino {
+                    serial_println!(
+                        "[vfs]   FAIL: link_at_pinned produced ino {} for a link to ino {} — a \
+                         hard link must be the same inode, not a copy",
+                        hard_meta.ino,
+                        src_meta.ino
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+                if hard_meta.nlinks < 2 {
+                    serial_println!(
+                        "[vfs]   FAIL: link_at_pinned left nlinks = {}, want at least 2 — `rm` \
+                         uses this to decide whether removing a name destroys the data",
+                        hard_meta.nlinks
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // utimensat, including the zero-means-unchanged convention: the
+            // modification time is set and the access time is left alone in the
+            // same call, so a primitive that stamped both from one argument
+            // fails here rather than in a user's backup years later.
+            //
+            // Stamped on a file created for the purpose rather than on the hard
+            // link above, so that this assertion does not silently vanish on a
+            // filesystem that cannot make the link.
+            Vfs::write_file("/tmp/_pin2/dst/stamped", b"t")?;
+            let stamp_meta = Vfs::metadata("/tmp/_pin2/dst/stamped")?;
+            let want_mtime: Timestamp = 1_000_000_000;
+            let before_atime = stamp_meta.accessed_ns;
+            Vfs::set_times_at_pinned(&dst, b"stamped", 0, want_mtime, false)?;
+            match Vfs::metadata_at_pinned(&dst, b"stamped", false) {
+                Ok(m) if m.modified_ns == want_mtime && m.accessed_ns == before_atime => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: set_times_at_pinned(0, {want_mtime}) gave {:?}, want \
+                         mtime {want_mtime} with atime left at {before_atime}",
+                        other.map(|m| (m.accessed_ns, m.modified_ns))
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The one-component containment, on all four.  `..` is the
+            // load-bearing entry: a create that climbed out of the verified
+            // directory is the whole class of bug the pin exists to stop, and
+            // for these four it would be a *write* outside the destination
+            // rather than a read.
+            for bad in [&b".."[..], b".", b"a/b", b"", b"/etc"] {
+                let shown = core::str::from_utf8(bad).unwrap_or("<non-utf8>");
+                match Vfs::mkdir_at_pinned(&dst, bad, 0o755) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: mkdir_at_pinned(.., {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                match Vfs::symlink_at_pinned(&dst, bad, "/tmp") {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: symlink_at_pinned(.., {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                match Vfs::set_times_at_pinned(&dst, bad, 1, 1, false) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: set_times_at_pinned(.., {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                // Both of `linkat`'s names are checked, not just one: a
+                // primitive that validated the source and forwarded the
+                // destination unchecked would create the new name outside the
+                // pinned directory, which is the more dangerous half.
+                match Vfs::link_at_pinned(&src, bad, &dst, b"escaped", false) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: link_at_pinned(src {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                match Vfs::link_at_pinned(&src, b"f", &dst, bad, false) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: link_at_pinned(dst {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+            }
+
+            // Now the swap, on the destination -- the pin that matters for a
+            // recursive copy, because it is where new objects land.  `dst.path`
+            // still resolves, to an impostor that must end up empty.
+            Vfs::rename("/tmp/_pin2/dst", "/tmp/_pin2/aside")?;
+            Vfs::mkdir("/tmp/_pin2/dst")?;
+
+            match Vfs::mkdir_at_pinned(&dst, b"intruder", 0o755) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned through a swapped directory = {other:?}, \
+                         want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match Vfs::symlink_at_pinned(&dst, b"intruder", "/etc/passwd") {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: symlink_at_pinned through a swapped directory = {other:?}, \
+                         want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match Vfs::link_at_pinned(&src, b"f", &dst, b"intruder", false) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: link_at_pinned into a swapped destination = {other:?}, \
+                         want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match Vfs::set_times_at_pinned(&dst, b"intruder", 1, 1, false) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: set_times_at_pinned through a swapped directory = \
+                         {other:?}, want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The half that the return value cannot tell you.  Three of the
+            // four calls above would have *created* `intruder` had they
+            // re-resolved the name, so the impostor being empty is the real
+            // assertion and the StaleHandle results are only corroboration.
+            match Vfs::readdir("/tmp/_pin2/dst") {
+                Ok(v) if v.is_empty() => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: the impostor directory is not empty after four refused \
+                         pinned creates ({:?} entries) — a refusal that still wrote is the bug \
+                         this whole family exists to prevent",
+                        other.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // And a stale *source* is refused too, not merely a stale
+            // destination: the source pin is what says which file gets a second
+            // name, and linking the wrong file is how a hard link becomes a way
+            // to keep a deleted secret alive.
+            let live_dst = Vfs::pin_dir("/tmp/_pin2/dst")?;
+            let stale_src = {
+                Vfs::mkdir("/tmp/_pin2/src/gone")?;
+                let p = Vfs::pin_dir("/tmp/_pin2/src/gone")?;
+                Vfs::rmdir("/tmp/_pin2/src/gone")?;
+                Vfs::mkdir("/tmp/_pin2/src/gone")?;
+                Vfs::write_file("/tmp/_pin2/src/gone/f", b"impostor")?;
+                p
+            };
+            let stale_src_result = Vfs::link_at_pinned(&stale_src, b"f", &live_dst, b"x", false);
+            let _ = Vfs::remove("/tmp/_pin2/src/gone/f");
+            let _ = Vfs::rmdir("/tmp/_pin2/src/gone");
+            match stale_src_result {
+                // `NotFound` is also correct here on a filesystem that reuses
+                // an inode number for the replacement directory: the pin then
+                // genuinely still matches, and the removed directory's `f` is
+                // genuinely absent. Both answers are refusals; what would be
+                // wrong is `Ok`.
+                Err(KernelError::StaleHandle | KernelError::NotFound) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: link_at_pinned from a stale *source* pin = {other:?}, \
+                         want StaleHandle (or NotFound)"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            let _ = Vfs::remove("/tmp/_pin2/dst/x");
+            Ok(linked)
+        };
+
+        let result = run();
+        for p in ["/tmp/_pin2/dst/x", "/tmp/_pin2/src/gone/f"] {
+            let _ = Vfs::remove(p);
+        }
+        let _ = Vfs::rmdir("/tmp/_pin2/src/gone");
+        // The swap above leaves the original directory under `aside`, so its
+        // contents have to go before either name can be removed.
+        for p in [
+            "/tmp/_pin2/aside/hard",
+            "/tmp/_pin2/aside/link",
+            "/tmp/_pin2/dst/intruder",
+        ] {
+            let _ = Vfs::remove(p);
+        }
+        let _ = Vfs::rmdir("/tmp/_pin2/aside/made");
+        cleanup();
+        let linked = result?;
+
+        // Recorded here rather than inside `run` for the borrow reason above.
+        // This is a gap in memfs, not in `link_at_pinned`: everything that
+        // makes the primitive safe -- `check_at_name` and both `verify_pinned`
+        // passes -- runs before the filesystem is reached, so the containment
+        // and stale-handle assertions below were exercised either way. What is
+        // missing is only the proof that a successful link shares an inode.
+        if !linked {
+            skips.record(
+                "pinned linkat: the positive same-inode/nlinks assertion",
+                "/tmp is memfs, whose directories own their children by value, so no two names \
+                 can denote one node and `FileSystem::link` stays at its refusing default",
+            );
+        }
+
+        serial_println!(
+            "[vfs]   pinned mkdir/symlink/link/utimens: OK (a swapped destination refuses all \
+             four with StaleHandle and leaves the impostor directory empty; both of linkat's \
+             names are contained; a symlink target keeps `..` and `/` while a link *name* with \
+             them is refused; mkdirat's mode is stamped, utimensat leaves a zero argument \
+             alone{})",
+            if linked {
+                ", linkat shares an inode"
+            } else {
+                ", linkat's same-inode check skipped -- memfs cannot hard-link"
+            }
+        );
+    } else {
+        skips.record(
+            "pinned mkdir/symlink/link/utimens (the set `cp -r` needs)",
+            "/tmp not mounted",
+        );
+    }
+
     skips.report("[vfs]");
     serial_println!("[vfs] Self-test PASSED{}", skips.suffix());
     Ok(())
@@ -7348,7 +8105,28 @@ fn acl_gate_self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // 6. Removing the ACL restores unrestricted access, and drops the count
+    // 6. The asymmetry `Vfs::link_inner` relies on: a third party who may read
+    //    the file may *not* write it. That pair is what makes `Read` the right
+    //    gate for a hard link's source and `Write` the wrong one — under a
+    //    Write-based gate this user could not hard-link a file they are
+    //    plainly allowed to read, which would break every read-only-source use
+    //    of hard links (content-addressed stores, `cp -l`, dedup backups).
+    //    Step 4 already established the read half; this is the write half, and
+    //    the two together are the decision.
+    match path_access_verdict(path, 4242, 4242, &[], PathAccess::Write) {
+        Err(KernelError::PermissionDenied) => {}
+        other => {
+            serial_println!(
+                "[vfs]     FAIL: ACL_OTHER (r--) got {:?} on write, expected PermissionDenied — \
+                 a read/write split is what `link_inner`'s source gate depends on",
+                other
+            );
+            cleanup();
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // 7. Removing the ACL restores unrestricted access, and drops the count
     //    back to zero so the fast path in the gate is taken again.
     if !super::acl::remove_acl(PATH) {
         serial_println!("[vfs]     FAIL: remove_acl reported nothing to remove");
@@ -7372,7 +8150,7 @@ fn acl_gate_self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    // 7. A path with no ACL is unaffected — the gate fails open, deferring to
+    // 8. A path with no ACL is unaffected — the gate fails open, deferring to
     //    the traditional permission bits.
     if let Err(e) = path_access_verdict(
         Path::new("/tmp/_vfs_acl_absent"),
@@ -7387,7 +8165,9 @@ fn acl_gate_self_test() -> KernelResult<()> {
     }
 
     cleanup();
-    serial_println!("[vfs]     POSIX ACL enforcement: OK (deny, metadata-exempt, root bypass)");
+    serial_println!(
+        "[vfs]     POSIX ACL enforcement: OK (deny, metadata-exempt, root bypass, read/write split)"
+    );
     Ok(())
 }
 

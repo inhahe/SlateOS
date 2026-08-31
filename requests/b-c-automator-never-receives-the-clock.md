@@ -33,6 +33,15 @@ match falls to `_ => Ignored`) and is caught by four tests, none of them the two
 that guarded `tick` before. That is `known-issues.md` lesson 102 in its purest
 form. All five new rows sweep `[ok]`; the table is 67 rows.
 
+One note on provenance, since the history will look odd: lane A landed the same
+arm directly on `main` as `f64ad6259` about nineteen minutes before I finished
+this, under the red-trunk exception, and filed
+`requests/a-c-automator-asked-for-a-clock-and-threw-it-away-i-fixed-it-on-main.md`.
+We wrote it independently and the merge conflicted. I resolved in favour of this
+branch's version — which is A's test split into three named tests plus two more,
+with the mutation rows to own them — and replied in §6 of A's file. Nothing of
+A's was dropped except the name.
+
 **Filed:** 2026-08-31 by Lane B. **Action needed:** one match arm in
 `apps/automator/src/main.rs`, and a regression test written *through*
 `handle_event`. This is your own gate reporting your own tree, so there is

@@ -117,7 +117,7 @@ MUTATIONS = [
     # rows break the *door*, not the worker behind it.
     (
         "the tick never reaches the app, because the window's arm is missing",
-        "            Event::Tick { elapsed_ms } => {\n                // `tick` reports whether anything moved; a tick that changed\n                // nothing must not ask for a frame, or an idle automator\n                // repaints at the tick rate for ever.\n                if self.tick(*elapsed_ms) {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                }\n            }\n            _ => EventResult::Ignored,",
+        "            Event::Tick { elapsed_ms } => {\n                // `tick` reports whether anything moved; a tick that changed\n                // nothing must not ask for a frame, or an idle automator\n                // repaints at the tick rate for ever. That is the same\n                // distinction `on_event` maps onto `Redraw`/`Idle`, so the\n                // answer here needs nothing decided that `tick` has not\n                // already decided.\n                if self.tick(*elapsed_ms) {\n                    EventResult::Consumed\n                } else {\n                    EventResult::Ignored\n                }\n            }\n            _ => EventResult::Ignored,",
         "            _ => EventResult::Ignored,",
         ["the_clock_reaches_the_playback_through_the_door_the_window_knocks_on"],
     ),

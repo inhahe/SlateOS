@@ -3976,6 +3976,57 @@ check_boot_skips() {
 
 check_boot_skips
 
+# Refuse to build when a *conditionally called* self-test has never once been
+# observed to run.
+#
+# The sibling gate above reads `skips`, and a skip is a statement: the suite ran
+# far enough to say so. A suite behind `if fat_ok` says nothing at all when the
+# condition is false -- no SKIP line, no section name, a log region byte-
+# identical to one where the suite was never written. `check-boot-skips.py`
+# cannot see that class at all, which is why it gets its own gate rather than
+# another branch of that one.
+#
+# The evidence is the `gated_ran` field, written by boot-history.py from the
+# `RAN-IF` markers that check-self-tests-wired.py emits earlier in this script.
+# So this is again about *previous* runs, and belongs before the build for the
+# same two reasons: it is history, and it fails in seconds.
+check_gated_selftests() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Never-ran gated self-test check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for gated self-tests that have never announced themselves ==="
+    local out rc
+    out="$("$py" -u "$PROJECT_ROOT/scripts/check-gated-selftests.py" 2>&1)" \
+        && rc=0 || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo "" >&2
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR: refusing to build.  The never-ran gated self-test checker" >&2
+        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
+        echo "checker, not a broken tree.  Fix the checker first." >&2
+    else
+        echo "ERROR: refusing to build.  A self-test that is called from inside" >&2
+        echo "a conditional in kernel/src/main.rs has never once printed the" >&2
+        echo "line it declares with RAN-IF, so it has never run -- while every" >&2
+        echo "summary above it counts it as coverage.  The lines above name" >&2
+        echo "each one and the three ways to resolve it; run" >&2
+        echo "    python scripts/check-gated-selftests.py --list" >&2
+        echo "for the full per-marker standing." >&2
+    fi
+    exit 1
+}
+
+check_gated_selftests
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it

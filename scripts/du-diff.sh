@@ -57,6 +57,16 @@ set -u
 # agree, and without `truncate` it would silently be an ordinary empty file
 # that both sides report as 0.
 DIFF_PROG='du'
+# Not `/usr/bin/du`. `du` and `df` share gnulib's `mountlist`, and the one
+# distribution patch already found in it -- Ubuntu's two extra `ME_DUMMY_0`
+# types, `devtmpfs` and `squashfs` -- is what `du -x` consults when deciding
+# whether a directory it has reached is still on the starting file system. No
+# case here has caught a difference from it, but "no case has caught it yet" is
+# not the same as "the reference is upstream", and `df` is the other half of
+# the same pair: converting one and not the other would leave two harnesses
+# reading the same patched list and disagreeing about whether that matters.
+# See `diff-wsl.sh`'s "Why a built reference" and `design-decisions.md` 700.
+DIFF_GNU_SOURCE=9.4
 DIFF_NEED="dd truncate"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

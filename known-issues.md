@@ -100248,8 +100248,8 @@ whether it has been checked.
 
 | Patch | Effect | Harness | Reached? |
 |---|---|---|---|
-| `cp-n.diff` (Debian #1058752) | `cp -n` skips silently, exit 0, plus a parse-time warning | `cp-diff.sh` | **yes** — see above |
-| `treat-devtmpfs-and-squashfs-as-dummy-filesystems.patch` | `df`/`du` hide `/dev` and `/snap/*` rows | `df-diff.sh`, `du-diff.sh` | **yes** — §700 |
+| `cp-n.diff` (Debian #1058752) | `cp -n` skips silently, exit 0, plus a parse-time warning | `cp-diff.sh` | **yes** — see above; harness converted 2026-08-30 |
+| `treat-devtmpfs-and-squashfs-as-dummy-filesystems.patch` | `df`/`du` hide `/dev` and `/snap/*` rows | `df-diff.sh`, `du-diff.sh` | **yes** — §700; both harnesses converted 2026-08-30 |
 | `80_fedora_sysinfo.patch` | `uname -i -p` print the real processor rather than `unknown` | none | no harness yet |
 | `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch` | `tail` on sysfs files with a 64 K page | `tail-diff.sh` | unchecked; the fixture is ordinary files, so probably not |
 | `CVE-2024-0684.patch` | `split --line-bytes` heap overflow fix (also upstream in 9.5) | `split-diff.sh` | unchecked; a fix, so the patched binary is the *more* correct one |
@@ -100269,19 +100269,25 @@ verifies `--version` before comparing anything. It skips rather than falling
 back if it cannot build, and treats a version mismatch as fatal. `ls-diff.sh`
 is converted and its bespoke copy of that sequence is deleted.
 
+Done since: **`cp-diff.sh` → 9.4** (2026-08-30), which unblocked `cp -n` and
+then `cp -i`; the conversion moved no count, because every `-n` case was
+written after the patch was known and none had been certified against it.
+**`df-diff.sh` and `du-diff.sh` → 9.4** (2026-08-30), which retired §700's
+`drop_hidden` subtraction, its `=` exemption marker and its
+`!Ubuntu hides devtmpfs …` xfail outright — the pristine `df` prints the `/dev`
+row, so there was nothing to subtract. `df-diff.sh` gained three
+`--output` forms that the subtraction had made uncomparable (`--output=source`
+among them, which had been the xfail), and now runs 177 cases with 174 passing
+and 3 xfails, none of them about the distribution. `du-diff.sh` moved no count
+at all: 188 pass, 5 xfail, exactly as before, which is the outcome the note
+below predicts for most of the remaining conversions and is still worth having.
+
 Remaining, in the order they matter:
 
-1. **`cp-diff.sh` → `DIFF_GNU_SOURCE=9.4`**, which is what unblocks `cp -n`.
-   Expect the conversion to move some counts: 244 cases are currently certified
-   against the patched binary, and any place they agreed *because* of a patch
-   will now differ.
-2. **`df-diff.sh` and `du-diff.sh` → 9.4**, after which §700's `drop_hidden`
-   subtraction and its `!Ubuntu hides devtmpfs …` xfail can both be deleted —
-   the pristine `df` prints the `/dev` row, so there is nothing to subtract.
-3. **The rest of the coreutils harnesses**, one at a time. A conversion that
+1. **The rest of the coreutils harnesses**, one at a time. A conversion that
    changes no count is still worth committing: it converts an unexamined
    assumption into a checked one.
-4. **`printf`, `split` and `tail`** carry a specific hypothesis each from the
+2. **`printf`, `split` and `tail`** carry a specific hypothesis each from the
    table above; converting them tests it.
 
 Harnesses whose reference is *not* coreutils are out of scope and always were:

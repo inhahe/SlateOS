@@ -93,6 +93,8 @@ fi
 # runs the masked half. `dd` is, because `fs/a`'s Used figure is the whole
 # point of that mount and an empty tmpfs would make several cases vacuous.
 DIFF_PROG='df'
+# Not `/usr/bin/df`; see "rows the reference used to hide" below.
+DIFF_GNU_SOURCE=9.4
 DIFF_NEED="dd"
 DIFF_FORWARD="DF_DIFF_NS"
 # shellcheck source=diff-wsl.sh
@@ -179,49 +181,38 @@ diff_cleanup() {
     rm -rf "$DIFF_TMP"
 }
 
-# --- rows the reference hides and upstream GNU does not -----------------------
+# --- rows the reference used to hide, and no longer does ----------------------
 #
-# Ubuntu's `df` is not upstream `df`. Its `ME_DUMMY_0` -- the macro naming the
-# file system types that count as "dummy", i.e. hidden unless `-a` or an
-# explicit operand asks for them -- carries two types that GNU coreutils 9.4
-# does not have: `devtmpfs` and `squashfs`. That is visible in the shipped
-# binary's string table, where the two sit inside the same run of literals as
-# `autofs`, `subfs`, `rpc_pipefs` and `kernfs`, and it is not in the 9.4 source
-# nor in gnulib master. The practical effect here is that the reference omits
-# the `/dev` row from every whole-table listing and ours prints it, on 37 cases.
+# `DIFF_GNU_SOURCE=9.4` above is here for one measured reason. Ubuntu's `df` is
+# not upstream `df`: its `ME_DUMMY_0` -- the macro naming the file system types
+# that count as "dummy", i.e. hidden unless `-a` or an explicit operand asks for
+# them -- carries two types that GNU coreutils 9.4 does not have, `devtmpfs` and
+# `squashfs`. That is visible in the shipped binary's string table, where the
+# two sit inside the same run of literals as `autofs`, `subfs`, `rpc_pipefs` and
+# `kernfs`, and it is in neither the 9.4 source nor gnulib master. The practical
+# effect was that the installed reference omitted the `/dev` row from every
+# whole-table listing while ours printed it, on 37 cases.
 #
-# Ours follows upstream, which is the specification this transcription is
-# against, so the divergence is the reference's and must not be "fixed" in the
-# subject. It is removed from the comparison instead: rows for file systems of
-# those types are deleted from *both* sides. Both, not just ours -- the
-# reference does print them when `-a` or an operand bypasses the dummy rule, and
-# deleting one-sidedly would invent a failure there.
+# This harness used to answer that by deleting rows of those types from *both*
+# sides before comparing (`drop_hidden`), with a `=` marker exempting the cases
+# that were about one of those file systems, and a `!`-marked xfail for the one
+# whole-table form -- `--output=source` -- that has no target column and so no
+# way to name the row to delete. All of that is gone: the reference is now built
+# from the GNU tarball and does not hide the rows at all, so there is nothing to
+# subtract and `--output=source` is a real case.
 #
-# The exemption marker `=` turns this off for a case that is *about* one of
-# those file systems, where deleting the row would leave nothing to compare.
+# That was the trigger `design-decisions.md` section 700 named for itself. It
+# chose subtraction over a built reference on cost grounds and wrote down what
+# would overturn the choice: "if a second distribution patch is ever found,
+# [building a pristine reference] becomes the right answer and should be
+# revisited for all the harnesses at once." `cp -n` was that second patch, and
+# the machinery arrived with it -- `diff-wsl.sh`'s "Why a built reference".
 #
-# The full reasoning, and what to do if a second distribution patch is ever
-# found, is `design-decisions.md` section 700.
-hidden_mounts=$DIFF_TMP/hidden-mounts
-awk '{ target = $5
-       for (i = 6; i <= NF; i++)
-         if ($i == "-") { type = $(i + 1); break }
-       if (type == "devtmpfs" || type == "squashfs") print target }' \
-    /proc/self/mountinfo >"$hidden_mounts" 2>/dev/null || : >"$hidden_mounts"
-
-# Delete from $1 every line having a field equal to one of those mount points.
-# `print` reproduces the record verbatim, so column padding survives; awk does
-# append a final newline the captured output did not have, but it does so to
-# both sides and the `rc=` sentinel keeps a missing newline visible either way.
-# `LC_ALL=C` because one fixture's mount point holds a `\377`, and a UTF-8
-# locale makes awk warn about it on stderr — a warning that would then be
-# indistinguishable from a diagnostic under test.
-drop_hidden() {
-    [ -s "$hidden_mounts" ] || return 0
-    LC_ALL=C awk 'NR == FNR { hide[$0] = 1; next }
-         { for (i = 1; i <= NF; i++) if ($i in hide) next
-           print }' "$hidden_mounts" "$1" >"$1.kept" && mv "$1.kept" "$1"
-}
+# Note what the conversion does *not* change: ours still follows upstream
+# rather than the distribution, which is what section 700 decided and what made
+# the subtraction correct while it lasted. What has changed is only *where* the
+# divergence is removed. It is no longer removed in the harness, because it is
+# no longer in the reference.
 
 # The scratch files the two sides are captured into live on the *host* file
 # system, not on any of the fixtures above. Writing them is what would otherwise
@@ -246,13 +237,11 @@ df() { PATH=$DF_PATH command df "$@"; }
 #   !why|cmd  the two are expected to differ, for the stated reason (xfail)
 #   ~cmd      compare with every digit rewritten to `#` (see the header)
 #   @cmd      needs the private mount namespace; skipped without it
-#   =cmd      compare the distro-hidden rows too (see `drop_hidden`)
 run_case() {
     line=$1
     expect_diff=0
     mask=0
     needs_fixtures=0
-    keep_hidden=0
     reason=""
     while :; do
         case $line in
@@ -264,7 +253,6 @@ run_case() {
                 ;;
             '~'*) mask=1;           line=${line#\~} ;;
             '@'*) needs_fixtures=1; line=${line#@} ;;
-            '='*) keep_hidden=1;    line=${line#=} ;;
             *) break ;;
         esac
     done
@@ -280,13 +268,6 @@ run_case() {
     # could not see the end of a line would be blind to exactly that rule.
     ( DF_PATH=$GNU_PATH;  eval "$line"; printf 'rc=%s' "$?" ) >"$a_file" 2>&1
     ( DF_PATH=$OURS_PATH; eval "$line"; printf 'rc=%s' "$?" ) >"$b_file" 2>&1
-
-    # Before the mask, not after: a hidden mount point can carry digits
-    # (`/snap/core24/1587`), and masking them first would stop it matching.
-    if [ "$keep_hidden" = 0 ]; then
-        drop_hidden "$a_file"
-        drop_hidden "$b_file"
-    fi
 
     if [ "$mask" = 1 ]; then
         sed -i 's/[0-9]/#/g' "$a_file" "$b_file"
@@ -365,14 +346,15 @@ done <<'CASES'
 
 # --- the output option -------------------------------------------------------
 #
-# The whole-table forms here all carry `target`, because that is the column
-# `drop_hidden` identifies a row by and without it the reference's extra
-# `devtmpfs` row cannot be told from any other `none`. The field rendering of
-# the target-less forms is covered by the fixture cases below, which name one
-# file system and so have nothing to identify. One target-less form is kept as
-# an xfail, as the harness's own record that the divergence is still there.
+# Most of the whole-table forms here carry `target`, which is a leftover of the
+# subtraction described above: it named a row by its mount point, so a form
+# without that column could not be compared at all. The target-less forms are
+# real cases now, and `--output=source` in particular was the xfail that stood
+# as the harness's own record that the divergence was still there.
 ~df --output
-!Ubuntu hides devtmpfs; with no target column the extra row cannot be dropped|~df --output=source
+~df --output=source
+~df --output=size,used,avail,pcent
+~df --output=fstype,size
 ~df --output=target
 ~df --output=fstype,target
 ~df --output=source,target
@@ -485,10 +467,10 @@ done <<'CASES'
 # --- operands that are devices and other odd things --------------------------
 ~df /
 ~df / /
-=~df /dev
+~df /dev
 ~df /proc
-=~df /dev/null
-=~df --output=target /dev/null
+~df /dev/null
+~df --output=target /dev/null
 ~df -a /proc
 
 # --- diagnostics -------------------------------------------------------------

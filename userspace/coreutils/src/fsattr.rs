@@ -917,8 +917,13 @@ pub fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
 
     unsafe extern "C" {
-        fn setxattr(path: *const u8, name: *const u8, value: *const u8, size: usize, flags: i32)
-        -> i32;
+        fn setxattr(
+            path: *const u8,
+            name: *const u8,
+            value: *const u8,
+            size: usize,
+            flags: i32,
+        ) -> i32;
         fn lsetxattr(
             path: *const u8,
             name: *const u8,
@@ -1484,7 +1489,10 @@ mod tests {
             On::Path(&dst, Link::NoFollow),
             Xattrs::Ordinary,
         );
-        assert!(failures.is_empty(), "unexpected failures copying attributes");
+        assert!(
+            failures.is_empty(),
+            "unexpected failures copying attributes"
+        );
 
         let mut names = list_xattrs(On::Path(&dst, Link::NoFollow)).unwrap();
         names.sort();
@@ -1525,7 +1533,9 @@ mod tests {
         );
         assert!(failures.is_empty());
         assert!(
-            list_xattrs(On::Path(&dst, Link::NoFollow)).unwrap().is_empty(),
+            list_xattrs(On::Path(&dst, Link::NoFollow))
+                .unwrap()
+                .is_empty(),
             "a permissions-only copy carried an ordinary attribute"
         );
 

@@ -2345,10 +2345,7 @@ fn place_entity<O: Write, E: Write>(
     let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
     let dest_multiply_linked =
         job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
-    if dest_exists
-        && !dest_is_dir
-        && (metadata.file_type().is_symlink() || dest_multiply_linked)
-    {
+    if dest_exists && !dest_is_dir && (metadata.file_type().is_symlink() || dest_multiply_linked) {
         if !remove_before_writing(target, job) {
             return Placed::Failed;
         }
@@ -3455,11 +3452,9 @@ fn xattr_sentence(at: &fsattr::XattrStep, src: &Path, dst: &Path) -> String {
     // and libattr quotes the name with it as well as the path.
     match at {
         fsattr::XattrStep::List => format!("listing attributes of {}", quoteaf_os(src)),
-        fsattr::XattrStep::Get(name) => format!(
-            "getting attribute {} of {}",
-            quoteaf(name),
-            quoteaf_os(src)
-        ),
+        fsattr::XattrStep::Get(name) => {
+            format!("getting attribute {} of {}", quoteaf(name), quoteaf_os(src))
+        }
         fsattr::XattrStep::Set(name) => format!(
             "setting attribute {} for {}",
             quoteaf(name),
@@ -4581,10 +4576,7 @@ mod tests {
         for asked in ["--preserve=all", "-a"] {
             let (g, _) = run_parse(&[asked, "a", "b"]);
             assert!(g.preserve.xattr, "{asked} asks for them");
-            assert!(
-                !g.require_preserve_xattr,
-                "{asked} does not insist on them"
-            );
+            assert!(!g.require_preserve_xattr, "{asked} does not insist on them");
         }
 
         let (h, _) = run_parse(&["--preserve=xattr", "--no-preserve=xattr", "a", "b"]);
@@ -4600,11 +4592,7 @@ mod tests {
     #[test]
     fn the_unwritable_attribute_is_refused_one_way_only() {
         let e = fail(&["--preserve=context", "a", "b"]);
-        assert!(
-            e.sentence.contains("not implemented"),
-            "{:?}",
-            e.sentence
-        );
+        assert!(e.sentence.contains("not implemented"), "{:?}", e.sentence);
         assert!(
             e.sentence.contains("context"),
             "the diagnostic names the word, not the option: {:?}",
@@ -7729,7 +7717,11 @@ mod tests {
 
         let (ok, err) = cp(&PRESERVE, &[&a, &b]);
         assert!(ok, "{err}");
-        assert_eq!(xattr_of(&b, b"user.tag"), None, "-p is not --preserve=xattr");
+        assert_eq!(
+            xattr_of(&b, b"user.tag"),
+            None,
+            "-p is not --preserve=xattr"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

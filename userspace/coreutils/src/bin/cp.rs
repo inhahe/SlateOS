@@ -81,6 +81,38 @@
 //!    look for. See `known-issues.md` ->
 //!    `B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT`.
 //!
+//! # An eighth, from the same harness: three wrong answers about permissions
+//!
+//! 8. **`fs::copy` gave the destination the source's mode, exactly, in every
+//!    case.** That is wrong three separate ways, and two of them publish a file
+//!    that was private:
+//!
+//!    * *A new file ignored the umask.* `fs::copy` creates the destination and
+//!      then `chmod`s it to the source's mode, so a 0777 source produced a 0777
+//!      copy. GNU passes the mode to `open` and lets the kernel subtract the
+//!      umask, so under the ordinary 022 the copy is 0755. Measured, both ways,
+//!      across three umasks — see [`mode_of_a_new_file_is_narrowed_by_umask`].
+//!    * *An existing destination had its mode overwritten.* `cp public private`
+//!      — a 0777 source over somebody's 0600 file — left that file 0777. GNU
+//!      reopens an existing destination **without** a mode argument, so its
+//!      permissions are not touched at all; only its contents are. This is the
+//!      one that is a security bug rather than a cosmetic one, and no amount of
+//!      reading the old code would have suggested looking for it, because the
+//!      old code mentioned modes for files nowhere at all.
+//!    * *A directory ignored the umask too, and had a window.* `cp -r` of a
+//!      1777 directory produced 1777 where GNU produces 1755, and the copy was
+//!      made group- and other-writable *before* its contents were written —
+//!      a window in which anyone could add a file to a directory that is about
+//!      to look like a faithful copy. [`copy_tree`] now does GNU's dance:
+//!      withhold group/other write at `mkdir`, force owner-rwx on if the source
+//!      lacked it, and put both back at the end, less the umask.
+//!
+//!    Bug 3 above was the same subject and did not go far enough: it noticed
+//!    that a copied directory came out *wider* than its source and fixed that
+//!    by copying the mode over verbatim, which is a different wrong answer. The
+//!    lesson is bug 7's — a fix derived by reading is worth what the reading
+//!    was worth, and only measurement says whether it was right.
+//!
 //! # Options this implementation does not have
 //!
 //! Everything except `-r`/`-R`/`--recursive`. They are recognised and rejected
@@ -101,9 +133,17 @@ use coreutils::quote::quoteaf_os;
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+
+// The file-mode creation mask. There is no read-only spelling of it in POSIX —
+// reading it means setting it — and `std` exposes no wrapper, so this is the
+// libc call itself. `mkdir.rs` declares it the same way for the same reason.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn umask(mask: u32) -> u32;
+}
 
 /// `cp`'s usage status is 1, like almost every utility's; see
 /// [`coreutils::getopt::Error`] for the two that differ and why.
@@ -519,19 +559,7 @@ fn copy_one<W: Write>(
     }
 
     if !metadata.is_dir() {
-        return match fs::copy(src_path, &target) {
-            Ok(_) => true,
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(
-                    err,
-                    "cp: cannot copy {} to {}: {why}",
-                    quoteaf_os(src),
-                    quoteaf_os(&target)
-                );
-                false
-            }
-        };
+        return copy_regular_file(src_path, &metadata, &target, err);
     }
 
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
@@ -546,7 +574,7 @@ fn copy_one<W: Write>(
         return false;
     }
 
-    copy_tree(src_path, &target, err)
+    copy_tree(src_path, permission_bits(&metadata), &target, err)
 }
 
 /// Does `dst` already name the very file `src_meta` describes?
@@ -653,88 +681,119 @@ fn resolve_as_far_as_exists(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Copy the tree at `src` to `dest`, reporting every failure to `err`.
+/// Copy the tree at `src`, whose permission bits are `src_mode`, to `dest`,
+/// reporting every failure to `err`.
 ///
 /// Returns `false` if anything failed. A failure on one entry does not abandon
 /// the others — module docs, bug 6.
-fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
-    if let Err(e) = fs::create_dir_all(dest) {
-        let why = strerror(&e);
-        let _ = writeln!(
-            err,
-            "cp: cannot create directory {}: {why}",
-            quoteaf_os(dest)
-        );
-        return false;
-    }
-
-    let entries = match fs::read_dir(src) {
-        Ok(e) => e,
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
-            return false;
-        }
-    };
-
+///
+/// The mode is taken as an argument rather than re-stat'd because the caller
+/// has already stat'd `src` and a second look could see a different directory.
+fn copy_tree<W: Write>(src: &Path, src_mode: u32, dest: &Path, err: &mut W) -> bool {
     let mut ok = true;
-    for entry in entries {
-        let entry = match entry {
-            Ok(e) => e,
+
+    // Group- and other-write are *withheld* at `mkdir` and put back at the end,
+    // so that there is no window in which the directory exists, is writable by
+    // someone else, and is not yet filled. That is GNU's `omitted_permissions`
+    // (`copy.c`), and it is the reason a copy is not simply `mkdir(src_mode)`.
+    let mut omitted = src_mode & 0o022;
+
+    // The second adjustment, in the opposite direction: a source that is not
+    // owner-rwx — 0500 is perfectly ordinary — would leave this process unable
+    // to fill the directory it has just made. So owner-rwx goes on now and the
+    // real mode goes back at the end. `dst_mode` is what to go back *to*.
+    let mut dst_mode = 0;
+    let mut restore = false;
+
+    match make_dir(dest, src_mode & !omitted) {
+        Ok(true) => match permission_bits_of(dest) {
+            Ok(made) => {
+                if made & 0o700 != 0o700 {
+                    dst_mode = made;
+                    restore = true;
+                    if let Err(e) = set_mode(dest, made | 0o700) {
+                        let why = strerror(&e);
+                        let _ = writeln!(
+                            err,
+                            "cp: setting permissions for {}: {why}",
+                            quoteaf_os(dest)
+                        );
+                        return false;
+                    }
+                }
+            }
             Err(e) => {
                 let why = strerror(&e);
-                let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
-                ok = false;
-                continue;
+                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
+                return false;
             }
-        };
-        let from = entry.path();
-        let to = dest.join(entry.file_name());
-
-        // `DirEntry::file_type` does **not** follow symlinks, unlike
-        // `Path::is_dir`. That is the whole of the fix for bug 1.
-        let kind = match entry.file_type() {
-            Ok(k) => k,
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
-                ok = false;
-                continue;
-            }
-        };
-
-        let outcome = if kind.is_symlink() {
-            clone_symlink(&from, &to)
-        } else if kind.is_dir() {
-            if !copy_tree(&from, &to, err) {
-                ok = false;
-            }
-            continue;
-        } else {
-            fs::copy(&from, &to).map(|_| ())
-        };
-
-        if let Err(e) = outcome {
+        },
+        Ok(false) => {
+            // The destination directory was already there. GNU leaves its mode
+            // alone — exactly as it leaves an existing *file*'s mode alone — so
+            // there is nothing to withhold and nothing to put back.
+            omitted = 0;
+        }
+        Err(e) => {
             let why = strerror(&e);
             let _ = writeln!(
                 err,
-                "cp: cannot copy {} to {}: {why}",
-                quoteaf_os(&from),
-                quoteaf_os(&to)
+                "cp: cannot create directory {}: {why}",
+                quoteaf_os(dest)
             );
+            return false;
+        }
+    }
+
+    // An unreadable source directory is *not* a reason to leave the copy
+    // early: the directory has already been created, and it must still end up
+    // with the mode it is supposed to have. GNU carries the mode over in this
+    // case too, and a `dst` left at the forced owner-rwx would be a copy of a
+    // 0500 directory that anyone could write into.
+    match fs::read_dir(src) {
+        Ok(entries) => {
+            for entry in entries {
+                if !copy_entry(&entry, dest, err) {
+                    ok = false;
+                }
+            }
+        }
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(src));
             ok = false;
         }
     }
 
-    // Last, not first: a source mode like 0500 applied before the contents were
-    // written would lock this process out of the directory it is filling.
-    // Module docs, bug 3 — without this a 0700 source becomes a 0755 copy and
-    // everything under it is published.
-    if let Err(e) = carry_over_mode(src, dest) {
+    // What was withheld goes back on, less the umask — which is the subtraction
+    // the kernel would have done had `mkdir` been handed the mode outright, and
+    // is why a 1777 source produces a 1755 copy under the ordinary 022. Skipping
+    // it would publish group-write on every copy of a 0775 directory made by a
+    // process whose umask says otherwise.
+    omitted &= !cached_umask();
+    if omitted != 0 && !restore {
+        // Deducing the mode the directory actually got is not worth attempting
+        // — `mkdir` applies implementation-defined rules to the special bits —
+        // so it is read back. GNU says the same in the same place.
+        match permission_bits_of(dest) {
+            Ok(now) => {
+                dst_mode = now;
+                if omitted & !now != 0 {
+                    restore = true;
+                }
+            }
+            Err(e) => {
+                let why = strerror(&e);
+                let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(dest));
+                ok = false;
+            }
+        }
+    }
+    if restore && let Err(e) = set_mode(dest, dst_mode | omitted) {
         let why = strerror(&e);
         let _ = writeln!(
             err,
-            "cp: cannot set permissions on {}: {why}",
+            "cp: preserving permissions for {}: {why}",
             quoteaf_os(dest)
         );
         ok = false;
@@ -742,19 +801,316 @@ fn copy_tree<W: Write>(src: &Path, dest: &Path, err: &mut W) -> bool {
     ok
 }
 
-/// Give `dest` the permission bits of `src`.
-#[cfg(unix)]
-fn carry_over_mode(src: &Path, dest: &Path) -> io::Result<()> {
-    let mode = fs::metadata(src)?.permissions();
-    fs::set_permissions(dest, mode)
+/// One entry of a directory being walked. Split out of [`copy_tree`] only to
+/// keep the mode bookkeeping either side of the walk readable in one screen.
+fn copy_entry<W: Write>(entry: &io::Result<fs::DirEntry>, dest: &Path, err: &mut W) -> bool {
+    let entry = match entry {
+        Ok(e) => e,
+        Err(e) => {
+            let why = strerror(e);
+            let _ = writeln!(err, "cp: cannot read directory {}: {why}", quoteaf_os(dest));
+            return false;
+        }
+    };
+    let from = entry.path();
+    let to = dest.join(entry.file_name());
+
+    // `DirEntry::metadata` does **not** follow symlinks, unlike `Path::is_dir`.
+    // That is the whole of the fix for bug 1, and it also hands over the mode
+    // the copy is to be created with, which a second `stat` might not.
+    let meta = match entry.metadata() {
+        Ok(m) => m,
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&from));
+            return false;
+        }
+    };
+
+    if meta.file_type().is_symlink() {
+        return match clone_symlink(&from, &to) {
+            Ok(()) => true,
+            Err(e) => {
+                let why = strerror(&e);
+                let _ = writeln!(
+                    err,
+                    "cp: cannot create symbolic link {}: {why}",
+                    quoteaf_os(&to)
+                );
+                false
+            }
+        };
+    }
+    if meta.is_dir() {
+        return copy_tree(&from, permission_bits(&meta), &to, err);
+    }
+    copy_regular_file(&from, &meta, &to, err)
 }
 
-/// Windows has no mode bits to carry — `set_permissions` there only toggles the
-/// read-only flag, and copying that onto a directory is not what POSIX is asking
-/// for. The target OS is the `#[cfg(unix)]` branch above.
+/// Create `dest` as a directory with mode `mode`, before the umask is applied.
+///
+/// `Ok(true)` if it was created, `Ok(false)` if a directory was already there —
+/// a distinction the caller needs, because an existing directory's mode is left
+/// alone. Plain `create_dir` and not `create_dir_all`: GNU's single `mkdirat`
+/// does not invent missing parents either, and `cp -r a no/such/dir` must fail
+/// rather than quietly build the path.
+fn make_dir(dest: &Path, mode: u32) -> io::Result<bool> {
+    match create_dir_with_mode(dest, mode) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            // Only "already there" if it is a *directory*. A regular file under
+            // that name is a failure, and reporting it as one is what stops the
+            // walk from writing a directory's contents into whatever it found.
+            if fs::metadata(dest).is_ok_and(|m| m.is_dir()) {
+                Ok(false)
+            } else {
+                Err(e)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Copy the regular file `src` to `dst`.
+///
+/// This does by hand what `fs::copy` does in one call, for two reasons that are
+/// not about speed:
+///
+/// * **`fs::copy` reports four different failures as one error.** The source
+///   not opening, the destination not being creatable, a read fault and a write
+///   fault all arrive as a single `io::Error` with nothing to say which
+///   happened. GNU has a different sentence for each, and which sentence is
+///   printed is the difference between knowing that a disk is full and knowing
+///   that a file is unreadable.
+/// * **`fs::copy` ends by giving the destination the source's exact mode.**
+///   That is wrong twice: it ignores the umask on a file it has just created,
+///   so a 0777 source lands as 0777 where GNU lands it as 0755; and it
+///   overwrites the mode of a destination that *already existed*, so copying a
+///   0777 file over somebody's 0600 one published it. See module docs, bug 8.
+fn copy_regular_file<W: Write>(
+    src: &Path,
+    src_meta: &fs::Metadata,
+    dst: &Path,
+    err: &mut W,
+) -> bool {
+    let mut input = match fs::File::open(src) {
+        Ok(f) => f,
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                err,
+                "cp: cannot open {} for reading: {why}",
+                quoteaf_os(src)
+            );
+            return false;
+        }
+    };
+
+    let mut output = match create_destination(src_meta, dst) {
+        Ok(f) => f,
+        Err(DestError::Dangling) => {
+            let _ = writeln!(
+                err,
+                "cp: not writing through dangling symlink {}",
+                quoteaf_os(dst)
+            );
+            return false;
+        }
+        Err(DestError::Io(e)) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                err,
+                "cp: cannot create regular file {}: {why}",
+                quoteaf_os(dst)
+            );
+            return false;
+        }
+    };
+
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match input.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            // A signal arriving mid-read is not a read failure, and reporting
+            // it as one would make `cp` unreliable under any job control.
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                let why = strerror(&e);
+                let _ = writeln!(err, "cp: error reading {}: {why}", quoteaf_os(src));
+                return false;
+            }
+        };
+        let Some(chunk) = buf.get(..n) else {
+            // Unreachable: `read` returns at most the buffer's length. Handled
+            // rather than indexed so the crate's `indexing_slicing` lint has
+            // nothing to complain about and a broken `Read` cannot panic here.
+            break;
+        };
+        if let Err(e) = output.write_all(chunk) {
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: error writing {}: {why}", quoteaf_os(dst));
+            return false;
+        }
+    }
+    true
+}
+
+/// Why a destination could not be opened for writing.
+enum DestError {
+    Io(io::Error),
+    /// The name is a symlink that points at nothing. Resolving it to a
+    /// (directory, name) pair to write through is racy by construction, so GNU
+    /// refuses and says so rather than creating the link's target.
+    Dangling,
+}
+
+/// Open `dst` for writing, creating it with the source's mode if it is new and
+/// leaving its mode entirely alone if it is not.
+///
+/// The order is GNU's: try `O_CREAT|O_EXCL` with the mode, and treat `EEXIST`
+/// as "it was already there, reopen it without a mode". That is what keeps the
+/// umask in the kernel's hands for a new file — the only place it can be
+/// applied without a window in which the file exists at the wider mode — and
+/// what leaves an existing file's permissions untouched.
+fn create_destination(src_meta: &fs::Metadata, dst: &Path) -> Result<fs::File, DestError> {
+    match open_new(dst, permission_bits(src_meta)) {
+        Ok(f) => return Ok(f),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(DestError::Io(e)),
+    }
+
+    // `symlink_metadata` sees the link itself; `metadata` follows it, so
+    // failing there is exactly "points at nothing".
+    if fs::symlink_metadata(dst).is_ok_and(|m| m.file_type().is_symlink())
+        && fs::metadata(dst).is_err()
+    {
+        return Err(DestError::Dangling);
+    }
+
+    fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(dst)
+        .map_err(DestError::Io)
+}
+
+/// `O_WRONLY|O_CREAT|O_EXCL` with `mode`, which the kernel narrows by the umask.
+#[cfg(unix)]
+fn open_new(dst: &Path, mode: u32) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode)
+        .open(dst)
+}
+
+/// The development host has no mode to give, so the file is created with
+/// whatever Windows would have given it. The target OS is the `#[cfg(unix)]`
+/// arm above; see [`permission_bits`].
 #[cfg(not(unix))]
-fn carry_over_mode(_src: &Path, _dest: &Path) -> io::Result<()> {
+fn open_new(dst: &Path, _mode: u32) -> io::Result<fs::File> {
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(dst)
+}
+
+/// The permission and special bits — `07777` — of `meta`.
+#[cfg(unix)]
+fn permission_bits(meta: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode() & 0o7777
+}
+
+/// Windows has no mode bits. `0o777` rather than `0` so that the arithmetic in
+/// [`copy_tree`] — withhold group/other write, put it back if the directory did
+/// not get it — cancels out to no change at all, which is the right answer on a
+/// host where every `chmod` is a no-op anyway.
+#[cfg(not(unix))]
+fn permission_bits(_meta: &fs::Metadata) -> u32 {
+    0o777
+}
+
+/// `permission_bits` of the name `path`, without following a final symlink.
+fn permission_bits_of(path: &Path) -> io::Result<u32> {
+    fs::symlink_metadata(path).map(|m| permission_bits(&m))
+}
+
+/// `mkdir(path, mode)`; the kernel narrows `mode` by the umask.
+#[cfg(unix)]
+fn create_dir_with_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new().mode(mode).create(path)
+}
+
+/// See [`open_new`]'s non-unix arm.
+#[cfg(not(unix))]
+fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
+    fs::create_dir(path)
+}
+
+/// `chmod(path, mode)`.
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode))
+}
+
+/// `set_permissions` on Windows only toggles the read-only flag, which is not
+/// what POSIX is asking for; doing nothing is the honest answer. The target OS
+/// is the `#[cfg(unix)]` arm above.
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
+}
+
+/// The process's file-mode creation mask.
+///
+/// There is no read-only spelling of it in POSIX — reading it means setting it
+/// — so this sets it to deny everything and immediately puts the old value
+/// back. That is GNU's `cached_umask` (`copy.c`) verbatim, and it is safe for
+/// the reason it is safe there: `cp` is single-threaded and creates nothing
+/// between the two calls, so nothing can observe the wider-denying mask.
+#[cfg(unix)]
+fn read_umask() -> u32 {
+    // SAFETY: `umask` cannot fail, takes and returns a plain integer, and
+    // touches no memory. Setting it back to the value just read leaves the
+    // process's mask exactly as it was found.
+    unsafe {
+        let old = umask(0o777);
+        umask(old);
+        old
+    }
+}
+
+/// [`read_umask`], remembered, as GNU remembers it: a deep `cp -r` should open
+/// that momentary all-denying window once, not once per directory.
+///
+/// A real `cp` is one process with one umask for its whole life, so caching
+/// changes no answer. The **test build does not cache** — `cargo test` runs
+/// dozens of copies inside one process, and the mode tests set the umask around
+/// each one, so a value remembered from the first would make every later row
+/// assert against the wrong mask. That is the cache being wrong about the test
+/// harness, not the tests being wrong about `cp`.
+#[cfg(all(unix, not(test)))]
+fn cached_umask() -> u32 {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<u32> = OnceLock::new();
+    *CACHE.get_or_init(read_umask)
+}
+
+/// See the caching note above.
+#[cfg(all(unix, test))]
+fn cached_umask() -> u32 {
+    read_umask()
+}
+
+/// Windows has no umask. Zero makes [`copy_tree`]'s subtraction a no-op.
+#[cfg(not(unix))]
+fn cached_umask() -> u32 {
+    0
 }
 
 /// Reproduce the symlink at `src` as a symlink at `at`.
@@ -1207,6 +1563,159 @@ mod tests {
         let (ok, err) = cp(&PLAIN, &[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------- modes, module docs 8 --
+    //
+    // These four run only on a POSIX host, because there is nothing on Windows
+    // for them to assert about. `scripts/cp-diff.sh` is what certifies the same
+    // behaviour against GNU itself; these exist so that a regression is caught
+    // by `cargo test` on the target rather than only by a harness that needs a
+    // GNU userland to run.
+
+    /// Set the umask, run `f`, put the umask back.
+    ///
+    /// The umask is process-wide and `cargo test` runs tests on threads of one
+    /// process, so two tests doing this at once would each see the other's
+    /// mask. The lock makes them take turns. It does *not* protect against an
+    /// unrelated test creating a file while a mask is installed — nothing can,
+    /// short of running single-threaded — which is why these are the only tests
+    /// in this file that assert a mode at all.
+    #[cfg(unix)]
+    fn with_umask<T>(mask: u32, f: impl FnOnce() -> T) -> T {
+        use std::sync::Mutex;
+        static TURN: Mutex<()> = Mutex::new(());
+        // A poisoned lock means another umask test panicked; its `old` was
+        // restored on unwind only if it got that far, so the mask may be
+        // whatever it left. Proceeding is still the right call: the panic will
+        // already be reported, and refusing here would hide this test's result
+        // behind that one.
+        let _guard = TURN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: `umask` cannot fail, takes and returns a plain integer, and
+        // touches no memory.
+        let old = unsafe { umask(mask) };
+        let out = f();
+        // SAFETY: as above.
+        unsafe { umask(old) };
+        out
+    }
+
+    #[cfg(unix)]
+    fn mode_of(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(p).unwrap().permissions().mode() & 0o7777
+    }
+
+    #[cfg(unix)]
+    fn set_test_mode(p: &Path, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(p, fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    /// A new destination is created with the source's mode *narrowed by the
+    /// umask* — which is what the kernel does when the mode is passed to
+    /// `open`, and what `fs::copy`'s trailing `chmod` undid.
+    ///
+    /// The expectations are measured, not derived: each row was produced by
+    /// GNU `cp` under WSL before it was written down here.
+    #[cfg(unix)]
+    #[test]
+    fn mode_of_a_new_file_is_narrowed_by_umask() {
+        // (umask, source mode, what GNU produces)
+        let rows: &[(u32, u32, u32)] = &[
+            (0o022, 0o777, 0o755),
+            (0o022, 0o600, 0o600),
+            (0o000, 0o777, 0o777),
+            (0o077, 0o777, 0o700),
+            (0o077, 0o600, 0o600),
+        ];
+        let dir = scratch("file_mode");
+        for (i, &(mask, src_mode, want)) in rows.iter().enumerate() {
+            let a = dir.join(format!("a{i}"));
+            let b = dir.join(format!("b{i}"));
+            fs::write(&a, b"x").unwrap();
+            set_test_mode(&a, src_mode);
+            let (ok, err) = with_umask(mask, || cp(&PLAIN, &[&a, &b]));
+            assert!(ok, "{err}");
+            assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The security half of module docs, bug 8: copying a wide file over a
+    /// narrow one must not widen the narrow one. GNU reopens an existing
+    /// destination with no mode argument at all.
+    #[cfg(unix)]
+    #[test]
+    fn an_existing_destination_keeps_its_own_mode() {
+        let dir = scratch("keep_mode");
+        let a = dir.join("public");
+        let b = dir.join("private");
+        fs::write(&a, b"wide").unwrap();
+        set_test_mode(&a, 0o777);
+        fs::write(&b, b"narrow").unwrap();
+        set_test_mode(&b, 0o600);
+
+        let (ok, err) = cp(&PLAIN, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(fs::read(&b).unwrap(), b"wide", "contents are copied");
+        assert_eq!(mode_of(&b), 0o600, "permissions are not");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A copied directory ends at `src & 07777 & ~umask`, sticky bit included
+    /// — 1777 under 022 is 1755, which is what GNU produces and what the
+    /// verbatim mode carry-over got wrong.
+    #[cfg(unix)]
+    #[test]
+    fn mode_of_a_copied_directory_is_narrowed_by_umask() {
+        let rows: &[(u32, u32, u32)] = &[
+            (0o022, 0o777, 0o755),
+            (0o022, 0o1777, 0o1755),
+            (0o000, 0o1777, 0o1777),
+            (0o077, 0o1777, 0o1700),
+            (0o022, 0o700, 0o700),
+        ];
+        let dir = scratch("dir_mode");
+        for (i, &(mask, src_mode, want)) in rows.iter().enumerate() {
+            let a = dir.join(format!("s{i}"));
+            let b = dir.join(format!("d{i}"));
+            fs::create_dir(&a).unwrap();
+            fs::write(a.join("inner"), b"x").unwrap();
+            set_test_mode(&a, src_mode);
+            let (ok, err) = with_umask(mask, || cp(&RECURSIVE, &[&a, &b]));
+            assert!(ok, "{err}");
+            assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
+            assert!(b.join("inner").is_file(), "and it was actually filled");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A source directory the copy cannot write into must still be filled: the
+    /// mode goes on last, not first. 0500 is the case that mattered — it has no
+    /// owner-write, so a copy that set the mode at `mkdir` time could not put
+    /// anything inside what it had just made.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_source_directory_is_copied_whole_and_ends_read_only() {
+        let dir = scratch("ro_dir");
+        let a = dir.join("src");
+        let b = dir.join("dst");
+        fs::create_dir(&a).unwrap();
+        fs::write(a.join("inner"), b"x").unwrap();
+        set_test_mode(&a, 0o500);
+
+        let (ok, err) = cp(&RECURSIVE, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert!(b.join("inner").is_file(), "contents got in");
+        assert_eq!(mode_of(&b), 0o500, "and the mode went on afterwards");
+
+        // Leave both writable again so the scratch directory can be removed.
+        set_test_mode(&a, 0o700);
+        set_test_mode(&b, 0o700);
         let _ = fs::remove_dir_all(&dir);
     }
 

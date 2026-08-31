@@ -2922,11 +2922,11 @@ pub(crate) fn resolve_dirfd_path(
 // that never came into it.  It also breaks with no attacker at all: rename the
 // directory and the descriptor names a path that no longer exists.
 //
-// `SYS_FS_UNLINKAT_PINNED` (662) resolves the handle instead.  Where the
-// arguments fit its shape — a real directory fd and a single-component name —
-// it is used, and the join is not reached at all.  Everything else still goes
-// through `resolve_dirfd_path`, because a multi-component name is a walk and
-// the call deliberately refuses to walk.
+// `SYS_FS_UNLINKAT_PINNED` (662) and `SYS_FS_FSTATAT_PINNED` (663) resolve the
+// handle instead.  Where the arguments fit their shape — a real directory fd
+// and a single-component name — they are used, and the join is not reached at
+// all.  Everything else still goes through `resolve_dirfd_path`, because a
+// multi-component name is a walk and the calls deliberately refuse to walk.
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
@@ -2934,15 +2934,25 @@ pub(crate) fn resolve_dirfd_path(
 // on the failure path where nobody is looking.  Only "this kernel does not
 // have the call" falls back.
 //
-// `SYS_FS_FSTATAT_PINNED` (663) is deliberately *not* used here.  It writes the
-// 64-byte `FS_META_SIZE` record, which carries no inode number, no link count
-// and no block count; [`Stat`] needs all three, and the 80-byte record that
-// `SYS_FS_STAT` writes has them.  A pinned `fstatat` built on 663 as it stands
-// would report `st_ino == 0`, which silently breaks every same-file test in
-// userspace — `cp`'s refusal to copy a file onto itself, `ls -i`, hardlink
+// Each call gets its **own** "have I seen this one answer?" latch rather than
+// sharing one.  Lane A landed 662 and 663 in separate changes, and will land
+// the rest of the family the same way, so a kernel that has one and not the
+// next is not hypothetical — it is every kernel built between two of those
+// commits.  One shared latch would let 662's first success vouch for 663,
+// after which 663's honest "no such syscall" would be taken as a real error
+// and returned to the caller as `ENOTSUP` from a `stat`.
+//
+// 663 was refused here until 2026-08-31, and the reason is worth keeping: it
+// used to write the 64-byte `FS_META_SIZE` record, which carries no inode
+// number, no link count and no block count, where [`Stat`] needs all three.
+// A pinned `fstatat` built on that would have reported `st_ino == 0` — not a
+// failure anyone would see, but a silent break of every same-file test in
+// userspace: `cp`'s refusal to copy a file onto itself, `ls -i`, hardlink
 // coalescing in `du` and `tar`, `find -samefile`.  A slower `fstatat` that
-// answers correctly beats a faster one that does not, so this waits on a
-// request to lane A for the wider record.
+// answers correctly beats a faster one that does not.  Lane A widened the
+// record to the 80-byte one `SYS_FS_STAT` writes (see
+// `requests/a-b-663-now-writes-the-80-byte-record-wire-up-fstatat.md`), which
+// `crate::stat::fill_from_fsstat` already decodes, and the objection is gone.
 
 /// The `AT_REMOVEDIR` bit as syscall 662 spells it.
 ///
@@ -2952,6 +2962,14 @@ pub(crate) fn resolve_dirfd_path(
 /// are `EINVAL` on the kernel side, so a divergence would fail on the first
 /// call rather than quietly mean something else.
 const AT_REMOVEDIR_PINNED: u64 = 0x200;
+
+/// The `AT_SYMLINK_NOFOLLOW` bit as syscall 663 spells it.
+///
+/// A separate constant from [`AT_SYMLINK_NOFOLLOW`] for the same reason
+/// [`AT_REMOVEDIR_PINNED`] is separate from [`AT_REMOVEDIR`]: the two ABIs
+/// agree on the value today, and nothing but this comment says they must keep
+/// agreeing.
+const AT_SYMLINK_NOFOLLOW_PINNED: u64 = 0x100;
 
 /// Longest single component the pinned calls accept.
 const PINNED_NAME_MAX: usize = 255;
@@ -2975,34 +2993,57 @@ pub(crate) fn is_pinnable_component(name: &[u8]) -> bool {
 }
 
 /// Have we ever seen syscall 662 answer as something other than "no such
-/// syscall"?
+/// syscall"?  See [`pinned_answer`] for what that question is for.
+static PINNED_UNLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 663.  Separate from
+/// [`PINNED_UNLINKAT_ANSWERED`] on purpose — see the "own latch" paragraph in
+/// "The pinned `*at` fast path" above.
+static PINNED_FSTATAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Turn a raw pinned-syscall return into either a final answer or a fallback.
 ///
-/// `false` until the first pinned call comes back with anything but
-/// `NotSupported`/[`HOST_ENOSYS`], then `true` forever. On a host build it is
-/// never set, because the raw `SYSCALL` instruction is compiled out there and
-/// every attempt reports `HOST_ENOSYS` — which is what keeps the host test
-/// suite meaningful: `unlinkat` under `cargo test` behaves exactly as it did
-/// before this fast path existed.
+/// `Some(ret)` is the call's answer, translated to a libc return, and is final
+/// — including its errors. `None` means this kernel does not have the call and
+/// the caller must take the path-based route.
 ///
-/// This exists because `NotSupported` (-2) is ambiguous, and dangerously so.
-/// `dispatch.rs` returns it for an *unregistered slot* — a kernel predating
-/// lane A's 662 — but a registered handler may also return it for a
-/// *filesystem* that cannot perform the operation. Treating every -2 as
-/// "kernel too old" would mean a filesystem-level refusal silently downgrades
-/// the call to the racy path-based route, which is the one outcome this whole
-/// fast path exists to prevent, and it would do it on the failure path where
-/// nobody looks.
+/// `answered` is that one syscall's latch: `false` until the syscall comes back
+/// with anything but `NotSupported`/[`HOST_ENOSYS`], then `true` forever. On a
+/// host build it is never set, because the raw `SYSCALL` instruction is
+/// compiled out there and every attempt reports `HOST_ENOSYS` — which is what
+/// keeps the host test suite meaningful: the `*at` wrappers under `cargo test`
+/// behave exactly as they did before this fast path existed.
 ///
-/// The flag disambiguates by observation rather than by guessing. On a kernel
-/// that *has* 662, the first call returns success or a real error, this flips,
-/// and every later -2 is honoured as the real answer it is. On a kernel that
-/// lacks it, every call returns -2, the flag never flips, and the fallback
-/// stays available — which is exactly the transitional behaviour wanted.
+/// The latch exists because `NotSupported` (-2) is ambiguous, and dangerously
+/// so. `dispatch.rs` returns it for an *unregistered slot* — a kernel predating
+/// the syscall — but a registered handler may also return it for a *filesystem*
+/// that cannot perform the operation. Treating every -2 as "kernel too old"
+/// would mean a filesystem-level refusal silently downgrades the call to the
+/// racy path-based route, which is the one outcome this whole fast path exists
+/// to prevent, and it would do it on the failure path where nobody looks.
+///
+/// The latch disambiguates by observation rather than by guessing. On a kernel
+/// that *has* the call, the first invocation returns success or a real error,
+/// the flag flips, and every later -2 is honoured as the real answer it is. On
+/// a kernel that lacks it, every invocation returns -2, the flag never flips,
+/// and the fallback stays available — which is exactly the transitional
+/// behaviour wanted.
 ///
 /// Racy only in the benign direction: two threads may both observe `false` and
 /// both fall back once. There is no ordering requirement, hence `Relaxed`.
-static PINNED_UNLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+fn pinned_answer(ret: i64, answered: &core::sync::atomic::AtomicBool) -> Option<i32> {
+    use core::sync::atomic::Ordering;
+    if ret == crate::errno::native::NOT_SUPPORTED || ret == crate::syscall::HOST_ENOSYS {
+        if !answered.load(Ordering::Relaxed) {
+            return None;
+        }
+    } else {
+        answered.store(true, Ordering::Relaxed);
+    }
+    Some(errno::translate(ret) as i32)
+}
 
 /// The kernel handle a libc directory fd stands for, if it is a file handle.
 ///
@@ -3077,17 +3118,69 @@ unsafe fn try_pinned_unlinkat(dirfd: i32, path: *const u8, flags: i32) -> Option
         name.len() as u64,
         pinned_flags,
     );
+    pinned_answer(ret, &PINNED_UNLINKAT_ANSWERED)
+}
 
-    use core::sync::atomic::Ordering;
-    if ret == crate::errno::native::NOT_SUPPORTED || ret == crate::syscall::HOST_ENOSYS {
-        if !PINNED_UNLINKAT_ANSWERED.load(Ordering::Relaxed) {
-            return None;
-        }
-    } else {
-        PINNED_UNLINKAT_ANSWERED.store(true, Ordering::Relaxed);
+/// Stat `path` under `dirfd` through syscall 663, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors, and
+/// including having already written `buf` when it succeeded. `None` means the
+/// fast path did not apply and the caller must fall back; errno is untouched
+/// and `buf` unwritten in that case.
+///
+/// A null `buf` is one of those `None`s, and deliberately so. 663 writes into a
+/// buffer of ours and the translation into the caller's `Stat` happens here, so
+/// the kernel never sees the caller's pointer and cannot diagnose it; falling
+/// back leaves [`stat`]/[`lstat`] to raise the `EFAULT`, in the one place that
+/// already does. Ordering is unaffected — a bad `dirfd` has already failed
+/// [`pinned_base`] and fallen back by this point, so `EBADF` still outranks
+/// `EFAULT` exactly as it does on the path-based route.
+///
+/// Only [`AT_SYMLINK_NOFOLLOW`] is forwarded, remapped to 663's own constant.
+/// [`fstatat`] also accepts [`AT_NO_AUTOMOUNT`], [`AT_EMPTY_PATH`] and the two
+/// [`AT_STATX_SYNC_TYPE`] bits, all of which it ignores; 663 rejects unknown
+/// bits with `EINVAL`, so passing the caller's word through unfiltered would
+/// turn three flags that mean nothing into an error, and only on the fast path.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string, and `buf` null or a writable
+/// [`Stat`].
+unsafe fn try_pinned_fstatat(
+    dirfd: i32,
+    path: *const u8,
+    buf: *mut Stat,
+    flags: i32,
+) -> Option<i32> {
+    if buf.is_null() {
+        return None;
     }
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(path) }?;
+    let base = pinned_base(dirfd)?;
 
-    Some(errno::translate(ret) as i32)
+    let pinned_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        AT_SYMLINK_NOFOLLOW_PINNED
+    } else {
+        0
+    };
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    let ret = syscall5(
+        SYS_FS_FSTATAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        pinned_flags,
+        raw.as_mut_ptr() as u64,
+    );
+    let ret = pinned_answer(ret, &PINNED_FSTATAT_ANSWERED)?;
+    if ret == 0 {
+        // SAFETY: `buf` was checked non-null above, and the caller guarantees
+        // it points to a writable `Stat`.  `raw` is `KERNEL_STAT_LEN` bytes,
+        // which is the length 663 validated and wrote.
+        crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
+    }
+    Some(ret)
 }
 
 /// AT_FDCWD: use the current working directory.
@@ -3158,6 +3251,12 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 /// When `flags` includes `AT_SYMLINK_NOFOLLOW`, uses `lstat` (does
 /// not follow symlinks).
+///
+/// For the common shape — a real directory fd, a single-component name and a
+/// non-null `buf` — this goes through [`try_pinned_fstatat`], which has the
+/// kernel resolve the descriptor rather than the remembered path. See "The
+/// pinned `*at` fast path" above for why that matters and when it does not
+/// apply.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
     // Linux validates flags in `vfs_statx`, ahead of everything: measured on
@@ -3190,6 +3289,12 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
         } else {
             stat(path, buf)
         };
+    }
+    // SAFETY: `path` and `buf` are this function's own contract — null or a
+    // valid C string, and null or a writable `Stat` — which is what
+    // `try_pinned_fstatat` requires.
+    if let Some(ret) = unsafe { try_pinned_fstatat(dirfd, path, buf, flags) } {
+        return ret;
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
@@ -14188,7 +14293,8 @@ mod tests {
 
     mod pinned_at {
         use super::super::{
-            AT_REMOVEDIR, is_pinnable_component, pinned_base, try_pinned_unlinkat, unlinkat,
+            AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, Stat, fstatat, is_pinnable_component, pinned_answer,
+            pinned_base, try_pinned_fstatat, try_pinned_unlinkat, unlinkat,
         };
         use crate::fdtable::{self, HandleKind};
 
@@ -14336,6 +14442,106 @@ mod tests {
                     );
                 }
             }
+        }
+
+        /// The same for `fstatat`, whose fast path additionally declines a
+        /// null `buf`.
+        #[test]
+        fn every_pinned_fstatat_attempt_declines_on_the_host() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+            let mut st = Stat::default();
+
+            // SAFETY: all the names are valid C strings and `st` is writable.
+            unsafe {
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, b"f\0".as_ptr(), &raw mut st, 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, b"f\0".as_ptr(), &raw mut st, AT_SYMLINK_NOFOLLOW),
+                    None
+                );
+                // Shapes the fast path never accepts in the first place.
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, b"a/b\0".as_ptr(), &raw mut st, 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, b"..\0".as_ptr(), &raw mut st, 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, core::ptr::null(), &raw mut st, 0),
+                    None
+                );
+                // And the one that is specific to this call: a null `buf` is
+                // left to `stat`/`lstat` to diagnose, because 663 never sees
+                // the caller's pointer and so cannot diagnose it itself.
+                assert_eq!(
+                    try_pinned_fstatat(dir_fd, b"f\0".as_ptr(), core::ptr::null_mut(), 0),
+                    None
+                );
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
+        }
+
+        /// `EBADF` outranks `EFAULT` for `fstatat`, on either route.
+        ///
+        /// The pinned route reaches the same answer by a different path: a bad
+        /// `dirfd` fails [`pinned_base`] and falls back, so the fallback's
+        /// `EBADF` is still the one that lands. The claim is worth a test
+        /// because the fast path *could* have been written to check `buf`
+        /// first and return `EFAULT` from the kernel's `arg4` validation,
+        /// which would have inverted the order for exactly the shape — a
+        /// single-component name — that most callers use.
+        #[test]
+        fn a_bad_dirfd_outranks_a_null_buf_in_fstatat() {
+            for name in [&b"f\0"[..], b"sub/f\0"] {
+                crate::errno::set_errno(0);
+                assert_eq!(fstatat(4242, name.as_ptr(), core::ptr::null_mut(), 0), -1);
+                assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "{name:?}");
+            }
+        }
+
+        /// What the per-syscall latch does, exercised directly.
+        ///
+        /// This logic used to be inline in `try_pinned_unlinkat`, where the
+        /// only arm a host test could reach was the `HOST_ENOSYS` one — and
+        /// the arm that actually matters, a real `-2` arriving *after* the
+        /// syscall has proved it exists, was unreachable from any test at all.
+        /// Extracting it so each call could have its own latch also made it
+        /// reachable, which is the larger of the two gains.
+        #[test]
+        fn a_fresh_latch_falls_back_and_a_proven_one_does_not() {
+            use core::sync::atomic::{AtomicBool, Ordering};
+            let latch = AtomicBool::new(false);
+            let not_supported = crate::errno::native::NOT_SUPPORTED;
+
+            // Nothing has answered yet, so -2 means "this kernel is older
+            // than the syscall" and the caller must take the path route.
+            assert_eq!(pinned_answer(not_supported, &latch), None);
+            assert_eq!(pinned_answer(crate::syscall::HOST_ENOSYS, &latch), None);
+            assert!(!latch.load(Ordering::Relaxed), "a decline proves nothing");
+
+            // A real error proves the slot is registered just as well as a
+            // success does — the handler had to run to produce it.
+            assert_eq!(
+                pinned_answer(crate::errno::native::NOT_FOUND, &latch),
+                Some(-1)
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+            assert!(latch.load(Ordering::Relaxed));
+
+            // From here a -2 is a filesystem that cannot do the thing, not a
+            // kernel that has never heard of it. Falling back now would retry
+            // by path and reintroduce the race the call exists to close.
+            assert_eq!(pinned_answer(not_supported, &latch), Some(-1));
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOTSUP);
+
+            // Success is passed through unchanged, not folded to 0 by
+            // `translate` — 664 will want a byte count here.
+            assert_eq!(pinned_answer(7, &latch), Some(7));
         }
     }
 

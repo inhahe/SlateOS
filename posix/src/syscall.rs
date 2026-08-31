@@ -568,18 +568,22 @@ pub const SYS_FS_OPENAT2: u64 = 661;
 /// selects `rmdir` over `unlink`; unknown bits are `EINVAL`, not ignored.
 pub const SYS_FS_UNLINKAT_PINNED: u64 = 662;
 /// `(dirfd, name ptr, name len, flags, out buf) -> 0`.  Writes the same
-/// `FS_META_SIZE` record `SYS_FS_METADATA` writes, from the same encoder.
-/// `AT_SYMLINK_NOFOLLOW_PINNED` (0x100) selects `lstat` over `stat`.
+/// 80-byte `FsStatResult` `SYS_FS_STAT` and `SYS_FS_LSTAT` write, from the same
+/// encoder, so `crate::stat::fill_from_fsstat` decodes it unchanged.
+/// `AT_SYMLINK_NOFOLLOW_PINNED` (0x100) selects `lstat` over `stat`; unknown
+/// bits are `EINVAL`, not ignored.
 ///
-/// **Not yet usable for [`crate::file::fstatat`], and the reason is the
-/// record.**  The 64-byte `FS_META_SIZE` layout has no inode number, no hard
-/// link count and no block count; the 80-byte one `SYS_FS_STAT` writes — the
-/// one `crate::stat::fill_from_fsstat` decodes — has all three.  Wiring
-/// `fstatat` onto this constant as it stands would make `st_ino` zero for
-/// every file, which does not fail loudly anywhere: it silently breaks `cp`'s
-/// refusal to copy a file onto itself, `ls -i`, hardlink coalescing in `du`
-/// and `tar`, and `find -samefile`.  The constant is declared so the number is
-/// recorded in one place, and is deliberately unused pending a wider record.
+/// `out buf` is validated writable for the full 80 bytes *before* the name is
+/// read, so a bad output pointer cannot be used to probe whether a name exists.
+/// A 64-byte buffer therefore fails with `EFAULT` rather than being partly
+/// written — which is the failure that can be noticed.
+///
+/// It wrote the 64-byte `FS_META_SIZE` record until 2026-08-31, and
+/// [`crate::file::fstatat`] refused to use it for that reason: that layout has
+/// no inode number, no hard link count and no block count, so `st_ino` would
+/// have been zero for every file — silently breaking `cp`'s refusal to copy a
+/// file onto itself, `ls -i`, hardlink coalescing in `du` and `tar`, and
+/// `find -samefile`.
 pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// `(dirfd, out buf, out cap) -> size of the complete listing`.
 ///

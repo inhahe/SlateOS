@@ -49647,7 +49647,10 @@ fn cmd_autostart(args: &str) {
             // "Added autostart item". The absent case keeps that default
             // because a system autostart item genuinely is root's; the
             // misspelled case must not silently join it.
-            let Some(uid) = optional_num::<u64>(&parts, 4, "autostart", sub, "user id", 0) else {
+            // The noun carries its own article: `article_for` picks by spelling,
+            // and "user" is spelled with a vowel but sounds like one starting
+            // with `y`, so the rule produces "an user id". See §649.
+            let Some(uid) = optional_num::<u64>(&parts, 4, "autostart", sub, "a user id", 0) else {
                 return;
             };
             match autostart::add_item(name, cmd, phase, uid) {
@@ -56959,7 +56962,7 @@ fn cmd_envvars(args: &str) {
             // true sentence about a question nobody asked. Absence still means
             // root, because `envvars resolve` with no operand is the documented
             // way to see the system environment.
-            let Some(uid) = optional_num::<u32>(&parts, 1, "envvars", sub, "user id", 0) else {
+            let Some(uid) = optional_num::<u32>(&parts, 1, "envvars", sub, "a user id", 0) else {
                 return;
             };
             let env = envvars::resolve_env(uid);
@@ -56979,7 +56982,7 @@ fn cmd_envvars(args: &str) {
             // guessed 0 expanded `$HOME` and friends against root's
             // environment and printed the result with nothing to distinguish
             // it from the user's own.
-            let Some(uid) = required_num::<u32>(&parts, 1, "envvars", sub, "user id") else {
+            let Some(uid) = required_num::<u32>(&parts, 1, "envvars", sub, "a user id") else {
                 return;
             };
             let input = parts.get(2..).map(|p| p.join(" ")).unwrap_or_default();
@@ -59040,7 +59043,8 @@ fn cmd_defaultapps(args: &str) {
                 // one must not: 0 is a *security principal* -- root -- so
                 // `defaultapps rm text/html 100O` would have removed root's
                 // default rather than uid 1000's, and said it had succeeded.
-                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "uid", 0) else {
+                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "a UID", 0)
+                else {
                     return;
                 };
                 match defaultapps::default_for_type(mime, uid) {
@@ -59060,7 +59064,8 @@ fn cmd_defaultapps(args: &str) {
                 // Same as the `get(2)` arms above: absent still means the
                 // system-wide default, but a mistyped uid is refused rather
                 // than silently resolving to root.
-                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "uid", 0) else {
+                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "a UID", 0)
+                else {
                     return;
                 };
                 match defaultapps::set_default(mime, app, uid) {
@@ -59082,7 +59087,8 @@ fn cmd_defaultapps(args: &str) {
                 // one must not: 0 is a *security principal* -- root -- so
                 // `defaultapps rm text/html 100O` would have removed root's
                 // default rather than uid 1000's, and said it had succeeded.
-                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "uid", 0) else {
+                let Some(uid) = optional_num::<u32>(&parts, 2, "defaultapps", sub, "a UID", 0)
+                else {
                     return;
                 };
                 match defaultapps::remove_default(mime, uid) {
@@ -59105,7 +59111,8 @@ fn cmd_defaultapps(args: &str) {
                 // Same as the `get(2)` arms above: absent still means the
                 // system-wide default, but a mistyped uid is refused rather
                 // than silently resolving to root.
-                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "uid", 0) else {
+                let Some(uid) = optional_num::<u32>(&parts, 3, "defaultapps", sub, "a UID", 0)
+                else {
                     return;
                 };
                 let cat = match cat_name {
@@ -76292,7 +76299,7 @@ fn cmd_netthrottle(args: &str) {
                     return;
                 };
                 let Some(up) =
-                    optional_num::<u64>(&parts, 3, "nthrottle", sub, "upload limit in bps", 0)
+                    optional_num::<u64>(&parts, 3, "nthrottle", sub, "an upload limit in bps", 0)
                 else {
                     return;
                 };
@@ -77448,7 +77455,7 @@ fn cmd_speechio(args: &str) {
         }
         "cancel" => {
             if let Some(id_str) = parts.get(1) {
-                let Some(id) = readable_num::<u32>(id_str, "speech", sub, "utterance id") else {
+                let Some(id) = readable_num::<u32>(id_str, "speech", sub, "an utterance id") else {
                     return;
                 };
                 match speechio::cancel_utterance(id) {
@@ -104496,7 +104503,7 @@ fn cmd_zramstat(args: &str) {
                 return;
             };
             let Some(orig) =
-                required_num::<u64>(&parts, 2, "zramstat", sub, "uncompressed size in bytes")
+                required_num::<u64>(&parts, 2, "zramstat", sub, "an uncompressed size in bytes")
             else {
                 return;
             };
@@ -117413,9 +117420,12 @@ fn cmd_container(args: &str) {
                         else {
                             return;
                         };
-                        let Some(count) =
-                            readable_num::<u32>(count_s, "container", "create", "uid range length")
-                        else {
+                        let Some(count) = readable_num::<u32>(
+                            count_s,
+                            "container",
+                            "create",
+                            "a uid range length",
+                        ) else {
                             return;
                         };
                         cfg = cfg.uid_map(inner, outer, count);

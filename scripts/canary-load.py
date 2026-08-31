@@ -200,8 +200,32 @@ def _host_probe(samples, stop_probe, origin):
 #: jitter, and a tight bar here would reject good runs on a busy desktop.
 OCCUPANCY_FLOOR = 0.5
 
+#: Granularity of the per-process CPU clock on Windows -- the scheduler's
+#: 64 Hz tick.  A spinner's `process_time` therefore lands on a ~15.6 ms grid,
+#: so a *perfectly* consistent measurement can still read slightly above 1.0.
+#: This is a property of the clock, not a fudge factor: it is used to derive
+#: the ceiling from the span actually measured (see `occupancy_ceiling`),
+#: rather than to justify a hardcoded tolerance.
+CPU_CLOCK_GRANULARITY_S = 0.0156
 
-def summarise_occupancy(before, after, window_seconds):
+
+def occupancy_ceiling(span_seconds):
+    """The highest `occupancy_measured` a *self-consistent* run can report.
+
+    No process burns more CPU than the interval it was measured over, times
+    the cores it had, so the true ceiling is 1.0.  The clock only resolves
+    ~15.6 ms, so a short span can round up: over 0.3 s that is 5%, over 3 s
+    it is 0.5%.  Deriving the bound from the span is the point -- a fixed
+    tolerance is either too tight for a short span or too loose for a long
+    one, and the loose end is what let a systematically-biased ratio pass
+    unnoticed for as long as the host stayed quiet.
+    """
+    if not span_seconds or span_seconds <= 0:
+        return None
+    return 1.0 + CPU_CLOCK_GRANULARITY_S / span_seconds
+
+
+def summarise_occupancy(before, after, window_seconds, span_seconds=None):
     """How much CPU the spinners actually burned across the load window.
 
     This is the canary's real instrument, and it is a direct measurement
@@ -217,6 +241,37 @@ def summarise_occupancy(before, after, window_seconds):
     has a run-to-run spread of 1.95x on this host and reported x0.78 -- the
     host apparently *speeding up* under load -- for a run whose load was in
     fact applied correctly.
+
+    ## Two denominators, because there are two questions
+
+    `window_seconds` is the window the caller *asked for*; `span_seconds` is
+    the interval the CPU snapshots actually straddle.  They are deliberately
+    not the same, and the difference is not an error to be tuned away:
+
+    - The opening snapshot is taken *before* `go`, so no pre-window burn can
+      land in the window's opening balance.
+    - The closing one is taken *after* `stop`, because a spinner publishes on
+      its way out and truncating there would lose its final chunk.
+
+    So the numerator's interval strictly *contains* `[on_at, off_at]`, and
+    `occupancy` is biased upward by however long the two ends take.  On a
+    quiet host that is microseconds and invisible.  Under load it is not: the
+    spinners keep burning until they next observe `stop`, and every one of
+    those CPU-seconds lands in a numerator whose denominator already closed.
+    On 2026-08-31 that produced `occupancy 2.036` and failed a boot test
+    before it built anything -- the ratio was not wrong about the load, it was
+    dividing by the wrong interval.
+
+    Both are therefore reported, and they answer different questions:
+
+    | field | denominator | answers |
+    |---|---|---|
+    | `occupancy` | the requested window | *was the load applied across the window I asked for?* -- the floor check |
+    | `occupancy_measured` | the measured span | *is this measurement self-consistent?* -- the ceiling check |
+
+    Only the second has a physical ceiling (see `occupancy_ceiling`); the
+    first legitimately exceeds 1.0 whenever the ends are slow, which is
+    exactly when it is least safe to hardcode a tolerance for it.
     """
     if not before or not after or len(before) != len(after):
         return None
@@ -226,13 +281,21 @@ def summarise_occupancy(before, after, window_seconds):
     # spinners x window.  A zero-length window would make the ratio
     # meaningless rather than infinite, so it is reported as unavailable.
     expected = len(burned) * window_seconds if window_seconds else None
+    measured = len(burned) * span_seconds if span_seconds else None
+    ceiling = occupancy_ceiling(span_seconds)
     return {
         "spinners": len(burned),
         "window_s": round(window_seconds, 4) if window_seconds else None,
+        # Absent, not equal to `window_s`, when the caller did not stamp its
+        # snapshots: a reader must be able to tell "this run measured the span"
+        # from "this run assumed it".
+        "span_s": round(span_seconds, 4) if span_seconds else None,
         "cpu_seconds": [round(v, 4) for v in burned],
         "cpu_seconds_total": round(total, 4),
         "expected_cpu_seconds": round(expected, 4) if expected else None,
         "occupancy": round(total / expected, 3) if expected else None,
+        "occupancy_measured": round(total / measured, 3) if measured else None,
+        "occupancy_ceiling": round(ceiling, 3) if ceiling else None,
         "idle_spinners": sum(1 for v in burned
                              if window_seconds and v < 0.1 * window_seconds),
     }
@@ -303,7 +366,15 @@ def summarise_probe(samples, fired_at, released_at):
     }
 
 
-def _spin(go, stop, deadline, cpu_slot=None):
+#: How long the controller waits for every spinner to publish an opening
+#: balance before giving up on the barrier and saying so.  Generous, because
+#: the cost of waiting is nothing (it happens before the window opens) and the
+#: cost of firing early is a measurement that counts interpreter startup as
+#: load.
+SPINNER_READY_TIMEOUT_S = 30.0
+
+
+def _spin(go, stop, deadline, cpu_slot=None, ready_count=None):
     """One CPU burner: block until `go`, then loop until `stop`.
 
     A tight pure-Python loop with no I/O and no sleeping, which is what
@@ -345,11 +416,34 @@ def _spin(go, stop, deadline, cpu_slot=None):
     # `go` would otherwise sit blocked for the life of the machine.  The
     # timeout costs one wakeup per second and does *not* add latency -- the
     # semaphore wakes immediately when `go` is set.
+    # Publish *before* the window can open, and again on every wakeup.
+    #
+    # This loop used to publish only on its way out, which left the slot at its
+    # initial 0.0 for the entire wait.  The controller snapshots `cpu_at_fire`
+    # before setting `go` -- deliberately -- so it read that 0.0, while the
+    # closing snapshot read a real `process_time()` that includes this
+    # process's whole interpreter startup.  Every spinner's Python startup cost
+    # therefore landed in the window's burn, inflating occupancy by a fixed
+    # amount that a short window cannot absorb: the live test measured 1.82
+    # cores per single-threaded spinner, which is not a tolerance problem but
+    # an impossibility.  It went unnoticed because the bound it had to clear
+    # was a hardcoded 2.0.
+    #
+    # Publishing here costs nothing -- the spinner is blocked in `go.wait`, so
+    # there is no CPU to account for between the last publish and `go`.
+    publish()
+    # Only now is this spinner's startup accounted for, so only now may the
+    # controller consider it ready.  Signalling before the publish would
+    # reintroduce the race the barrier exists to close.
+    if ready_count is not None:
+        with ready_count.get_lock():
+            ready_count.value += 1
     while not go.is_set():
         if should_quit():
             publish()
             return
         go.wait(1.0)
+        publish()
 
     while True:
         for _ in range(SPIN_CHUNK):
@@ -452,12 +546,54 @@ def run(args):
     # read costs at worst one chunk of age -- whereas locking on every chunk
     # would inject contention into the very measurement being taken.
     cpu = [ctx.Value("d", 0.0, lock=False) for _ in range(args.spinners)]
+    # Counts spinners that have reached `_spin` and published an opening
+    # balance.  This one *is* locked: it has as many writers as there are
+    # spinners, it is incremented once each, and it is read as a barrier rather
+    # than as a measurement, so contention on it is irrelevant.
+    ready_count = ctx.Value("i", 0)
     workers = [
-        ctx.Process(target=_spin, args=(go, stop, deadline, slot), daemon=True)
+        ctx.Process(target=_spin, args=(go, stop, deadline, slot, ready_count),
+                    daemon=True)
         for slot in cpu
     ]
     for worker in workers:
         worker.start()
+
+    # Wait for every spinner to publish before anything else happens.
+    #
+    # `Process.start()` returns when the process has been *spawned*, not when
+    # its interpreter has finished booting and reached `_spin`.  Under the
+    # spawn start method the child re-imports this module, which is hundreds of
+    # milliseconds of CPU -- and until the fix on 2026-08-31 all of it landed
+    # inside the measured window, because the controller snapshotted an opening
+    # balance of 0.0 from a spinner that had not yet published anything.  Two
+    # spinners over a 0.2 s window measured 1.82 cores each, which is not a
+    # tolerance problem but an impossibility.
+    #
+    # The comment below this block already claimed readiness meant "every
+    # interpreter is up".  It did not; `start()` cannot promise that.  This
+    # barrier is what makes the sentence true.
+    barrier_deadline = time.monotonic() + SPINNER_READY_TIMEOUT_S
+    while True:
+        with ready_count.get_lock():
+            up = ready_count.value
+        if up >= args.spinners:
+            break
+        if time.monotonic() > barrier_deadline:
+            # Not fatal: a spinner that never starts is exactly what
+            # `idle_spinners` and OCCUPANCY_FLOOR exist to report, and failing
+            # here would turn a measurable problem into an unmeasurable one.
+            # But it must be visible rather than silently absorbed.
+            print(f"=== WARNING: only {up} of {args.spinners} spinner(s) "
+                  f"published within {SPINNER_READY_TIMEOUT_S}s; the opening "
+                  f"balance of the rest will include their startup ===",
+                  flush=True)
+            break
+        if not any(w.is_alive() for w in workers):
+            print("=== WARNING: no spinner is alive while waiting for the "
+                  "readiness barrier ===", flush=True)
+            break
+        time.sleep(0.01)
 
     record = {
         "serial": args.serial,
@@ -479,9 +615,10 @@ def run(args):
         daemon=True)
     probe.start()
 
-    # Announce readiness only once every interpreter is up, because the
-    # caller uses this line to decide it is safe to start QEMU.  Announcing
-    # earlier would move the interpreter startup cost back inside the
+    # Announce readiness only once every interpreter is up -- which the barrier
+    # above now actually establishes, rather than this comment merely asserting
+    # it.  The caller uses this line to decide it is safe to start QEMU, and
+    # announcing earlier would move the interpreter startup cost back inside the
     # measurement window, which is the whole thing this program exists to
     # avoid.
     print(f"=== load controller ready: {args.spinners} spinner(s), "
@@ -508,22 +645,28 @@ def run(args):
     during = []
     cpu_at_fire = None
     cpu_at_release = None
+    cpu_fire_at = None
+    cpu_release_at = None
 
     def fire():
-        nonlocal on_at, cpu_at_fire
+        nonlocal on_at, cpu_at_fire, cpu_fire_at
         # Snapshot before `go`, so no spinner can have burned anything that
         # lands inside the window's opening balance.
         cpu_at_fire = [slot.value for slot in cpu]
+        # Stamped so the span the numerator covers is measured rather than
+        # assumed equal to the window.  See `summarise_occupancy`.
+        cpu_fire_at = time.monotonic()
         go.set()
         on_at = time.monotonic()
 
     def release():
-        nonlocal off_at, cpu_at_release
+        nonlocal off_at, cpu_at_release, cpu_release_at
         stop.set()
         off_at = time.monotonic()
         # Snapshot after `stop`: a spinner publishes on its way out, so this
         # captures the final chunk rather than truncating the window early.
         cpu_at_release = [slot.value for slot in cpu]
+        cpu_release_at = time.monotonic()
 
     if args.at is None:
         # No trigger: the whole-window behaviour the P20 control used.
@@ -620,7 +763,10 @@ def run(args):
             "host_occupancy": summarise_occupancy(
                 cpu_at_fire, cpu_at_release,
                 (off_at - on_at) if (on_at is not None
-                                     and off_at is not None) else None),
+                                     and off_at is not None) else None,
+                (cpu_release_at - cpu_fire_at)
+                if (cpu_fire_at is not None
+                    and cpu_release_at is not None) else None),
         })
         # A `--until` that never matched is not a detail.  The window has no
         # right-hand edge, so the run answers a different question from the

@@ -7220,6 +7220,20 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("[FATAL] Zero-on-free self-test failed: {:?}", e);
             }
 
+            // Zeroed frame allocation — same reason, and until 2026-08-31 this
+            // call did not exist, so the case had never run on any boot: its
+            // only caller was the early frame-allocator self-test at Step 5,
+            // where the HHDM guard is false every time.
+            //
+            // It is not a duplicate of the line above.  Zero-on-free zeroes at
+            // *free* time under a sysctl this block toggles; this asserts the
+            // zero-on-*allocate* path, which is the one that stops a new owner
+            // reading the previous owner's bytes and which nothing else in a
+            // booting kernel checks.
+            if let Err(e) = mm::frame::test_zeroed_alloc() {
+                serial_println!("[FATAL] Zeroed frame allocation self-test failed: {:?}", e);
+            }
+
             boot_timing::mark(boot_timing::Milestone::SelfTests);
 
             // Security posture summary — one consolidated view of active protections.

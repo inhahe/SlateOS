@@ -57,8 +57,19 @@ So every `main.rs` call site inside a conditional is now reported separately
 a failure and deliberately *not* a verdict: a gate can be perfectly benign --
 `acpi::self_test` is called from both arms of an `if`/`else` and therefore
 always runs -- and this check cannot reason about that. It tells you where to
-look; the serial log tells you what happened. Of the 12 sites it flags today,
-5 do run and 7 do not.
+look; the serial log tells you what happened.
+
+That `fat_ok` hole is closed -- the seven were moved out from under the wrong
+condition on 2026-08-22, and "[ext4] Phase 0" is in the log now -- but the story
+is kept because it is the clearest statement of why this section exists.
+
+**No count of how many sites currently run belongs in this docstring.** One used
+to ("of the 12 sites it flags today, 5 do run and 7 do not"), and it was true
+for about a day: the 12 became 6 and the 7 became 0 while the sentence went on
+telling every reader otherwise. A hardcoded tally of a live property is the same
+defect this whole section is about -- a claim that reads as current fact and is
+checked by nobody. The dated verdict, with a serial-log line per site, lives in
+known-issues.md A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF.
 
 Cross-checking is the point. "Is it wired up" is a question about source, and
 source cannot answer "did it run" -- only the log can.

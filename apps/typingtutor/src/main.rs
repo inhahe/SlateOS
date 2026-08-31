@@ -2487,6 +2487,9 @@ mod tests {
         }
         assert!(glyphs.len() > 5, "the lesson body is drawn: {glyphs:?}");
 
+        // Counted for the same reason: if every glyph landed on its own line
+        // the comparison below would be skipped for all of them (lesson 89).
+        let mut compared = 0usize;
         for pair in glyphs.windows(2) {
             let Some(((x0, y0, glyph, size), (x1, y1, _, _))) = pair.first().zip(pair.get(1))
             else {
@@ -2497,12 +2500,18 @@ mod tests {
                 continue;
             }
             let advance = text::measure_in(glyph, *size, FontWeightHint::Regular, FontFamily::Mono);
+            compared = compared.saturating_add(1);
             assert!(
                 (x1 - x0 - advance).abs() < 0.01,
                 "{glyph:?} at {x0} is followed by {x1}, which is not one \
                  measured advance ({advance}) along"
             );
         }
+        assert!(
+            compared > 3,
+            "only {compared} pair(s) of glyphs shared a line, so the advance \
+             between them was barely tested"
+        );
     }
 
     #[test]
@@ -2829,10 +2838,14 @@ mod tests {
     fn clicking_a_row_selects_the_lesson_drawn_in_it() {
         let app = TypingTutorApp::new();
         let frame = app.draw(W);
+        // Counted, because the `continue` below is a silent exit: a list drawn
+        // with no rows at all would skip every iteration and pass (lesson 89).
+        let mut checked = 0usize;
         for idx in 0..app.lessons.len() {
             let Some(r) = probe::rect_of(&app, Target::Lesson(idx)) else {
                 continue;
             };
+            checked = checked.saturating_add(1);
             assert!(
                 text_inside(&frame, &app.lessons[idx].title, r),
                 "row {idx} is clickable but lesson {:?} is not drawn in it",
@@ -2849,6 +2862,7 @@ mod tests {
                 app.selected_lesson
             );
         }
+        assert!(checked > 1, "only {checked} row(s) were on screen to check");
     }
 
     /// A second click on the row already selected starts it.
@@ -2987,9 +3001,10 @@ mod tests {
     fn a_click_on_empty_space_is_ignored() {
         let mut app = TypingTutorApp::new();
         let before = (app.view, app.selected_lesson, app.category_filter);
-        let Some((x, y)) = probe::bare_point(&app, W) else {
-            return;
-        };
+        let (x, y) = probe::bare_point(&app, W).expect(
+            "no point in the window is free of a hit box, so a click that \
+             reaches nothing cannot be tested here",
+        );
         assert_eq!(
             app.click_at(x, y, MouseButton::Left, W),
             EventResult::Ignored
@@ -3004,11 +3019,16 @@ mod tests {
     /// clicked against a picture drawn at 620x560.
     #[test]
     fn the_controls_move_with_the_window_and_are_still_clickable() {
+        // The chip is dropped rather than drawn illegibly narrow when the
+        // header cannot pay for it, so `continue` is right -- but it must not be
+        // able to take every size with it (lesson 89).
+        let mut checked = 0usize;
         for size in SIZES {
             let mut app = TypingTutorApp::new();
             let Some(r) = probe::rect_of_sized(&app, Target::Stats, size) else {
                 continue;
             };
+            checked = checked.saturating_add(1);
             assert_eq!(
                 app.click_at(r.x + r.w / 2.0, r.y + r.h / 2.0, MouseButton::Left, size),
                 EventResult::Consumed,
@@ -3016,6 +3036,11 @@ mod tests {
             );
             assert_eq!(app.view, AppView::Statistics, "at {size:?}");
         }
+        assert!(
+            checked >= SIZES.len() - 1,
+            "the Stats chip was drawn at only {checked} of {} sizes",
+            SIZES.len()
+        );
     }
 
     // --- Scrolling ----------------------------------------------------------
@@ -3113,19 +3138,48 @@ mod tests {
     /// cursor walked off the bottom of it. The cursor's highlight is the box
     /// under the current character, so this asks whether that box was drawn at
     /// all -- which is the same question as whether the cursor is in view.
+    ///
+    /// It types a lesson of its own rather than the longest shipped one,
+    /// because the longest shipped one is 51 characters and a 300x300 panel
+    /// holds around five lines of forty: the text fit whole, the panel never
+    /// had to scroll, and pinning it to the top of the text was therefore
+    /// *correct* on the only fixture the test built. The precondition below
+    /// is what stops that happening again -- it asserts the panel cannot show
+    /// the whole text, which is the regime the rule being tested exists for.
     #[test]
     fn the_typing_panel_follows_the_cursor() {
         let size = (300.0, 300.0);
         let mut app = TypingTutorApp::new();
-        // The longest lesson, so the text is many lines in a narrow window.
-        let longest = app
-            .lessons
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, l)| l.text.len())
-            .map_or(0, |(i, _)| i);
+        app.lessons.push(Lesson {
+            category: LessonCategory::Sentences,
+            title: String::from("Long enough to overflow the panel"),
+            text: "the quick brown fox jumps over the lazy dog ".repeat(12),
+        });
+        let longest = app.lessons.len().saturating_sub(1);
         app.start_lesson(longest);
         let total = app.session.as_ref().expect("a session").text.len();
+
+        // Precondition: the panel is smaller than the text. Counted from the
+        // glyphs actually drawn, not from arithmetic over the layout, so it
+        // stays true to what the reader sees.
+        let mut in_mono = false;
+        let mut drawn = 0usize;
+        for cmd in app.frame(size.0, size.1).commands() {
+            match cmd {
+                RenderCommand::PushFont { .. } => in_mono = true,
+                RenderCommand::PopFont => in_mono = false,
+                RenderCommand::Text { .. } if in_mono => {
+                    drawn = drawn.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            drawn < total,
+            "the panel shows all {total} characters at once, so it never has \
+             to scroll and this test cannot tell whether it would"
+        );
+
         for n in 0..total {
             let session = app.session.as_ref().expect("a session");
             let Some(&ch) = session.text.get(session.cursor) else {
@@ -3146,6 +3200,58 @@ mod tests {
                  the panel is not following the typist"
             );
         }
+    }
+
+    /// The results text is placed below the cards, not at a constant.
+    ///
+    /// `table_y = 240.0` was one of the faults the wiring found, and this is
+    /// the same shape in the view next door: a hardcoded start for the text
+    /// under the summary cards. It is wrong exactly when the card grid wraps
+    /// far enough to reach past the constant, and the damage is text printed
+    /// *over* the cards -- which leaves nothing outside the window, so the
+    /// geometric catch-all only ever noticed it at the sizes where 240 itself
+    /// fell off the bottom. This asks the rule instead of a side effect of it.
+    #[test]
+    fn the_results_text_sits_below_the_cards_it_summarises() {
+        let mut app = TypingTutorApp::new();
+        app.start_lesson(0);
+        app.view = AppView::Results;
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
+
+        // The cards are the only fills inside the body on this view.
+        let mut rows: Vec<f32> = Vec::new();
+        let mut card_bottom = f32::NEG_INFINITY;
+        for cmd in frame.commands() {
+            if let RenderCommand::FillRect { y, height, .. } = cmd {
+                if *y >= l.body.y {
+                    if !rows.iter().any(|r| (r - y).abs() < 0.5) {
+                        rows.push(*y);
+                    }
+                    card_bottom = card_bottom.max(y + height);
+                }
+            }
+        }
+        assert!(
+            rows.len() > 1,
+            "the cards fit on a single row at {W:?}, and a constant above a \
+             single row of cards is indistinguishable from the rule -- this \
+             test needs a window the grid wraps in"
+        );
+
+        let rating = frame
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { y, text, .. } if text.starts_with("Rating:") => Some(*y),
+                _ => None,
+            })
+            .expect("the results view names a rating");
+        assert!(
+            rating >= card_bottom,
+            "the rating is drawn at y {rating}, above the bottom of the cards \
+             at {card_bottom} -- it is printed over them"
+        );
     }
 
     /// The lesson text is drawn in the monospace family it is measured in.
@@ -3477,7 +3583,13 @@ mod tests {
                 probe::click(&mut app, Target::Filter);
             }
             let frame = app.draw(W);
-            for &idx in &app.filtered_lessons() {
+            let shown = app.filtered_lessons();
+            assert!(
+                !shown.is_empty(),
+                "filter {:?} admits no lesson, so this round checks nothing",
+                app.category_filter
+            );
+            for &idx in &shown {
                 let r = probe::rect_of(&app, Target::Lesson(idx)).unwrap_or_else(|| {
                     panic!(
                         "filter {:?} shows lesson {idx} and no row can be clicked for it",

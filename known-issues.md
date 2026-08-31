@@ -100029,3 +100029,163 @@ user can **see** this, or that a click **reaches** it? Fixing the 40 would have
 been worse than leaving them — a clickability test with a paint assertion bolted
 on fails for the wrong reason and teaches the next reader that the two claims
 are one.
+
+### Lesson 89: an assertion behind an `if` about the code under test can retire without failing (lane C, 2026-08-30)
+
+**In short:** a test that computes something from the production code, then only
+asserts when that something looks a certain way, stops testing the moment the
+code stops looking that way -- and it stops silently, because a test that
+asserts nothing passes. This is Lesson 84's shape (the expectation computed with
+the function under test) moved from the *value* to the *decision to check it*.
+
+typingtutor's `a_body_too_short_for_a_row_shows_none` was written to hold the
+one interesting case in `Layout::rows_visible`: a body with no room for even one
+row must answer zero, not one, because a row drawn in a body that cannot hold it
+is a row drawn over the footer. It read:
+
+```rust
+let l = Layout::solve(620.0, 40.0);
+if l.body.h < l.row {
+    assert_eq!(l.rows_visible(), 0, ...);
+}
+```
+
+At 40 px the layout gives up all three bands of chrome and hands the body 34 px
+against a 20.8 px row, so `l.body.h < l.row` is false and the body has room for
+a row after all. The `if` never held. The test ran, passed, and asserted nothing
+whatsoever -- against the real code, and against the mutant that returns
+`.max(1)`, which is precisely the bug it names in its own doc comment.
+
+**Why it is easy to write.** The `if` looks like defensive care: "only check
+this when the case actually arises." But the case is decided by the same
+function being tested, at a size the test chose without checking. The author
+believed 40 px was too short; nothing in the test held that belief to account.
+
+**The fix is one line, and it is not deleting the `if`.** State the precondition
+as an assertion:
+
+```rust
+let l = Layout::solve(620.0, 20.0);
+assert!(l.body.h < l.row, "this test needs a body too short for a row: ...");
+assert_eq!(l.rows_visible(), 0, ...);
+```
+
+Now the test fails two ways: if the answer is wrong, and if the situation it was
+written for has stopped existing. The second failure is the valuable one -- it
+says "your test has drifted off its case," which is information no green run can
+carry.
+
+**The tell.** Any `if`, `let ... else { return }`, `filter`, or `continue` in a
+test body whose condition mentions the code under test. Each is a silent exit.
+Ask of every one: what makes it certain this branch is taken? If the answer is
+"the layout works out that way," assert it. If the answer is genuinely "some of
+these are not applicable" -- a loop over sizes where a control does not fit at
+the smallest -- then count the ones that *were* checked and assert the count is
+non-zero, which is the same discipline at the level of the loop.
+
+### Lesson 90: a test can run every assertion and still prove nothing, if its fixture never enters the regime the rule governs (lane C, 2026-08-30)
+
+**In short:** lesson 89 was about an assertion that never ran. This is the
+same damage from the opposite direction: an assertion that runs, on data
+where the right answer and the wrong answer are the same. `typingtutor`'s
+typing panel is supposed to scroll to follow the cursor. Its test typed a
+lesson into the panel, checked after *every single keystroke* that the
+cursor was still drawn, and passed -- and when the mutation sweep deleted
+the scrolling outright, replacing it with "always show the top of the
+text," the test went on passing. The lesson it typed was 51 characters and
+the panel held about two hundred. The text fit whole, so the panel never
+had to scroll, so showing the top of it *was the correct behaviour* on the
+only fixture the test ever built.
+
+**The test was not weak.** It is worth being clear about this, because the
+instinct on reading "a mutant survived" is to look for a sloppy assertion.
+There wasn't one:
+
+```rust
+let frame = app.frame(size.0, size.1);
+let highlight = frame.commands().iter().any(|c| {
+    matches!(c, RenderCommand::FillRect { color, .. }
+        if *color == hex(COL_SURFACE1))
+});
+assert!(
+    highlight,
+    "after {n} characters the cursor's highlight is not drawn -- \
+     the panel is not following the typist"
+);
+```
+
+`COL_SURFACE1` appears in exactly one place in the whole program -- the box
+drawn under the character being typed -- so the assertion is not confusable
+with other paint (lesson 83's hazard, and it was avoided). It runs on every
+iteration of a loop over every character in the lesson. It reads the
+commands the renderer would actually emit. The fixture even *tried* to be
+adversarial: it picked the longest lesson in the list rather than the first.
+
+That is the trap. "The longest lesson" sounds like the hard case, and it is
+the hard case *among the lessons* -- but the quantity that matters is not
+which lesson is longest, it is whether any of them is longer than the
+panel. None is. The fixture selection reasoned about the wrong axis, and
+reasoning about the wrong axis feels exactly like reasoning about the right
+one.
+
+**The arithmetic nobody did.** At 300x300: `font` is 9, the panel's type is
+`(font * 1.25).max(8.0)` = 11.25, a line is about 17 px, and the panel is
+roughly 90 px tall -- five lines. The panel is `body.w` = 285 px wide and a
+mono glyph at 11.25 px advances about 6.75 px, so a line holds about 42
+characters. Five lines is about 210 characters. The longest shipped lesson
+is 51. The panel could have held four of them stacked.
+
+**Why mutation testing is the only thing that finds this.** Every other
+signal says the test is fine. It is green, it asserts something specific and
+true, its name describes a real rule, and reading it top to bottom raises no
+question. Coverage tools call the scrolling line covered, because it *is*
+executed -- it runs, computes `cursor_line.saturating_sub(lines_visible - 1)`,
+and correctly returns 0 every time. Only replacing the line with `0usize` and
+watching nothing go red distinguishes "this test checks the rule" from "this
+test agrees with the rule by accident."
+
+**The fix is two lines, and the second is the one that lasts.** Give the test
+a fixture that overflows -- here, a lesson of its own rather than one of the
+shipped ones -- and then *assert that it overflows*, in terms of what the
+program actually did:
+
+```rust
+assert!(
+    drawn < total,
+    "the panel shows all {total} characters at once, so it never has \
+     to scroll and this test cannot tell whether it would"
+);
+```
+
+`drawn` is counted from the glyph commands in the frame, not computed from
+the layout. That matters: a precondition derived from the code under test is
+lesson 84's fault, and would go on being satisfied by a layout that had
+stopped meaning what the test assumed. Counting the ink is a statement about
+the picture.
+
+**The tell, which is different from lesson 89's.** Lesson 89's tell is
+syntactic -- look for a branch. This one is not visible in the test at all;
+it lives in the relationship between the fixture's size and the rule's
+threshold. The questions that surface it:
+
+- **For any rule of the form "X follows/scrolls/wraps/clamps when Y exceeds
+  Z"** -- does the fixture make Y exceed Z? Not "is the fixture large," but
+  large *relative to the specific threshold the rule turns on*. Write the
+  comparison down; if you cannot write it down, you do not know.
+- **When a fixture is chosen by a superlative** (`max_by_key`, "the longest",
+  "the biggest board", "the deepest tree"), ask what it is the superlative
+  *of*. The maximum of a set that is entirely below the threshold is still
+  below the threshold. `typingtutor` picked the longest of fourteen lessons
+  that were all too short.
+- **When a rule has a "nothing to do" answer** -- scroll offset 0, no wrap,
+  no clamp, no elision -- that answer is what a deleted rule also returns.
+  A test that only ever observes the no-op answer cannot see the deletion.
+  Ask: does this fixture produce a *non-trivial* answer?
+
+**Where else to look.** Every windowed app in `apps/` has tests of this
+family -- panels that scroll, lists that clamp, text that elides, grids that
+wrap -- and the fixture is usually one hardcoded window size chosen when the
+test was written. The systematic check is cheap and does not need a full
+sweep: for each such test, find the rule's threshold, find the fixture's
+value, and confirm the fixture is on the far side. Where it is not, the test
+is green today for a reason unrelated to the rule it names.

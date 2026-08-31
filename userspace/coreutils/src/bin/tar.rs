@@ -3338,50 +3338,25 @@ fn trim_slashes(name: &[u8]) -> &[u8] {
     name.get(..end).unwrap_or(name)
 }
 
-// The umask has to be read to be known — POSIX gives no read-only spelling, so
-// reading it means setting it — and `std` exposes no wrapper.
-#[cfg(unix)]
-unsafe extern "C" {
-    fn umask(mask: u32) -> u32;
-}
-
 /// The process umask, read once and left as it was found.
 ///
-/// Two halves, each needed for a measured reason:
+/// The mask still has a job to do here, which is why this reads it rather than
+/// clearing it: this tar sets the mode of every member it extracts explicitly,
+/// so for those the kernel's mask is irrelevant; but the parent directories it
+/// creates implicitly on the way to a member (`dir/sub/f` extracted on its own)
+/// are left to `mkdir`, and GNU lets the umask gate those. Leaving the mask at
+/// `0` made them 0777 where GNU produced 0755 — visible in
+/// `scripts/tar-diff.sh` as a mode mismatch on an implicitly created parent.
 ///
-/// *Cached*, because reading is destructive — the call sets the mask and returns
-/// the old value, so a naive second call would answer whatever the first one
-/// stored.
-///
-/// *Restored*, because the umask still has a job to do here. This tar sets the
-/// mode of every member it extracts explicitly, so for those the kernel's mask
-/// is irrelevant; but the parent directories it creates implicitly on the way to
-/// a member (`dir/sub/f` extracted on its own) are left to `mkdir`, and GNU
-/// lets the umask gate those. Leaving the mask at `0` made them 0777 where GNU
-/// produced 0755 — visible in `scripts/tar-diff.sh` as a mode mismatch on an
-/// implicitly created parent.
-#[cfg(unix)]
+/// Cached because the value cannot change under us — one extraction, one
+/// process — and because [`coreutils::umask::current`] answers from
+/// `/proc/self/status`, which is a file read rather than an arithmetic
+/// operation. On a host with no such thing the answer is `0`, which leaves the
+/// pure arithmetic in [`extraction_mode`] testable there.
 fn read_umask() -> u32 {
     use std::sync::OnceLock;
     static UMASK: OnceLock<u32> = OnceLock::new();
-    *UMASK.get_or_init(|| {
-        // SAFETY: `umask` is a POSIX call that cannot fail and touches only this
-        // process's file-mode creation mask. The pair leaves the mask exactly as
-        // it was found; it is racy only against another thread creating a file
-        // in between, and this runs before any extraction work starts.
-        unsafe {
-            let old = umask(0);
-            umask(old);
-            old
-        }
-    })
-}
-
-/// [`read_umask`] on the target; `0` on a host that has no such thing, so that
-/// the pure arithmetic in [`extraction_mode`] is still testable there.
-#[cfg(not(unix))]
-fn read_umask() -> u32 {
-    0
+    *UMASK.get_or_init(coreutils::umask::current)
 }
 
 /// The mode an extracted member actually gets.

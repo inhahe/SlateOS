@@ -89,7 +89,11 @@ DIFF_GNU_SOURCE=9.4
 # non-empty string is true -- `test --version` prints nothing and exits 0, on
 # both the built 9.4 and the installed binary (measured). The built tree is one
 # `make` of one tarball, so borrow a sibling that does answer.
-DIFF_GNU_VERIFY_WITH=cat
+#
+# Quoted although it is a single word: bare, `X=cat` reads to shellcheck like a
+# half-written `X=$(cat)` (SC2209), and it cannot tell the two apart. The quotes
+# say "the name of a program, not a call to one", which is what this is.
+DIFF_GNU_VERIFY_WITH='cat'
 DIFF_REF='/usr/bin/test /bin/test'
 # There is no coreutils way to create a bound unix socket, and `-S` against a
 # path with no socket on it is a case that passes by agreeing the file is

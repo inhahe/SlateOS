@@ -105,7 +105,10 @@ mktree() {
   printf 'a\n' > file
   ln -s file link
   ln -s nowhere dangling
-  printf 'ro\n' > readonly
+  # `./` because `readonly` is also a shell builtin, and a redirection whose
+  # target is spelled like one is how `foo > kill` gets written when a pipe was
+  # meant (SC2238). The prefix names the same file and cannot be misread.
+  printf 'ro\n' > ./readonly
 
   /usr/bin/touch -a -d '2001-02-03 04:05:06.111111111' file
   /usr/bin/touch -m -d '2002-03-04 05:06:07.222222222' file

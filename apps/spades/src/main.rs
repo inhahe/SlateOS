@@ -1,28 +1,31 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::match_same_arms)]
-#![allow(unused_imports)]
-
-//! Slate OS Spades -- a 4-player trick-taking card game with AI opponents.
+//! Slate OS Spades -- four-player partnership Spades in a real window.
 //!
-//! The human plays as Player 0 (South), partnered with Player 2 (North)
-//! against Player 1 (East) and Player 3 (West). Features bidding with nil
-//! support, spades-broken tracking, bag penalties, and a Catppuccin Mocha UI.
+//! The human sits south, partnered with north, against east and west. A round
+//! deals thirteen cards each, every seat bids the number of tricks it expects
+//! to take -- nil is a bid of none, worth a hundred won or lost -- and then
+//! thirteen tricks are played with spades as trump. A partnership that makes
+//! its bid scores ten a trick plus a bag for each overtrick, and ten bags cost
+//! a hundred; five hundred wins the game.
+//!
+//! Every rectangle on the screen is solved from the live window size each
+//! frame, and everything the pointer can reach is a hit box recorded by the
+//! pass that painted it. What this replaced did neither: `main` built the game
+//! and dropped it on the next line, `render` took no window size at all and
+//! painted a 900x700 picture into a window of any other size, and both the hand
+//! and the bid pad were hit-tested from a second copy of their geometry that
+//! disagreed with the first by twenty-five pixels.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::cmp::Ordering;
+use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -40,26 +43,72 @@ const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
-// ── Layout constants ────────────────────────────────────────────────
-const WINDOW_W: f32 = 900.0;
-const WINDOW_H: f32 = 700.0;
-const CARD_W: f32 = 60.0;
-const CARD_H: f32 = 84.0;
-const CARD_SPACING: f32 = 40.0;
-const HAND_Y: f32 = 580.0;
-const TRICK_CENTER_X: f32 = 390.0;
-const TRICK_CENTER_Y: f32 = 300.0;
-const SIDEBAR_X: f32 = 720.0;
-const HEADER_Y: f32 = 10.0;
-const FOOTER_Y: f32 = 675.0;
+const CARD_FACE: Color = Color::from_hex(0xEFF1F5);
+const CARD_INK: Color = Color::from_hex(0x1E1E2E);
+const CARD_INK_RED: Color = Color::from_hex(0xD20F39);
+const CARD_TRUMP_INK: Color = Color::from_hex(0x6C33A8);
+const FELT: Color = Color::from_hex(0x14352B);
+const MANTLE: Color = Color::from_hex(0x181825);
 
-const TITLE_FONT_SIZE: f32 = 22.0;
-const INFO_FONT_SIZE: f32 = 16.0;
-const LABEL_FONT_SIZE: f32 = 14.0;
-const CARD_FONT_SIZE: f32 = 18.0;
-const CARD_SUIT_SIZE: f32 = 24.0;
-const SMALL_FONT_SIZE: f32 = 12.0;
-const BID_FONT_SIZE: f32 = 28.0;
+// ── Constants ───────────────────────────────────────────────────────
+
+/// What the window is called.
+const TITLE: &str = "Spades";
+
+/// The window asked for at launch. Nothing else is derived from it -- every
+/// rectangle comes from the size the compositor actually gives us.
+const WINDOW_WIDTH: f32 = 900.0;
+const WINDOW_HEIGHT: f32 = 700.0;
+
+/// Seats at the table, running clockwise from the human's.
+const SEATS: usize = 4;
+
+/// The same count where a seat number is wanted rather than an array length.
+const SEATS_U8: u8 = 4;
+
+/// Who sits with whom. Spades is a partnership game and the pairing is fixed:
+/// the human and the seat opposite against the two seats beside them. The old
+/// program wrote this pairing out longhand in four separate places.
+const TEAM_SEATS: [(PlayerId, PlayerId); 2] = [
+    (PlayerId::SOUTH, PlayerId::NORTH),
+    (PlayerId::EAST, PlayerId::WEST),
+];
+
+/// How often the clock ticks, in milliseconds.
+const TICK_MS: u64 = 40;
+
+/// How long a machine player appears to think before it bids or plays.
+///
+/// The old program ran every machine seat inside the human's own click, so
+/// three opponents answered instantly and simultaneously and the game only
+/// moved when the human touched it.
+const THINK_MS: u32 = 320;
+
+/// How long a settled trick stays face up on the table before it is swept.
+const SWEEP_MS: u32 = 900;
+
+/// The largest a card is drawn, however large the window is.
+const MAX_CARD_W: f32 = 78.0;
+
+/// A card is this many times taller than it is wide.
+const CARD_ASPECT: f32 = 1.4;
+
+/// The highest bid there is. Thirteen tricks, so thirteen is the ceiling.
+const MAX_BID: u8 = 13;
+
+/// How many bid buttons sit in a row of the bid pad.
+const BID_COLS: u8 = 7;
+
+/// Narrower than this and the seat panel is left out rather than squeezed.
+const MIN_PANEL_W: f32 = 128.0;
+
+/// How much taller than a card the hand strip is.
+///
+/// The slack is what the chosen card lifts into, and it is the *only* reason
+/// the strip and the card are two different heights. Both `Layout::solve`'s
+/// cap on the card and `Layout::hand_lift`'s answer come from this one number,
+/// so a card can never be taller than the strip that holds it.
+const HAND_STRIP_SLACK: f32 = 1.14;
 
 // ── Card types ──────────────────────────────────────────────────────
 
@@ -93,12 +142,15 @@ impl Suit {
         }
     }
 
-    fn color(self) -> Color {
+    /// The ink a pip of this suit is printed in **on a card face**, which is
+    /// near-white.  The old `color` returned the palette's GREEN and BLUE for
+    /// clubs and diamonds -- fine on the dark background it was chosen for,
+    /// illegible on paper.
+    fn ink(self) -> Color {
         match self {
-            Suit::Clubs => GREEN,
-            Suit::Diamonds => BLUE,
-            Suit::Hearts => RED,
-            Suit::Spades => LAVENDER,
+            Suit::Clubs => CARD_INK,
+            Suit::Spades => CARD_TRUMP_INK,
+            Suit::Diamonds | Suit::Hearts => CARD_INK_RED,
         }
     }
 
@@ -125,6 +177,28 @@ impl Rank {
     const QUEEN: Rank = Rank(12);
     const KING: Rank = Rank(13);
     const ACE: Rank = Rank(14);
+
+    /// Every rank there is, low to high.
+    ///
+    /// `standard_deck` used to build its thirteen cards from a bare `2..=14`,
+    /// so the thirteen named ranks above and the range that actually made the
+    /// deck were two statements of the same fact that nothing checked against
+    /// each other.
+    const ALL: [Rank; 13] = [
+        Rank::TWO,
+        Rank::THREE,
+        Rank::FOUR,
+        Rank::FIVE,
+        Rank::SIX,
+        Rank::SEVEN,
+        Rank::EIGHT,
+        Rank::NINE,
+        Rank::TEN,
+        Rank::JACK,
+        Rank::QUEEN,
+        Rank::KING,
+        Rank::ACE,
+    ];
 
     fn label(self) -> &'static str {
         match self.0 {
@@ -164,12 +238,16 @@ impl Card {
 
     /// Sort key: by suit first, then by rank within suit.
     fn sort_key_suit(self) -> u16 {
-        (self.suit as u16) * 100 + self.rank.0 as u16
+        u16::from(self.suit as u8)
+            .saturating_mul(100)
+            .saturating_add(u16::from(self.rank.value()))
     }
 
     /// Sort key: by rank first, then by suit.
     fn sort_key_rank(self) -> u16 {
-        (self.rank.0 as u16) * 10 + self.suit as u16
+        u16::from(self.rank.value())
+            .saturating_mul(10)
+            .saturating_add(u16::from(self.suit as u8))
     }
 
     /// Whether this card beats `other` given the led suit.
@@ -192,8 +270,8 @@ impl Card {
 fn standard_deck() -> Vec<Card> {
     let mut deck = Vec::with_capacity(52);
     for &suit in &Suit::ALL {
-        for r in 2..=14 {
-            deck.push(Card::new(suit, Rank(r)));
+        for rank in Rank::ALL {
+            deck.push(Card::new(suit, rank));
         }
     }
     deck
@@ -258,11 +336,11 @@ impl PlayerId {
     const WEST: PlayerId = PlayerId(3);
 
     fn index(self) -> usize {
-        self.0 as usize
+        usize::from(self.0)
     }
 
     fn next(self) -> PlayerId {
-        PlayerId((self.0 + 1) % 4)
+        PlayerId(self.0.wrapping_add(1) % SEATS_U8)
     }
 
     fn name(self) -> &'static str {
@@ -339,18 +417,25 @@ impl PlayerRound {
 // ── Trick ───────────────────────────────────────────────────────────
 
 /// A single trick: up to 4 cards played, tracking who played what.
+///
+/// It used to carry a `leader` seat as well, written by every construction and
+/// read by nothing but one test -- and redundant besides, since the seat that
+/// led is `cards.first()`'s and the seat to play is the game's `current_player`.
 #[derive(Clone, Debug)]
 struct Trick {
     cards: Vec<(PlayerId, Card)>,
-    leader: PlayerId,
 }
 
 impl Trick {
-    fn new(leader: PlayerId) -> Self {
+    fn new() -> Self {
         Self {
             cards: Vec::with_capacity(4),
-            leader,
         }
+    }
+
+    /// Who led this trick, once anyone has.
+    fn leader(&self) -> Option<PlayerId> {
+        self.cards.first().map(|&(p, _)| p)
     }
 
     fn led_suit(&self) -> Option<Suit> {
@@ -367,13 +452,10 @@ impl Trick {
 
     /// Determine the trick winner: highest trump if any, else highest of led suit.
     fn winner(&self) -> Option<PlayerId> {
-        if self.cards.is_empty() {
-            return None;
-        }
-        let led = self.led_suit()?;
-        let mut best_player = self.cards[0].0;
-        let mut best_card = self.cards[0].1;
-        for &(player, card) in &self.cards[1..] {
+        let mut played = self.cards.iter();
+        let &(mut best_player, mut best_card) = played.next()?;
+        let led = best_card.suit;
+        for &(player, card) in played {
             if card.beats(best_card, led) {
                 best_card = card;
                 best_player = player;
@@ -413,6 +495,345 @@ impl SortOrder {
     }
 }
 
+// ── What a click can land on ────────────────────────────────────────
+
+/// A verb with a key and a button in the footer that do the same thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Button {
+    /// Whatever Enter means in this phase.
+    Confirm,
+    /// Re-sort the hand: by suit, or by rank across suits.
+    Sort,
+    /// Abandon this game and deal a new one.
+    New,
+    /// Show or hide the help card.
+    Help,
+}
+
+const BUTTONS: [Button; 4] = [Button::Confirm, Button::Sort, Button::New, Button::Help];
+
+impl Button {
+    /// The key that does the same thing.
+    const fn key(self) -> Key {
+        match self {
+            Button::Confirm => Key::Enter,
+            Button::Sort => Key::S,
+            Button::New => Key::N,
+            Button::Help => Key::H,
+        }
+    }
+
+    /// The name that key is known by on the help card.
+    const fn key_name(self) -> &'static str {
+        match self {
+            Button::Confirm => "Enter",
+            Button::Sort => "S",
+            Button::New => "N",
+            Button::Help => "H",
+        }
+    }
+}
+
+/// What the `Confirm` button will do if it is pressed now.
+///
+/// One function, read by the button that carries the label, by the help card
+/// that explains it and by the test that holds the two together. Enter means
+/// five different things across the five phases, and a label written out beside
+/// each of them would be that rule written six times.
+const fn confirm_label(phase: Phase) -> &'static str {
+    match phase {
+        Phase::Bidding => "Bid",
+        Phase::Playing => "Play",
+        Phase::TrickDone => "Next trick",
+        Phase::RoundOver => "Next round",
+        Phase::GameOver => "New game",
+    }
+}
+
+/// Everything the pointer can land on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// The `i`th card of the human's hand, as the hand is currently sorted.
+    Card(usize),
+    /// A bid of this many tricks, on the bid pad.
+    Bid(u8),
+    Button(Button),
+    /// The help card itself, which swallows the click that dismisses it.
+    Help,
+}
+
+// ── Layout ──────────────────────────────────────────────────────────
+
+/// Every rectangle in the picture, solved from the live window size.
+///
+/// What this replaced was eleven compile-time coordinates -- `HAND_Y = 580`,
+/// `TRICK_CENTER_X = 390`, `SIDEBAR_X = 720` -- and a `render` that took no
+/// window size at all, so the picture was drawn at 900x700 in a window of any
+/// other size and the sidebar hung off the right edge of anything narrower.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    window: Rect,
+    /// The bar carrying the title and the round.
+    header: Rect,
+    /// The felt: the trick in the middle, the seats round it, the panel.
+    table: Rect,
+    /// The strip the human's cards are fanned across.
+    hand: Rect,
+    /// The row of buttons.
+    footer: Rect,
+    /// The one line of prose under the buttons.
+    status: Rect,
+    /// The panel of scores and bids. Empty when the window cannot pay for one.
+    panel: Rect,
+    /// A card's size, in the hand and on the table alike.
+    card: (f32, f32),
+    pad: f32,
+    title: f32,
+    font: f32,
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        let window = Rect::new(0.0, 0.0, w, h);
+        let pad = (w.min(h) * 0.03).clamp(4.0, 18.0);
+        let font = (h / 44.0).clamp(9.0, 17.0);
+        let title = (font * 1.4).clamp(12.0, 24.0);
+        let small = (font - 2.0).max(8.0);
+
+        let header = Rect::new(0.0, 0.0, w, (title + pad * 1.6).min(h));
+        let status_h = (font + pad * 1.1).min((h - header.h).max(0.0));
+        let status = Rect::new(0.0, h - status_h, w, status_h);
+
+        // The hand strip is taller than a card on purpose: the card the player
+        // is pointing at lifts out of the fan, and it has to lift into
+        // something. The old program lifted it ten pixels into the table's
+        // airspace and then hit-tested the row it had left.
+        let free_h = (status.y - header.bottom()).max(0.0);
+        let footer_h = (small * 2.4).min(free_h);
+        let strip_h = (free_h - footer_h).max(0.0);
+
+        // A card is sized by what the hand strip and the table can both pay
+        // for. Taking the width alone survives every containment test and eats
+        // the table in a wide, short window -- and taking the free height
+        // alone is not enough either, because the strip is what is left of it
+        // once the footer has been paid for. A card measured against the whole
+        // of the free height is taller than the strip in a window about sixty
+        // pixels high, and a card taller than its strip hangs out of the top
+        // of it, over the felt, with a hit box that hangs out with it.
+        let card_w = (w / 11.0)
+            .min(free_h / 5.6)
+            .min(strip_h / (CARD_ASPECT * HAND_STRIP_SLACK))
+            .clamp(0.0, MAX_CARD_W);
+        let card_h = card_w * CARD_ASPECT;
+        // No second `.min(strip_h)` here. `card_w` is already capped at
+        // `strip_h / (CARD_ASPECT * HAND_STRIP_SLACK)`, so this product cannot
+        // exceed the strip -- and a clamp no input can reach is not a
+        // safeguard, it is a branch no test can enter that quietly takes the
+        // credit for the cap above. The mutation sweep is what found it: strike
+        // the `.min` out and every test still passed.
+        let hand_h = card_h * HAND_STRIP_SLACK;
+        let footer = Rect::new(0.0, (status.y - footer_h).max(header.bottom()), w, footer_h);
+        let hand = Rect::new(
+            pad,
+            (footer.y - hand_h).max(header.bottom()),
+            (w - pad * 2.0).max(0.0),
+            hand_h,
+        );
+        let table = Rect::new(
+            pad,
+            header.bottom(),
+            (w - pad * 2.0).max(0.0),
+            (hand.y - header.bottom()).max(0.0),
+        );
+
+        // The panel sits in the top-right of the felt and is left out rather
+        // than squeezed when what is left would not hold a name -- the answer
+        // the old sidebar could not give, being pinned at x = 720.
+        let panel_w = (w * 0.24).clamp(0.0, 196.0);
+        let panel_h = small.mul_add(17.1, pad * 2.0);
+        let panel = if panel_w >= MIN_PANEL_W && table.h >= panel_h + pad * 2.0 {
+            Rect::new(table.right() - panel_w, table.y + pad, panel_w, panel_h)
+        } else {
+            Rect::EMPTY
+        };
+
+        Self {
+            window,
+            header,
+            table,
+            hand,
+            footer,
+            status,
+            panel,
+            card: (card_w, card_h),
+            pad,
+            title,
+            font,
+            small,
+        }
+    }
+
+    /// How far the chosen card is lifted out of the fan.
+    ///
+    /// It is exactly the slack the hand strip carries over a card's height, so
+    /// a lifted card is still inside the strip and its hit box -- recorded by
+    /// the pass that paints it -- cannot fall outside what was drawn.
+    fn hand_lift(&self) -> f32 {
+        (self.hand.h - self.card.1).max(0.0)
+    }
+
+    /// How far apart the cards of an `n`-card hand are drawn.
+    ///
+    /// Cards overlap only as much as they must. The old program stepped a fixed
+    /// forty pixels whatever the window was, so a thirteen-card hand was 540
+    /// wide in every window there has ever been -- and it was centred on
+    /// `TRICK_CENTER_X = 390`, sixty pixels left of the middle of the 900-wide
+    /// window it was drawn in.
+    fn hand_step(&self, n: usize) -> f32 {
+        let (cw, _) = self.card;
+        if n <= 1 {
+            return 0.0;
+        }
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a hand is at most thirteen cards; exact in f32"
+        )]
+        let gaps = n.saturating_sub(1) as f32;
+        ((self.hand.w - cw) / gaps).clamp(0.0, cw)
+    }
+
+    /// Where the `i`th card of an `n`-card hand is drawn.
+    ///
+    /// This is the only place the hand's geometry exists. `handle_mouse_playing`
+    /// used to compute its own from its own copies of `CARD_SPACING`, `CARD_W`
+    /// and `TRICK_CENTER_X`, and searched the strip `HAND_Y ..= HAND_Y +
+    /// CARD_H` -- while `render_hand` drew the selected card ten pixels higher.
+    fn hand_card(&self, i: usize, n: usize) -> Rect {
+        let (cw, ch) = self.card;
+        if i >= n || cw <= 0.0 || ch <= 0.0 {
+            return Rect::EMPTY;
+        }
+        let step = self.hand_step(n);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a hand is at most thirteen cards; exact in f32"
+        )]
+        let (fi, gaps) = (i as f32, (n.saturating_sub(1)) as f32);
+        let span = step.mul_add(gaps, cw);
+        let x0 = self.hand.x + (self.hand.w - span) / 2.0;
+        Rect::new(
+            step.mul_add(fi, x0),
+            self.hand.y + (self.hand.h - ch).max(0.0),
+            cw,
+            ch,
+        )
+    }
+
+    /// Where the card played by `seat` sits in the middle of the table.
+    ///
+    /// South is the human and the seats run clockwise from there -- east,
+    /// north, west -- which is also the order the turn passes in.
+    fn trick_card(&self, seat: usize) -> Rect {
+        let (cw, ch) = self.card;
+        if cw <= 0.0 || ch <= 0.0 {
+            return Rect::EMPTY;
+        }
+        let (cx, cy) = self.table.centre();
+        let (dx, dy) = match seat % SEATS {
+            0 => (0.0, ch * 0.55),
+            1 => (cw * 1.05, 0.0),
+            2 => (0.0, -ch * 0.55),
+            _ => (-cw * 1.05, 0.0),
+        };
+        Rect::new(cx + dx - cw / 2.0, cy + dy - ch / 2.0, cw, ch)
+    }
+
+    /// Where a seat's name and remaining cards are written on the felt.
+    fn seat_label(&self, seat: usize) -> Rect {
+        let (cw, ch) = self.card;
+        let w = (cw * 1.9).min(self.table.w / 3.0);
+        let h = self.small * 2.4;
+        if w <= 0.0 || h > self.table.h {
+            return Rect::EMPTY;
+        }
+        let (cx, cy) = self.table.centre();
+        let label = match seat % SEATS {
+            0 => Rect::new(
+                cx - w / 2.0,
+                (cy + ch * 1.15).min(self.table.bottom() - h),
+                w,
+                h,
+            ),
+            1 => Rect::new(
+                (cx + cw * 1.7).min(self.table.right() - w),
+                cy - h / 2.0,
+                w,
+                h,
+            ),
+            2 => Rect::new(cx - w / 2.0, (cy - ch * 1.15 - h).max(self.table.y), w, h),
+            _ => Rect::new((cx - cw * 1.7 - w).max(self.table.x), cy - h / 2.0, w, h),
+        };
+        // Clamping is what keeps a label on the felt, but a felt small enough
+        // to need clamping is one where the clamp can push the label over the
+        // card it describes, or over the panel. Left out rather than drawn
+        // through either -- the same answer the panel itself gives.
+        if label.intersect(self.trick_card(seat)).is_some() || label.intersect(self.panel).is_some()
+        {
+            return Rect::EMPTY;
+        }
+        label
+    }
+
+    /// The side of one square button on the bid pad.
+    fn bid_cell(&self) -> f32 {
+        (self.table.w / 9.5)
+            .min(self.table.h / 7.5)
+            .clamp(0.0, 46.0)
+    }
+
+    /// The card the human bids from, centred on the felt.
+    ///
+    /// Empty when the felt is too small to hold it, in which case Up, Down and
+    /// Enter are still a whole way to bid.
+    fn bid_pad(&self) -> Rect {
+        let cell = self.bid_cell();
+        let gap = cell * 0.14;
+        let (cols, rows) = (f32::from(BID_COLS), 2.0_f32);
+        let w = cols.mul_add(cell, (cols - 1.0) * gap) + self.pad * 2.0;
+        let h = rows.mul_add(cell, gap) + self.font * 2.6 + self.pad * 2.0;
+        if cell < 12.0 || w > self.table.w || h > self.table.h {
+            return Rect::EMPTY;
+        }
+        let (cx, cy) = self.table.centre();
+        Rect::new(cx - w / 2.0, cy - h / 2.0, w, h)
+    }
+
+    /// The button for a bid of `value` tricks.
+    ///
+    /// The old program painted this grid at `TRICK_CENTER_X - 140` and
+    /// `overlay_y + 75`, and hit-tested it at `TRICK_CENTER_X - 120` and
+    /// `overlay_y + 50`: every bid button answered to a square twenty pixels
+    /// right and twenty-five pixels below the one it was drawn on.
+    fn bid_button(&self, value: u8) -> Rect {
+        let pad = self.bid_pad();
+        if pad.is_empty() || value > MAX_BID {
+            return Rect::EMPTY;
+        }
+        let cell = self.bid_cell();
+        let gap = cell * 0.14;
+        let (col, row) = (f32::from(value % BID_COLS), f32::from(value / BID_COLS));
+        Rect::new(
+            (cell + gap).mul_add(col, pad.x + self.pad),
+            (cell + gap).mul_add(row, pad.y + self.pad + self.font * 2.6),
+            cell,
+            cell,
+        )
+    }
+}
+
 // ── Main game state ─────────────────────────────────────────────────
 
 struct SpadesGame {
@@ -440,6 +861,17 @@ struct SpadesGame {
     round_number: u32,
     /// Winner message on game over.
     winner_message: String,
+    /// The size the renderer last drew at.
+    ///
+    /// A click is resolved against the frame that was actually painted, so the
+    /// handler has to know what size that was.
+    size: (f32, f32),
+    /// Milliseconds left before the machine seat now to act bids or plays.
+    think_ms: u32,
+    /// Milliseconds a settled trick still has on the table.
+    sweep_ms: u32,
+    /// Whether the help card is up.
+    show_help: bool,
 }
 
 impl SpadesGame {
@@ -468,7 +900,7 @@ impl SpadesGame {
                 PlayerRound::new(),
                 PlayerRound::new(),
             ],
-            current_trick: Trick::new(PlayerId::EAST),
+            current_trick: Trick::new(),
             tricks_played: 0,
             current_player: PlayerId::EAST,
             dealer: PlayerId::SOUTH,
@@ -480,9 +912,13 @@ impl SpadesGame {
             last_trick: None,
             round_number: 1,
             winner_message: String::new(),
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
+            think_ms: 0,
+            sweep_ms: 0,
+            show_help: false,
         };
         game.deal();
-        game.run_ai_bids_before_human();
+        game.begin_bidding();
         game
     }
 
@@ -509,10 +945,11 @@ impl SpadesGame {
         self.selected_card = 0;
         self.bid_selection = 3;
         self.phase = Phase::Bidding;
+        self.sweep_ms = 0;
         // Player to left of dealer leads bidding and first trick
         self.current_player = self.dealer.next();
         self.deal();
-        self.run_ai_bids_before_human();
+        self.begin_bidding();
     }
 
     fn deal(&mut self) {
@@ -530,19 +967,28 @@ impl SpadesGame {
         self.sort_hand(PlayerId::WEST);
     }
 
+    /// The cards a seat still holds. Empty for a seat that does not exist,
+    /// which is every seat but four.
+    fn hand_of(&self, player: PlayerId) -> &[Card] {
+        self.hands
+            .get(player.index())
+            .map_or(&[][..], Vec::as_slice)
+    }
+
     fn sort_hand(&mut self, player: PlayerId) {
-        let idx = player.index();
         let order = self.sort_order;
-        self.hands[idx].sort_by_key(|c| match order {
-            SortOrder::BySuit => c.sort_key_suit(),
-            SortOrder::ByRank => c.sort_key_rank(),
-        });
+        if let Some(hand) = self.hands.get_mut(player.index()) {
+            hand.sort_by_key(|c| match order {
+                SortOrder::BySuit => c.sort_key_suit(),
+                SortOrder::ByRank => c.sort_key_rank(),
+            });
+        }
     }
 
     fn sort_all_hands(&mut self) {
-        for i in 0..4 {
-            let order = self.sort_order;
-            self.hands[i].sort_by_key(|c| match order {
+        let order = self.sort_order;
+        for hand in &mut self.hands {
+            hand.sort_by_key(|c| match order {
                 SortOrder::BySuit => c.sort_key_suit(),
                 SortOrder::ByRank => c.sort_key_rank(),
             });
@@ -553,38 +999,33 @@ impl SpadesGame {
 
     /// AI bidding heuristic: count high cards and spades to estimate tricks.
     fn ai_bid(&self, player: PlayerId) -> u8 {
-        let hand = &self.hands[player.index()];
+        let hand = self.hand_of(player);
+        let length_of = |suit: Suit| hand.iter().filter(|c| c.suit == suit).count();
         let mut estimate: u8 = 0;
 
         // Count aces and kings as likely tricks
         for card in hand {
             if card.rank == Rank::ACE {
-                estimate += 1;
-            } else if card.rank == Rank::KING {
+                estimate = estimate.saturating_add(1);
+            } else if card.rank == Rank::KING && length_of(card.suit) >= 3 {
                 // King is usually good if you have 3+ cards in the suit
-                let suit_count = hand.iter().filter(|c| c.suit == card.suit).count();
-                if suit_count >= 3 {
-                    estimate += 1;
-                }
+                estimate = estimate.saturating_add(1);
             }
         }
 
         // Count spades (trump) as partial tricks
-        let spade_count = hand.iter().filter(|c| c.suit == Suit::Spades).count() as u8;
+        let spade_count = length_of(Suit::Spades);
         if spade_count >= 3 {
-            estimate += 1;
+            estimate = estimate.saturating_add(1);
         }
         if spade_count >= 5 {
-            estimate += 1;
+            estimate = estimate.saturating_add(1);
         }
 
         // Queens in long suits
         for card in hand {
-            if card.rank == Rank::QUEEN {
-                let suit_count = hand.iter().filter(|c| c.suit == card.suit).count();
-                if suit_count >= 4 {
-                    estimate += 1;
-                }
+            if card.rank == Rank::QUEEN && length_of(card.suit) >= 4 {
+                estimate = estimate.saturating_add(1);
             }
         }
 
@@ -592,17 +1033,15 @@ impl SpadesGame {
         estimate.clamp(1, 6)
     }
 
-    /// Run AI bids for players before the human (bidding starts left of dealer).
-    fn run_ai_bids_before_human(&mut self) {
-        while self.phase == Phase::Bidding && !self.current_player.is_human() {
-            let bid = self.ai_bid(self.current_player);
-            self.player_rounds[self.current_player.index()].bid = Some(bid);
-            self.advance_bidder();
-        }
-        if self.phase == Phase::Bidding && self.current_player.is_human() {
-            self.status_message =
-                "Choose your bid (Up/Down to adjust, Enter to confirm)".to_string();
-        }
+    /// Open the auction on the seat left of the dealer.
+    ///
+    /// The old program ran every machine bid before the human's in one loop
+    /// here, and the rest of them inside the human's own click; four seats
+    /// therefore bid in a single event and the player never saw a bid arrive.
+    /// The clock deals them out one at a time now.
+    fn begin_bidding(&mut self) {
+        self.arm_think();
+        self.set_turn_status();
     }
 
     fn advance_bidder(&mut self) {
@@ -611,30 +1050,111 @@ impl SpadesGame {
         if self.player_rounds.iter().all(|pr| pr.bid.is_some()) {
             self.phase = Phase::Playing;
             self.current_player = self.dealer.next();
-            self.current_trick = Trick::new(self.current_player);
-            self.status_message = format!("{} leads", self.current_player.name());
+            self.current_trick = Trick::new();
         }
+        self.arm_think();
+        self.set_turn_status();
     }
 
-    fn submit_human_bid(&mut self) {
+    /// What the status line says while it is somebody's turn to bid or play.
+    ///
+    /// One function, so that the four places the turn moves cannot each invent
+    /// their own wording for the same fact.
+    fn set_turn_status(&mut self) {
+        self.status_message = match self.phase {
+            Phase::Bidding => {
+                if self.current_player.is_human() {
+                    format!(
+                        "Your bid: {} \u{2014} {} to confirm",
+                        bid_name(self.bid_selection),
+                        Button::Confirm.key_name()
+                    )
+                } else {
+                    format!("{} is bidding", self.current_player.name())
+                }
+            }
+            Phase::Playing => {
+                if self.current_player.is_human() {
+                    if self.current_trick.cards.is_empty() {
+                        String::from("Your turn to lead")
+                    } else {
+                        String::from("Your turn to play")
+                    }
+                } else {
+                    format!("{} is thinking", self.current_player.name())
+                }
+            }
+            _ => return,
+        };
+    }
+
+    /// Record the human's bid and hand the auction on.
+    fn submit_human_bid(&mut self) -> bool {
         if self.phase != Phase::Bidding || !self.current_player.is_human() {
-            return;
+            return false;
         }
         self.player_rounds[0].bid = Some(self.bid_selection);
         self.advance_bidder();
+        true
+    }
 
-        // Run remaining AI bids after human
-        while self.phase == Phase::Bidding && !self.current_player.is_human() {
-            let bid = self.ai_bid(self.current_player);
-            self.player_rounds[self.current_player.index()].bid = Some(bid);
-            self.advance_bidder();
+    // ── The clock ───────────────────────────────────────────────────
+
+    /// Set the machine's pause, or clear it when the seat now to act is the
+    /// human's or nobody is owed a turn at all.
+    ///
+    /// The single writer of `think_ms`, so no caller has to decide whether a
+    /// pause is owed and `tick` does not have to ask a second time.
+    fn arm_think(&mut self) {
+        let waiting = matches!(self.phase, Phase::Bidding | Phase::Playing)
+            && !self.current_player.is_human();
+        self.think_ms = if waiting { THINK_MS } else { 0 };
+    }
+
+    /// Advance the two timers. Answers whether anything changed.
+    fn tick(&mut self, elapsed_ms: u64) -> bool {
+        let ms = u32::try_from(elapsed_ms).unwrap_or(u32::MAX);
+        if self.sweep_ms > 0 {
+            self.sweep_ms = self.sweep_ms.saturating_sub(ms);
+            if self.sweep_ms == 0 {
+                self.advance_after_trick();
+            }
+            return true;
         }
+        // `arm_think` is the only writer of the pause and clears it to zero
+        // whenever one is not owed, so repeating its phase and seat tests here
+        // would be the same fact written in two places.
+        if self.think_ms > 0 {
+            self.think_ms = self.think_ms.saturating_sub(ms);
+            if self.think_ms == 0 {
+                self.machine_acts();
+            }
+            return true;
+        }
+        false
+    }
 
-        if self.phase == Phase::Playing {
-            if self.current_player.is_human() {
-                self.status_message = "Your turn to lead".to_string();
+    /// One machine seat bids, or plays one card.
+    ///
+    /// Which of the two is a question about the phase, not a second copy of
+    /// `arm_think`'s question about whose turn it is.
+    fn machine_acts(&mut self) {
+        if self.phase == Phase::Bidding {
+            let bid = self.ai_bid(self.current_player);
+            if let Some(pr) = self.player_rounds.get_mut(self.current_player.index()) {
+                pr.bid = Some(bid);
+            }
+            self.advance_bidder();
+        } else {
+            let legal = self.legal_plays(self.current_player);
+            if legal.is_empty() {
+                // A seat with no legal card would otherwise hold the game for
+                // ever; there is no such hand, and
+                // `every_seat_always_has_a_legal_card` says so.
+                self.arm_think();
             } else {
-                self.run_ai_plays();
+                let choice = self.ai_choose_card(self.current_player, &legal);
+                self.play_card(self.current_player, choice);
             }
         }
     }
@@ -643,7 +1163,7 @@ impl SpadesGame {
 
     /// Get legal cards the player can play from their hand.
     fn legal_plays(&self, player: PlayerId) -> Vec<usize> {
-        let hand = &self.hands[player.index()];
+        let hand = self.hand_of(player);
         if hand.is_empty() {
             return Vec::new();
         }
@@ -694,7 +1214,14 @@ impl SpadesGame {
 
     /// Play a card from a player's hand (by index).
     fn play_card(&mut self, player: PlayerId, hand_index: usize) {
-        let card = self.hands[player.index()].remove(hand_index);
+        let Some(card) = self
+            .hands
+            .get_mut(player.index())
+            .filter(|hand| hand_index < hand.len())
+            .map(|hand| hand.remove(hand_index))
+        else {
+            return;
+        };
         self.current_trick.add(player, card);
 
         if card.suit == Suit::Spades {
@@ -705,69 +1232,62 @@ impl SpadesGame {
             self.resolve_trick();
         } else {
             self.current_player = self.current_player.next();
-            if !self.current_player.is_human() {
-                self.run_ai_plays();
-            } else {
-                self.status_message = "Your turn to play".to_string();
-                self.clamp_selected_card();
-            }
+            self.clamp_selected_card();
+            self.arm_think();
+            self.set_turn_status();
         }
     }
 
+    /// Settle a full trick and leave it face up for `SWEEP_MS`.
+    ///
+    /// The old program kept a `last_trick` and drew it, but nothing timed it:
+    /// the phase sat at `TrickDone` until the human pressed Enter, which is
+    /// also how the machine seats were unblocked, so a game left alone stopped.
     fn resolve_trick(&mut self) {
         let winner = self.current_trick.winner().unwrap_or(PlayerId::SOUTH);
-        self.player_rounds[winner.index()].tricks_won += 1;
-        self.tricks_played += 1;
+        if let Some(pr) = self.player_rounds.get_mut(winner.index()) {
+            pr.tricks_won = pr.tricks_won.saturating_add(1);
+        }
+        self.tricks_played = self.tricks_played.saturating_add(1);
         self.last_trick = Some(self.current_trick.clone());
         self.phase = Phase::TrickDone;
-        self.status_message = format!("{} wins the trick!", winner.name());
+        self.status_message = format!("{} wins the trick", winner.name());
         self.current_player = winner;
+        self.sweep_ms = SWEEP_MS;
+        self.arm_think();
     }
 
-    /// Advance from TrickDone to the next trick or round.
+    /// Sweep the settled trick and start the next one, or score the round.
     fn advance_after_trick(&mut self) {
+        self.sweep_ms = 0;
         if self.tricks_played >= 13 {
             self.score_round();
+            self.arm_think();
             return;
         }
         self.phase = Phase::Playing;
-        self.current_trick = Trick::new(self.current_player);
-
-        if !self.current_player.is_human() {
-            self.run_ai_plays();
-        } else {
-            self.status_message = "Your turn to lead".to_string();
-            self.clamp_selected_card();
-        }
+        self.current_trick = Trick::new();
+        self.clamp_selected_card();
+        self.arm_think();
+        self.set_turn_status();
     }
 
     // ── AI play ─────────────────────────────────────────────────────
 
-    fn run_ai_plays(&mut self) {
-        while self.phase == Phase::Playing && !self.current_player.is_human() {
-            let legal = self.legal_plays(self.current_player);
-            if legal.is_empty() {
-                break;
-            }
-            let choice = self.ai_choose_card(self.current_player, &legal);
-            self.play_card(self.current_player, choice);
-            if self.phase != Phase::Playing {
-                break;
-            }
-        }
-    }
-
     /// AI card selection strategy.
-    fn ai_choose_card(&mut self, player: PlayerId, legal: &[usize]) -> usize {
+    fn ai_choose_card(&self, player: PlayerId, legal: &[usize]) -> usize {
         if legal.is_empty() {
             return 0;
         }
-        if legal.len() == 1 {
-            return legal[0];
+        if let [only] = *legal {
+            return only;
         }
 
-        let hand = &self.hands[player.index()];
-        let is_nil = self.player_rounds[player.index()].is_nil();
+        let hand = self.hand_of(player);
+        let is_nil = self
+            .player_rounds
+            .get(player.index())
+            .is_some_and(PlayerRound::is_nil);
 
         if self.current_trick.cards.is_empty() {
             // Leading: play lowest non-trump if possible (or lowest overall)
@@ -790,12 +1310,20 @@ impl SpadesGame {
         self.pick_smart(hand, legal, led_suit)
     }
 
+    /// The first index in `legal` naming the lowest card in `hand`.
+    ///
+    /// `legal` indexes `hand`, and every caller builds it from `legal_plays`,
+    /// which builds it by enumerating that same hand. It is still read with
+    /// `get` rather than `[]`: the invariant is one function away from here,
+    /// and a card game that panics is worse than one that plays the first card.
     fn pick_lowest(&self, hand: &[Card], legal: &[usize]) -> usize {
-        let mut best = legal[0];
-        let mut best_rank = hand[legal[0]].rank;
-        for &i in &legal[1..] {
-            if hand[i].rank < best_rank {
-                best_rank = hand[i].rank;
+        let mut best = legal.first().copied().unwrap_or(0);
+        let mut best_rank = hand.get(best).map_or(Rank(u8::MAX), |c| c.rank);
+        for &i in legal.iter().skip(1) {
+            if let Some(card) = hand.get(i)
+                && card.rank < best_rank
+            {
+                best_rank = card.rank;
                 best = i;
             }
         }
@@ -804,14 +1332,14 @@ impl SpadesGame {
 
     fn pick_lead(&self, hand: &[Card], legal: &[usize]) -> usize {
         // Prefer leading a low card from a non-trump suit
-        let mut best = legal[0];
-        let mut best_score: i32 = 1000;
+        let mut best = legal.first().copied().unwrap_or(0);
+        let mut best_score = u16::MAX;
         for &i in legal {
-            let card = hand[i];
-            let mut score = card.rank.0 as i32;
-            if card.suit.is_trump() {
-                score += 50; // Avoid leading trump
-            }
+            let Some(card) = hand.get(i) else { continue };
+            // Avoid leading trump: fifty is more than any rank, so every
+            // non-trump is preferred to every trump.
+            let penalty = if card.suit.is_trump() { 50 } else { 0 };
+            let score = u16::from(card.rank.value()).saturating_add(penalty);
             if score < best_score {
                 best_score = score;
                 best = i;
@@ -835,7 +1363,7 @@ impl SpadesGame {
             let mut best_losing_rank = Rank(0);
 
             for &i in legal {
-                let card = hand[i];
+                let Some(&card) = hand.get(i) else { continue };
                 if !card.beats(winner_card, led_suit)
                     && (best_losing.is_none() || card.rank > best_losing_rank)
                 {
@@ -882,7 +1410,7 @@ impl SpadesGame {
             let mut best_winning_rank = Rank(15);
 
             for &i in legal {
-                let card = hand[i];
+                let Some(&card) = hand.get(i) else { continue };
                 if card.beats(winner_card, led_suit) && card.rank < best_winning_rank {
                     best_winning = Some(i);
                     best_winning_rank = card.rank;
@@ -903,70 +1431,75 @@ impl SpadesGame {
 
     // ── Scoring ─────────────────────────────────────────────────────
 
+    /// What one partnership scores this round, and the bags it is left holding.
+    ///
+    /// A pure function of the two seats' rounds and the bags carried in, so the
+    /// scoring can be read without also reading how the totals are stored.
+    fn team_round_score(&self, seats: (PlayerId, PlayerId), bags: u32) -> (i32, u32) {
+        let (Some(p1r), Some(p2r)) = (
+            self.player_rounds.get(seats.0.index()),
+            self.player_rounds.get(seats.1.index()),
+        ) else {
+            return (0, bags);
+        };
+
+        // A nil is scored on its own, made or set, and takes no part in the
+        // partnership's contract either way.
+        let mut score: i32 = 0;
+        for pr in [p1r, p2r] {
+            if pr.is_nil() {
+                score = score.saturating_add(if pr.tricks_won == 0 { 100 } else { -100 });
+            }
+        }
+
+        let contract = |pr: &PlayerRound| -> (i32, i32) {
+            if pr.is_nil() {
+                (0, 0)
+            } else {
+                (i32::from(pr.bid_value()), i32::from(pr.tricks_won))
+            }
+        };
+        let (b1, t1) = contract(p1r);
+        let (b2, t2) = contract(p2r);
+        let team_bid = b1.saturating_add(b2);
+        let tricks = t1.saturating_add(t2);
+
+        if team_bid <= 0 {
+            return (score, bags);
+        }
+        if tricks < team_bid {
+            // Set: lose ten a trick bid.
+            return (score.saturating_sub(team_bid.saturating_mul(10)), bags);
+        }
+
+        let overtricks = tricks.saturating_sub(team_bid);
+        score = score
+            .saturating_add(team_bid.saturating_mul(10))
+            .saturating_add(overtricks);
+        let new_bags = bags.saturating_add(u32::try_from(overtricks).unwrap_or(0));
+        let penalties = i32::try_from(new_bags / 10).unwrap_or(0);
+        (
+            score.saturating_sub(penalties.saturating_mul(100)),
+            new_bags % 10,
+        )
+    }
+
     fn score_round(&mut self) {
         self.phase = Phase::RoundOver;
 
-        for team_idx in 0..2 {
-            let (p1, p2) = if team_idx == 0 {
-                (PlayerId::SOUTH, PlayerId::NORTH)
-            } else {
-                (PlayerId::EAST, PlayerId::WEST)
-            };
-
-            let p1r = &self.player_rounds[p1.index()];
-            let p2r = &self.player_rounds[p2.index()];
-
-            let mut round_score: i32 = 0;
-
-            // Handle nil bids individually
-            let p1_nil = p1r.is_nil();
-            let p2_nil = p2r.is_nil();
-
-            if p1_nil {
-                if p1r.tricks_won == 0 {
-                    round_score += 100;
-                } else {
-                    round_score -= 100;
-                }
+        for index in 0..TEAM_SEATS.len() {
+            let bags = self.teams.get(index).map_or(0, |t| t.bags);
+            let (round_score, new_bags) = self.team_round_score(Self::seats_of(index), bags);
+            if let Some(team) = self.teams.get_mut(index) {
+                team.score = team.score.saturating_add(round_score);
+                team.bags = new_bags;
             }
-            if p2_nil {
-                if p2r.tricks_won == 0 {
-                    round_score += 100;
-                } else {
-                    round_score -= 100;
-                }
-            }
-
-            // Team bid (excluding nil bidders)
-            let team_bid = if p1_nil { 0 } else { p1r.bid_value() as i32 }
-                + if p2_nil { 0 } else { p2r.bid_value() as i32 };
-            let non_nil_tricks = if p1_nil { 0 } else { p1r.tricks_won as i32 }
-                + if p2_nil { 0 } else { p2r.tricks_won as i32 };
-
-            if team_bid > 0 {
-                if non_nil_tricks >= team_bid {
-                    // Made bid
-                    let overtricks = non_nil_tricks - team_bid;
-                    round_score += team_bid * 10 + overtricks;
-                    // Add bags
-                    let new_bags = self.teams[team_idx].bags + overtricks as u32;
-                    let bag_penalties = new_bags / 10;
-                    let remaining_bags = new_bags % 10;
-                    round_score -= (bag_penalties as i32) * 100;
-                    self.teams[team_idx].bags = remaining_bags;
-                } else {
-                    // Set: lose 10 * bid
-                    round_score -= team_bid * 10;
-                }
-            }
-
-            self.teams[team_idx].score += round_score;
         }
 
         self.check_game_over();
         if self.phase != Phase::GameOver {
-            let ns_score = self.teams[0].score;
-            let ew_score = self.teams[1].score;
+            let ns_score = self.team_score(0);
+            let ew_score = self.team_score(1);
             self.status_message = format!(
                 "Round {} over! NS: {} EW: {} (Enter to continue)",
                 self.round_number, ns_score, ew_score
@@ -974,22 +1507,29 @@ impl SpadesGame {
         }
     }
 
+    /// A partnership's running total, or zero for a partnership there is not.
+    fn team_score(&self, team: usize) -> i32 {
+        self.teams.get(team).map_or(0, |t| t.score)
+    }
+
     fn check_game_over(&mut self) {
-        let ns = self.teams[0].score;
-        let ew = self.teams[1].score;
+        let ns = self.team_score(0);
+        let ew = self.team_score(1);
 
         // Both reach 500: higher score wins
         if ns >= 500 || ew >= 500 {
             if ns >= 500 && ew >= 500 {
-                if ns > ew {
-                    self.phase = Phase::GameOver;
-                    self.winner_message = format!("Your team wins! {} to {}", ns, ew);
-                } else if ew > ns {
-                    self.phase = Phase::GameOver;
-                    self.winner_message = format!("East-West wins! {} to {}", ew, ns);
-                } else {
-                    // Tie: keep playing
-                    return;
+                match ns.cmp(&ew) {
+                    Ordering::Greater => {
+                        self.phase = Phase::GameOver;
+                        self.winner_message = format!("Your team wins! {ns} to {ew}");
+                    }
+                    Ordering::Less => {
+                        self.phase = Phase::GameOver;
+                        self.winner_message = format!("East-West wins! {ew} to {ns}");
+                    }
+                    // Tie at five hundred: keep playing.
+                    Ordering::Equal => return,
                 }
             } else if ns >= 500 {
                 self.phase = Phase::GameOver;
@@ -1012,7 +1552,7 @@ impl SpadesGame {
     }
 
     fn advance_round(&mut self) {
-        self.round_number += 1;
+        self.round_number = self.round_number.saturating_add(1);
         self.dealer = self.dealer.next();
         self.start_round();
     }
@@ -1021,917 +1561,1067 @@ impl SpadesGame {
 
     fn clamp_selected_card(&mut self) {
         let hand_len = self.hands[0].len();
-        if hand_len == 0 {
-            self.selected_card = 0;
-        } else if self.selected_card >= hand_len {
-            self.selected_card = hand_len - 1;
-        }
+        self.selected_card = self.selected_card.min(hand_len.saturating_sub(1));
     }
 
-    fn try_play_selected(&mut self) {
+    fn try_play_selected(&mut self) -> bool {
         if self.phase != Phase::Playing || !self.current_player.is_human() {
-            return;
+            return false;
         }
         let legal = self.legal_plays(PlayerId::SOUTH);
         if legal.contains(&self.selected_card) {
             self.play_card(PlayerId::SOUTH, self.selected_card);
-            self.clamp_selected_card();
         } else {
-            self.status_message = "Illegal play! Must follow suit.".to_string();
+            self.status_message = String::from("That card cannot be played on this trick");
         }
+        true
+    }
+
+    /// Move the keyboard's pointer along the hand.
+    ///
+    /// One function for both directions. `Key::Left` used to carry its bound in
+    /// the match arm's guard and `Key::Right` its own in the arm's body, so the
+    /// two directions were not the same code in any sense a reader could check.
+    fn move_selection(&mut self, step: isize) -> bool {
+        let len = self.hands[0].len();
+        if len == 0 {
+            return false;
+        }
+        let last = len.saturating_sub(1);
+        let next = if step < 0 {
+            self.selected_card.saturating_sub(step.unsigned_abs())
+        } else {
+            self.selected_card
+                .saturating_add(step.unsigned_abs())
+                .min(last)
+        };
+        if next == self.selected_card {
+            return false;
+        }
+        self.selected_card = next;
+        true
+    }
+
+    /// Move the bid the human is about to make.
+    ///
+    /// The same shape as `move_selection`, and for the same reason: `Key::Up`
+    /// carried its ceiling in a match guard and `Key::Down` its floor in
+    /// another, two bounds written a line apart in two different places.
+    fn move_bid(&mut self, step: i16) -> bool {
+        if self.phase != Phase::Bidding || !self.current_player.is_human() {
+            return false;
+        }
+        let next = i16::from(self.bid_selection)
+            .saturating_add(step)
+            .clamp(0, i16::from(MAX_BID));
+        let next = u8::try_from(next).unwrap_or(0);
+        if next == self.bid_selection {
+            return false;
+        }
+        self.bid_selection = next;
+        self.set_turn_status();
+        true
+    }
+
+    /// Whatever Enter means in this phase.
+    ///
+    /// The button in the footer and the key both call this, which is why
+    /// `confirm_label` can promise what pressing it will do.
+    fn confirm(&mut self) -> bool {
+        match self.phase {
+            Phase::Bidding => self.submit_human_bid(),
+            Phase::Playing => self.try_play_selected(),
+            Phase::TrickDone => {
+                self.advance_after_trick();
+                true
+            }
+            Phase::RoundOver => {
+                self.advance_round();
+                true
+            }
+            Phase::GameOver => {
+                self.new_game();
+                true
+            }
+        }
+    }
+
+    /// Re-sort every hand, keeping the pointer on the card it was on.
+    fn resort(&mut self) -> bool {
+        let held = self.hands[0].get(self.selected_card).copied();
+        self.sort_order = self.sort_order.toggle();
+        self.sort_all_hands();
+        // The pointer follows the card, not the index: a re-sort that left the
+        // pointer where it was would silently move it to a different card.
+        if let Some(card) = held
+            && let Some(i) = self.hands[0].iter().position(|c| *c == card)
+        {
+            self.selected_card = i;
+        }
+        self.clamp_selected_card();
+        true
+    }
+
+    /// Do what a button says, whether it was clicked or its key was pressed.
+    fn press(&mut self, button: Button) -> bool {
+        match button {
+            Button::Confirm => self.confirm(),
+            Button::Sort => self.resort(),
+            Button::New => {
+                self.new_game();
+                true
+            }
+            Button::Help => {
+                self.show_help = !self.show_help;
+                true
+            }
+        }
+    }
+
+    /// Click or choose the `i`th card of the human's hand.
+    fn touch_card(&mut self, index: usize) -> bool {
+        if index >= self.hands[0].len() {
+            return false;
+        }
+        self.selected_card = index;
+        self.try_play_selected();
+        true
+    }
+
+    /// Click a bid on the pad.
+    fn touch_bid(&mut self, value: u8) -> bool {
+        if value > MAX_BID {
+            return false;
+        }
+        self.bid_selection = value;
+        self.submit_human_bid()
     }
 
     // ── Team bid total for a team ───────────────────────────────────
 
+    /// The two seats of a partnership. `TEAM_SEATS` is the one statement of
+    /// which seats sit together; this used to be written out four times.
+    fn seats_of(team: usize) -> (PlayerId, PlayerId) {
+        TEAM_SEATS
+            .get(team)
+            .copied()
+            .unwrap_or((PlayerId::SOUTH, PlayerId::NORTH))
+    }
+
+    /// What a partnership between them contracted for.
     fn team_bid(&self, team: usize) -> u8 {
-        let (p1, p2) = if team == 0 {
-            (PlayerId::SOUTH, PlayerId::NORTH)
-        } else {
-            (PlayerId::EAST, PlayerId::WEST)
-        };
-        self.player_rounds[p1.index()].bid_value() + self.player_rounds[p2.index()].bid_value()
+        self.team_total(team, PlayerRound::bid_value)
     }
 
+    /// What a partnership between them has actually taken.
     fn team_tricks(&self, team: usize) -> u8 {
-        let (p1, p2) = if team == 0 {
-            (PlayerId::SOUTH, PlayerId::NORTH)
-        } else {
-            (PlayerId::EAST, PlayerId::WEST)
-        };
-        self.player_rounds[p1.index()].tricks_won + self.player_rounds[p2.index()].tricks_won
+        self.team_total(team, |pr| pr.tricks_won)
     }
 
-    // ── Event handling ──────────────────────────────────────────────
+    fn team_total(&self, team: usize, of: impl Fn(&PlayerRound) -> u8) -> u8 {
+        let (p1, p2) = Self::seats_of(team);
+        let one = |p: PlayerId| self.player_rounds.get(p.index()).map_or(0, &of);
+        one(p1).saturating_add(one(p2))
+    }
 
-    fn handle_event(&mut self, event: &Event) {
+    // ── Events ──────────────────────────────────────────────────────
+
+    fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::Key(ke) => self.handle_key(ke),
-            Event::Mouse(me) => self.handle_mouse(me),
-            _ => {}
+            Event::Key(key) => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Tick { elapsed_ms } => {
+                if self.tick(*elapsed_ms) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key(&mut self, event: &KeyEvent) {
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
+            return EventResult::Ignored;
+        }
+        // A key with a modifier on it belongs to the window, not to the game:
+        // Ctrl+N is the compositor's new window, and it used to throw away the
+        // round in progress because no modifier was ever examined anywhere.
+        if event.modifiers.ctrl || event.modifiers.alt || event.modifiers.super_key {
+            return EventResult::Ignored;
+        }
+        let changed = match event.key {
+            Key::Left => self.move_selection(-1),
+            Key::Right => self.move_selection(1),
+            Key::Up => self.move_bid(1),
+            Key::Down => self.move_bid(-1),
+            Key::Space => self.confirm(),
+            key => match BUTTONS.into_iter().find(|b| b.key() == key) {
+                Some(button) => self.press(button),
+                None => return EventResult::Ignored,
+            },
+        };
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        if !matches!(event.kind, MouseEventKind::Press(MouseButton::Left)) {
+            return EventResult::Ignored;
+        }
+        // Resolved against the frame the renderer last drew, so a click lands
+        // on the card the player is looking at. The old handlers rebuilt both
+        // the hand and the bid grid from their own copies of the constants,
+        // and the bid grid's copy was twenty pixels right and twenty-five
+        // pixels below where the pad was actually painted.
+        let (w, h) = self.size;
+        let changed = match self.frame(w, h).hit_test(event.x, event.y) {
+            Some(Target::Card(i)) => self.touch_card(i),
+            Some(Target::Bid(v)) => self.touch_bid(v),
+            Some(Target::Button(b)) => self.press(b),
+            // The help card covers the table; a click on it dismisses the card
+            // rather than falling through to whatever is underneath.
+            Some(Target::Help) => {
+                self.show_help = false;
+                true
+            }
+            None => false,
+        };
+        if changed {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+}
+
+// ── Drawing ─────────────────────────────────────────────────────────
+
+impl SpadesGame {
+    /// The whole window: every rectangle solved from the size handed in, and
+    /// everything the pointer can reach recorded as a hit box.
+    ///
+    /// The old renderer took no size at all. It filled a 900x700 rectangle with
+    /// the background colour and then drew five panels at compile-time
+    /// coordinates, so in any other window the picture was the wrong size and
+    /// the sidebar at `SIDEBAR_X = 720` hung off the edge.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let mut f = Frame::new(width, height);
+        let l = Layout::solve(width, height);
+        fill(&mut f, l.window, BASE, 0.0);
+        self.draw_header(&mut f, &l);
+        self.draw_table(&mut f, &l);
+        self.draw_hand(&mut f, &l);
+        self.draw_footer(&mut f, &l);
+        self.draw_status(&mut f, &l);
+        if self.show_help {
+            self.draw_help(&mut f, &l);
+        }
+        f
+    }
+
+    /// The title bar: the game's name, and which round is being played.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, 0.0);
+        if l.header.is_empty() {
             return;
         }
-
-        match self.phase {
-            Phase::Bidding => self.handle_key_bidding(event),
-            Phase::Playing => self.handle_key_playing(event),
-            Phase::TrickDone => self.handle_key_trick_done(event),
-            Phase::RoundOver => self.handle_key_round_over(event),
-            Phase::GameOver => self.handle_key_game_over(event),
+        bounded(
+            f,
+            (l.pad, l.header.y + (l.header.h - l.title) / 2.0),
+            (l.header.w - l.pad * 2.0).max(0.0),
+            TITLE,
+            LAVENDER,
+            l.title,
+            FontWeightHint::Bold,
+        );
+        let right = format!("Round {}", self.round_number);
+        let w = text::measure(&right, l.small, FontWeightHint::Regular);
+        let x = l.header.right() - l.pad - w;
+        // Measured against the title rather than assumed to clear it: the two
+        // are left out rather than painted through one another.
+        if x > l.pad + text::measure(TITLE, l.title, FontWeightHint::Bold) + l.pad {
+            text_at(
+                f,
+                x,
+                l.header.y + (l.header.h - l.small) / 2.0,
+                &right,
+                SUBTEXT0,
+                l.small,
+                FontWeightHint::Regular,
+            );
         }
     }
 
-    fn handle_key_bidding(&mut self, event: &KeyEvent) {
-        if !self.current_player.is_human() {
-            return;
-        }
-        match event.key {
-            Key::Up if self.bid_selection < 13 => {
-                self.bid_selection += 1;
-            }
-            Key::Down if self.bid_selection > 0 => {
-                self.bid_selection -= 1;
-            }
-            Key::Enter | Key::Space => {
-                self.submit_human_bid();
-            }
-            Key::N => {
-                self.new_game();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_key_playing(&mut self, event: &KeyEvent) {
-        if !self.current_player.is_human() {
-            return;
-        }
-        match event.key {
-            Key::Left if self.selected_card > 0 => {
-                self.selected_card -= 1;
-            }
-            Key::Right => {
-                let max = self.hands[0].len().saturating_sub(1);
-                if self.selected_card < max {
-                    self.selected_card += 1;
-                }
-            }
-            Key::Enter | Key::Space => {
-                self.try_play_selected();
-            }
-            Key::H => {
-                self.sort_order = self.sort_order.toggle();
-                self.sort_all_hands();
-                self.clamp_selected_card();
-            }
-            Key::N => {
-                self.new_game();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_key_trick_done(&mut self, event: &KeyEvent) {
-        match event.key {
-            Key::Enter | Key::Space => {
-                self.advance_after_trick();
-            }
-            Key::N => {
-                self.new_game();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_key_round_over(&mut self, event: &KeyEvent) {
-        match event.key {
-            Key::Enter | Key::Space => {
-                self.advance_round();
-            }
-            Key::N => {
-                self.new_game();
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_key_game_over(&mut self, event: &KeyEvent) {
-        if event.key == Key::N {
-            self.new_game();
-        }
-    }
-
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            match self.phase {
-                Phase::Bidding => self.handle_mouse_bidding(event),
-                Phase::Playing => self.handle_mouse_playing(event),
-                Phase::TrickDone => {
-                    self.advance_after_trick();
-                }
-                Phase::RoundOver => {
-                    self.advance_round();
-                }
-                Phase::GameOver => {}
-            }
-        }
-    }
-
-    fn handle_mouse_bidding(&mut self, event: &MouseEvent) {
-        if !self.current_player.is_human() {
-            return;
-        }
-        // Check if click is on a bid button in the overlay
-        let overlay_x = TRICK_CENTER_X - 120.0;
-        let overlay_y = TRICK_CENTER_Y - 100.0;
-
-        // Bid number grid: 7 columns x 2 rows (0-6, 7-13)
-        let btn_w: f32 = 32.0;
-        let btn_h: f32 = 32.0;
-        let btn_gap: f32 = 4.0;
-
-        for bid_val in 0..=13u8 {
-            let col = (bid_val % 7) as f32;
-            let row = (bid_val / 7) as f32;
-            let bx = overlay_x + 10.0 + col * (btn_w + btn_gap);
-            let by = overlay_y + 50.0 + row * (btn_h + btn_gap);
-
-            if event.x >= bx && event.x < bx + btn_w && event.y >= by && event.y < by + btn_h {
-                self.bid_selection = bid_val;
-                self.submit_human_bid();
-                return;
-            }
-        }
-    }
-
-    fn handle_mouse_playing(&mut self, event: &MouseEvent) {
-        if !self.current_player.is_human() {
-            return;
-        }
-        // Check if click is on a card in the hand
-        let hand_len = self.hands[0].len();
-        if hand_len == 0 {
-            return;
-        }
-        let total_width = (hand_len - 1) as f32 * CARD_SPACING + CARD_W;
-        let start_x = TRICK_CENTER_X - total_width / 2.0;
-
-        for i in 0..hand_len {
-            let cx = start_x + i as f32 * CARD_SPACING;
-            if event.x >= cx
-                && event.x < cx + CARD_W
-                && event.y >= HAND_Y
-                && event.y < HAND_Y + CARD_H
-            {
-                self.selected_card = i;
-                self.try_play_selected();
-                return;
-            }
-        }
-    }
-
-    // ── Rendering ───────────────────────────────────────────────────
-
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut commands = Vec::with_capacity(512);
-
-        // Background
-        commands.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: WINDOW_W,
-            height: WINDOW_H,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        self.render_header(&mut commands);
-        self.render_trick_area(&mut commands);
-        self.render_hand(&mut commands);
-        self.render_sidebar(&mut commands);
-        self.render_footer(&mut commands);
-
+    /// The felt, and everything on it.
+    fn draw_table(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.table, FELT, l.pad * 0.6);
+        self.draw_trick(f, l);
+        self.draw_seats(f, l);
+        self.draw_panel(f, l);
         if self.phase == Phase::Bidding && self.current_player.is_human() {
-            self.render_bid_overlay(&mut commands);
-        }
-
-        if self.phase == Phase::GameOver {
-            self.render_game_over_overlay(&mut commands);
-        }
-
-        commands
-    }
-
-    fn render_header(&self, commands: &mut Vec<RenderCommand>) {
-        // Title
-        commands.push(RenderCommand::Text {
-            x: 20.0,
-            y: HEADER_Y,
-            text: "Spades".to_string(),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Round number
-        commands.push(RenderCommand::Text {
-            x: 120.0,
-            y: HEADER_Y + 4.0,
-            text: format!("Round {}", self.round_number),
-            color: SUBTEXT0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Team scores
-        let ns_score = self.teams[0].score;
-        let ns_bags = self.teams[0].bags;
-        let ew_score = self.teams[1].score;
-        let ew_bags = self.teams[1].bags;
-
-        commands.push(RenderCommand::FillRect {
-            x: 230.0,
-            y: HEADER_Y - 2.0,
-            width: 220.0,
-            height: 28.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        commands.push(RenderCommand::Text {
-            x: 240.0,
-            y: HEADER_Y + 3.0,
-            text: format!("NS: {} (bags: {})", ns_score, ns_bags),
-            color: GREEN,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        commands.push(RenderCommand::FillRect {
-            x: 470.0,
-            y: HEADER_Y - 2.0,
-            width: 220.0,
-            height: 28.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        commands.push(RenderCommand::Text {
-            x: 480.0,
-            y: HEADER_Y + 3.0,
-            text: format!("EW: {} (bags: {})", ew_score, ew_bags),
-            color: PEACH,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Trick count vs bid for this round (below scores)
-        if self.phase == Phase::Playing || self.phase == Phase::TrickDone {
-            let ns_tricks = self.team_tricks(0);
-            let ns_bid = self.team_bid(0);
-            let ew_tricks = self.team_tricks(1);
-            let ew_bid = self.team_bid(1);
-
-            commands.push(RenderCommand::Text {
-                x: 240.0,
-                y: HEADER_Y + 26.0,
-                text: format!("Tricks: {}/{}", ns_tricks, ns_bid),
-                color: SUBTEXT0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            commands.push(RenderCommand::Text {
-                x: 480.0,
-                y: HEADER_Y + 26.0,
-                text: format!("Tricks: {}/{}", ew_tricks, ew_bid),
-                color: SUBTEXT0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            self.draw_bid_pad(f, l);
         }
     }
 
-    fn render_trick_area(&self, commands: &mut Vec<RenderCommand>) {
-        // Central trick display area background
-        commands.push(RenderCommand::FillRect {
-            x: TRICK_CENTER_X - 130.0,
-            y: TRICK_CENTER_Y - 100.0,
-            width: 260.0,
-            height: 200.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Player position labels
-        let positions = [
-            (TRICK_CENTER_X - 15.0, TRICK_CENTER_Y + 60.0, "S"),
-            (TRICK_CENTER_X + 80.0, TRICK_CENTER_Y - 15.0, "E"),
-            (TRICK_CENTER_X - 15.0, TRICK_CENTER_Y - 85.0, "N"),
-            (TRICK_CENTER_X - 100.0, TRICK_CENTER_Y - 15.0, "W"),
-        ];
-        for &(px, py, label) in &positions {
-            commands.push(RenderCommand::Text {
-                x: px,
-                y: py,
-                text: label.to_string(),
-                color: OVERLAY0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Render played cards in trick
-        let trick_ref = if self.phase == Phase::TrickDone {
+    /// The cards in play, and a ring round the one that took them.
+    ///
+    /// A settled trick stays here for `SWEEP_MS`. The old program kept the
+    /// finished trick in `last_trick` and drew it, but nothing ever timed it
+    /// out: the game sat at `TrickDone` until the human pressed Enter, and
+    /// pressing Enter was also the only thing that let the machines play, so a
+    /// game left alone stopped where it stood.
+    fn draw_trick(&self, f: &mut Frame<Target>, l: &Layout) {
+        let settled = self.phase == Phase::TrickDone;
+        let trick = if settled {
             self.last_trick.as_ref().unwrap_or(&self.current_trick)
         } else {
             &self.current_trick
         };
-
-        for &(player, card) in &trick_ref.cards {
-            let (cx, cy) = self.trick_card_position(player);
-            self.render_card_face(commands, cx, cy, card, false, false);
+        let taker = if settled { trick.winner() } else { None };
+        // While the trick is live, the card that was led is the one everyone
+        // else must follow, so it is marked; once the trick has settled the
+        // taker's ring replaces it, because that is then the fact that matters.
+        let leader = if settled { None } else { trick.leader() };
+        let stroke = (l.card.0 * 0.07).clamp(1.0, 4.0);
+        for &(player, card) in &trick.cards {
+            let r = l.trick_card(player.index());
+            draw_card_face(f, r, card, false);
+            if taker == Some(player) {
+                outline(f, r, GREEN, stroke);
+            } else if leader == Some(player) {
+                outline(f, r, LAVENDER, stroke);
+            }
         }
-
-        // Spades broken indicator
+        if trick.cards.is_empty()
+            && let Some(message) = self.table_message()
+        {
+            let (_, cy) = l.table.centre();
+            centred(
+                f,
+                l.table.x,
+                l.table.w,
+                cy - l.font / 2.0,
+                &message,
+                MAUVE,
+                l.font,
+                FontWeightHint::Bold,
+            );
+        }
         if self.spades_broken {
-            commands.push(RenderCommand::Text {
-                x: TRICK_CENTER_X - 125.0,
-                y: TRICK_CENTER_Y + 80.0,
-                text: "\u{2660} Broken".to_string(),
-                color: LAVENDER,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            bounded(
+                f,
+                (l.table.x + l.pad, l.table.bottom() - l.pad - l.small),
+                (l.table.w - l.pad * 2.0).max(0.0),
+                &format!("{} broken", Suit::Spades.name()),
+                LAVENDER,
+                l.small,
+                FontWeightHint::Regular,
+            );
         }
     }
 
-    fn trick_card_position(&self, player: PlayerId) -> (f32, f32) {
-        match player.0 {
-            0 => (TRICK_CENTER_X - CARD_W / 2.0, TRICK_CENTER_Y + 10.0), // South
-            1 => (TRICK_CENTER_X + 30.0, TRICK_CENTER_Y - CARD_H / 2.0), // East
-            2 => (
-                TRICK_CENTER_X - CARD_W / 2.0,
-                TRICK_CENTER_Y - CARD_H - 10.0,
-            ), // North
-            3 => (
-                TRICK_CENTER_X - CARD_W - 30.0,
-                TRICK_CENTER_Y - CARD_H / 2.0,
-            ), // West
-            _ => (0.0, 0.0),
+    /// What is written across the middle of an empty table.
+    ///
+    /// Deliberately not the status line: the two say different things, so a
+    /// test that searched the frame for a string cannot pass for the wrong
+    /// reason.
+    fn table_message(&self) -> Option<String> {
+        match self.phase {
+            Phase::Bidding | Phase::Playing | Phase::TrickDone => None,
+            Phase::RoundOver => Some(format!(
+                "Press {} for the next round",
+                Button::Confirm.key_name()
+            )),
+            Phase::GameOver => Some(self.winner_message.clone()),
         }
     }
 
-    fn render_card_face(
-        &self,
-        commands: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        card: Card,
-        selected: bool,
-        dimmed: bool,
-    ) {
-        let bg = if selected {
-            SURFACE1
-        } else {
-            Color::from_hex(0xEEEEEE)
-        };
-        let border_color = if selected { BLUE } else { OVERLAY0 };
-
-        // Card border
-        commands.push(RenderCommand::FillRect {
-            x: x - 1.0,
-            y: y - 1.0,
-            width: CARD_W + 2.0,
-            height: CARD_H + 2.0,
-            color: border_color,
-            corner_radii: CornerRadii::all(5.0),
-        });
-
-        // Card background
-        let card_bg = if dimmed {
-            Color::rgba(bg.r, bg.g, bg.b, 160)
-        } else {
-            bg
-        };
-        commands.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: CARD_W,
-            height: CARD_H,
-            color: card_bg,
-            corner_radii: CornerRadii::all(4.0),
-        });
-
-        let suit_color = if dimmed { OVERLAY0 } else { card.suit.color() };
-
-        // Rank in top-left
-        commands.push(RenderCommand::Text {
-            x: x + 4.0,
-            y: y + 4.0,
-            text: card.rank.label().to_string(),
-            color: suit_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Suit symbol center
-        commands.push(RenderCommand::Text {
-            x: x + CARD_W / 2.0 - 8.0,
-            y: y + CARD_H / 2.0 - 8.0,
-            text: card.suit.symbol().to_string(),
-            color: suit_color,
-            font_size: CARD_SUIT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Rank in bottom-right
-        commands.push(RenderCommand::Text {
-            x: x + CARD_W - 20.0,
-            y: y + CARD_H - 22.0,
-            text: card.rank.label().to_string(),
-            color: suit_color,
-            font_size: CARD_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The four seats: who they are, how much they still hold, who is to act.
+    ///
+    /// The old program wrote three compass letters at literal offsets from a
+    /// literal centre and put everything else in a sidebar pinned at x = 720.
+    fn draw_seats(&self, f: &mut Frame<Target>, l: &Layout) {
+        for index in 0..SEATS {
+            let r = l.seat_label(index);
+            if r.is_empty() {
+                continue;
+            }
+            let pid = seat(index);
+            let acting = pid == self.current_player && self.sweep_ms == 0;
+            fill(f, r, if acting { SURFACE1 } else { SURFACE0 }, l.pad * 0.3);
+            let budget = (r.w - l.pad * 0.6).max(0.0);
+            bounded(
+                f,
+                (r.x + l.pad * 0.3, r.y + r.h * 0.08),
+                budget,
+                pid.name(),
+                if acting { YELLOW } else { TEXT_COLOR },
+                l.small,
+                FontWeightHint::Bold,
+            );
+            bounded(
+                f,
+                (r.x + l.pad * 0.3, r.y + r.h * 0.52),
+                budget,
+                &format!("{} left", self.hand_of(pid).len()),
+                SUBTEXT0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+        }
     }
 
-    fn render_hand(&self, commands: &mut Vec<RenderCommand>) {
-        let hand = &self.hands[0];
-        if hand.is_empty() {
+    /// The scores, the bags and every seat's bid against what it has taken.
+    ///
+    /// Left out rather than squeezed when the window cannot pay for it, which
+    /// is the answer the old sidebar could not give: it was drawn at x = 720
+    /// whatever the window was, so in anything narrower than 890 it was off the
+    /// right-hand edge entirely.
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.panel.is_empty() {
             return;
         }
+        fill(f, l.panel, SURFACE0, l.pad * 0.4);
+        let x = l.panel.x + l.pad * 0.6;
+        let budget = (l.panel.w - l.pad * 1.2).max(0.0);
+        let step = l.small * 1.9;
+        let mut y = l.panel.y + l.pad;
+        let mut row = |f: &mut Frame<Target>, text: &str, color: Color, weight| {
+            bounded(f, (x, y), budget, text, color, l.small, weight);
+            y += step;
+        };
+        row(f, "Scores", LAVENDER, FontWeightHint::Bold);
+        for (index, team) in self.teams.iter().enumerate() {
+            let text = format!(
+                "{}: {} \u{00b7} {} bags",
+                team_name(index),
+                team.score,
+                team.bags
+            );
+            let color = if index == 0 { GREEN } else { PEACH };
+            row(f, &text, color, FontWeightHint::Bold);
+            // The partnership's contract against what it has taken -- the one
+            // number that says whether the round is being made or set, and the
+            // number the old sidebar never showed at all.
+            let contract = format!(
+                "  bid {}, won {}",
+                self.team_bid(index),
+                self.team_tricks(index)
+            );
+            row(f, &contract, SUBTEXT0, FontWeightHint::Regular);
+        }
+        for (index, pr) in self.player_rounds.iter().enumerate() {
+            let bid = pr.bid.map_or_else(|| String::from("\u{2014}"), bid_name);
+            let text = format!(
+                "{}: bid {} \u{00b7} {} won",
+                seat(index).name(),
+                bid,
+                pr.tricks_won
+            );
+            row(f, &text, SUBTEXT0, FontWeightHint::Regular);
+        }
+    }
 
-        let legal = if self.phase == Phase::Playing && self.current_player.is_human() {
+    /// The pad the human bids from: fourteen buttons, nil to thirteen.
+    ///
+    /// Every button is recorded as a hit box by the pass that paints it, which
+    /// is the whole fix: the old overlay was drawn from `overlay_x =
+    /// TRICK_CENTER_X - 140.0` and `grid_start_y = overlay_y + 75.0`, and hit
+    /// tested against `overlay_x = TRICK_CENTER_X - 120.0` and `overlay_y +
+    /// 50.0`, so a click on the button marked 5 was answered by the square
+    /// drawn one row up and half a cell left of it.
+    fn draw_bid_pad(&self, f: &mut Frame<Target>, l: &Layout) {
+        let pad = l.bid_pad();
+        if pad.is_empty() {
+            return;
+        }
+        fill(f, pad, MANTLE, l.pad * 0.6);
+        outline(f, pad, LAVENDER, (l.pad * 0.12).clamp(1.0, 3.0));
+        centred(
+            f,
+            pad.x,
+            pad.w,
+            pad.y + l.pad * 0.7,
+            &format!("Your bid: {}", bid_name(self.bid_selection)),
+            TEXT_COLOR,
+            l.font,
+            FontWeightHint::Bold,
+        );
+        for value in 0..=MAX_BID {
+            let r = l.bid_button(value);
+            if r.is_empty() {
+                continue;
+            }
+            let on = value == self.bid_selection;
+            fill(f, r, if on { BLUE } else { SURFACE1 }, r.w * 0.2);
+            let size = (r.w * 0.42).max(7.0);
+            centred(
+                f,
+                r.x,
+                r.w,
+                r.y + (r.h - size) / 2.0,
+                &bid_key_label(value),
+                if on { BASE } else { TEXT_COLOR },
+                size,
+                FontWeightHint::Bold,
+            );
+            f.hit(Target::Bid(value), r);
+        }
+    }
+
+    /// The human's hand, and the hit box of every card in it.
+    ///
+    /// The card the pointer is on is lifted out of the fan, and the hit box
+    /// recorded is the lifted rectangle -- the one that was painted. The old
+    /// program drew a selected card ten pixels high and searched the strip it
+    /// had left, so the top ten pixels of the card the player was aiming at
+    /// were the one part of it that could not be clicked.
+    fn draw_hand(&self, f: &mut Frame<Target>, l: &Layout) {
+        let hand = &self.hands[0];
+        let n = hand.len();
+        let choosing = self.phase == Phase::Playing && self.current_player.is_human();
+        let legal = if choosing {
             self.legal_plays(PlayerId::SOUTH)
         } else {
             Vec::new()
         };
-
-        let total_width = (hand.len() - 1) as f32 * CARD_SPACING + CARD_W;
-        let start_x = TRICK_CENTER_X - total_width / 2.0;
-
-        // "Your hand" label
-        commands.push(RenderCommand::Text {
-            x: start_x,
-            y: HAND_Y - 20.0,
-            text: "Your Hand".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
         for (i, &card) in hand.iter().enumerate() {
-            let cx = start_x + i as f32 * CARD_SPACING;
-            let is_selected = i == self.selected_card
-                && self.phase == Phase::Playing
-                && self.current_player.is_human();
-            let is_legal = legal.contains(&i);
-            let dimmed =
-                self.phase == Phase::Playing && self.current_player.is_human() && !is_legal;
-
-            let card_y = if is_selected { HAND_Y - 10.0 } else { HAND_Y };
-            self.render_card_face(commands, cx, card_y, card, is_selected, dimmed);
+            let on = choosing && i == self.selected_card;
+            let r = if on {
+                l.hand_card(i, n).translated(0.0, -l.hand_lift())
+            } else {
+                l.hand_card(i, n)
+            };
+            draw_card_face(f, r, card, choosing && !legal.contains(&i));
+            if on {
+                outline(f, r, YELLOW, (l.card.0 * 0.07).clamp(1.0, 4.0));
+            }
+            f.hit(Target::Card(i), r);
         }
     }
 
-    fn render_sidebar(&self, commands: &mut Vec<RenderCommand>) {
-        // Sidebar background
-        commands.push(RenderCommand::FillRect {
-            x: SIDEBAR_X,
-            y: 50.0,
-            width: 170.0,
-            height: 400.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        // Title
-        commands.push(RenderCommand::Text {
-            x: SIDEBAR_X + 10.0,
-            y: 60.0,
-            text: "Players".to_string(),
-            color: LAVENDER,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Separator
-        commands.push(RenderCommand::Line {
-            x1: SIDEBAR_X + 10.0,
-            y1: 82.0,
-            x2: SIDEBAR_X + 160.0,
-            y2: 82.0,
-            color: SURFACE1,
-            width: 1.0,
-        });
-
-        let player_order = [
-            PlayerId::SOUTH,
-            PlayerId::EAST,
-            PlayerId::NORTH,
-            PlayerId::WEST,
-        ];
-        for (idx, &pid) in player_order.iter().enumerate() {
-            let py = 90.0 + idx as f32 * 90.0;
-            let pr = &self.player_rounds[pid.index()];
-
-            // Player name
-            let name_color = if pid == self.current_player {
-                YELLOW
-            } else {
-                TEXT_COLOR
-            };
-            let team_marker = if pid.team() == 0 { " (NS)" } else { " (EW)" };
-            commands.push(RenderCommand::Text {
-                x: SIDEBAR_X + 10.0,
-                y: py,
-                text: format!("{}{}", pid.name(), team_marker),
-                color: name_color,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Bid
-            let bid_text = if let Some(b) = pr.bid {
-                if b == 0 {
-                    "Nil".to_string()
-                } else {
-                    format!("Bid: {}", b)
-                }
-            } else {
-                "...".to_string()
-            };
-            commands.push(RenderCommand::Text {
-                x: SIDEBAR_X + 10.0,
-                y: py + 18.0,
-                text: bid_text,
-                color: SUBTEXT0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Tricks won
-            commands.push(RenderCommand::Text {
-                x: SIDEBAR_X + 10.0,
-                y: py + 34.0,
-                text: format!("Tricks: {}", pr.tricks_won),
-                color: SUBTEXT0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            // Cards remaining
-            let cards_left = self.hands[pid.index()].len();
-            commands.push(RenderCommand::Text {
-                x: SIDEBAR_X + 10.0,
-                y: py + 50.0,
-                text: format!("Cards: {}", cards_left),
-                color: OVERLAY0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+    /// The row of buttons, each of which duplicates a key.
+    ///
+    /// The old window had no buttons at all: every verb was a keystroke, and
+    /// the only list of them was one line of grey text in the footer.
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.footer, BASE, 0.0);
+        if l.footer.is_empty() {
+            return;
+        }
+        let size = (l.small * 0.95).max(7.0);
+        let gap = l.pad * 0.4;
+        let h = (l.footer.h - gap).max(0.0);
+        let y = l.footer.y + (l.footer.h - h) / 2.0;
+        let mut x = l.pad;
+        for button in BUTTONS {
+            let label = self.button_label(button);
+            let w = text::measure(label, size, FontWeightHint::Bold) + l.pad;
+            // A button that would not fit whole is left out rather than drawn
+            // off the edge of the window.
+            if x + w > l.footer.right() - l.pad {
+                break;
+            }
+            let r = Rect::new(x, y, w, h);
+            let on = button == Button::Help && self.show_help;
+            fill(f, r, if on { SURFACE1 } else { SURFACE0 }, h * 0.25);
+            let (cx, cy) = r.centre();
+            text_at(
+                f,
+                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
+                cy - size / 2.0,
+                label,
+                if on { TEXT_COLOR } else { SUBTEXT0 },
+                size,
+                FontWeightHint::Bold,
+            );
+            f.hit(Target::Button(button), r);
+            x += w + gap;
         }
     }
 
-    fn render_footer(&self, commands: &mut Vec<RenderCommand>) {
-        // Status message
-        let status_color = match self.phase {
+    /// The one line of prose, in a bar of its own.
+    ///
+    /// The old program drew the status at `FOOTER_Y - 25.0` and a list of
+    /// keystrokes at `FOOTER_Y`, both unbounded, so a status naming a seat ran
+    /// straight off the right edge of any window narrower than the one the
+    /// coordinates were written for.
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.status, MANTLE, 0.0);
+        if l.status.is_empty() {
+            return;
+        }
+        let y = l.status.y + (l.status.h - l.font) / 2.0;
+        let mut budget = (l.status.w - l.pad * 2.0).max(0.0);
+
+        if matches!(self.phase, Phase::Playing | Phase::TrickDone) {
+            let counter = format!("Trick {}/13", self.tricks_played.saturating_add(1).min(13));
+            let w = text::measure(&counter, l.small, FontWeightHint::Regular);
+            // Drawn only if the status still has room to say something after
+            // it; the prose is what the player is reading.
+            if budget > w + l.pad * 4.0 {
+                text_at(
+                    f,
+                    l.status.right() - l.pad - w,
+                    l.status.y + (l.status.h - l.small) / 2.0,
+                    &counter,
+                    SUBTEXT0,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+                budget = (budget - w - l.pad).max(0.0);
+            }
+        }
+
+        let color = match self.phase {
             Phase::GameOver => RED,
             Phase::RoundOver => YELLOW,
             Phase::TrickDone => TEAL,
-            _ => SUBTEXT0,
+            Phase::Bidding | Phase::Playing => TEXT_COLOR,
         };
-        commands.push(RenderCommand::Text {
-            x: 20.0,
-            y: FOOTER_Y - 25.0,
-            text: self.status_message.clone(),
-            color: status_color,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Controls help
-        let controls = match self.phase {
-            Phase::Bidding => "\u{2191}/\u{2193}: Adjust bid  Enter: Confirm  N: New game",
-            Phase::Playing => "\u{2190}/\u{2192}: Select card  Enter: Play  H: Sort  N: New game",
-            Phase::TrickDone => "Enter: Next trick  N: New game",
-            Phase::RoundOver => "Enter: Next round  N: New game",
-            Phase::GameOver => "N: New game",
-        };
-        commands.push(RenderCommand::Text {
-            x: 20.0,
-            y: FOOTER_Y,
-            text: controls.to_string(),
-            color: OVERLAY0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        bounded(
+            f,
+            (l.pad, y),
+            budget,
+            &self.status_message,
+            color,
+            l.font,
+            FontWeightHint::Regular,
+        );
     }
 
-    fn render_bid_overlay(&self, commands: &mut Vec<RenderCommand>) {
-        let overlay_x = TRICK_CENTER_X - 140.0;
-        let overlay_y = TRICK_CENTER_Y - 120.0;
-        let overlay_w = 280.0;
-        let overlay_h = 200.0;
+    /// The help card, sized from the rows it holds.
+    ///
+    /// The keys it lists are `Button::key_name` and the labels are
+    /// `button_label` -- the same two functions the footer draws from, so a
+    /// button whose label changes cannot leave the help card describing the old
+    /// one. The old window had no help at all.
+    fn draw_help(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.window, Color::rgba(0, 0, 0, 180), 0.0);
 
-        // Overlay background
-        commands.push(RenderCommand::FillRect {
-            x: overlay_x,
-            y: overlay_y,
-            width: overlay_w,
-            height: overlay_h,
-            color: Color::rgba(30, 30, 46, 240),
-            corner_radii: CornerRadii::all(12.0),
+        let mut rows: Vec<(String, String)> = vec![
+            (
+                String::from("\u{2190} \u{2192}"),
+                String::from("Move along your hand"),
+            ),
+            (
+                String::from("\u{2191} \u{2193}"),
+                String::from("Raise or lower your bid"),
+            ),
+            (String::from("Space"), String::from("Same as Enter")),
+        ];
+        rows.extend(BUTTONS.iter().map(|&b| {
+            (
+                String::from(b.key_name()),
+                String::from(self.button_label(b)),
+            )
+        }));
+
+        let key_w = rows.iter().fold(0.0f32, |acc, (k, _)| {
+            acc.max(text::measure(k, l.small, FontWeightHint::Bold))
         });
-
-        // Border
-        commands.push(RenderCommand::FillRect {
-            x: overlay_x - 2.0,
-            y: overlay_y - 2.0,
-            width: overlay_w + 4.0,
-            height: overlay_h + 4.0,
-            color: LAVENDER,
-            corner_radii: CornerRadii::all(14.0),
+        let desc_w = rows.iter().fold(0.0f32, |acc, (_, d)| {
+            acc.max(text::measure(d, l.small, FontWeightHint::Regular))
         });
-        // Inner fill again on top of border
-        commands.push(RenderCommand::FillRect {
-            x: overlay_x,
-            y: overlay_y,
-            width: overlay_w,
-            height: overlay_h,
-            color: Color::rgba(30, 30, 46, 245),
-            corner_radii: CornerRadii::all(12.0),
-        });
+        let heading = "How to play";
+        let inner =
+            (key_w + desc_w + l.pad).max(text::measure(heading, l.title, FontWeightHint::Bold));
+        #[expect(clippy::cast_precision_loss, reason = "seven rows; exact in f32")]
+        let rows_h = rows.len() as f32 * l.small * 1.8;
+        let card_w = (inner + l.pad * 2.0).min(l.window.w);
+        let card_h = (rows_h + l.title * 2.2 + l.pad).min(l.window.h);
+        let card = Rect::new(
+            (l.window.w - card_w) / 2.0,
+            (l.window.h - card_h) / 2.0,
+            card_w,
+            card_h,
+        );
+        fill(f, card, MANTLE, l.pad * 0.6);
+        centred(
+            f,
+            card.x,
+            card.w,
+            card.y + l.pad,
+            heading,
+            TEXT_COLOR,
+            l.title,
+            FontWeightHint::Bold,
+        );
 
-        // Title
-        commands.push(RenderCommand::Text {
-            x: overlay_x + 80.0,
-            y: overlay_y + 10.0,
-            text: "Your Bid".to_string(),
-            color: LAVENDER,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Current selection
-        let bid_label = if self.bid_selection == 0 {
-            "Nil".to_string()
-        } else {
-            format!("{}", self.bid_selection)
-        };
-        commands.push(RenderCommand::Text {
-            x: overlay_x + overlay_w / 2.0 - 15.0,
-            y: overlay_y + 35.0,
-            text: bid_label,
-            color: YELLOW,
-            font_size: BID_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Bid button grid (0-13)
-        let btn_w: f32 = 32.0;
-        let btn_h: f32 = 32.0;
-        let btn_gap: f32 = 4.0;
-        let grid_start_x = overlay_x + 10.0;
-        let grid_start_y = overlay_y + 75.0;
-
-        for bid_val in 0..=13u8 {
-            let col = (bid_val % 7) as f32;
-            let row = (bid_val / 7) as f32;
-            let bx = grid_start_x + col * (btn_w + btn_gap);
-            let by = grid_start_y + row * (btn_h + btn_gap);
-
-            let bg = if bid_val == self.bid_selection {
-                BLUE
-            } else {
-                SURFACE1
-            };
-            let fg = if bid_val == self.bid_selection {
-                BASE
-            } else {
-                TEXT_COLOR
-            };
-
-            commands.push(RenderCommand::FillRect {
-                x: bx,
-                y: by,
-                width: btn_w,
-                height: btn_h,
-                color: bg,
-                corner_radii: CornerRadii::all(4.0),
-            });
-
-            let label = if bid_val == 0 {
-                "N".to_string()
-            } else {
-                format!("{}", bid_val)
-            };
-            commands.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: by + 8.0,
-                text: label,
-                color: fg,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Instructions
-        commands.push(RenderCommand::Text {
-            x: overlay_x + 20.0,
-            y: overlay_y + overlay_h - 30.0,
-            text: "Click or \u{2191}/\u{2193} then Enter".to_string(),
-            color: OVERLAY0,
-            font_size: SMALL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Show other players' bids if they've already bid
-        let mut already_bid = Vec::new();
-        for pid_val in 0..4u8 {
-            let pid = PlayerId(pid_val);
-            if let Some(b) = self.player_rounds[pid.index()].bid {
-                let bid_str = if b == 0 {
-                    "Nil".to_string()
-                } else {
-                    format!("{}", b)
-                };
-                already_bid.push(format!("{}: {}", pid.name(), bid_str));
+        let mut y = card.y + l.title * 1.8;
+        for (key, desc) in &rows {
+            if y + l.small > card.bottom() {
+                break;
             }
+            // The card is clipped to the window when the window is smaller
+            // than the help it holds, so each column is bounded by the room
+            // the card actually has rather than by what the row measured.
+            let key_x = card.x + l.pad;
+            bounded(
+                f,
+                (key_x, y),
+                key_w.min((card.right() - l.pad - key_x).max(0.0)),
+                key,
+                BLUE,
+                l.small,
+                FontWeightHint::Bold,
+            );
+            let desc_x = key_x + key_w + l.pad;
+            bounded(
+                f,
+                (desc_x, y),
+                (card.right() - l.pad - desc_x).max(0.0),
+                desc,
+                SUBTEXT0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+            y += l.small * 1.8;
         }
-        if !already_bid.is_empty() {
-            commands.push(RenderCommand::Text {
-                x: overlay_x + 20.0,
-                y: overlay_y + overlay_h - 15.0,
-                text: already_bid.join("  "),
-                color: SUBTEXT0,
-                font_size: SMALL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
+        // The card swallows the click that dismisses it, so a player reaching
+        // for a line of the help does not play the card underneath it.
+        f.hit(Target::Help, card);
     }
 
-    fn render_game_over_overlay(&self, commands: &mut Vec<RenderCommand>) {
-        let overlay_x = TRICK_CENTER_X - 160.0;
-        let overlay_y = TRICK_CENTER_Y - 80.0;
-        let overlay_w = 320.0;
-        let overlay_h = 160.0;
-
-        // Background
-        commands.push(RenderCommand::FillRect {
-            x: overlay_x - 2.0,
-            y: overlay_y - 2.0,
-            width: overlay_w + 4.0,
-            height: overlay_h + 4.0,
-            color: MAUVE,
-            corner_radii: CornerRadii::all(14.0),
-        });
-        commands.push(RenderCommand::FillRect {
-            x: overlay_x,
-            y: overlay_y,
-            width: overlay_w,
-            height: overlay_h,
-            color: Color::rgba(30, 30, 46, 250),
-            corner_radii: CornerRadii::all(12.0),
-        });
-
-        // Title
-        commands.push(RenderCommand::Text {
-            x: overlay_x + 100.0,
-            y: overlay_y + 20.0,
-            text: "Game Over".to_string(),
-            color: MAUVE,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Winner
-        commands.push(RenderCommand::Text {
-            x: overlay_x + 30.0,
-            y: overlay_y + 60.0,
-            text: self.winner_message.clone(),
-            color: YELLOW,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Instructions
-        commands.push(RenderCommand::Text {
-            x: overlay_x + 80.0,
-            y: overlay_y + 110.0,
-            text: "Press N for new game".to_string(),
-            color: OVERLAY0,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// What a button says now.
+    ///
+    /// `Confirm` says five different things across the phases, which is why it
+    /// asks `confirm_label`: the footer, the help card and the test that holds
+    /// the two together all read the one function.
+    fn button_label(&self, button: Button) -> &'static str {
+        match button {
+            Button::Confirm => confirm_label(self.phase),
+            Button::Sort => match self.sort_order {
+                SortOrder::BySuit => "Sort by rank",
+                SortOrder::ByRank => "Sort by suit",
+            },
+            Button::New => "New game",
+            Button::Help => "Help",
+        }
     }
 }
 
-fn main() {
-    let _app = SpadesGame::new();
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// The seat at `index`, counting clockwise from the human's.
+///
+/// Total, so that no caller has to carry a bound: seats are produced by
+/// `0..SEATS` and by `% SEATS`, so the wrap is unreachable.
+fn seat(index: usize) -> PlayerId {
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "index % SEATS is 0..4, which is a u8"
+    )]
+    PlayerId((index % SEATS) as u8)
+}
+
+/// What a partnership is called.
+fn team_name(team: usize) -> &'static str {
+    if team == 0 { "NS" } else { "EW" }
+}
+
+/// A bid, spelled the way the player reads it.
+fn bid_name(value: u8) -> String {
+    if value == 0 {
+        String::from("Nil")
+    } else {
+        value.to_string()
+    }
+}
+
+/// What is written on the bid pad's button for `value`.
+///
+/// Nil is "N": the cell is a square about as wide as two digits, and "Nil"
+/// spelled out would be drawn over its neighbour.
+fn bid_key_label(value: u8) -> String {
+    if value == 0 {
+        String::from("N")
+    } else {
+        value.to_string()
+    }
+}
+
+/// A filled rectangle, skipped when there is nothing to fill.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, radius: f32) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    });
+}
+
+/// A ring round a rectangle: the selection, and the taker of the trick.
+fn outline(f: &mut Frame<Target>, r: Rect, color: Color, line_width: f32) {
+    if r.is_empty() {
+        return;
+    }
+    f.push(RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width,
+        corner_radii: CornerRadii::all(r.w * 0.12),
+    });
+}
+
+/// One run of text.
+fn text_at(
+    f: &mut Frame<Target>,
+    x: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+) {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: String::from(s),
+        color,
+        font_size,
+        font_weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+}
+
+/// One run of text that is cut with an ellipsis rather than allowed to run on.
+///
+/// Every string the old program drew was `max_width: None`, including the four
+/// panel columns and the status line.
+fn bounded(
+    f: &mut Frame<Target>,
+    at: (f32, f32),
+    width: f32,
+    s: &str,
+    color: Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+) {
+    // No room, no run -- the same rule `fill` keeps for an empty rectangle. A
+    // caller that has been squeezed to nothing hands on a width of zero while
+    // its origin is still wherever the layout put it, which in a window too
+    // small for the widget is outside the widget: the help card in a nought-
+    // wide window wrote seven invisible rows at x = 4. They paint nothing
+    // either way, but a command outside the frame is a claim the picture does
+    // not mean, and it is the claim a test has to read.
+    if width <= 0.0 || width.is_nan() {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x: at.0,
+        y: at.1,
+        text: String::from(s),
+        color,
+        font_size,
+        font_weight,
+        max_width: Some(width),
+        overflow: TextOverflow::Ellipsis,
+    });
+}
+
+/// A run of text centred in `[x, x + w)`, by measuring it.
+///
+/// The old program centred by subtracting a literal -- `x + CARD_W / 2.0 - 8.0`
+/// for the suit in the middle of a card, `overlay_x + 80.0` for a heading --
+/// which is half of one particular string at one particular size, in a program
+/// that links `guitk::text`.
+fn centred(
+    f: &mut Frame<Target>,
+    x: f32,
+    w: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    size: f32,
+    weight: FontWeightHint,
+) {
+    let measured = text::measure(s, size, weight);
+    // Centred *in* `[x, x + w)`, which means it never leaves it. Two separate
+    // things are needed for that, and the first version of this helper had only
+    // the second: the offset is floored at zero, so a run too wide to centre
+    // starts at the left edge rather than being centred by a negative offset
+    // that hangs off *both* sides; and the width handed on is the room left
+    // from where the run starts, not the whole box, because a bound of `w`
+    // measured from `x + offset` reaches `offset` pixels past the box's own
+    // right edge. That second fault is what put a 300-pixel bound on the bid
+    // pad's heading in a 360-pixel window.
+    let offset = ((w - measured) / 2.0).max(0.0);
+    bounded(
+        f,
+        (x + offset, y),
+        (w - offset).max(0.0),
+        s,
+        color,
+        size,
+        weight,
+    );
+}
+
+/// A card, face up: rank and suit in the corner, the suit again in the middle.
+///
+/// `dim` is a card the rules will not allow to be played now.
+fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
+    if r.is_empty() {
+        return;
+    }
+    fill(f, r, if dim { SUBTEXT0 } else { CARD_FACE }, r.w * 0.12);
+    let ink = if dim { OVERLAY0 } else { card.suit.ink() };
+    let corner = (r.w * 0.30).max(6.0);
+    // A card too small to letter is left blank rather than scribbled over:
+    // below about twenty pixels the smallest legible rank is wider than the
+    // card it would be written on.
+    if corner * 2.0 > r.w {
+        return;
+    }
+    // Every glyph is bounded by the card it is written on. A ten is two
+    // characters where every other rank is one, so the corner is the one place
+    // in the picture where the text can be wider than the space measured for
+    // it, and a card at the edge of the fan would write it onto the felt.
+    let corner_x = r.x + r.w * 0.10;
+    let corner_w = (r.right() - corner_x).max(0.0);
+    bounded(
+        f,
+        (corner_x, r.y + r.h * 0.06),
+        corner_w,
+        card.rank.label(),
+        ink,
+        corner,
+        FontWeightHint::Bold,
+    );
+    bounded(
+        f,
+        (corner_x, corner.mul_add(1.05, r.y + r.h * 0.06)),
+        corner_w,
+        card.suit.symbol(),
+        ink,
+        corner,
+        FontWeightHint::Regular,
+    );
+    let big = r.w * 0.46;
+    let measured = text::measure(card.suit.symbol(), big, FontWeightHint::Regular);
+    let big_x = (r.right() - r.w * 0.12 - measured).max(r.x);
+    bounded(
+        f,
+        (big_x, r.bottom() - r.h * 0.10 - big),
+        (r.right() - big_x).max(0.0),
+        card.suit.symbol(),
+        ink,
+        big,
+        FontWeightHint::Regular,
+    );
+}
+
+// ── The window ──────────────────────────────────────────────────────
+
+impl App for SpadesGame {
+    fn title(&self) -> String {
+        String::from(TITLE)
+    }
+
+    fn app_id(&self) -> String {
+        String::from("spades")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        // Without a tick the machine seats never act: the old program bid and
+        // played for all three of them inside the human's own event handler.
+        Some(std::time::Duration::from_millis(TICK_MS))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.size = (width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for SpadesGame {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Key(key.clone()))
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = SpadesGame::new();
+    app::launch("spades", &mut app)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::expect_used,
+        reason = "a test that indexes past the end should fail loudly"
+    )]
+
     use super::*;
+    use guitk::event::Modifiers;
+    use guitk::probe::{click_sized, press, press_with, rect_of_sized};
+
+    /// Run the clock until the game stops asking for time.
+    ///
+    /// Every test that wants to see what the machine seats did has to say so,
+    /// because they act on a clock now. The old program ran all three of them
+    /// inside the human's own event, so a test could not tell the difference
+    /// between "the machines answered" and "the human's click was handled".
+    fn settle(game: &mut SpadesGame) {
+        let step = u64::from(THINK_MS.max(SWEEP_MS));
+        for _ in 0..10_000 {
+            if !game.tick(step) {
+                return;
+            }
+        }
+        panic!("the clock never stopped");
+    }
 
     // ── RNG tests ───────────────────────────────────────────────────
 
@@ -1949,8 +2639,8 @@ mod tests {
                 dealt.extend(hand.iter().copied());
             }
             let mut deck = standard_deck();
-            dealt.sort_by_key(|c| (c.suit as u8, c.rank.0));
-            deck.sort_by_key(|c| (c.suit as u8, c.rank.0));
+            dealt.sort_by_key(|c| (c.suit as u8, c.rank.value()));
+            deck.sort_by_key(|c| (c.suit as u8, c.rank.value()));
             assert_eq!(dealt, deck, "seed {seed}: a hand is missing or doubled");
         }
     }
@@ -2150,15 +2840,23 @@ mod tests {
 
     #[test]
     fn test_trick_new() {
-        let trick = Trick::new(PlayerId::SOUTH);
-        assert_eq!(trick.leader, PlayerId::SOUTH);
+        let trick = Trick::new();
+        assert_eq!(trick.leader(), None);
         assert!(trick.cards.is_empty());
         assert!(!trick.is_complete());
     }
 
     #[test]
+    fn test_trick_leader_is_whoever_played_first() {
+        let mut trick = Trick::new();
+        trick.add(PlayerId::WEST, Card::new(Suit::Hearts, Rank::TWO));
+        trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::ACE));
+        assert_eq!(trick.leader(), Some(PlayerId::WEST));
+    }
+
+    #[test]
     fn test_trick_led_suit() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         assert_eq!(trick.led_suit(), None);
         trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::ACE));
         assert_eq!(trick.led_suit(), Some(Suit::Hearts));
@@ -2166,7 +2864,7 @@ mod tests {
 
     #[test]
     fn test_trick_is_complete() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         for i in 0..4 {
             trick.add(PlayerId(i), Card::new(Suit::Hearts, Rank(2 + i)));
             if i < 3 {
@@ -2178,7 +2876,7 @@ mod tests {
 
     #[test]
     fn test_trick_winner_highest_of_led_suit() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::FIVE));
         trick.add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::ACE));
         trick.add(PlayerId::NORTH, Card::new(Suit::Hearts, Rank::KING));
@@ -2188,7 +2886,7 @@ mod tests {
 
     #[test]
     fn test_trick_winner_trump_beats_all() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::ACE));
         trick.add(PlayerId::EAST, Card::new(Suit::Spades, Rank::TWO));
         trick.add(PlayerId::NORTH, Card::new(Suit::Hearts, Rank::KING));
@@ -2198,7 +2896,7 @@ mod tests {
 
     #[test]
     fn test_trick_winner_highest_trump_wins() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::ACE));
         trick.add(PlayerId::EAST, Card::new(Suit::Spades, Rank::TWO));
         trick.add(PlayerId::NORTH, Card::new(Suit::Spades, Rank::KING));
@@ -2208,7 +2906,7 @@ mod tests {
 
     #[test]
     fn test_trick_winner_off_suit_loses_to_led() {
-        let mut trick = Trick::new(PlayerId::SOUTH);
+        let mut trick = Trick::new();
         trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::TWO));
         trick.add(PlayerId::EAST, Card::new(Suit::Clubs, Rank::ACE));
         trick.add(PlayerId::NORTH, Card::new(Suit::Diamonds, Rank::ACE));
@@ -2223,7 +2921,7 @@ mod tests {
 
     #[test]
     fn test_trick_winner_empty() {
-        let trick = Trick::new(PlayerId::SOUTH);
+        let trick = Trick::new();
         assert_eq!(trick.winner(), None);
     }
 
@@ -2285,18 +2983,21 @@ mod tests {
     #[test]
     fn test_submit_bid_advances_phase() {
         let mut game = SpadesGame::new();
-        // AI bids should have run for players before human
+        settle(&mut game);
+        assert!(game.current_player.is_human(), "the human's turn to bid");
         game.bid_selection = 4;
-        game.submit_human_bid();
-        // After all bids submitted, should be Playing phase
+        assert!(game.submit_human_bid());
+        settle(&mut game);
         assert_eq!(game.phase, Phase::Playing);
     }
 
     #[test]
     fn test_all_bids_set_after_bidding() {
         let mut game = SpadesGame::new();
+        settle(&mut game);
         game.bid_selection = 3;
-        game.submit_human_bid();
+        assert!(game.submit_human_bid());
+        settle(&mut game);
         for pr in &game.player_rounds {
             assert!(pr.bid.is_some());
         }
@@ -2331,7 +3032,7 @@ mod tests {
             Card::new(Suit::Clubs, Rank::TWO),
             Card::new(Suit::Spades, Rank::THREE),
         ];
-        game.current_trick = Trick::new(PlayerId::EAST);
+        game.current_trick = Trick::new();
         game.current_trick
             .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
 
@@ -2352,7 +3053,7 @@ mod tests {
             Card::new(Suit::Spades, Rank::TWO),
             Card::new(Suit::Diamonds, Rank::THREE),
         ];
-        game.current_trick = Trick::new(PlayerId::EAST);
+        game.current_trick = Trick::new();
         game.current_trick
             .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
 
@@ -2371,7 +3072,7 @@ mod tests {
             Card::new(Suit::Spades, Rank::TWO),
             Card::new(Suit::Spades, Rank::KING),
         ];
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert_eq!(legal.len(), 1); // Only hearts
@@ -2388,7 +3089,7 @@ mod tests {
             Card::new(Suit::Hearts, Rank::ACE),
             Card::new(Suit::Spades, Rank::TWO),
         ];
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert_eq!(legal.len(), 2);
@@ -2404,7 +3105,7 @@ mod tests {
             Card::new(Suit::Spades, Rank::ACE),
             Card::new(Suit::Spades, Rank::KING),
         ];
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert_eq!(legal.len(), 2); // Forced to lead spade
@@ -2416,7 +3117,7 @@ mod tests {
         game.phase = Phase::Playing;
         game.current_player = PlayerId::SOUTH;
         game.hands[0] = Vec::new();
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert!(legal.is_empty());
@@ -2435,7 +3136,7 @@ mod tests {
         }
         let initial_len = game.hands[0].len();
         let card = game.hands[0][0];
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
         game.play_card(PlayerId::SOUTH, 0);
         assert_eq!(game.hands[0].len(), initial_len - 1);
         assert!(!game.hands[0].contains(&card));
@@ -2451,7 +3152,7 @@ mod tests {
             game.player_rounds[i].bid = Some(3);
         }
         game.hands[0] = vec![Card::new(Suit::Spades, Rank::ACE)];
-        game.current_trick = Trick::new(PlayerId::EAST);
+        game.current_trick = Trick::new();
         game.current_trick
             .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
         game.play_card(PlayerId::SOUTH, 0);
@@ -2732,12 +3433,7 @@ mod tests {
         let mut game = SpadesGame::new();
         game.current_player = PlayerId::SOUTH;
         game.bid_selection = 3;
-        game.handle_key(&KeyEvent {
-            key: Key::Up,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
+        game.handle_key(&press(Key::Up));
         assert_eq!(game.bid_selection, 4);
     }
 
@@ -2746,12 +3442,7 @@ mod tests {
         let mut game = SpadesGame::new();
         game.current_player = PlayerId::SOUTH;
         game.bid_selection = 3;
-        game.handle_key(&KeyEvent {
-            key: Key::Down,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
+        game.handle_key(&press(Key::Down));
         assert_eq!(game.bid_selection, 2);
     }
 
@@ -2760,12 +3451,7 @@ mod tests {
         let mut game = SpadesGame::new();
         game.current_player = PlayerId::SOUTH;
         game.bid_selection = 0;
-        game.handle_key(&KeyEvent {
-            key: Key::Down,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
+        game.handle_key(&press(Key::Down));
         assert_eq!(game.bid_selection, 0);
     }
 
@@ -2773,14 +3459,9 @@ mod tests {
     fn test_bid_up_clamp_at_13() {
         let mut game = SpadesGame::new();
         game.current_player = PlayerId::SOUTH;
-        game.bid_selection = 13;
-        game.handle_key(&KeyEvent {
-            key: Key::Up,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
-        assert_eq!(game.bid_selection, 13);
+        game.bid_selection = MAX_BID;
+        game.handle_key(&press(Key::Up));
+        assert_eq!(game.bid_selection, MAX_BID);
     }
 
     #[test]
@@ -2788,12 +3469,9 @@ mod tests {
         let mut game = SpadesGame::new();
         game.current_player = PlayerId::SOUTH;
         game.bid_selection = 5;
-        game.handle_key(&KeyEvent {
-            key: Key::Up,
-            modifiers: Modifiers::NONE,
-            pressed: false,
-            text: String::new(),
-        });
+        let mut release = press(Key::Up);
+        release.pressed = false;
+        game.handle_key(&release);
         assert_eq!(game.bid_selection, 5);
     }
 
@@ -2803,12 +3481,7 @@ mod tests {
         game.phase = Phase::Playing;
         game.current_player = PlayerId::SOUTH;
         game.selected_card = 0;
-        game.handle_key(&KeyEvent {
-            key: Key::Right,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
+        game.handle_key(&press(Key::Right));
         assert_eq!(game.selected_card, 1);
     }
 
@@ -2818,40 +3491,8 @@ mod tests {
         game.phase = Phase::Playing;
         game.current_player = PlayerId::SOUTH;
         game.selected_card = 0;
-        game.handle_key(&KeyEvent {
-            key: Key::Left,
-            modifiers: Modifiers::NONE,
-            pressed: true,
-            text: String::new(),
-        });
+        game.handle_key(&press(Key::Left));
         assert_eq!(game.selected_card, 0);
-    }
-
-    // ── Render tests ────────────────────────────────────────────────
-
-    #[test]
-    fn test_render_returns_commands() {
-        let game = SpadesGame::new();
-        let commands = game.render();
-        assert!(!commands.is_empty());
-    }
-
-    #[test]
-    fn test_render_bidding_overlay() {
-        let game = SpadesGame::new();
-        assert_eq!(game.phase, Phase::Bidding);
-        let commands = game.render();
-        // Should have bid overlay elements
-        assert!(commands.len() > 20);
-    }
-
-    #[test]
-    fn test_render_game_over_overlay() {
-        let mut game = SpadesGame::new();
-        game.phase = Phase::GameOver;
-        game.winner_message = "Test winner".to_string();
-        let commands = game.render();
-        assert!(commands.len() > 10);
     }
 
     // ── Clamp selected card tests ───────────────────────────────────
@@ -2927,18 +3568,28 @@ mod tests {
 
     #[test]
     fn test_render_card_face_produces_commands() {
-        let game = SpadesGame::new();
-        let mut commands = Vec::new();
-        game.render_card_face(
-            &mut commands,
-            0.0,
-            0.0,
+        let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+        draw_card_face(
+            &mut f,
+            Rect::new(10.0, 10.0, 60.0, 84.0),
             Card::new(Suit::Spades, Rank::ACE),
             false,
+        );
+        // A face, a rank in the corner, the suit beside it, and the suit again
+        // across the middle.
+        assert!(f.commands().len() >= 4);
+    }
+
+    #[test]
+    fn a_card_with_no_room_to_be_drawn_is_not_drawn() {
+        let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+        draw_card_face(
+            &mut f,
+            Rect::EMPTY,
+            Card::new(Suit::Spades, Rank::ACE),
             false,
         );
-        // Should produce: border rect, bg rect, rank text, suit text, bottom rank text
-        assert!(commands.len() >= 5);
+        assert!(f.commands().is_empty());
     }
 
     // ── AI card choice tests ────────────────────────────────────────
@@ -2952,7 +3603,7 @@ mod tests {
             Card::new(Suit::Hearts, Rank::ACE),
             Card::new(Suit::Clubs, Rank::TWO),
         ];
-        game.current_trick = Trick::new(PlayerId::SOUTH);
+        game.current_trick = Trick::new();
         game.current_trick
             .add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::FIVE));
         let legal = vec![0]; // Only hearts
@@ -3003,5 +3654,1145 @@ mod tests {
         // The card matching led_suit wins; here neither matches, so
         // only self.suit == led matters: clubs != hearts so clubs doesn't beat
         assert!(!ace_clubs.beats(ace_diamonds, Suit::Hearts));
+    }
+
+    // ── Window wiring ───────────────────────────────────────────────
+    //
+    // Everything below is about the program being in a window: that the
+    // picture is drawn at the size it is given, that what the pointer
+    // reaches is what the painter painted, and that the machine seats
+    // answer on a clock rather than inside the human's own click.
+
+    /// The window widths every layout claim is checked at.
+    ///
+    /// A rule about `Layout::solve` is a rule at *every* size, so a handful of
+    /// sampled sizes tests a handful of points and nothing else. The sizes that
+    /// break a layout rule are exactly the ones nobody would think to sample:
+    /// 20 wide, where the padding is a fifth of the window; 1400 wide, where a
+    /// capped card leaves the hand's step longer than the card itself.
+    const GRID_W: [f32; 7] = [0.0, 20.0, 60.0, 120.0, 360.0, 900.0, 1400.0];
+    /// The window heights every layout claim is checked at.
+    const GRID_H: [f32; 6] = [0.0, 57.0, 120.0, 280.0, 620.0, 900.0];
+
+    /// Every window size the layout claims sweep.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is the answer the
+    /// layout gives when a thing does not fit and is left out, and a thing that
+    /// was left out cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// Do these two rectangles share any area?
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.intersect(b).is_some_and(|r| r.w > 0.01 && r.h > 0.01)
+    }
+
+    #[test]
+    fn the_panes_are_stacked_and_do_not_overlap() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            assert!(l.header.bottom() <= l.table.y + 0.01, "header/table {at}");
+            assert!(l.table.bottom() <= l.hand.y + 0.01, "table/hand {at}");
+            assert!(l.hand.bottom() <= l.footer.y + 0.01, "hand/footer {at}");
+            assert!(l.footer.bottom() <= l.status.y + 0.01, "footer/status {at}");
+            assert!(l.status.bottom() <= h + 0.01, "status/window {at}");
+        }
+    }
+
+    #[test]
+    fn every_pane_stays_inside_the_window() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for (name, r) in [
+                ("header", l.header),
+                ("table", l.table),
+                ("hand", l.hand),
+                ("footer", l.footer),
+                ("status", l.status),
+                ("panel", l.panel),
+            ] {
+                assert!(inside(l.window, r), "{name} escapes the window at {at}");
+            }
+            assert!(inside(l.table, l.panel), "panel escapes the felt at {at}");
+        }
+    }
+
+    #[test]
+    fn the_hand_fits_the_window_it_is_drawn_in() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for i in 0..HAND_SIZE {
+                let card = l.hand_card(i, HAND_SIZE);
+                assert!(inside(l.hand, card), "card {i} escapes the strip at {at}");
+                let lifted = card.translated(0.0, -l.hand_lift());
+                assert!(
+                    inside(l.hand, lifted),
+                    "card {i} lifts out of the strip at {at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_window_lays_the_hand_out_without_hiding_any_card() {
+        // The card is capped, so past a certain width the fan stops growing and
+        // the strip does not: the step is clamped to the card's own width and
+        // the thirteen cards sit side by side. Uncapped, the card outgrows the
+        // step and every card but the last is partly behind its neighbour.
+        let l = Layout::solve(1400.0, 900.0);
+        for i in 1..HAND_SIZE {
+            let left = l.hand_card(i - 1, HAND_SIZE);
+            let right = l.hand_card(i, HAND_SIZE);
+            assert!(
+                !overlaps(left, right),
+                "card {i} hides part of card {}: {left:?} vs {right:?}",
+                i - 1
+            );
+        }
+        // The step is clamped at *both* ends, and the upper end matters just as
+        // much: uncapped, a wide window divides the whole strip between twelve
+        // gaps and the hand stops being a hand -- thirteen cards scattered
+        // across four feet of screen with daylight between them. A fan is
+        // cards that touch, so no card may start past its neighbour's edge.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            for i in 1..HAND_SIZE {
+                let left = l.hand_card(i - 1, HAND_SIZE);
+                let right = l.hand_card(i, HAND_SIZE);
+                if left.is_empty() || right.is_empty() {
+                    continue;
+                }
+                assert!(
+                    right.x <= left.right() + 0.01,
+                    "the fan breaks apart between cards {} and {i} at {w}x{h}: {left:?} then {right:?}",
+                    i - 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_seat_plays_its_card_in_its_own_place() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            for a in 0..SEATS {
+                for b in (a + 1)..SEATS {
+                    let (ra, rb) = (l.trick_card(a), l.trick_card(b));
+                    assert!(
+                        !overlaps(ra, rb),
+                        "seats {a} and {b} play on the same felt at {w}x{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_seat_labels_stay_on_the_felt_and_clear_of_their_own_card() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for seat in 0..SEATS {
+                let label = l.seat_label(seat);
+                assert!(
+                    inside(l.table, label),
+                    "seat {seat} label off the felt at {at}"
+                );
+                assert!(
+                    !overlaps(label, l.trick_card(seat)),
+                    "seat {seat} label sits on its own card at {at}"
+                );
+                assert!(
+                    !overlaps(label, l.panel),
+                    "seat {seat} label sits under the panel at {at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_bid_button_is_inside_the_pad_that_holds_it() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let pad = l.bid_pad();
+            for value in 0..=MAX_BID {
+                let cell = l.bid_button(value);
+                assert!(
+                    inside(pad, cell),
+                    "bid {value} escapes the pad at {w}x{h}: {cell:?} vs {pad:?}"
+                );
+            }
+            assert!(
+                inside(l.table, pad),
+                "the bid pad escapes the felt at {w}x{h}"
+            );
+        }
+    }
+
+    // ── What was painted is what the pointer reaches ────────────────
+
+    /// A game past bidding, with the human to play and a hand to play from.
+    /// Play the round out, the human always taking the first card the rules
+    /// allow, until the felt carries a message rather than a trick.
+    fn play_out(game: &mut SpadesGame) {
+        for _ in 0..600 {
+            if matches!(game.phase, Phase::RoundOver | Phase::GameOver) {
+                return;
+            }
+            if game.current_player.is_human() {
+                if game.phase == Phase::Bidding {
+                    game.submit_human_bid();
+                } else if let Some(&i) = game.legal_plays(PlayerId::SOUTH).first() {
+                    game.touch_card(i);
+                }
+            }
+            settle(game);
+        }
+        panic!("the round never ended: {:?}", game.phase);
+    }
+
+    fn playing_game() -> SpadesGame {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        game.submit_human_bid();
+        settle(&mut game);
+        game
+    }
+
+    #[test]
+    fn the_hand_is_hit_boxed_where_it_is_painted() {
+        let game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let f = game.frame(w, h);
+        let l = Layout::solve(w, h);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        assert!(
+            n > 0,
+            "the human has to hold cards for this to mean anything"
+        );
+        for i in 0..n {
+            let boxed = f
+                .hits()
+                .iter()
+                .find(|&&(t, _)| t == Target::Card(i))
+                .map(|&(_, r)| r)
+                .unwrap_or_else(|| panic!("card {i} has no hit box"));
+            let laid_out = l.hand_card(i, n);
+            let lifted = laid_out.translated(0.0, -l.hand_lift());
+            assert!(
+                boxed == laid_out || boxed == lifted,
+                "card {i} is hit-boxed at {boxed:?}, laid out at {laid_out:?}"
+            );
+            // And -- the part that matters -- the box is on the *ink*, not
+            // merely on a second reading of the layout. Checking the hit box
+            // against `hand_card` again only proves the test agrees with
+            // `Layout`; it says nothing about where `draw_card_face` put the
+            // card, which is the disagreement the old program shipped. A card
+            // face is a filled rectangle, so one of them must be exactly here.
+            assert!(
+                filled(&f).iter().any(|r| same(*r, boxed)),
+                "card {i} is hit-boxed at {boxed:?}, where nothing was painted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_card_lifts_and_its_hit_box_lifts_with_it() {
+        // The old program drew the chosen card ten pixels higher than the rest
+        // and then searched the row the card had left, so the top ten pixels of
+        // the card the player had chosen were the one part of it that could not
+        // be clicked.
+        let mut game = playing_game();
+        game.selected_card = 3;
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        assert!(l.hand_lift() > 0.5, "there is no lift to test");
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let unlifted = l.hand_card(3, n);
+        let boxed =
+            rect_of_sized(&game, Target::Card(3), (w, h)).expect("the chosen card is drawn");
+        assert!(
+            (boxed.y - (unlifted.y - l.hand_lift())).abs() < 0.01,
+            "the chosen card's hit box did not lift with it: {boxed:?} vs {unlifted:?}"
+        );
+        // And the very top of the lifted card reaches the card, not the felt.
+        let hit = game.frame(w, h).hit_test(boxed.centre().0, boxed.y + 1.0);
+        assert_eq!(
+            hit,
+            Some(Target::Card(3)),
+            "the top of the lifted card is dead"
+        );
+    }
+
+    #[test]
+    fn a_click_where_two_cards_overlap_reaches_the_one_on_top() {
+        let game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let (left, right) = (l.hand_card(0, n), l.hand_card(1, n));
+        let shared = left.intersect(right).expect("the fan has to overlap");
+        assert!(
+            shared.w > 1.0,
+            "the fan does not overlap at the default size"
+        );
+        let (x, y) = shared.centre();
+        assert_eq!(
+            game.frame(w, h).hit_test(x, y),
+            Some(Target::Card(1)),
+            "the click reached the card underneath"
+        );
+    }
+
+    #[test]
+    fn the_bid_pad_is_drawn_where_it_is_clicked() {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        assert_eq!(game.phase, Phase::Bidding);
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        for value in 0..=MAX_BID {
+            let painted = l.bid_button(value);
+            let boxed = rect_of_sized(&game, Target::Bid(value), (w, h))
+                .unwrap_or_else(|| panic!("bid {value} has no hit box"));
+            assert_eq!(
+                boxed, painted,
+                "bid {value} is clicked somewhere it is not drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_bid_bids_it() {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        click_sized(
+            &mut game,
+            Target::Bid(5),
+            MouseButton::Left,
+            SpadesGame::SIZE,
+        );
+        assert_eq!(game.player_rounds[PlayerId::SOUTH.index()].bid, Some(5));
+    }
+
+    #[test]
+    fn a_frame_is_drawn_at_the_size_it_is_given_not_the_size_it_remembers() {
+        // `render` used to take no size at all and paint a 900x700 picture into
+        // a window of any other size.
+        let game = playing_game();
+        for (w, h) in sizes() {
+            let f = game.frame(w, h);
+            assert!(
+                (f.width - w).abs() < 0.01,
+                "frame width {} for {w}",
+                f.width
+            );
+            assert!(
+                (f.height - h).abs() < 0.01,
+                "frame height {} for {h}",
+                f.height
+            );
+            let l = Layout::solve(w, h);
+            for &(target, r) in f.hits() {
+                assert!(
+                    inside(l.window, r),
+                    "{target:?} is hit-boxed outside the {w}x{h} window at {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_draws_at_the_window_it_was_given_and_records_it() {
+        // The click handler resolves a pointer against the frame the renderer
+        // last drew, so the renderer has to remember what size that was.
+        let mut game = playing_game();
+        let _ = game.render(640.0, 480.0);
+        assert_eq!(game.size, (640.0, 480.0));
+        let _ = game.render(1280.0, 300.0);
+        assert_eq!(game.size, (1280.0, 300.0));
+    }
+
+    #[test]
+    fn a_click_lands_on_what_was_drawn_in_that_window_not_the_last_one() {
+        // Draw at one size, then another: a click has to be answered against
+        // the picture that is actually on the screen.
+        let mut game = playing_game();
+        let narrow = (420.0, 520.0);
+        let _ = game.render(narrow.0, narrow.1);
+        let l = Layout::solve(narrow.0, narrow.1);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let (x, y) = l.hand_card(n - 1, n).centre();
+        game.selected_card = 0;
+        game.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(
+            game.selected_card,
+            n - 1,
+            "the click found nothing at {x},{y} in a {}x{} window",
+            narrow.0,
+            narrow.1
+        );
+    }
+
+    // ── The footer, the keys and the help card ──────────────────────
+
+    /// Everything about a game that a button could change.
+    ///
+    /// A button and its key have to reach the *same* state, not merely both
+    /// change something, so the comparison has to be of the whole game.
+    fn snapshot(game: &SpadesGame) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{:?}|{}",
+            game.phase,
+            game.sort_order,
+            game.hands,
+            game.show_help,
+            game.selected_card,
+            game.bid_selection,
+            game.round_number,
+            game.player_rounds,
+            game.tricks_played,
+            game.status_message,
+            game.current_trick,
+            game.spades_broken,
+        )
+    }
+
+    /// Every text the frame carries, in painting order.
+    /// Every rectangle the frame actually paints, in painting order.
+    ///
+    /// The point of reading these back is that a hit box can then be checked
+    /// against the ink rather than against a second reading of `Layout`.
+    fn filled(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn same(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() < 0.01
+            && (a.y - b.y).abs() < 0.01
+            && (a.w - b.w).abs() < 0.01
+            && (a.h - b.h).abs() < 0.01
+    }
+
+    fn texts(f: &Frame<Target>) -> Vec<String> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_button_does_what_its_key_does() {
+        // The old program's only clickable thing was the hand; every other verb
+        // was a keystroke listed in a one-line hint. Now each verb exists twice
+        // -- as a key and as a button -- and the two have to stay one verb.
+        for button in BUTTONS {
+            let mut by_key = playing_game();
+            let mut by_click = playing_game();
+            assert_eq!(
+                snapshot(&by_key),
+                snapshot(&by_click),
+                "two games from one seed already differ"
+            );
+            let before = snapshot(&by_key);
+            by_key.key_at(&press(button.key()), SpadesGame::SIZE);
+            click_sized(
+                &mut by_click,
+                Target::Button(button),
+                MouseButton::Left,
+                SpadesGame::SIZE,
+            );
+            assert_eq!(
+                snapshot(&by_key),
+                snapshot(&by_click),
+                "{button:?}: the button and the key disagree"
+            );
+            // Agreeing is not enough. Both paths run the same `press(button)`,
+            // so a verb that had been gutted would be gutted identically on
+            // both sides and this test would pass a program in which no button
+            // did anything at all. Each of the four changes the game here.
+            assert_ne!(
+                before,
+                snapshot(&by_key),
+                "{button:?} left the game exactly as it found it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_button_too_wide_for_the_footer_is_left_out() {
+        // Left out, not drawn off the edge: the last thing a narrow window
+        // should show is half a button hanging past the frame.
+        let game = playing_game();
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let f = game.frame(w, h);
+            for &(target, r) in f.hits() {
+                if matches!(target, Target::Button(_)) {
+                    assert!(
+                        inside(l.footer, r),
+                        "{target:?} hangs off the footer at {w}x{h}: {r:?} vs {:?}",
+                        l.footer
+                    );
+                }
+            }
+        }
+        // And at sixty pixels wide there is genuinely not room for all four.
+        let narrow = game.frame(60.0, 700.0);
+        let drawn = narrow
+            .hits()
+            .iter()
+            .filter(|&&(t, _)| matches!(t, Target::Button(_)))
+            .count();
+        assert!(drawn < BUTTONS.len(), "four buttons fitted a 60px window");
+    }
+
+    #[test]
+    fn the_confirm_button_says_what_enter_will_do() {
+        // Enter means five different things across the five phases. The button
+        // and the help card both read `confirm_label`, so they cannot drift.
+        let mut game = playing_game();
+        for phase in [
+            Phase::Bidding,
+            Phase::Playing,
+            Phase::TrickDone,
+            Phase::RoundOver,
+            Phase::GameOver,
+        ] {
+            game.phase = phase;
+            assert_eq!(game.button_label(Button::Confirm), confirm_label(phase));
+            let f = game.frame(SpadesGame::SIZE.0, SpadesGame::SIZE.1);
+            assert!(
+                texts(&f).iter().any(|t| t == confirm_label(phase)),
+                "the footer does not say {:?} in {phase:?}",
+                confirm_label(phase)
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_card_lists_every_button_and_is_dismissed_by_a_click() {
+        let mut game = playing_game();
+        assert!(!game.show_help);
+        game.key_at(&press(Key::H), SpadesGame::SIZE);
+        assert!(game.show_help, "H did not raise the help");
+        let f = game.draw(SpadesGame::SIZE);
+        let said = texts(&f);
+        for button in BUTTONS {
+            assert!(
+                said.iter().any(|t| t == button.key_name()),
+                "the help card does not name {button:?}'s key"
+            );
+            assert!(
+                said.iter().any(|t| t == game.button_label(button)),
+                "the help card does not say what {button:?} does"
+            );
+        }
+        // The card swallows the click, so a player reaching for a line of the
+        // help does not play the card underneath it.
+        let held = game.hand_of(PlayerId::SOUTH).len();
+        click_sized(&mut game, Target::Help, MouseButton::Left, SpadesGame::SIZE);
+        assert!(!game.show_help, "the click did not dismiss the help");
+        assert_eq!(
+            game.hand_of(PlayerId::SOUTH).len(),
+            held,
+            "the click through the help card played a card"
+        );
+    }
+
+    #[test]
+    fn the_help_card_fits_the_window_it_is_drawn_in() {
+        let mut game = playing_game();
+        game.show_help = true;
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let f = game.frame(w, h);
+            let card = f
+                .hits()
+                .iter()
+                .find(|&&(t, _)| t == Target::Help)
+                .map(|&(_, r)| r);
+            if let Some(card) = card {
+                assert!(inside(l.window, card), "the help card escapes {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_centred_run_stays_inside_the_box_it_is_centred_in() {
+        // Both ends, and they fail separately. A run that fits must not claim
+        // room past the box's right edge -- `x + max_width` is where the
+        // renderer will elide, so a bound measured from the centred start
+        // rather than from the box's left edge reaches past it. A run that does
+        // not fit must start at the left edge, not at a negative offset that
+        // hangs it off both sides at once.
+        let (x0, w) = (60.0_f32, 80.0_f32);
+        for s in ["3", "a heading far too wide for the box it is centred in"] {
+            let mut f: Frame<Target> = Frame::new(400.0, 100.0);
+            centred(
+                &mut f,
+                x0,
+                w,
+                10.0,
+                s,
+                TEXT_COLOR,
+                14.0,
+                FontWeightHint::Regular,
+            );
+            let Some(&RenderCommand::Text { x, max_width, .. }) = f.commands().first() else {
+                panic!("centred drew nothing for {s:?}");
+            };
+            let bound = max_width.unwrap_or(f32::INFINITY);
+            assert!(
+                x >= x0 - 0.01,
+                "{s:?} starts at {x}, left of its box at {x0}"
+            );
+            assert!(
+                x + bound <= x0 + w + 0.01,
+                "{s:?} is bounded at {} , past its box at {}",
+                x + bound,
+                x0 + w
+            );
+        }
+    }
+
+    #[test]
+    fn no_text_runs_off_the_window_it_is_drawn_in() {
+        // Every text in the old program was `max_width: None`, so a status
+        // naming a seat and a card ran straight off a narrow window -- and so
+        // did the title, the help card's rows and a card's own corner.
+        //
+        // One fixture is not enough: whole swathes of the picture -- the bid
+        // pad, the help card, the message across the empty felt -- are drawn in
+        // states a playing game is not in, and the strings they centre were
+        // exactly the ones this test could not see when it looked at one state.
+        let mut playing = playing_game();
+        playing.status_message = "West played the king of diamonds and took the trick".repeat(4);
+        let mut bidding = SpadesGame::with_seed(7);
+        settle(&mut bidding);
+        let mut helping = playing_game();
+        helping.show_help = true;
+        let mut over = playing_game();
+        play_out(&mut over);
+        for game in [&playing, &bidding, &helping, &over] {
+            assert_frame_text_is_bounded(game);
+        }
+    }
+
+    fn assert_frame_text_is_bounded(game: &SpadesGame) {
+        for (w, h) in sizes() {
+            let f = game.frame(w, h);
+            for c in f.commands() {
+                if let RenderCommand::Text {
+                    text,
+                    x,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } = c
+                {
+                    let bound =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    assert!(
+                        x + bound <= w + 0.01,
+                        "{text:?} runs off a {w}x{h} window: x {x} + {bound}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_with_a_modifier_is_left_to_the_window() {
+        // Ctrl+N is the compositor's new window. It used to throw away the
+        // round in progress, because no modifier was ever examined.
+        let mut game = playing_game();
+        let before = snapshot(&game);
+        for key in [Key::N, Key::S, Key::H, Key::Enter, Key::Left] {
+            for mods in [
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::default()
+                },
+            ] {
+                let result = game.handle_key(&press_with(key, mods));
+                assert_eq!(result, EventResult::Ignored, "{key:?} with {mods:?}");
+            }
+        }
+        assert_eq!(snapshot(&game), before, "a modified key changed the game");
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut game = playing_game();
+        let before = snapshot(&game);
+        let mut release = press(Key::N);
+        release.pressed = false;
+        assert_eq!(game.handle_key(&release), EventResult::Ignored);
+        assert_eq!(snapshot(&game), before);
+    }
+
+    #[test]
+    fn a_click_on_nothing_changes_nothing() {
+        let mut game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let before = snapshot(&game);
+        // The very corner of the header, which carries no target at all.
+        let hit = game.frame(w, h).hit_test(w - 1.0, 1.0);
+        assert_eq!(hit, None, "the top-right corner is a target");
+        game.handle_mouse(&MouseEvent {
+            x: w - 1.0,
+            y: 1.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(snapshot(&game), before);
+    }
+
+    #[test]
+    fn the_status_line_is_elided_rather_than_cut_off() {
+        let mut game = playing_game();
+        game.status_message = "North played the king of diamonds and took it".repeat(3);
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let f = game.frame(w, h);
+        let said = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if *text == game.status_message => Some((*max_width, *overflow)),
+                _ => None,
+            })
+            .expect("the status is drawn");
+        assert_eq!(
+            said.1,
+            TextOverflow::Ellipsis,
+            "the status is cut, not elided"
+        );
+        let bound = said.0.expect("the status is bounded");
+        assert!(
+            bound <= l.status.w - l.pad * 2.0 + 0.01,
+            "the status is bounded to {bound}, wider than its own bar"
+        );
+    }
+
+    // ── The clock ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_machine_seats_answer_on_a_clock_not_inside_the_human_s_click() {
+        // The old program ran all three machine seats inside the human's own
+        // event, so three seats answered instantly and simultaneously in the
+        // middle of a click that was supposed to play one card.
+        let mut game = SpadesGame::with_seed(11);
+        assert_eq!(game.phase, Phase::Bidding);
+        assert!(
+            !game.current_player.is_human(),
+            "seed 11 opens on a machine"
+        );
+        assert!(
+            game.player_rounds.iter().all(|pr| pr.bid.is_none()),
+            "a seat bid before the clock ever ran"
+        );
+        // One tick short of the pause: still nobody.
+        assert!(game.tick(u64::from(THINK_MS) - 1));
+        assert!(
+            game.player_rounds.iter().all(|pr| pr.bid.is_none()),
+            "a seat answered before its time was up"
+        );
+        assert!(game.tick(1));
+        assert_eq!(
+            game.player_rounds
+                .iter()
+                .filter(|pr| pr.bid.is_some())
+                .count(),
+            1,
+            "more than one seat answered on one tick"
+        );
+    }
+
+    #[test]
+    fn nobody_plays_while_a_settled_trick_is_still_on_the_table() {
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(
+                    game.tick(u64::from(THINK_MS)),
+                    "the clock stopped mid-trick"
+                );
+            }
+        }
+        assert!(
+            game.sweep_ms > 0,
+            "a settled trick has no time on the table"
+        );
+        let held: Vec<usize> = game.hands.iter().map(Vec::len).collect();
+        // The sweep has to run out before anybody may play again.
+        for _ in 0..((SWEEP_MS / 10) - 1) {
+            assert!(game.tick(10));
+            assert_eq!(game.phase, Phase::TrickDone, "the trick was swept early");
+            assert_eq!(
+                game.hands.iter().map(Vec::len).collect::<Vec<_>>(),
+                held,
+                "a card was played onto a settled trick"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_trick_stays_face_up_and_names_who_took_it() {
+        // `finish_trick` used to replace the trick the instant the fourth card
+        // landed, and what the table showed in its place was four blank grey
+        // rectangles with no rank and no suit on them.
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(game.tick(u64::from(THINK_MS)));
+            }
+        }
+        let taker = game
+            .last_trick
+            .as_ref()
+            .and_then(Trick::winner)
+            .expect("a settled trick has a taker");
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let f = game.frame(w, h);
+        // Four cards, face up: every rank on the table is written on the felt.
+        let said = texts(&f);
+        for &(player, card) in &game.last_trick.as_ref().expect("a trick").cards {
+            assert!(
+                said.iter().any(|t| t == card.rank.label()),
+                "the card {player:?} played is not face up"
+            );
+        }
+        // And the taker's card, and only the taker's, wears the green ring.
+        let ringed: Vec<Rect> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == GREEN => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ringed.len(), 1, "the ring is round {} cards", ringed.len());
+        assert_eq!(ringed[0], l.trick_card(taker.index()));
+        assert!(
+            game.status_message.contains(taker.name()),
+            "the status does not say who took it: {:?}",
+            game.status_message
+        );
+    }
+
+    #[test]
+    fn a_trick_left_alone_is_swept_and_the_next_one_starts() {
+        // The old program parked at `TrickDone` for ever waiting on Enter --
+        // and Enter was also the only thing that unblocked the machine seats,
+        // so a game left alone stopped dead.
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(game.tick(u64::from(THINK_MS)));
+            }
+        }
+        assert_eq!(game.tricks_played, 1);
+        settle(&mut game);
+        assert_ne!(game.phase, Phase::TrickDone, "the trick was never swept");
+        assert!(
+            game.current_trick.cards.is_empty() || game.current_player.is_human(),
+            "the machines stopped after the sweep"
+        );
+    }
+
+    #[test]
+    fn a_game_left_alone_reaches_the_human_and_stops_there() {
+        // The clock is only ever owed to a machine seat: when it is the human's
+        // turn, `tick` says no, and the program is not spinning.
+        // "Or the round ended" would be an escape hatch wide enough to drive
+        // the fault through: a clock owed to the human as well plays the
+        // human's cards, and the round it runs away with does end. It cannot
+        // end here -- the human still holds thirteen cards and the round needs
+        // every one of them -- so the clock must stop with the human to act.
+        let mut game = playing_game();
+        settle(&mut game);
+        assert_eq!(
+            game.phase,
+            Phase::Playing,
+            "the clock played the round out on its own"
+        );
+        assert!(
+            game.current_player.is_human(),
+            "the clock stopped on {:?} in {:?}",
+            game.current_player,
+            game.phase
+        );
+    }
+
+    #[test]
+    fn every_seat_always_has_a_legal_card() {
+        // `machine_acts` would hold the game for ever on a seat with nothing
+        // legal to play, so there had better be no such seat.
+        for seed in 0..12u64 {
+            let mut game = SpadesGame::with_seed(seed);
+            settle(&mut game);
+            game.submit_human_bid();
+            for _ in 0..600 {
+                if matches!(game.phase, Phase::RoundOver | Phase::GameOver) {
+                    break;
+                }
+                let seat = game.current_player;
+                if !game.hand_of(seat).is_empty() && game.phase == Phase::Playing {
+                    assert!(
+                        !game.legal_plays(seat).is_empty(),
+                        "seed {seed}: {seat:?} holds {:?} and may play none of it",
+                        game.hand_of(seat)
+                    );
+                }
+                if seat.is_human() && game.phase == Phase::Playing {
+                    let legal = game.legal_plays(seat);
+                    game.play_card(seat, legal[0]);
+                } else if !game.tick(u64::from(THINK_MS.max(SWEEP_MS))) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── The pointer, the panel and a fresh deal ─────────────────────
+
+    #[test]
+    fn the_selection_stays_on_a_card_that_exists() {
+        let mut game = playing_game();
+        // Walk the pointer off the right-hand end, then off the left.
+        for _ in 0..40 {
+            game.key_at(&press(Key::Right), SpadesGame::SIZE);
+        }
+        assert_eq!(game.selected_card, game.hand_of(PlayerId::SOUTH).len() - 1);
+        for _ in 0..40 {
+            game.key_at(&press(Key::Left), SpadesGame::SIZE);
+        }
+        assert_eq!(game.selected_card, 0);
+        // And it survives the hand shrinking under it: point at the last card,
+        // play a different one, and the pointer must not be past the end.
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        game.selected_card = n - 1;
+        game.play_card(PlayerId::SOUTH, 0);
+        settle(&mut game);
+        assert!(
+            game.selected_card < game.hand_of(PlayerId::SOUTH).len().max(1),
+            "the pointer is past the end of a {} card hand",
+            game.hand_of(PlayerId::SOUTH).len()
+        );
+    }
+
+    #[test]
+    fn re_sorting_keeps_the_pointer_on_the_same_card() {
+        // The pointer follows the card, not the index: a re-sort that left the
+        // pointer where it was would silently move it to a different card.
+        let mut game = playing_game();
+        for start in [0usize, 4, 9] {
+            game.selected_card = start;
+            let held = game.hand_of(PlayerId::SOUTH)[start];
+            game.key_at(&press(Key::S), SpadesGame::SIZE);
+            assert_eq!(
+                game.hand_of(PlayerId::SOUTH)[game.selected_card],
+                held,
+                "re-sorting moved the pointer to a different card"
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_is_left_out_rather_than_squeezed() {
+        // The old sidebar was pinned at x = 720 in a window of any width, so it
+        // hung off the right edge of anything narrower than about 860.
+        let mut seen_out = false;
+        let mut seen_in = false;
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            if l.panel.is_empty() {
+                seen_out = true;
+            } else {
+                seen_in = true;
+                assert!(
+                    l.panel.w >= MIN_PANEL_W,
+                    "a {}-wide panel was squeezed in at {w}x{h}",
+                    l.panel.w
+                );
+                assert!(
+                    inside(l.table, l.panel),
+                    "the panel escapes the felt at {w}x{h}"
+                );
+            }
+        }
+        assert!(seen_out, "the panel is never left out");
+        assert!(seen_in, "the panel is never drawn");
+    }
+
+    #[test]
+    fn the_panel_says_what_each_team_bid_and_what_it_has_taken() {
+        let mut game = playing_game();
+        game.player_rounds[PlayerId::SOUTH.index()].bid = Some(4);
+        game.player_rounds[PlayerId::NORTH.index()].bid = Some(3);
+        game.player_rounds[PlayerId::SOUTH.index()].tricks_won = 2;
+        let f = game.frame(SpadesGame::SIZE.0, SpadesGame::SIZE.1);
+        let said = texts(&f).join("\n");
+        assert!(
+            said.contains("bid 7") && said.contains("won 2"),
+            "the panel does not carry the contract: {said}"
+        );
+    }
+
+    #[test]
+    fn a_new_game_from_the_button_deals_a_fresh_round() {
+        let mut game = playing_game();
+        game.play_card(PlayerId::SOUTH, 0);
+        settle(&mut game);
+        click_sized(
+            &mut game,
+            Target::Button(Button::New),
+            MouseButton::Left,
+            SpadesGame::SIZE,
+        );
+        assert_eq!(game.round_number, 1);
+        assert_eq!(game.tricks_played, 0);
+        assert_eq!(game.phase, Phase::Bidding);
+        assert!(!game.spades_broken);
+        for hand in &game.hands {
+            assert_eq!(
+                hand.len(),
+                HAND_SIZE,
+                "a fresh deal is thirteen cards a seat"
+            );
+        }
+        for team in &game.teams {
+            assert_eq!(team.score, 0);
+            assert_eq!(team.bags, 0);
+        }
+    }
+
+    #[test]
+    fn two_different_seeds_deal_two_different_games() {
+        // The deal used to come from a fixed seed, so the identical thirteen
+        // cards arrived every time the program was opened. `new()` asks the
+        // system for a seed now and `with_seed` is what the tests use -- and
+        // *that* the seed differs per launch cannot be asserted off-target,
+        // where the system source is out of reach and every launch falls back
+        // to the same number by design. What can be asserted, and is what the
+        // repair actually rests on, is that the seed is what decides the deal.
+        let a = SpadesGame::with_seed(1);
+        let b = SpadesGame::with_seed(2);
+        assert_ne!(a.hands, b.hands, "two seeds dealt the same cards");
+    }
+
+    // ── The window itself ───────────────────────────────────────────
+
+    #[test]
+    fn closing_the_window_exits() {
+        let mut game = playing_game();
+        assert_eq!(game.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_app_asks_for_a_clock() {
+        // Without a tick the machine seats never act at all: the old program
+        // bid and played for all three of them inside the human's own event.
+        let game = playing_game();
+        assert_eq!(
+            game.tick_interval(),
+            Some(std::time::Duration::from_millis(TICK_MS))
+        );
+    }
+
+    #[test]
+    fn a_tick_that_moves_the_game_redraws_and_one_that_does_not_idles() {
+        // A window that redrew on every tick would repaint forty times a second
+        // for ever; one that never redrew would never show a machine's card.
+        let mut game = SpadesGame::with_seed(11);
+        assert!(
+            !game.current_player.is_human(),
+            "seed 11 opens on a machine"
+        );
+        assert_eq!(
+            game.on_event(&Event::Tick {
+                elapsed_ms: u64::from(THINK_MS)
+            }),
+            Response::Redraw,
+            "the seat that acted did not ask for a repaint"
+        );
+        settle(&mut game);
+        assert_eq!(
+            game.on_event(&Event::Tick { elapsed_ms: 1000 }),
+            Response::Idle,
+            "an idle window repainted anyway"
+        );
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_was_designed_for() {
+        let game = playing_game();
+        assert_eq!(
+            game.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        assert_eq!(game.title(), TITLE);
+        assert_eq!(game.app_id(), "spades");
     }
 }

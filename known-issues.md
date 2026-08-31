@@ -100966,7 +100966,56 @@ because each was wrong in the same way and it is not a way that looks wrong:
 | `[io_ring] File handle read/write` | **false positive** | `[io_ring]   File handle read/write (1 entry): OK` — 1045 lines later in the same boot |
 | `[io_ring] Positioned I/O (pread/pwrite)` | **false positive** | `[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK` |
 | `[mm] Zero-on-free` | **false positive** | `[mm]   Zero-on-free: OK (counter=2, settled=false)` — 46,883 lines later |
-| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs |
+| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs — **FIXED 2026-08-31, see below** |
+
+#### The one genuine finding, fixed (lane A, 2026-08-31)
+
+`test_zeroed_alloc`'s only caller was `mm::frame::self_test()`, which runs at
+`main.rs:654`; `page_table::init` is at `main.rs:774`. So its `hhdm()` guard
+was not "sometimes false" but false on **every** boot, and the case had never
+executed once.
+
+**What was untested is not a formality.** `alloc_frame_zeroed` is the primitive
+that stops a new owner reading the previous owner's bytes — `virtio/gpu.rs`
+states it outright ("anything but `alloc_frame_zeroed` leaks"). Nothing else in
+a booting kernel asserted that it returns zeros. `test_zero_on_free` is *not*
+that assertion: it exercises zeroing at **free** time, behind a sysctl it
+toggles on and back off — a different mechanism on a different code path. So an
+information-disclosure boundary had no live test at all.
+
+**The comment is why nobody looked.** The skip said the case "will be exercised
+indirectly by the demand paging self-test". There is no such assertion; no
+demand-paging test checks the contents of a freshly allocated frame. A skip
+carrying a plausible coverage claim reads as a *decision* rather than a hole,
+so it survives every review that a bare skip would not. The claim had evidently
+never been checked against the tree. **Treat an unverified coverage claim in a
+comment as the more dangerous half of a skip** — the skip is visible in the
+log, the claim is not.
+
+**What was done.**
+
+| | |
+|---|---|
+| Post-init entry point | `pub fn test_zeroed_alloc()`, called from `main.rs` in the same block as `test_zero_on_free` |
+| Shared body | `test_zeroed_alloc_inner(&mut skips)` — still called early, still skips, kept **as the tripwire** (`partition_skips` marks it *covered* while the real call happens, *uncovered* if that call is ever deleted) |
+| The guard became an assertion | new `require_hhdm_post_init()`: before `page_table::init` an absent HHDM is a boot stage and a SKIP is honest; after it, it is a defect |
+| Diagnostics | the failure now names the **offset and value** of the first non-zero byte, not just "not zero" |
+
+**A second instance of the same hole, four lines away.** `test_zero_on_free`'s
+post-init wrapper reused its shared body unchanged, so it too could record a
+silent SKIP for the one reason a post-init entry point cannot legitimately
+have. It now asserts the HHDM first. The lesson generalises: **splitting a test
+into an early and a late entry point is only half the fix — the late one must
+also stop treating the prerequisite as optional**, or it inherits exactly the
+hole the split was meant to close.
+
+**Why the failure message contains the words "self-test failed".** The harness's
+`check_selftest_failures` greps case-insensitively for that wrapper phrase, and
+it is the only thing that catches a self-test which reports failure and lets
+the boot continue to `BOOT_OK`. It deliberately does not grep raw
+`FAIL:`/`WARNING:`, because passing logs contain both legitimately
+(`[drm-atomic] check FAIL: CRTC 9999 not found`). A failure message without the
+phrase would print on a red boot and still let the run be recorded PASSED.
 
 **The `io_ring` pair is a deliberate tripwire, and the source says so.** The
 comment above the pre-mount calls (`kernel/src/ipc/io_ring.rs:1290`):

@@ -303,10 +303,29 @@
 //!   accepted it. A person who has learned what `rm -i` takes types the same
 //!   thing at `cp -i`, and must not get a different answer.
 //!
+//! The twentieth is the same shape as [`yesno`] — one small rule, several
+//! utilities, and a user who learns it once — but where a disagreement costs
+//! data rather than a prompt:
+//!
+//! - [`backup`] — what `-b` moves the destination aside to. `cp -b`, `mv -b`,
+//!   `ln -b` and `install -b` are one gnulib file (`backupfile.c`) upstream, and
+//!   they have to stay one thing here for a reason stronger than tidiness: the
+//!   whole point of the option is that the old contents survive, so two
+//!   utilities that disagree about *which name* the old contents went to have
+//!   between them lost the file. The rules that would not survive being written
+//!   twice are the numbering ones — a version number compared as a string
+//!   rather than as an integer, so `f.~10~` beats `f.~9~` and a
+//!   twenty-digit version in a file name overflows nothing; a carry that
+//!   lengthens the name by prepending a digit; and a rename that asks for
+//!   `RENAME_NOREPLACE`, because two concurrent `--backup=numbered` runs that
+//!   both chose `.~4~` would otherwise have one of them destroy the other's
+//!   backup.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
 
+pub mod backup;
 mod bignat;
 pub mod canon;
 pub mod cfmt;

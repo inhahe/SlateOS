@@ -628,7 +628,13 @@ impl Layout {
             .min(strip_h / (CARD_ASPECT * HAND_STRIP_SLACK))
             .clamp(0.0, MAX_CARD_W);
         let card_h = card_w * CARD_ASPECT;
-        let hand_h = (card_h * HAND_STRIP_SLACK).min(strip_h);
+        // No second `.min(strip_h)` here. `card_w` is already capped at
+        // `strip_h / (CARD_ASPECT * HAND_STRIP_SLACK)`, so this product cannot
+        // exceed the strip -- and a clamp no input can reach is not a
+        // safeguard, it is a branch no test can enter that quietly takes the
+        // credit for the cap above. The mutation sweep is what found it: strike
+        // the `.min` out and every test still passed.
+        let hand_h = card_h * HAND_STRIP_SLACK;
         let footer = Rect::new(0.0, (status.y - footer_h).max(header.bottom()), w, footer_h);
         let hand = Rect::new(
             pad,
@@ -2406,6 +2412,16 @@ fn bounded(
     font_size: f32,
     font_weight: FontWeightHint,
 ) {
+    // No room, no run -- the same rule `fill` keeps for an empty rectangle. A
+    // caller that has been squeezed to nothing hands on a width of zero while
+    // its origin is still wherever the layout put it, which in a window too
+    // small for the widget is outside the widget: the help card in a nought-
+    // wide window wrote seven invisible rows at x = 4. They paint nothing
+    // either way, but a command outside the frame is a claim the picture does
+    // not mean, and it is the claim a test has to read.
+    if width <= 0.0 || width.is_nan() {
+        return;
+    }
     f.push(RenderCommand::Text {
         x: at.0,
         y: at.1,
@@ -2435,13 +2451,20 @@ fn centred(
     weight: FontWeightHint,
 ) {
     let measured = text::measure(s, size, weight);
-    // Centred *in* `w`, which means it never leaves `w`: a run too wide to
-    // centre starts at the left edge and is elided at the right one, rather
-    // than being centred by a negative offset that hangs off both sides.
+    // Centred *in* `[x, x + w)`, which means it never leaves it. Two separate
+    // things are needed for that, and the first version of this helper had only
+    // the second: the offset is floored at zero, so a run too wide to centre
+    // starts at the left edge rather than being centred by a negative offset
+    // that hangs off *both* sides; and the width handed on is the room left
+    // from where the run starts, not the whole box, because a bound of `w`
+    // measured from `x + offset` reaches `offset` pixels past the box's own
+    // right edge. That second fault is what put a 300-pixel bound on the bid
+    // pad's heading in a 360-pixel window.
+    let offset = ((w - measured) / 2.0).max(0.0);
     bounded(
         f,
-        (x + ((w - measured) / 2.0).max(0.0), y),
-        w,
+        (x + offset, y),
+        (w - offset).max(0.0),
         s,
         color,
         size,
@@ -3739,6 +3762,26 @@ mod tests {
                 i - 1
             );
         }
+        // The step is clamped at *both* ends, and the upper end matters just as
+        // much: uncapped, a wide window divides the whole strip between twelve
+        // gaps and the hand stops being a hand -- thirteen cards scattered
+        // across four feet of screen with daylight between them. A fan is
+        // cards that touch, so no card may start past its neighbour's edge.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            for i in 1..HAND_SIZE {
+                let left = l.hand_card(i - 1, HAND_SIZE);
+                let right = l.hand_card(i, HAND_SIZE);
+                if left.is_empty() || right.is_empty() {
+                    continue;
+                }
+                assert!(
+                    right.x <= left.right() + 0.01,
+                    "the fan breaks apart between cards {} and {i} at {w}x{h}: {left:?} then {right:?}",
+                    i - 1
+                );
+            }
+        }
     }
 
     #[test]
@@ -3802,6 +3845,25 @@ mod tests {
     // ── What was painted is what the pointer reaches ────────────────
 
     /// A game past bidding, with the human to play and a hand to play from.
+    /// Play the round out, the human always taking the first card the rules
+    /// allow, until the felt carries a message rather than a trick.
+    fn play_out(game: &mut SpadesGame) {
+        for _ in 0..600 {
+            if matches!(game.phase, Phase::RoundOver | Phase::GameOver) {
+                return;
+            }
+            if game.current_player.is_human() {
+                if game.phase == Phase::Bidding {
+                    game.submit_human_bid();
+                } else if let Some(&i) = game.legal_plays(PlayerId::SOUTH).first() {
+                    game.touch_card(i);
+                }
+            }
+            settle(game);
+        }
+        panic!("the round never ended: {:?}", game.phase);
+    }
+
     fn playing_game() -> SpadesGame {
         let mut game = SpadesGame::with_seed(7);
         settle(&mut game);
@@ -3828,11 +3890,21 @@ mod tests {
                 .find(|&&(t, _)| t == Target::Card(i))
                 .map(|&(_, r)| r)
                 .unwrap_or_else(|| panic!("card {i} has no hit box"));
-            let painted = l.hand_card(i, n);
-            let lifted = painted.translated(0.0, -l.hand_lift());
+            let laid_out = l.hand_card(i, n);
+            let lifted = laid_out.translated(0.0, -l.hand_lift());
             assert!(
-                boxed == painted || boxed == lifted,
-                "card {i} is hit-boxed at {boxed:?}, painted at {painted:?}"
+                boxed == laid_out || boxed == lifted,
+                "card {i} is hit-boxed at {boxed:?}, laid out at {laid_out:?}"
+            );
+            // And -- the part that matters -- the box is on the *ink*, not
+            // merely on a second reading of the layout. Checking the hit box
+            // against `hand_card` again only proves the test agrees with
+            // `Layout`; it says nothing about where `draw_card_face` put the
+            // card, which is the disagreement the old program shipped. A card
+            // face is a filled rectangle, so one of them must be exactly here.
+            assert!(
+                filled(&f).iter().any(|r| same(*r, boxed)),
+                "card {i} is hit-boxed at {boxed:?}, where nothing was painted"
             );
         }
     }
@@ -4004,6 +4076,33 @@ mod tests {
     }
 
     /// Every text the frame carries, in painting order.
+    /// Every rectangle the frame actually paints, in painting order.
+    ///
+    /// The point of reading these back is that a hit box can then be checked
+    /// against the ink rather than against a second reading of `Layout`.
+    fn filled(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn same(a: Rect, b: Rect) -> bool {
+        (a.x - b.x).abs() < 0.01
+            && (a.y - b.y).abs() < 0.01
+            && (a.w - b.w).abs() < 0.01
+            && (a.h - b.h).abs() < 0.01
+    }
+
     fn texts(f: &Frame<Target>) -> Vec<String> {
         f.commands()
             .iter()
@@ -4027,6 +4126,7 @@ mod tests {
                 snapshot(&by_click),
                 "two games from one seed already differ"
             );
+            let before = snapshot(&by_key);
             by_key.key_at(&press(button.key()), SpadesGame::SIZE);
             click_sized(
                 &mut by_click,
@@ -4038,6 +4138,15 @@ mod tests {
                 snapshot(&by_key),
                 snapshot(&by_click),
                 "{button:?}: the button and the key disagree"
+            );
+            // Agreeing is not enough. Both paths run the same `press(button)`,
+            // so a verb that had been gutted would be gutted identically on
+            // both sides and this test would pass a program in which no button
+            // did anything at all. Each of the four changes the game here.
+            assert_ne!(
+                before,
+                snapshot(&by_key),
+                "{button:?} left the game exactly as it found it"
             );
         }
     }
@@ -4142,12 +4251,67 @@ mod tests {
     }
 
     #[test]
+    fn a_centred_run_stays_inside_the_box_it_is_centred_in() {
+        // Both ends, and they fail separately. A run that fits must not claim
+        // room past the box's right edge -- `x + max_width` is where the
+        // renderer will elide, so a bound measured from the centred start
+        // rather than from the box's left edge reaches past it. A run that does
+        // not fit must start at the left edge, not at a negative offset that
+        // hangs it off both sides at once.
+        let (x0, w) = (60.0_f32, 80.0_f32);
+        for s in ["3", "a heading far too wide for the box it is centred in"] {
+            let mut f: Frame<Target> = Frame::new(400.0, 100.0);
+            centred(
+                &mut f,
+                x0,
+                w,
+                10.0,
+                s,
+                TEXT_COLOR,
+                14.0,
+                FontWeightHint::Regular,
+            );
+            let Some(&RenderCommand::Text { x, max_width, .. }) = f.commands().first() else {
+                panic!("centred drew nothing for {s:?}");
+            };
+            let bound = max_width.unwrap_or(f32::INFINITY);
+            assert!(
+                x >= x0 - 0.01,
+                "{s:?} starts at {x}, left of its box at {x0}"
+            );
+            assert!(
+                x + bound <= x0 + w + 0.01,
+                "{s:?} is bounded at {} , past its box at {}",
+                x + bound,
+                x0 + w
+            );
+        }
+    }
+
+    #[test]
     fn no_text_runs_off_the_window_it_is_drawn_in() {
         // Every text in the old program was `max_width: None`, so a status
         // naming a seat and a card ran straight off a narrow window -- and so
         // did the title, the help card's rows and a card's own corner.
-        let mut game = playing_game();
-        game.status_message = "West played the king of diamonds and took the trick".repeat(4);
+        //
+        // One fixture is not enough: whole swathes of the picture -- the bid
+        // pad, the help card, the message across the empty felt -- are drawn in
+        // states a playing game is not in, and the strings they centre were
+        // exactly the ones this test could not see when it looked at one state.
+        let mut playing = playing_game();
+        playing.status_message = "West played the king of diamonds and took the trick".repeat(4);
+        let mut bidding = SpadesGame::with_seed(7);
+        settle(&mut bidding);
+        let mut helping = playing_game();
+        helping.show_help = true;
+        let mut over = playing_game();
+        play_out(&mut over);
+        for game in [&playing, &bidding, &helping, &over] {
+            assert_frame_text_is_bounded(game);
+        }
+    }
+
+    fn assert_frame_text_is_bounded(game: &SpadesGame) {
         for (w, h) in sizes() {
             let f = game.frame(w, h);
             for c in f.commands() {
@@ -4401,11 +4565,20 @@ mod tests {
     fn a_game_left_alone_reaches_the_human_and_stops_there() {
         // The clock is only ever owed to a machine seat: when it is the human's
         // turn, `tick` says no, and the program is not spinning.
+        // "Or the round ended" would be an escape hatch wide enough to drive
+        // the fault through: a clock owed to the human as well plays the
+        // human's cards, and the round it runs away with does end. It cannot
+        // end here -- the human still holds thirteen cards and the round needs
+        // every one of them -- so the clock must stop with the human to act.
         let mut game = playing_game();
         settle(&mut game);
+        assert_eq!(
+            game.phase,
+            Phase::Playing,
+            "the clock played the round out on its own"
+        );
         assert!(
-            game.current_player.is_human()
-                || matches!(game.phase, Phase::RoundOver | Phase::GameOver),
+            game.current_player.is_human(),
             "the clock stopped on {:?} in {:?}",
             game.current_player,
             game.phase
@@ -4567,5 +4740,59 @@ mod tests {
         let a = SpadesGame::with_seed(1);
         let b = SpadesGame::with_seed(2);
         assert_ne!(a.hands, b.hands, "two seeds dealt the same cards");
+    }
+
+    // ── The window itself ───────────────────────────────────────────
+
+    #[test]
+    fn closing_the_window_exits() {
+        let mut game = playing_game();
+        assert_eq!(game.on_event(&Event::CloseRequested), Response::Exit);
+    }
+
+    #[test]
+    fn the_app_asks_for_a_clock() {
+        // Without a tick the machine seats never act at all: the old program
+        // bid and played for all three of them inside the human's own event.
+        let game = playing_game();
+        assert_eq!(
+            game.tick_interval(),
+            Some(std::time::Duration::from_millis(TICK_MS))
+        );
+    }
+
+    #[test]
+    fn a_tick_that_moves_the_game_redraws_and_one_that_does_not_idles() {
+        // A window that redrew on every tick would repaint forty times a second
+        // for ever; one that never redrew would never show a machine's card.
+        let mut game = SpadesGame::with_seed(11);
+        assert!(
+            !game.current_player.is_human(),
+            "seed 11 opens on a machine"
+        );
+        assert_eq!(
+            game.on_event(&Event::Tick {
+                elapsed_ms: u64::from(THINK_MS)
+            }),
+            Response::Redraw,
+            "the seat that acted did not ask for a repaint"
+        );
+        settle(&mut game);
+        assert_eq!(
+            game.on_event(&Event::Tick { elapsed_ms: 1000 }),
+            Response::Idle,
+            "an idle window repainted anyway"
+        );
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_was_designed_for() {
+        let game = playing_game();
+        assert_eq!(
+            game.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        assert_eq!(game.title(), TITLE);
+        assert_eq!(game.app_id(), "spades");
     }
 }

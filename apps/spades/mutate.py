@@ -125,16 +125,27 @@ MUTATIONS = [
     ),
     # ── The panes ─────────────────────────────────────────────────────────
     (
+        # The first version of this row struck out a `.min(strip_h)` on
+        # `hand_h` -- and it survived, because `card_w` is already capped at
+        # `strip_h / (CARD_ASPECT * HAND_STRIP_SLACK)`, so the `.min` was a
+        # clamp no window could reach. The sweep is what proved it dead; the
+        # production line is gone and the row now cuts the real guard, which is
+        # that the strip is what the footer leaves of the free height.
         "the hand strip is not kept clear of the buttons",
-        "        let hand_h = (card_h * HAND_STRIP_SLACK).min(strip_h);",
-        "        let hand_h = card_h * HAND_STRIP_SLACK;",
+        "        let strip_h = (free_h - footer_h).max(0.0);",
+        "        let strip_h = free_h;",
         ["the_panes_are_stacked_and_do_not_overlap"],
     ),
     (
+        # The owner moved when the dead `.min(strip_h)` came off `hand_h` two
+        # rows up. With the strip's height derived from the card's, a card can
+        # no longer escape its strip -- that is now true by construction -- so
+        # cutting this cap does not show up as a card outside the hand, it
+        # shows up as the hand itself outside the pane it was given.
         "a card is measured against the free height rather than its own strip",
         "            .min(strip_h / (CARD_ASPECT * HAND_STRIP_SLACK))",
         "            .min(f32::INFINITY)",
-        ["the_hand_fits_the_window_it_is_drawn_in"],
+        ["the_panes_are_stacked_and_do_not_overlap"],
     ),
     (
         "a card may grow without limit",
@@ -371,9 +382,29 @@ MUTATIONS = [
         ["no_text_runs_off_the_window_it_is_drawn_in"],
     ),
     (
+        # The whole-frame text sweep cannot own either half of `centred`: a
+        # game that is playing draws no centred run at all, and a bound that
+        # overshoots by the centring offset still ends level with the box when
+        # the run is too wide to centre. Both halves belong to the helper's own
+        # test, which reads the command back rather than the picture.
         "a centred run too wide to centre hangs off both sides",
-        "        (x + ((w - measured) / 2.0).max(0.0), y),\n        w,",
-        "        (x + (w - measured) / 2.0, y),\n        f32::INFINITY,",
+        "    let offset = ((w - measured) / 2.0).max(0.0);",
+        "    let offset = (w - measured) / 2.0;",
+        ["a_centred_run_stays_inside_the_box_it_is_centred_in"],
+    ),
+    (
+        "a centred run is bounded by its whole box rather than by the room left",
+        "        (w - offset).max(0.0),",
+        "        w,",
+        [
+            "a_centred_run_stays_inside_the_box_it_is_centred_in",
+            "no_text_runs_off_the_window_it_is_drawn_in",
+        ],
+    ),
+    (
+        "a run with no room left is drawn anyway, outside the box that has none",
+        "    if width <= 0.0 || width.is_nan() {\n        return;\n    }",
+        "    if width.is_nan() {\n        return;\n    }",
         ["no_text_runs_off_the_window_it_is_drawn_in"],
     ),
     (
@@ -458,10 +489,13 @@ MUTATIONS = [
         ["the_panel_says_what_each_team_bid_and_what_it_has_taken"],
     ),
     (
+        # Owned by the score test that was already here, not by the new
+        # button test: the button test watches a fresh deal, and a game that
+        # kept its old score is still freshly dealt.
         "a new game keeps the old game's score",
         "        self.teams = [TeamState::new(), TeamState::new()];",
         "        {}",
-        ["a_new_game_from_the_button_deals_a_fresh_round"],
+        ["test_new_game_resets_scores"],
     ),
     (
         "every game is dealt from the same fixed seed",

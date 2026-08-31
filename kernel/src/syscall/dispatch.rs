@@ -1263,7 +1263,10 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
     //     `0` is legal.  The byte is checked, not just the success: this is the
     //     one shape where a wrong base would go unnoticed, since there is no
     //     base to be wrong.
-    let no_base = dispatch(SYS_FS_OPENAT2, &mk(b"/openat2_native/inside.txt", 1, 0, 0, 0));
+    let no_base = dispatch(
+        SYS_FS_OPENAT2,
+        &mk(b"/openat2_native/inside.txt", 1, 0, 0, 0),
+    );
     if no_base.value <= 0 {
         serial_println!(
             "[syscall]   FAIL: native openat2 absolute fragment with dirfd=0 returned {} \

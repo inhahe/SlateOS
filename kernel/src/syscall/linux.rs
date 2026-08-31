@@ -51007,9 +51007,7 @@ fn test_linux_rename_roundtrip() -> crate::error::KernelResult<()> {
     }
     let _ = crate::fs::Vfs::remove(rsrc);
     let _ = crate::fs::Vfs::remove(rdst);
-    serial_println!(
-        "[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK"
-    );
+    serial_println!("[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK");
     Ok(())
 }
 

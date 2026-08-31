@@ -40,6 +40,7 @@
 //! - Microsoft TLFS: Hypervisor CPUID Interface
 
 use crate::serial_println;
+use core::arch::x86_64::__cpuid;
 use core::sync::atomic::{AtomicU8, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -152,30 +153,16 @@ static mut SIGNATURE: [u8; 12] = [0u8; 12];
 /// Returns (eax, ebx, ecx, edx).
 #[inline]
 fn cpuid(leaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-
-    // SAFETY: CPUID is always available on x86_64 and has no side effects
-    // other than populating registers.  We save/restore rbx via xchg
-    // because LLVM reserves it.
-    unsafe {
-        // `{tmp:r}` forces 64-bit register name to match the `xchg rbx, ...`
-        // operand. The binding is u32 — rust only reads the low 32 bits.
-        core::arch::asm!(
-            "xchg rbx, {tmp:r}",
-            "cpuid",
-            "xchg rbx, {tmp:r}",
-            tmp = out(reg) ebx,
-            inout("eax") leaf => eax,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, preserves_flags),
-        );
-    }
-
-    (eax, ebx, ecx, edx)
+    // CPUID is always available on x86_64 and has no side effects
+    // other than populating registers.
+    //
+    // This site used the `xchg rbx, {tmp}` idiom, which — unlike the
+    // `push rbx` / `mov {out:e}, ebx` / `pop rbx` form the rest of the tree
+    // used — is correct for *either* register allocation.  It is replaced
+    // anyway so that no hand-rolled CPUID remains to be copied by the next
+    // reader who needs one; see design-decisions.md sec 652.
+    let r = __cpuid(leaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// Execute CPUID leaf 1 and check hypervisor present bit.

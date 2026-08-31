@@ -44,6 +44,11 @@
 
 use crate::serial_println;
 use crate::smp::MAX_CPUS;
+// See the note at the top of `crate::cpu` and design-decisions.md sec 652 for
+// why CPUID goes through `core`'s intrinsics rather than a hand-rolled `asm!`
+// block: the hand-rolled `push rbx` / `mov {out:e}, ebx` / `pop rbx` form
+// discards the result whenever the allocator picks `rbx` for the output.
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -485,94 +490,29 @@ fn count_physical_cores(num_cpus: usize) -> usize {
 
 /// CPUID topology enumeration (leaf 0xB or 0x1F with subleaf).
 fn cpuid_topology(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: CPUID is safe; we verified the leaf is supported.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            in("eax") leaf,
-            in("ecx") subleaf,
-            ebx_out = out(reg) ebx,
-            lateout("eax") eax,
-            lateout("ecx") ecx,
-            lateout("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    // CPUID is safe; we verified the leaf is supported.
+    let r = __cpuid_count(leaf, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// CPUID leaf 0: maximum standard leaf.
 fn cpuid_max_leaf() -> u32 {
-    let eax: u32;
-    // SAFETY: CPUID leaf 0 always valid.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "xor eax, eax",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // CPUID leaf 0 always valid.
+    __cpuid(0).eax
 }
 
 /// CPUID leaf 1: returns (ECX, EDX, EBX) — feature flags + misc info.
 fn cpuid_leaf1_full() -> (u32, u32, u32) {
-    let ecx: u32;
-    let edx: u32;
-    let ebx: u32;
-    // SAFETY: CPUID leaf 1 always valid on x86_64.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            lateout("eax") _,
-            lateout("ecx") ecx,
-            lateout("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (ecx, edx, ebx)
+    // CPUID leaf 1 always valid on x86_64.
+    let r = __cpuid(1);
+    (r.ecx, r.edx, r.ebx)
 }
 
 /// CPUID leaf 4, subleaf N: deterministic cache parameters.
 fn cpuid_leaf4_sub(subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: Caller verified max_leaf >= 4.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 4",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            in("ecx") subleaf,
-            ebx_out = out(reg) ebx,
-            lateout("eax") eax,
-            lateout("ecx") ecx,
-            lateout("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    // Caller verified max_leaf >= 4.
+    let r = __cpuid_count(4, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 extern crate alloc;

@@ -18,9 +18,11 @@
 # whether a copied directory came out 0700 or 0755 is a difference in the mode
 # column and nowhere else. Both are invisible in the text.
 #
-# Timestamps are deliberately *not* compared. Without `-p`, both programs give
-# the destination the time of the copy, so the column would differ between two
-# runs of the same program and say nothing about either.
+# Timestamps are compared only in the `-p` section. Without `-p` both programs
+# give the destination the time of the copy, so the column would differ between
+# two runs of the same program and say nothing about either; with `-p` it is
+# the one thing the option is for, and those cases pin their fixture's times
+# with `touch -d` so the expected value is a constant. The knob is `STAMPS`.
 #
 # ## What this harness will not do
 #
@@ -140,12 +142,53 @@ mktree() {
 # directory leaves one on both sides, so `find` fails to descend on both sides
 # and the blind spot is symmetric. The unreadable directory itself is still
 # listed, with its mode.
+#
+# The modification time is printed only when [`STAMPS`] is set, which is the
+# `-p` section and nowhere else. It cannot be unconditional: without `-p` the
+# destination gets the time of the copy, the two sides copy one after the
+# other, and the column would differ between two runs of the *same* program.
+# Under `-p` it is the whole point of the case, and the fixture pins every
+# source's time with `touch -d` so that the expected value is a constant rather
+# than whenever the harness happened to run.
+#
+# `%T@` and not `%TY-%Tm-…`: seconds-and-fraction since the epoch is what
+# `utimensat` actually carries, and a formatted time would hide a copy that got
+# the seconds right and threw the nanoseconds away.
 snapshot() {
+  local t=''
+  [ -n "$STAMPS" ] && t=' %T@'
   ( cd "$1" 2>/dev/null && find . -mindepth 1 \
-        \( -type d -printf '%P %m d\n' \
-        -o -type l -printf '%P l -> %l\n' \
-        -o -printf '%P %m %s\n' \) 2>/dev/null \
-      | LC_ALL=C sort )
+        \( -type d -printf "%P %m d$t\n" \
+        -o -type l -printf "%P l -> %l$t\n" \
+        -o -printf "%P %m %s$t\n" \) 2>/dev/null \
+      | fold_now | LC_ALL=C sort )
+}
+
+# Anything after this is the harness's own clock rather than the fixture's.
+# `mkstamped` pins everything it makes to 2001-2007; the cutoff is 2011 and the
+# harness runs long after it.
+STAMP_CUTOFF=1300000000
+
+# Rewrite a timestamp the fixture did not set as the literal `now`.
+#
+# Without this the section below could assert half of what it is for. A case
+# that preserves the times can be compared outright — both sides produce the
+# fixture's constant. A case that does *not* preserve them gives the
+# destination the moment it was copied, the two sides are copied one after the
+# other, and the column differs every run. Dropping those cases from the
+# comparison would mean never checking that `--preserve=mode` leaves the time
+# alone, which is exactly the confusion — one option quietly doing all three —
+# that one-attribute-at-a-time cases exist to catch. Folding says which of the
+# two happened without saying when.
+#
+# `sub` on `$0` and not `$NF = "now"`: assigning to a field makes awk rebuild
+# the record with single-space separators, which would silently rewrite any
+# name holding a tab. Nothing in `mkstamped` does, and this stays true if
+# something later does.
+fold_now() {
+  if [ -z "$STAMPS" ]; then cat; return; fi
+  awk -v cut="$STAMP_CUTOFF" '
+    { if ($NF ~ /^[0-9]+\.[0-9]+$/ && $NF + 0 > cut) sub(/[^ ]+$/, "now"); print }'
 }
 
 # And the bytes, so that a file which arrived with the right size and the wrong
@@ -184,7 +227,11 @@ TREE=
 # Written with `$'\n'` escapes rather than real newlines so that a case's
 # answers stay on the case's own line and can be read next to its options.
 ANSWERS=
-reset_knobs() { TREE='mktree'; ANSWERS=''; }
+# Non-empty makes [`snapshot`] print each path's modification time. Set by the
+# `-p` cases, which are the only ones whose fixture pins those times; see
+# `snapshot`.
+STAMPS=
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -1387,7 +1434,145 @@ ANSWERS='y'$'
 run_case -f --remove-destination -inv file.txt old.txt
 
 # =============================================================================
-# 17. Options GNU has and this cp has not
+# 17. -p, --preserve and --no-preserve
+# =============================================================================
+# The only section that compares modification times, and the only one that can:
+# `mkstamped` pins every path the fixture creates to a fixed instant, so the
+# expected value is a constant instead of whenever the harness ran. `STAMPS=1`
+# turns the column on; see `snapshot`.
+#
+# Each path gets a *different* instant, and the nanoseconds of each are
+# different too. Both matter. One shared instant would let a copy that stamped
+# every destination with the first source's time pass, and a whole-second value
+# would let one that rounded the nanoseconds away pass — which is the exact
+# shape of the bug a `utimensat` fed `st_mtime` instead of `st_mtim` produces.
+#
+# The order below is children first, then their directory: writing into a
+# directory moves its own modification time, so stamping `tree` before
+# `tree/a.txt` would leave `tree` carrying the time of the `touch` and not the
+# time asked for. `dir` is stamped too although nothing is copied into it —
+# `mktree` creates it, so it is in every snapshot, and an unstamped empty
+# directory carries the time the fixture ran, which is a different instant on
+# each side.
+mkstamped() {
+  mktree
+  touch -d '2001-02-03 04:05:06.123456789' tree/a.txt
+  touch -d '2002-03-04 05:06:07.987654321' tree/sub/b.txt
+  touch -h -d '2003-04-05 06:07:08.192837465' tree/link
+  touch -d '2004-05-06 07:08:09.564738291' tree/sub
+  touch -d '2005-06-07 08:09:10.918273645' tree
+  touch -d '2006-07-08 09:10:11.246813579' file.txt
+  touch -d '2007-08-09 10:11:12.135792468' dir
+}
+
+# The three POSIX attributes together, which is what `-p` and a bare
+# `--preserve` both mean.
+STAMPS=1 TREE='mkstamped'
+run_case -p file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case --preserve file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case -p -r tree dst
+STAMPS=1 TREE='mkstamped'
+run_case --preserve=mode,ownership,timestamps -r tree dst
+
+# One attribute at a time, so that a `-p` which quietly does all three whatever
+# it was asked for cannot pass. The mode column and the time column move
+# independently here and in no other section.
+STAMPS=1 TREE='mkstamped; chmod 741 file.txt'
+run_case --preserve=mode file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 741 file.txt'
+run_case --preserve=timestamps file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 741 file.txt'
+run_case --preserve=ownership file.txt new.txt
+# `--preserve=ownership` is the one that withholds group and other permissions
+# at creation and puts them back afterwards — GNU's `omitted_permissions`, which
+# is `src & 0077` under that option and `src & 0022` for a directory without it.
+# A copy that skipped the putting-back leaves 0700 where 0741 belongs.
+STAMPS=1 TREE='mkstamped; chmod 741 tree; chmod 775 tree/sub'
+run_case --preserve=ownership -r tree dst
+
+# Abbreviated words. Every one of the seven has a distinct first letter, so a
+# single character is unambiguous — and `--preserve=m` reaching `mode` is the
+# difference between gnulib's `XARGMATCH` and a table lookup.
+STAMPS=1 TREE='mkstamped; chmod 741 file.txt'
+run_case --preserve=m,t file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case --preserve=timestamp file.txt new.txt
+
+# The mode `-p` restores is the source's whole 07777 and is *not* narrowed by
+# the umask — the one thing separating a preserved mode from a fresh file's.
+STAMPS=1 TREE='mkstamped; chmod 4755 file.txt'
+run_case -p file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 2755 file.txt'
+run_case -p file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 777 file.txt'
+run_case -p file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 1777 tree'
+run_case -p -r tree dst
+# 0500: no owner-write, so the copy has to be filled before the mode goes on —
+# and the mode has to go on after the ownership, not instead of it.
+STAMPS=1 TREE='mkstamped; chmod 500 tree'
+run_case -p -r tree dst
+STAMPS=1 TREE='mkstamped; chmod 400 tree/a.txt'
+run_case -p -r tree dst
+
+# An existing destination. `-p` replaces its mode, where a plain copy leaves it
+# alone — section 10 asserts the second half and this asserts the first.
+STAMPS=1 TREE='mkstamped; printf old > old.txt; chmod 600 old.txt; touch -d "2010-01-01 00:00:00" old.txt'
+run_case -p file.txt old.txt
+STAMPS=1 TREE='mkstamped; chmod 4755 file.txt; printf old > old.txt; chmod 600 old.txt; touch -d "2010-01-01 00:00:00" old.txt'
+run_case -p file.txt old.txt
+STAMPS=1 TREE='mkstamped; chmod 600 file.txt; printf old > old.txt; chmod 777 old.txt; touch -d "2010-01-01 00:00:00" old.txt'
+run_case -p file.txt old.txt
+
+# A symbolic link copied as itself. The link's own times are preserved and its
+# mode is not touched at all — nothing portable can chmod a link, and GNU
+# returns before its mode block for exactly that reason.
+STAMPS=1 TREE='mkstamped'
+run_case -P -p tree/link dst
+STAMPS=1 TREE='mkstamped'
+run_case -p -r tree dst2
+
+# --no-preserve. On a destination this run created it is not the same as not
+# having asked: `--no-preserve=mode` gives 0666 (0777 for a directory) less the
+# umask, where a plain copy gives the source's mode less the umask.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case --no-preserve=mode file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 tree'
+run_case -r --no-preserve=mode tree dst
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt; printf old > old.txt; chmod 600 old.txt'
+run_case --no-preserve=mode file.txt old.txt
+# Order decides, because each word is applied as it is read.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case -p --no-preserve=mode file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case --no-preserve=mode -p file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case -p --no-preserve=timestamps file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case --preserve=mode --no-preserve=mode,timestamps file.txt new.txt
+# `--no-preserve=all` turns off the three that exist and is accepted for the
+# four that do not: refusing a word there would be refusing an instruction the
+# program has already obeyed by never having done the thing.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case -p --no-preserve=all file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case --no-preserve=links,xattr,context file.txt new.txt
+
+# Words and lists that are refused, by both programs and in the same sentence.
+run_case --preserve=bogus file.txt new.txt
+run_case --preserve=xyz file.txt new.txt
+run_case --preserve= file.txt new.txt
+run_case --no-preserve= file.txt new.txt
+run_case --preserve=mode,bogus file.txt new.txt
+# `--no-preserve` takes a required argument, so a trailing one has nothing to
+# take and both programs say so before looking at the operands.
+run_case file.txt new.txt --no-preserve
+run_case file.txt new.txt --preserve=
+
+# =============================================================================
+# 18. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -1409,11 +1594,17 @@ missing --debug file.txt new.txt
 missing -d tree/link dst
 missing -l file.txt new.txt
 missing --link file.txt new.txt
-missing --no-preserve=mode file.txt new.txt
 missing --one-file-system -r tree dst
-missing -p file.txt new.txt
-missing --preserve file.txt new.txt
-missing --preserve=mode,timestamps file.txt new.txt
+# The four `--preserve` words this cp has not, refused one word at a time
+# rather than by the option — `--preserve=mode` is honoured in the section
+# above and refusing it because `xattr` exists would be a lie. `--preserve=all`
+# is refused for containing `links`, which is the only one of the four that
+# changes what ends up on disk rather than what is attached to it.
+missing --preserve=links tree/a.txt new.txt
+missing --preserve=xattr file.txt new.txt
+missing --preserve=context file.txt new.txt
+missing --preserve=all -r tree dst
+missing --preserve=mode,links file.txt new.txt
 missing --parents tree/a.txt dir
 missing --path tree/a.txt dir
 missing --reflink=auto file.txt new.txt
@@ -1430,7 +1621,7 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 18. --help and --version
+# 19. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

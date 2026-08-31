@@ -41,6 +41,10 @@
 #![allow(dead_code)]
 
 use crate::serial_println;
+// See the note at the top of `crate::cpu` and design-decisions.md sec 652: no
+// hand-rolled CPUID `asm!` anywhere in the tree, so nobody copies the form that
+// silently discards EBX.
+use core::arch::x86_64::{__cpuid, __cpuid_count};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -119,44 +123,15 @@ static mut PER_CPU: [PerCpuPcid; MAX_CPUS] = {
 ///
 /// Call once during boot after CPU feature detection.
 pub fn detect() {
-    // PCID: CPUID.01H:ECX bit 17.
-    // LLVM reserves RBX, so we must save/restore it around CPUID.
-    let ecx: u32;
-    // SAFETY: CPUID is always safe to execute.  We save/restore RBX
-    // because LLVM uses it as a reserved register.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            out("ecx") ecx,
-            out("eax") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
+    // PCID: CPUID.01H:ECX bit 17.  Leaf 1 exists on every x86_64.
+    let ecx = __cpuid(1).ecx;
     let pcid_support = ecx & (1 << 17) != 0;
     PCID_SUPPORTED.store(pcid_support, Ordering::Release);
 
-    // INVPCID: CPUID.07H:EBX bit 10.
-    let ebx7: u32;
-    // SAFETY: CPUID is always safe.  We move EBX→EAX after CPUID
-    // to retrieve it (since we can't use out("ebx") directly).
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov eax, ebx",
-            "pop rbx",
-            out("eax") ebx7,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
+    // INVPCID: CPUID.07H:EBX bit 10.  A CPU whose max leaf is below 7
+    // returns zeros here, which reads as "INVPCID unsupported" — the
+    // conservative answer, and the one the caller already handles.
+    let ebx7 = __cpuid_count(7, 0).ebx;
     let invpcid_support = ebx7 & (1 << 10) != 0;
     INVPCID_SUPPORTED.store(invpcid_support, Ordering::Release);
 

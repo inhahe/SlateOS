@@ -100689,10 +100689,158 @@ inviting a check-then-use of its own.
 hypothetical question is one more thing to keep in step. **Trigger:** lane B
 asking, or the first userspace caller whose correctness depends on it.
 
+## A-CPUID-EBX-IS-READ-FROM-A-REGISTER-THE-ASM-JUST-RESTORED (lane A)
+
+**Status:** FIXED 2026-08-31 in `22506d697` (boot confirmation pending; the fix
+is verified in the rebuilt binary — see "Verification" below). **SMEP and SMAP
+were disabled on every boot of this kernel between 2026-08-23 and 2026-08-31** —
+not because the CPU lacks them, but because the kernel could not see them.
+
+*An earlier revision of this entry said "since the feature-detection code was
+written". That was wrong, and the correction makes the bug worse rather than
+better.* The retained boot logs show `SMEP=true SMAP=true UMIP=true` on
+2026-08-16 (ten soak iterations), 2026-08-18 (two virgl probes) and 2026-08-23
+(`serial-batch39.txt`), and `SMEP=false SMAP=false UMIP=true` on 2026-08-31
+(`serial-test.txt`). No one touched the detection code in that window — the
+leaf-7 parse and the `asm!` block that feeds it both predate 2026-08-16
+unchanged. What changed was the register the allocator handed the block, in
+response to edits elsewhere in the tree. So this is not a bug that was always
+present and always broken; it is a bug that was always present and *became*
+broken, silently, as a side effect of unrelated work, and then stayed broken.
+That is the actual hazard of the idiom: it does not fail when you write it.
+
+**In short:** To ask the CPU what it supports you run the `cpuid` instruction,
+which answers in four registers: EAX, EBX, ECX, EDX. Rust will not let inline
+assembly name `ebx` as an output (the compiler reserves that register), so ten
+places in this kernel work around it the same way: save `rbx`, run `cpuid`, copy
+`ebx` into "some register the compiler picks", restore `rbx`. The bug is the
+phrase in quotes. The compiler is free to pick `rbx` itself — nothing told it
+not to — and at five places in the compiled kernel it did. The generated code is
+`mov %ebx,%ebx` (a no-op) immediately followed by `pop %rbx`, which throws the
+answer away and puts back the value `rbx` held *before* the `cpuid`. Every
+feature reported by EBX at those sites is read from garbage.
+
+**Evidence, from the shipped binary rather than from reasoning.** Searching
+`target/x86_64-unknown-none/release/kernel` for `0f a2` (cpuid) followed by
+`mov %ebx,<r32>` and `5b` (pop rbx) finds 21 sites, of which five are the
+destructive `mov %ebx,%ebx` — at file offsets `0x1ada19`, `0x1adc1d`,
+`0x5b65ba`, `0x10bcbf7` and one more. (Twenty-one machine-code sites from ten
+source sites because the helpers are small and get inlined into several callers
+each — so one source helper can be correct at one call site and destructive at
+another.) The other sixteen picked `esi`/`edi`/`eax` and happen to be correct.
+Which register is chosen is an allocation decision that can change with any edit
+to surrounding code, so the working sites work by luck, not by construction.
+
+**The observable consequence, and how it was found.** The boot harness runs QEMU
+with `-cpu qemu64,+smep,+smap,+umip`, and QEMU accepts all three without warning
+(verified directly: realizing a q35 CPU with that exact string emits no
+"unsupported feature" diagnostic). The guest nevertheless reports:
+
+    [cpu]   SMEP=false SMAP=false UMIP=true
+
+UMIP is CPUID leaf 7 **ECX** bit 2 and arrives. SMEP and SMAP are leaf 7 **EBX**
+bits 7 and 20 and do not. Same leaf, same instruction, same boot — the only
+difference is which register the value comes back in, which is exactly the shape
+of this bug. `kernel/src/cpu.rs:1057-1059` reads the right bits from the right
+registers; the register it reads EBX *from* is the one the asm just restored.
+
+This surfaced from the other end: `[smep_smap] STAC/CLAC, with_user_access and
+the access counter` is on `check-boot-skips.py`'s allowlist justified as "needs
+SMAP on the running CPU, QEMU does not expose it". That justification is false,
+and the entry was hiding a security feature that is off. See "The class gate is
+now built" below — this is precisely the failure mode named there as the one an
+allowlist has, arriving within a day of the warning being written.
+
+**Blast radius.** Everything the kernel believes about EBX from CPUID:
+
+| Consumer | Reads | Consequence of a false negative |
+|---|---|---|
+| `smep_smap::init` | SMEP, SMAP | **CR4.SMEP and CR4.SMAP never set.** The kernel can execute and read user pages unhindered — both mitigations inert. |
+| `cpu::detect_features` | AVX2, BMI1, BMI2, AVX512F, SHA, RDSEED | Optimised paths silently never taken; RDSEED absence changes entropy sourcing. |
+| `cpu_topology` (3 of its 4 sites) | leaf 4 / 0xb EBX | Cache and topology fields read from a restored `rbx`. "Cache topology: not detected" in every log is consistent with this. |
+
+Two consumers that look like they belong in that table do **not**:
+`hypervisor.rs`'s leaf-`0x40000000` read and `bench.rs`'s serializing call used
+the `xchg rbx, {tmp}` idiom instead, which is correct for either allocation, so
+the hypervisor vendor signature was never misread. `mm/pcid.rs` named `eax` and
+`ecx` explicitly and was likewise never exposed. All three are still converted —
+see "Proper fix" — but they are not part of the damage.
+
+Note the asymmetry that made this invisible: a false *negative* on a CPU feature
+disables an optimisation or a mitigation and produces no error, so nothing ever
+printed anything red. A false positive would have crashed on the first `stac`.
+
+**Second defect, at a wider set of sites:** twenty-five of the twenty-eight
+CPUID call sites in the tree assert `options(nostack)` while containing `push
+rbx`/`pop rbx` — including sites that read no EBX at all and were therefore
+returning correct answers. That is a direct lie to the compiler: `nostack`
+permits red-zone use below `rsp`, which the push would corrupt. The kernel is
+built without a red zone so it has not bitten, but it is UB by the `asm!`
+contract and must not survive the fix.
+
+**Proper fix.** Delete the hand-rolled save/restore and call
+`core::arch::x86_64::__cpuid` / `__cpuid_count` — they are `core` (no `std`
+needed), handle the `rbx` problem correctly by construction (the `xchg` idiom is
+right for *either* allocation), and have no output operand to mis-allocate.
+
+A first count said eleven sites; grepping for the `"cpuid"` string rather than
+for the `ebx_out` operand found twenty-eight, in seven files: `kernel/src/cpu.rs`
+(15), `kernel/src/cpu_topology.rs` (4), `kernel/src/cpufreq.rs` (3),
+`kernel/src/thermal.rs` (2), `kernel/src/mm/pcid.rs` (2), `kernel/src/bench.rs`
+(1), `kernel/src/hypervisor.rs` (1). All twenty-eight are converted, not just
+the ten that read EBX: the thing being removed is the idiom, so that the next
+person who needs a CPUID has no broken template in the tree to copy. See
+design-decisions.md §652.
+
+The conversion also **removes 28 `unsafe` blocks**: `__cpuid`/`__cpuid_count`
+are safe functions on x86_64 (CPUID is baseline, so there is no precondition a
+caller can get wrong), which the compiler reported as `unnecessary unsafe block`
+at every site. The 28 `// SAFETY:` comments above them were never safety
+arguments — "Caller verified max_leaf >= 7" says the *answer* is meaningful, not
+that the call is sound — so they are kept as plain comments with the `SAFETY:`
+marker dropped.
+
+**Reproduce.**
+
+    python -c "import re; b=open('target/x86_64-unknown-none/release/kernel','rb').read(); print(len(re.findall(rb'\x0f\xa2\x89\xdb\x5b', b)), 'destructive cpuid sites')"
+    grep -E "SMEP=|SMAP hw=" build/serial-test.txt
+
+**Verification after the fix:** `[cpu]   SMEP=true SMAP=true UMIP=true` under
+the harness's default `-cpu`, `[smep_smap] Enabling SMEP` / `Enabling SMAP` in
+early boot, and the `[smep_smap]` SKIP disappearing — at which point its
+`ALLOWED` entry in `scripts/check-boot-skips.py` must be deleted, because a
+stale allowlist entry is itself a hard failure of that gate.
+
+**Verification actually obtained (2026-08-31, commit `22506d697`).** The
+allowlist entry is deleted and the rebuilt kernel was scanned with the same
+byte-pattern method that found the bug, which is the point: the fix is
+confirmed by the same instrument that produced the diagnosis, not by a
+different and more forgiving one.
+
+| Pattern following `0f a2` (`cpuid`) | Before | After |
+|---|---|---|
+| `mov %ebx,<r32>` (the fragile idiom, any allocation) | 21 | **0** |
+| `mov %ebx,%ebx` (the destructive allocation) | 5 | **0** |
+| `xchg %rbx,<r64>` (`core`'s idiom, correct for any allocation) | — | 144 |
+
+`cargo build -p kernel --release --target x86_64-unknown-none` is clean with
+zero warnings. The 144 is larger than the 28 source sites because the helpers
+inline into many callers — which is the same reason the "before" count was 21
+rather than 10, and is why the binary is the thing to count.
+
+What remains is the boot log, which confirms the *observable* effect rather
+than the fix. Note that the failure was value-only, so a passing boot log is
+weaker evidence than the byte scan above: a boot that printed `SMEP=true`
+would have done so on 2026-08-23 as well, while the bug was fully present.
+
 ## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
 
-**Status:** FIXED 2026-08-31 (the six instances). The *class* gate remains
-open — see "Then close the class" below.
+**Status:** FIXED 2026-08-31 (the six instances). The *class* gate is **built**
+as of the same day — see "The class gate is now built" below — but it cannot
+return a verdict until ten boots have been recorded with the new field. Its
+first pass named four more instances, of which **one** survived being checked
+against the source; the other three were false positives and are written up
+below, because the way they were false is the more useful finding.
 
 **In short:** Six self-test cases ask the mount table whether `/` is mounted
 read-write, find that it is not, record an honest SKIP, and return. They run
@@ -100791,6 +100939,130 @@ precise self-deception §648's own entry criticises elsewhere — so §648's
 test half was blocked on this (it is now unblocked), and any future "it is
 covered by a self-test" claim about these six subsystems is worth checking
 against the log first.
+
+### The class gate is now built — and three of its first four findings were wrong (lane A, 2026-08-31)
+
+**Status of the class:** the gate exists and is wired into `boot-test.sh`. It
+is **not yet able to fail**, and will not be for about ten more boots; see
+"the ten-boot wait" below, which is a property of the design and not an
+oversight.
+
+**What was built.**
+
+| | |
+|---|---|
+| The names | `scripts/boot-history.py` → `partition_skips`, `Serial.skips` / `Serial.skips_covered`, and `skips` + `skips_covered` fields on every row of `bench/boot-history.jsonl` |
+| The verdict | `scripts/check-boot-skips.py` — fails when a named skip has fired on 100% of the last N ≥ 10 qualifying boots |
+| The gate | `scripts/boot-test.sh` → `check_boot_skips`, run before the build alongside the design-decisions band check |
+| The tests | `scripts/test-check-boot-skips.py`, 32 cases |
+| Rationale | `design-decisions.md` §651 |
+
+**The first version recorded every SKIP line, and on the first real log that
+made three of its four findings wrong.** They are worth naming individually,
+because each was wrong in the same way and it is not a way that looks wrong:
+
+| Claimed | Verdict | The line that refutes it |
+|---|---|---|
+| `[io_ring] File handle read/write` | **false positive** | `[io_ring]   File handle read/write (1 entry): OK` — 1045 lines later in the same boot |
+| `[io_ring] Positioned I/O (pread/pwrite)` | **false positive** | `[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK` |
+| `[mm] Zero-on-free` | **false positive** | `[mm]   Zero-on-free: OK (counter=2, settled=false)` — 46,883 lines later |
+| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs |
+
+**The `io_ring` pair is a deliberate tripwire, and the source says so.** The
+comment above the pre-mount calls (`kernel/src/ipc/io_ring.rs:1290`):
+
+> The two file-handle sections cannot run here — this entry point is called
+> before /tmp exists — so their skips are expected. They are still reported,
+> because "expected" and "invisible" are different things: `self_test_fh` below
+> re-runs them once /tmp is mounted, and if *that* call ever stopped happening
+> the only evidence would be these two lines never being followed by an OK.
+
+So the gate as first written would have produced three **permanent** false
+positives — the exact failure `scripts/test-ki-dupes.py`'s docstring warns
+about ("a permanent false positive is worse than no check") — and the fix its
+own message invites, *move or delete the pre-mount call*, would have destroyed
+the tripwire that catches the case it was worried about.
+
+**The fix is not a suppression, it is the tripwire's own condition.**
+`partition_skips` splits each boot's skips into `uncovered` (no other line
+under that tag reports the section as having run) and `covered` (it ran
+elsewhere in the same boot). Only `uncovered` reaches the gate. "The only
+evidence would be these two lines never being followed by an OK" is *exactly*
+the condition being computed, so the day `self_test_fh` stops being called, the
+pair moves from `covered` to `uncovered` and starts accumulating against the
+gate by itself. The tripwire got a bell.
+
+Three matcher rules, each earned against the live log and each a bug that was
+present before it:
+
+- **Match the section only up to its first `(`.** The kernel spells a section's
+  parentheses differently between the skip and the result — `SKIP: Positioned
+  I/O (pread/pwrite)` vs `Positioned I/O (pread/pwrite preserve the cursor):
+  OK`. Whole-string matching found nothing and called a section dead two lines
+  from its sibling's proof. A `_MIN_COVER_KEY` floor keeps a short key like
+  `RX` from matching half a driver's output.
+- **Reject any line mentioning "skip" in any spelling.** `[hotplug]
+  Single-CPU: skipping offline/online cycle` and `[iso9660]   No ISO 9660
+  filesystem mounted — skipping integration test.` narrate the skip in prose on
+  the line *above* the machine-readable one. Read as ordinary lines they say the
+  section ran; they say the opposite. Both were wrongly marked `covered`.
+- **`FAIL:` counts as having run.** The question is whether the case executed.
+
+Where the matcher errs it errs toward `uncovered`, deliberately: a wrong
+`uncovered` becomes a visible accusation a human resolves with an allowlist
+entry, while a wrong `covered` excuses a section from the gate forever with
+nothing to see.
+
+**One row of `bench/boot-history.jsonl` was rewritten**, the single row written
+during the few hours the field held every skip. Its nine names are exactly the
+partition of its own serial log, so the correction is derived, not guessed —
+and leaving it would have left one row whose `skips` field meant something
+different from every row after it.
+
+**The one genuine instance is not fixed.** `[mm] Zeroed frame allocation` skips
+with `HHDM is not mapped yet (running before page_table::init)`, and
+`mm::frame::self_test` runs before `page_table::init` on every boot, always. It
+needs a post-`page_table::init` entry point that does not exist yet — the same
+shape as `io_ring::self_test_fh`, which is the pattern the six above were
+modelled on. Not fixed in the same change on purpose, and for the reason §650
+gives for splitting the gate off from the six: a gate landed together with the
+failures it finds is a gate whose first act is to be worked around.
+
+**The ten-boot wait, and why it is not a defect.** No row in
+`bench/boot-history.jsonl` written before today carries a `skips` field, and a
+row that predates the field is deliberately *not* counted — treating "this row
+does not say" as "this skip did not fire" would break the 100% streak of every
+genuine offender, which is failure in the direction that hides the bug. So the
+gate reports `1 qualifying boot(s) recorded, need 10 … -- no verdict` and exits
+0 until ten green boots have accumulated. It prints the count rather than
+staying silent, because silence reads as "checked, nothing found".
+
+Backfilling was considered and is not possible: the historical rows have no
+serial log retained, so the names cannot be recovered. Lowering the floor was
+considered and rejected — a skip that fired on both of the last two boots is
+not evidence of anything, and a gate that is wrong most of the time is a gate
+that gets bypassed.
+
+**The allowlist is the part most likely to rot.** Five skips fire on every boot
+*on this host* and are not defects — `[pcid] live alloc_pcid tests` wants a CPU
+feature QEMU does not expose, `[hotplug] offline/online cycle` wants a second
+core, and so on. From the log they are indistinguishable from the six, which is
+exactly the problem, so `ALLOWED` in `check-boot-skips.py` carries each one
+with the **observable condition that would stop it firing** ("boot with `-smp
+2`"). Two properties keep it honest: an allowlisted skip that is still firing is
+printed on every run, and an allowlisted skip that has *stopped* firing is a
+hard failure rather than a shrug — either the entry is now a false statement
+about the tree, or the section was renamed and the entry names nothing.
+
+One of the five is worth a second look when the gate goes live:
+`[smep_smap] STAC/CLAC, with_user_access and the access counter` skips with
+"SMAP not available on this CPU", yet the harness boots QEMU with
+`-cpu qemu64,+smep,+smap,+umip`. Either the feature is requested and not
+delivered, or the detection is wrong. It is allowlisted for now on the reading
+that took the skip's word for it; if the detection is what is broken, this is a
+security self-test that has never run, and the allowlist entry is hiding it.
+That is the failure mode an allowlist has, stated here so the next reader
+checks rather than trusts.
 
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 

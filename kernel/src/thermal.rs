@@ -399,39 +399,14 @@ pub fn is_supported() -> bool {
 
 /// CPUID leaf 6 EAX: Thermal and Power Management features.
 fn cpuid_leaf6_eax() -> u32 {
-    let max_leaf: u32;
-    // SAFETY: CPUID leaf 0 always valid.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "xor eax, eax",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") max_leaf,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
+    // CPUID leaf 0 always valid.
+    let max_leaf = core::arch::x86_64::__cpuid(0).eax;
     if max_leaf < 6 {
         return 0;
     }
 
-    let eax: u32;
-    // SAFETY: Leaf 6 is valid (max_leaf >= 6).
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 6",
-            "cpuid",
-            "pop rbx",
-            lateout("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // Leaf 6 is valid (max_leaf >= 6).
+    core::arch::x86_64::__cpuid(6).eax
 }
 
 /// Read a Model-Specific Register.

@@ -455,6 +455,40 @@ def test_a_lane_field_beyond_the_window_does_not_count(mod):
                any("has no '**Lane:** A' field" in e for e in found))
 
 
+def test_an_inline_lane_field_counts(mod):
+    """The one-line header form declares a lane just as well as its own line.
+
+    This is regression cover for a real false positive: the check used
+    `LANE_FIELD_RE.match`, which anchors at column 0 whatever the pattern
+    says, so an entry whose header read
+
+        **Date:** ... - **Decided by:** ... - **Lane:** B
+
+    was reported as having no lane field at all. Three of lane B's entries
+    (731, 732, 733) had declared their lane correctly and were failed on the
+    line it sat on, which put the whole gate -- and therefore boot-test.sh,
+    which refuses to build while it is red -- into a state no lane could
+    clear by fixing its own work. The rule is that the field is visible in
+    the diff beside the heading; both forms are.
+    """
+    head = ("## 631. a decision\n\n"
+            "**Date:** 2026-08-29 \u00b7 **Decided by:** Claude \u00b7 **Lane:** A\n\n"
+            "**In short:** something was decided.\n")
+    lines = doc(head)
+    found = errs(mod, lines, {})
+    check_true("an inline **Lane:** field is found",
+               not any("has no '**Lane:**" in e for e in found))
+
+    # And it is still the *declared* lane, not merely any lane -- an inline
+    # field that contradicts its band has to be caught like any other.
+    head_b = ("## 631. a decision\n\n"
+              "**Date:** 2026-08-29 \u00b7 **Lane:** B\n\n"
+              "**In short:** something was decided.\n")
+    found_b = errs(mod, doc(head_b), {})
+    check_true("an inline field in the wrong band is still reported",
+               any("declares '**Lane:** B'" in e for e in found_b))
+
+
 def test_the_lane_field_search_stops_at_the_next_heading(mod):
     """Otherwise a section with no field borrows its neighbour's."""
     lines = doc(section(631, lane=None), section(632, "A"))

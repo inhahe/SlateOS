@@ -1006,8 +1006,23 @@ pub fn self_test_fs() -> KernelResult<()> {
 /// widened to prevent, and it is invisible to any test that only checks the
 /// open succeeded.
 ///
-/// Kernel context, so the capability gate is bypassed and there is no cwd —
-/// `dirfd == 0` is therefore covered from ring 3 rather than here.
+/// (f), (g) and (h) are the whole of the `dirfd == 0` contract from
+/// `design-decisions.md` §648: `0` means *no base supplied*, so it is legal
+/// exactly where no base is read — an absolute fragment, (f), which checks the
+/// byte because that is the one shape with no base to be wrong about — and
+/// `InvalidArgument` everywhere else: (g) a relative fragment, (h) under
+/// containment. (h) is the case that mattered. `0` used to resolve against
+/// `pcb::get_cwd`, so a `RESOLVE_BENEATH` walk was confined to a directory the
+/// caller never named and *succeeded*, telling the caller its containment held.
+///
+/// These three could not exist before §648. This comment used to end "kernel
+/// context … there is no cwd — `dirfd == 0` is therefore covered from ring 3
+/// rather than here", and the ring-3 coverage it pointed at
+/// ([`crate::proc::spawn::self_test_openat2_beneath`]) goes through the
+/// **Linux** ABI's `AT_FDCWD`, a different mechanism — so native `dirfd == 0`
+/// was in fact covered nowhere.
+///
+/// Kernel context, so the capability gate is bypassed.
 #[allow(clippy::too_many_lines)]
 fn test_dispatch_openat2_native() -> KernelResult<()> {
     use crate::fs::handle::OpenFlags;
@@ -1066,7 +1081,11 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
     let dirfd = dir.value as u64;
 
     let mut failed = 0u32;
-    let mut check = |name: &str, got: i64, want: i64| {
+    // A free `fn` rather than a closure over `failed`: a closure would hold a
+    // unique borrow of `failed` from its definition to its last call, which
+    // makes the cases that count failures themselves (the read-back ones)
+    // impossible to interleave with the ones that use this.
+    fn check(failed: &mut u32, name: &str, got: i64, want: i64) {
         if got != want {
             serial_println!(
                 "[syscall]   FAIL: native openat2 {}: returned {}, expected {}",
@@ -1074,21 +1093,23 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
                 got,
                 want
             );
-            failed += 1;
+            *failed = failed.saturating_add(1);
         }
-    };
+    }
 
     let einval = i64::from(KernelError::InvalidArgument.code());
     let exdev = i64::from(KernelError::CrossDevice.code());
 
     // (a) Linux's own RESOLVE_BENEATH value is an unknown bit here.
     check(
+        &mut failed,
         "untranslated Linux resolve (0x08)",
         dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 0x08, dirfd)).value,
         einval,
     );
     // ...and so is a bit above everything we define.
     check(
+        &mut failed,
         "unknown resolve bit (1<<20)",
         dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 1 << 20, dirfd)).value,
         einval,
@@ -1096,6 +1117,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
 
     // (b) Containment is decided before the handle is looked up.
     check(
+        &mut failed,
         "absolute fragment under BENEATH with a bogus dirfd",
         dispatch(
             SYS_FS_OPENAT2,
@@ -1107,6 +1129,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
 
     // (c) An escaping `..` is refused even though the target really exists.
     check(
+        &mut failed,
         "escaping `..` under BENEATH",
         dispatch(
             SYS_FS_OPENAT2,
@@ -1139,7 +1162,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
                 name,
                 r.value
             );
-            failed += 1;
+            failed = failed.saturating_add(1);
             continue;
         }
         #[allow(clippy::cast_sign_loss)]
@@ -1165,7 +1188,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
                 buf[0],
                 INSIDE_BYTE
             );
-            failed += 1;
+            failed = failed.saturating_add(1);
         }
         let _ = dispatch(
             crate::syscall::number::SYS_FS_CLOSE,
@@ -1196,7 +1219,7 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
             "[syscall]   FAIL: native openat2 CREATE with mode 0o4755 returned {}",
             created.value
         );
-        failed += 1;
+        failed = failed.saturating_add(1);
     } else {
         #[allow(clippy::cast_sign_loss)]
         let fd = created.value as u64;
@@ -1219,17 +1242,94 @@ fn test_dispatch_openat2_native() -> KernelResult<()> {
                      (the setuid bit was masked off — this is the §639 nine-vs-twelve-bit bug)",
                     md.permissions
                 );
-                failed += 1;
+                failed = failed.saturating_add(1);
             }
             Err(e) => {
                 serial_println!(
                     "[syscall]   FAIL: native openat2 create-mode stat failed: {:?}",
                     e
                 );
-                failed += 1;
+                failed = failed.saturating_add(1);
             }
         }
     }
+
+    // (f)(g)(h) `dirfd == 0` means "no base supplied" — not the cwd
+    //     (design-decisions.md §648).  These three are the whole of the native
+    //     `dirfd == 0` contract, and until §648 they could not exist here: `0`
+    //     read `pcb::get_cwd`, and kernel context has no cwd.
+    //
+    // (f) An absolute fragment is the complete answer, so no base is read and
+    //     `0` is legal.  The byte is checked, not just the success: this is the
+    //     one shape where a wrong base would go unnoticed, since there is no
+    //     base to be wrong.
+    let no_base = dispatch(SYS_FS_OPENAT2, &mk(b"/openat2_native/inside.txt", 1, 0, 0, 0));
+    if no_base.value <= 0 {
+        serial_println!(
+            "[syscall]   FAIL: native openat2 absolute fragment with dirfd=0 returned {} \
+             (§648: no base is read for an absolute path, so 0 is legal here)",
+            no_base.value
+        );
+        failed = failed.saturating_add(1);
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        let fd = no_base.value as u64;
+        let mut buf = [0u8; 1];
+        let read = dispatch(
+            crate::syscall::number::SYS_FS_READ,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: buf.as_mut_ptr() as u64,
+                arg2: 1,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+        if read.value != 1 || buf[0] != INSIDE_BYTE {
+            serial_println!(
+                "[syscall]   FAIL: native openat2 absolute fragment with dirfd=0: read {} \
+                 byte(s) = {:#x}, expected 1 byte {:#x}",
+                read.value,
+                buf[0],
+                INSIDE_BYTE
+            );
+            failed = failed.saturating_add(1);
+        }
+        let _ = dispatch(
+            crate::syscall::number::SYS_FS_CLOSE,
+            &SyscallArgs {
+                arg0: fd,
+                arg1: 0,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        );
+    }
+
+    // (g) A relative fragment needs a base and none was given.  Before §648
+    //     this opened against the process cwd — which for a native caller is a
+    //     directory the *Linux* ABI owns and a native `chdir` never updates.
+    check(
+        &mut failed,
+        "relative fragment with dirfd=0 (no base supplied)",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, 0, 0)).value,
+        einval,
+    );
+
+    // (h) Under containment `0` is always an error: "confine this walk beneath
+    //     a directory I did not name" cannot be honoured.  This is the case
+    //     that mattered most — the old code confined to the cwd and returned a
+    //     valid handle, so the caller was told its containment held while the
+    //     walk had been confined to somewhere it never named.
+    check(
+        &mut failed,
+        "relative fragment under BENEATH with dirfd=0",
+        dispatch(SYS_FS_OPENAT2, &mk(b"inside.txt", 1, 0, RESOLVE_BENEATH, 0)).value,
+        einval,
+    );
 
     let _ = dispatch(
         crate::syscall::number::SYS_FS_CLOSE,

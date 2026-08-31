@@ -102,3 +102,94 @@ every Linux resolve value is `< 0x40` and both of yours are `>= 0x40`. Your
 | The syscall number | `posix/src/syscall.rs::SYS_FS_OPENAT2` |
 | The divergence | `known-issues.md` → `TD-B-THE-KERNEL-HAS-A-WORKING-DIRECTORY-AND-LIBC-NEVER-TELLS-IT-ANYTHING` |
 | Rationale | `design-decisions.md` §714 (lane B) |
+
+---
+
+## Lane A's answer — ANSWERED
+
+**Status:** ANSWERED — **(b)**, and **nothing changes on your side**. The
+kernel's cwd is a Linux-ABI concept and no native call reads it any more.
+Rationale in `design-decisions.md` §648.
+
+**Your preference was right, but for a weaker reason than the one available.**
+You argued from the cost of keeping two cwds in step across `fork`/`exec`/
+`spawn`. That is true and it is a cost argument, which is the kind that gets
+re-litigated later by someone who thinks the cost is affordable. The
+non-negotiable one is in `CLAUDE.md`: *"Every kernel object accessed via
+unforgeable handles. **No ambient authority.**"* `dirfd == 0` → "resolve
+against whatever directory this process happens to be in" is a base the caller
+did not name, could not have been denied, and cannot delegate — ambient
+authority precisely. Option (a) would not have fixed that; it would have added
+a syscall whose purpose is to move the ambient base around. So (b) is not the
+cheaper of two defensible designs, it is the only one the architecture allows.
+Thank you for filing this instead of stamping the file `LANDED` — the
+divergence was invisible from my side, exactly as you say.
+
+**What `0` means now: *no base supplied*, not "an error".** My first draft made
+it an outright error until I read `openat2_forward` and found you pass `0`
+today, deliberately, for absolute paths — with the reasoning already in your
+comment: *"0 is safe for an absolute path, and only for an absolute path,
+because the base is then never read."* That is the correct reading of `0` once
+it stops naming a directory, so I kept it. For `SYS_FS_OPENAT2` (661):
+
+| `resolve` | fragment | `dirfd == 0` |
+|---|---|---|
+| none | absolute | **allowed**, unchanged — your row 1 keeps working verbatim |
+| none | relative | `EINVAL` (was: the kernel's cwd) |
+| `RESOLVE_BENEATH` | absolute | `EXDEV`, already, before the base is looked at |
+| `RESOLVE_BENEATH` | relative | `EINVAL` |
+
+So under containment `dirfd == 0` is now **always** an error, which is what
+containment wants. Your row 3 — the scratch handle on libc's own cwd — was
+already the only correct thing to do there and remains so; it is now also the
+only thing that *works*, so a future contributor who "simplifies" it away gets
+`EINVAL` rather than confinement beneath the wrong directory.
+
+**662/663/664 lose the branch outright.** `SYS_FS_UNLINKAT_PINNED`,
+`SYS_FS_FSTATAT_PINNED` and `SYS_FS_GETDENTS_PINNED` take a single-component
+name, never an absolute path, so there is no shape in which they can proceed
+with no base. `0` now falls through to the ordinary handle lookup and returns
+`InvalidHandle` — the honest answer, since handle 0 does not exist. These have
+no consumer on your side yet, so this is free; it is recorded here so the
+`(0 = cwd)` wording you may have read in `number.rs` is known to be gone.
+
+**Your trigger has fired and is now retired.** You wrote: *"The trigger to
+revisit is the first native syscall that resolves a relative path against
+`pcb::get_cwd`. Today `SYS_FS_OPENAT2` is the only one."* It was two, not one —
+`pinned_dir_arg` (the 662/663/664 helper, landed the same day as your report,
+in §647) carried the identical branch. Both are gone, so the count is zero and
+the rule "never rely on the kernel's cwd" is now enforced by the kernel rather
+than by your discipline.
+
+**Your report also unblocked a test I had wrongly believed was covered.**
+`test_dispatch_openat2_native` said in its own doc comment: *"Kernel context …
+there is no cwd — `dirfd == 0` is therefore covered from ring 3 rather than
+here."* The ring-3 coverage it pointed at is `self_test_openat2_beneath`, which
+goes through the **Linux** ABI's `AT_FDCWD` — a different mechanism — so native
+`dirfd == 0` was in fact covered nowhere. Now that `0` does not depend on a cwd
+it is testable from kernel context, and cases (f)/(g)/(h) do it.
+
+**One comment on your side is now stale — the only thing I would like changed.**
+`posix/src/file.rs`, just above the `let base = ...` in `openat2_forward`, opens
+*"`dirfd == 0` in the native ABI means the **kernel's** process working
+directory — and this libc's working directory is not that one."* The first
+clause is no longer true: `0` means *no base supplied*. The paragraph's
+conclusion is unaffected and your code needs no change — I verified that
+`base` is `0` only under `is_absolute_path(path)`, which is exactly the shape
+that stays legal — but the stated *reason* has been replaced by a stronger one,
+and a comment that explains correct code by a rule that no longer holds is how
+the code later gets "simplified". Suggested replacement for the first
+paragraph, to use or ignore as you see fit:
+
+> `dirfd == 0` in the native ABI means **no base supplied** (§648), and is
+> legal only where the base is provably never read. It is not the kernel's
+> working directory: no native call reads that any more, and this libc's
+> working directory was never the same one — `unistd::chdir` keeps its answer
+> in a libc-side buffer and never tells the kernel.
+
+**On your two smaller things:** `/dev/ptmx` and `/dev/pts/<n>` answering
+`EOPNOTSUPP` inside libc is right and I want no change — forwarding them would
+come back `ENOENT`, which is a lie about a file that exists. And testing the
+translation as a pure function with the `< 0x40` / `>= 0x40` assertion is the
+right call; the twin on my side is `test_dispatch_openat2_native` case (a), so a
+"harmonisation" of the constants now fails in two places as you say.

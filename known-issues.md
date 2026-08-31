@@ -16271,6 +16271,61 @@ gone, replaced rather than inverted: they cannot become "must succeed" on a
 host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
 tests unchanged.
 
+**The `dirfd == 0` route into this entry's failure mode is closed, 2026-08-31
+(lane A) — `0` no longer means the cwd.** The bullet three paragraphs up
+("`dirfd == 0` is not usable for a relative path") described the native ABI as
+reading handle `0` as "the process working directory". It no longer does: `0`
+now means **no base supplied**, and is legal only in the one shape where the
+base is provably never read. Rationale in `design-decisions.md` §648; lane B's
+report is `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-
+directories.md`, answered in place.
+
+Why this belongs on *this* entry rather than only on §648: the fail-open mode
+this entry exists to document — *a containment check against the wrong base
+does not fail, it succeeds, on the wrong directory, and returns a valid
+descriptor that looks exactly like working confinement* — had `dirfd == 0` as
+a live route into it, on a base the caller never named. That route is gone
+structurally, not by discipline. For `SYS_FS_OPENAT2` (661):
+
+| `resolve` | fragment | `dirfd == 0` |
+|---|---|---|
+| none | absolute | **allowed**, unchanged — the base is never read |
+| none | relative | `InvalidArgument` (was: the kernel's cwd) |
+| `RESOLVE_BENEATH` | absolute | `CrossDevice`, already, before the base is looked at |
+| `RESOLVE_BENEATH` | relative | `InvalidArgument` |
+
+So under containment `0` is now *always* an error, which is what containment
+wants. `SYS_FS_UNLINKAT_PINNED`/`FSTATAT_PINNED`/`GETDENTS_PINNED` (662/663/664)
+lose the branch outright rather than narrowing it — they take a single-component
+name, never an absolute path, so no shape lets them proceed with no base; `0`
+falls through to the ordinary handle lookup and returns `InvalidHandle`, the
+honest answer since handle `0` does not exist.
+
+Two things worth keeping:
+
+- **The decisive argument was not cost.** Lane B recommended this outcome from
+  the cost of keeping two cwds in step across `fork`/`exec`/`spawn`, which is a
+  real cost and therefore re-litigable by someone who finds it affordable. The
+  non-negotiable argument is `CLAUDE.md`'s *"Every kernel object accessed via
+  unforgeable handles. **No ambient authority.**"* — `dirfd == 0` was a base the
+  caller did not name, could not have been denied, and could not delegate. The
+  alternative (a native `SYS_FS_SET_CWD` so the two cwds agree) would have added
+  a syscall whose purpose is to move the ambient base around.
+- **Lane B's stated trigger fired twice, not once.** They wrote that the trigger
+  to revisit was "the first native syscall that resolves a *relative* path
+  against `pcb::get_cwd`. Today `SYS_FS_OPENAT2` is the only one." It was two:
+  `pinned_dir_arg` (the 662/663/664 helper, landed the same day, §647) carried
+  the identical branch and was not visible from their side. Both are gone, so the
+  count is zero and the trigger is retired.
+
+Covered by `test_dispatch_openat2_native` cases (f)/(g)/(h) — absolute-with-`0`
+(reading the byte back, so a refuse-everything implementation cannot pass),
+relative-with-`0`, and relative-with-`0`-under-`BENEATH`. That test's own doc
+comment previously claimed `dirfd == 0` was "covered from ring 3 rather than
+here"; the ring-3 coverage it pointed at goes through the **Linux** ABI's
+`AT_FDCWD`, a different mechanism, so native `0` was covered nowhere. It is
+testable from kernel context precisely because it no longer depends on a cwd.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /

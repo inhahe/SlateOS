@@ -9174,7 +9174,9 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
 /// path length, open flags and create mode, in its order and positions.
 /// `arg4` is the resolve mask ([`RESOLVE_NO_SYMLINKS`],
 /// [`RESOLVE_BENEATH`]); `arg5` is the directory handle to resolve
-/// against, or `0` for the process's current working directory.
+/// against, or `0` for **no base supplied** — legal only where no base is
+/// read, i.e. an absolute fragment without `RESOLVE_BENEATH`, and
+/// `InvalidArgument` otherwise.  See `design-decisions.md` §648.
 ///
 /// See [`crate::syscall::number::SYS_FS_OPENAT2`] for the ABI rationale
 /// and `design-decisions.md` §639 for why the resolve bits sit at
@@ -9248,48 +9250,57 @@ pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::CrossDevice);
     }
 
-    // The base.  Handle 0 means the process working directory; native file
-    // handles are never 0, so this is not an in-band sentinel stolen from a
-    // valid value.  A real handle must be one this process owns — the same
-    // gate every other handle-taking fs call applies — and it must name a
-    // directory, which `resolve`/`open` below enforces by failing to walk
-    // through a non-directory.
+    // The base.  Handle 0 means **no base supplied** — not "the directory this
+    // process happens to be in".  Native file handles are never 0, so this is
+    // not an in-band sentinel stolen from a valid value.  A real handle must be
+    // one this process owns — the same gate every other handle-taking fs call
+    // applies — and it must name a directory, which `resolve`/`open` below
+    // enforces by failing to walk through a non-directory.
+    //
+    // `0` used to resolve against `pcb::get_cwd`.  That is ambient authority —
+    // a base the caller did not name, could not have been denied, and cannot
+    // pass on — which `CLAUDE.md` forbids outright; and the cwd it read was the
+    // *Linux* ABI's, which a SlateOS-native `chdir` never updates, so the base
+    // was very likely the wrong directory and a containment check against the
+    // wrong directory does not fail, it passes.  See `design-decisions.md` §648
+    // and `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`.
     let dirfd = args.arg5;
-    let base = if dirfd == 0 {
-        let Some(pid) = caller_pid() else {
-            // A bare kernel task has no cwd to resolve against.  It can
-            // still use this call by passing an explicit handle.
-            return SyscallResult::err(KernelError::InvalidArgument);
-        };
-        match pcb::get_cwd(pid) {
-            Some(c) => crate::fs::path::PathBuf::from(c),
-            None => return SyscallResult::err(KernelError::NotFound),
-        }
+    let base: Option<crate::fs::path::PathBuf> = if dirfd == 0 {
+        None
     } else {
         if let Err(e) = require_file_handle_owner(dirfd) {
             return SyscallResult::err(e);
         }
         match crate::fs::handle::handle_path(dirfd) {
-            Ok(p) => p,
+            Ok(p) => Some(p),
             Err(e) => return SyscallResult::err(e),
         }
     };
 
     let opened = if beneath {
+        // Under containment `0` is always an error.  "Confine this walk beneath
+        // a directory I did not name" is not a request that can be honoured —
+        // and the absolute-fragment half of it never reaches here, having been
+        // refused as `CrossDevice` by `beneath_fragment_ok` above.
+        let Some(base) = base.as_ref() else {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        };
         crate::fs::handle::open_beneath_with_mode(
-            crate::fs::handle::Beneath {
-                base: &base,
-                rel: &rel,
-            },
+            crate::fs::handle::Beneath { base, rel: &rel },
             flags,
             create_mode,
         )
     } else {
         // Without containment this is plain `openat`: an absolute path
         // ignores the base, exactly as POSIX specifies for `openat(2)`.
+        // That is the one shape in which "no base" is legal, because the
+        // fragment is already the complete answer and no base is read.
         let joined = if rel.is_absolute() {
             rel.clone()
         } else {
+            let Some(base) = base.as_ref() else {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            };
             base.join(&rel)
         };
         crate::fs::handle::open_with_mode(&joined, flags, create_mode)
@@ -9324,26 +9335,18 @@ fn entry_record_len(name_len: usize) -> usize {
 
 /// Recover the caller's `dirfd` argument as a [`crate::fs::PinnedDir`].
 ///
-/// `0` means the process working directory, matching `SYS_FS_OPENAT2`'s use
-/// of the same value (native file handles are never 0, so this is not an
-/// in-band sentinel taken from a valid handle).
+/// There is no `0` case. It used to mean "the process working directory", and
+/// that branch is deleted rather than narrowed the way [`sys_fs_openat2`]'s
+/// was: every caller of this function takes a single-component *name*, never an
+/// absolute path, so there is no shape in which one can proceed without a base.
+/// `0` therefore falls through to the ordinary handle lookup and comes back
+/// `InvalidHandle`, which is the honest answer — handle `0` does not exist.
 ///
-/// The cwd is pinned *here*, at the moment of the call, rather than carrying
-/// an identity from some earlier point — there is no earlier point for it to
-/// come from. That makes a cwd-relative call no worse than the path-based one
-/// it replaces, while a handle-relative call gets the full guarantee. The
-/// difference is real and is not papered over: a caller that needs the
-/// guarantee passes a handle.
+/// The removed branch was ambient authority (a base the caller did not name and
+/// could not have been denied), and the cwd it pinned was the Linux ABI's,
+/// which a SlateOS-native `chdir` never updates — so it was also, in practice,
+/// the wrong directory. See `design-decisions.md` §648.
 fn pinned_dir_arg(dirfd: u64) -> KernelResult<crate::fs::PinnedDir> {
-    if dirfd == 0 {
-        let Some(pid) = caller_pid() else {
-            // A bare kernel task has no cwd to resolve against; it can still
-            // use these calls by passing an explicit handle.
-            return Err(KernelError::InvalidArgument);
-        };
-        let cwd = pcb::get_cwd(pid).ok_or(KernelError::NotFound)?;
-        return crate::fs::Vfs::pin_dir(crate::fs::path::PathBuf::from(cwd));
-    }
     require_file_handle_owner(dirfd)?;
     crate::fs::handle::pinned_dir(dirfd)
 }
@@ -9351,7 +9354,8 @@ fn pinned_dir_arg(dirfd: u64) -> KernelResult<crate::fs::PinnedDir> {
 /// `SYS_FS_UNLINKAT_PINNED` — remove `name` from the directory a handle was
 /// opened on, refusing if the handle no longer denotes that directory.
 ///
-/// `arg0`: directory handle (0 = cwd).  `arg1`: name pointer.
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.
 /// `arg2`: name length.  `arg3`: flags (`AT_REMOVEDIR_PINNED`).
 pub fn sys_fs_unlinkat_pinned(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
@@ -9386,7 +9390,8 @@ pub fn sys_fs_unlinkat_pinned(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_FSTATAT_PINNED` — stat `name` within the directory a handle was
 /// opened on, refusing if the handle no longer denotes that directory.
 ///
-/// `arg0`: directory handle (0 = cwd).  `arg1`: name pointer.
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.
 /// `arg2`: name length.  `arg3`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
 /// `arg4`: output buffer of `FS_META_SIZE` bytes.
 pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
@@ -9434,7 +9439,8 @@ pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_FS_GETDENTS_PINNED` — list the directory a handle was opened on,
 /// resolving the handle rather than its name.
 ///
-/// `arg0`: directory handle (0 = cwd).  `arg1`: output buffer.
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: output buffer.
 /// `arg2`: output buffer capacity.
 pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {

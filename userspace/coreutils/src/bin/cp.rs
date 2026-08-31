@@ -479,6 +479,28 @@ impl Preserve {
             links: false,
         }
     }
+
+    /// Add what `-p` asks for, leaving the attributes it does not name alone.
+    ///
+    /// **Not `*self = Self::posix()`.** GNU's `case 'p'` (`cp.c:1104`) is three
+    /// assignments and no fourth: it never mentions `preserve_links`, so a `-p`
+    /// that follows a `-d` still has it. Overwriting the whole value reads the
+    /// same in every test that gives one option at a time, and turns `cp -d -p`
+    /// from a command that hard-links two hard-linked sources together into one
+    /// that gives the second its own copy of the bytes — with nothing said,
+    /// which is the kind of wrong answer this file's docs are otherwise about.
+    ///
+    /// Spelled as an or-in of [`Self::posix`] rather than as three assignments
+    /// so the list of what `-p` means stays in one place. The `false` fields of
+    /// `posix()` or in as no-ops, which is exactly what "never mentions it"
+    /// does.
+    fn add_posix(&mut self) {
+        let p = Self::posix();
+        self.mode |= p.mode;
+        self.timestamps |= p.timestamps;
+        self.ownership |= p.ownership;
+        self.links |= p.links;
+    }
 }
 
 #[derive(Default)]
@@ -801,7 +823,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // GNU (`--preserve` with no value falls through to `'p'`), so a
             // bare `--preserve` is not "preserve nothing" — it is all three.
             Opt::Short(b'p', _) | Opt::Long("preserve", None) => {
-                flags.preserve = Preserve::posix();
+                flags.preserve.add_posix();
                 flags.require_preserve = true;
             }
             Opt::Long("preserve", Some(list)) => {
@@ -4112,6 +4134,30 @@ mod tests {
             assert!(!f.explicit_no_preserve_mode, "{spelling}");
             assert_eq!(p, vec!["a", "b"]);
         }
+    }
+
+    /// `-p` names three attributes; it does not un-name a fourth.
+    ///
+    /// GNU's `case 'p'` is three assignments (`cp.c:1104`) and never mentions
+    /// `preserve_links`, so the two halves of `cp -d -p` do not fight. An
+    /// assignment of the whole [`Preserve`] passes every test above — each
+    /// gives one option — and fails only here, where the observable difference
+    /// is whether two hard-linked sources reach the destination as one inode or
+    /// as two.
+    #[test]
+    fn dash_p_leaves_the_attributes_it_does_not_name_alone() {
+        let (f, _) = run_parse(&["-d", "-p", "a", "b"]);
+        assert!(f.preserve.links, "-d's half survives the -p after it");
+        assert!(f.preserve.mode && f.preserve.timestamps && f.preserve.ownership);
+
+        let (g, _) = run_parse(&["-p", "-d", "a", "b"]);
+        assert_eq!(
+            f.preserve, g.preserve,
+            "neither option can undo the other, so their order cannot matter"
+        );
+
+        let (h, _) = run_parse(&["--preserve=links", "-p", "a", "b"]);
+        assert!(h.preserve.links, "and the spelled-out half survives too");
     }
 
     /// One word turns on one attribute and no others. A `--preserve=mode` that

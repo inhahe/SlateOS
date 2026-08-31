@@ -129,6 +129,7 @@
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
 # | `DIFF_GNU_DIR`   | (none) | an already-built `coreutils-N/src` to use instead of building one. The escape hatch for `DIFF_GNU_SOURCE`; ignored without it |
 # | `DIFF_GNU_CACHE` | `$HOME/.cache/slateos-diff-gnu` | where the tarball is downloaded and unpacked |
+# | `DIFF_GNU_VERIFY_WITH` | the first `DIFF_BINS` entry | which binary in the built tree is asked for its `--version`. For the one utility that cannot answer; see "Why a built reference" below |
 # | `DIFF_NEED`      | (none) | other commands that must exist inside WSL, or the run is skipped rather than run without them |
 # | `DIFF_NO_REF`    | (unset) | do not look for a reference; the harness finds its own |
 # | `DIFF_NO_BINDIR` | (unset) | do not build the `PATH` directories; the harness makes its own. See below — this is almost never what a harness wants |
@@ -210,6 +211,22 @@
 # * **Verify the version.** A reference of the wrong version fails cases that
 #   are right and passes cases that are wrong, in one run. `--version` is
 #   checked against `DIFF_GNU_SOURCE` and a mismatch is fatal, not a skip.
+#
+#   One utility cannot be asked. `test --version` prints nothing and exits 0 --
+#   measured, on both the built 9.4 and the installed binary -- because `test`
+#   has no options at all: `--version` is an ordinary one-argument expression,
+#   and a non-empty string is true. So the check reads "not coreutils 9.4 (it
+#   says: )" for a tree that is in fact exactly right. `DIFF_GNU_VERIFY_WITH`
+#   is the answer: the whole package is built once from one tarball into one
+#   directory, so *any* sibling in it attests the tree's version, and
+#   `test-diff.sh` sets `DIFF_GNU_VERIFY_WITH=cat` to borrow one.
+#
+#   Note what this is not: a way to switch the check off. It stays a real
+#   runtime check on a real binary, and stays fatal. The rejected alternative
+#   was to skip verification whenever `--version` produced nothing
+#   recognisable -- but "nothing recognisable" is also precisely what the wrong
+#   binary would produce, so that would disarm the guard for every harness in
+#   order to accommodate one.
 # * **The whole package is built, once.** Not `make src/cp`: automake makes
 #   `BUILT_SOURCES` for the default target only, and gnulib's replacement
 #   headers are built sources, so naming a target directly fails in a way that
@@ -265,6 +282,16 @@ fi
 : "${DIFF_FORWARD:=}"
 : "${DIFF_REF:=}"
 : "${DIFF_GNU_SOURCE:=}"
+# The witness defaults to the *first binary the harness builds*, not to
+# `DIFF_PROG`: a family harness names itself for the property it tests --
+# `write-error`, `digest`, `interleave` -- and there is no `src/write-error` in
+# the coreutils tree to ask. `DIFF_BINS` has already been defaulted to
+# `DIFF_PROG` above, so a single-binary harness gets exactly what it would have
+# either way.
+if [ -z "${DIFF_GNU_VERIFY_WITH:-}" ]; then
+  for diff_w in $DIFF_BINS; do DIFF_GNU_VERIFY_WITH=$diff_w; break; done
+  : "${DIFF_GNU_VERIFY_WITH:=$DIFF_PROG}"
+fi
 : "${DIFF_NEED:=}"
 
 # MSYS would rewrite an argument that looks like a path on its way to `wsl`.
@@ -427,13 +454,27 @@ fi
 # skip, because unlike a missing compiler this cannot be an accident of the
 # host -- something has handed us the wrong binary, and running on would report
 # the mismatch as differences in our own program.
+#
+# What is verified is the *tree*, not each binary in it: `$gnu_dir` is one
+# `make` of one tarball, so one sibling's `--version` attests all of them, and
+# a family harness need not fork five processes to hear the same answer five
+# times. That is also what makes `DIFF_GNU_VERIFY_WITH` sound -- see the
+# "Verify the version" bullet in the header for the one utility that needs it.
+diff_gnu_verified=
 diff_gnu_verify() {
   [ -n "$DIFF_GNU_SOURCE" ] || return 0
-  case $("$1" --version 2>/dev/null | head -1) in
+  [ -z "$diff_gnu_verified" ] || return 0
+  diff_gnu_verified=1
+  diff_gnu_witness=$gnu_dir/$DIFF_GNU_VERIFY_WITH
+  if [ ! -x "$diff_gnu_witness" ]; then
+    echo "$DIFF_PROG-diff: cannot check the reference's version: no $DIFF_GNU_VERIFY_WITH at $diff_gnu_witness" >&2
+    exit 1
+  fi
+  case $("$diff_gnu_witness" --version 2>/dev/null | head -1) in
     *" $DIFF_GNU_SOURCE") return 0 ;;
   esac
-  echo "$DIFF_PROG-diff: $1 is not coreutils $DIFF_GNU_SOURCE" >&2
-  echo "  (it says: $("$1" --version 2>/dev/null | head -1))" >&2
+  echo "$DIFF_PROG-diff: $diff_gnu_witness is not coreutils $DIFF_GNU_SOURCE" >&2
+  echo "  (it says: $("$diff_gnu_witness" --version 2>/dev/null | head -1))" >&2
   exit 1
 }
 
@@ -448,7 +489,7 @@ if [ -z "${DIFF_NO_REF:-}" ]; then
       echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE has no $DIFF_PROG at $gnu_real" >&2
       exit 1
     fi
-    diff_gnu_verify "$gnu_real"
+    diff_gnu_verify
   elif [ -n "$DIFF_REF" ]; then
     for diff_cand in $DIFF_REF; do
       [ -x "$diff_cand" ] && { gnu_real=$diff_cand; break; }
@@ -824,7 +865,7 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
           # this arm.
           [ -x "$gnu_dir/$diff_b" ] && {
             diff_gnu=$gnu_dir/$diff_b
-            diff_gnu_verify "$diff_gnu"
+            diff_gnu_verify
           }
         else
           for diff_cand in "/usr/bin/$diff_b" "/bin/$diff_b"; do

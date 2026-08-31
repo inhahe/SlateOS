@@ -14,11 +14,14 @@ costs milliseconds and the build costs ten minutes.
 
 Usage:
     python scripts/check-self-tests-wired.py [--root kernel/src]
-                                             [--list-manual] [--quiet]
+                                             [--list-manual] [--list-gated]
+                                             [--emit-markers PATH] [--quiet]
 
 Exit codes:
-    0  every self-test is reachable from a root
-    1  at least one is reachable from nothing (they are listed)
+    0  every self-test is reachable from a root, and every conditional call
+       site declares a usable `RAN-IF` marker
+    1  at least one is reachable from nothing, or at least one gated call site
+       has no marker or an unprintable one (they are listed)
     2  the check could not run (bad root, unreadable tree) -- never confused
        with "nothing is wrong", because a check that cannot fire must not be
        indistinguishable from a check that passes.
@@ -52,12 +55,42 @@ test mounts a memfs root and `fat_ok` is false. Seven suites sat behind that one
 condition; searching a full 43,450-line serial log for "[ext4] Phase 0" returned
 nothing.
 
-So every `main.rs` call site inside a conditional is now reported separately
-(`--list-gated`), with the conditions it sits under. This is deliberately *not*
-a failure and deliberately *not* a verdict: a gate can be perfectly benign --
-`acpi::self_test` is called from both arms of an `if`/`else` and therefore
-always runs -- and this check cannot reason about that. It tells you where to
-look; the serial log tells you what happened.
+So every `main.rs` call site inside a conditional is reported separately
+(`--list-gated`), with the conditions it sits under. Being gated is deliberately
+*not* a failure and deliberately *not* a verdict: a gate can be perfectly benign
+-- `acpi::self_test` is called from both arms of an `if`/`else` and therefore
+always runs -- and this check cannot reason about that.
+
+## `RAN-IF`: the note that became data
+
+For a year the paragraph above ended "check each against the serial log", and
+for a year nobody did. A guard whose output is a homework assignment is a guard
+that is read once. The instruction was also unfollowable in practice: the log is
+47,000 lines, and grepping it for the *function* name finds nothing, because the
+netstack pair prints "integration test" and never the words "self-test".
+
+So each gated site must now declare the serial line it prints when its condition
+held:
+
+    // RAN-IF: "[swap] Running disk backend self-test..."
+    mm::swap::self_test_disk();
+
+That is a hard requirement -- a gated site with no marker fails this check --
+and so is the marker being *printable*: the literal must occur in a file that
+defines the suite under test. Both halves matter, and the second one more. A
+missing marker fails loudly, here, now. A marker that matches nothing passes and
+then reports its suite as never-run on every boot forever: an accusation against
+working code, which is the failure most likely to be believed.
+
+Two sites may share one marker, and one pair does. `acpi::self_test` is called
+from both arms of an `if`/`else`, so the line proves an arm ran without saying
+which -- exactly as much as the log can prove. The markers are therefore keyed by
+literal, not by site; reporting one arm as never-seen because the other won
+would be a false alarm on code that is correct by construction.
+
+`--emit-markers PATH` writes them as JSON for the boot harness to correlate
+against the log. The source says what to look for; only the log says what
+happened.
 
 That `fat_ok` hole is closed -- the seven were moved out from under the wrong
 condition on 2026-08-22, and "[ext4] Phase 0" is in the log now -- but the story
@@ -154,6 +187,17 @@ DECL = re.compile(r"\bfn\s+(self_test\w*)\s*[(<]")
 # once, which is how a guard gets `--quiet`-ed permanently.
 BARE_CALL = re.compile(r"(?<![\w:])(self_test\w*)\s*[(<]")
 BARE_MENTION = re.compile(r"(?<![\w:])(self_test\w*)(?![\w:])")
+
+# `// RAN-IF: "[acpi] Running self-test..."` -- the serial line a gated call
+# site emits when its condition was true. See `marker_above`.
+#
+# The literal is quoted rather than "everything after the colon" so that its
+# extent is exact: trailing whitespace, a stray full stop added by a later
+# editor, or a rustfmt-driven rewrap would all silently change an unquoted
+# marker into one that matches nothing -- and the failure mode of a marker that
+# matches nothing is the very thing this mechanism exists to detect, reported
+# against an innocent call site.
+RANIF_RE = re.compile(r'^\s*//\s*RAN-IF:\s*"(.+)"\s*$')
 
 
 def module_path(rel):
@@ -429,6 +473,117 @@ def find_gated_calls(src, defs, by_qualified, by_bare, rel):
     return findings, (depth == 0 and not stack)
 
 
+def marker_above(lines, lineno):
+    """The `RAN-IF` literal declared for the call on `lineno` (1-based), or None.
+
+    Scans upward over the *contiguous* run of `//` lines directly above the
+    call. Contiguity is the whole point: a declaration that may sit anywhere in
+    the function is a declaration that survives having its call deleted, and a
+    marker outliving its call site is a permanent false "this ran" for a site
+    that no longer exists. Anchored to the comment block, it moves, and dies,
+    with the call.
+    """
+    i = lineno - 2  # 0-based index of the line directly above the call
+    while i >= 0:
+        stripped = lines[i].strip()
+        if not stripped.startswith("//"):
+            return None
+        m = RANIF_RE.match(lines[i])
+        if m:
+            return m.group(1)
+        i -= 1
+    return None
+
+
+def collect_markers(gated, src, files, defs):
+    """Group gated call sites by the serial line they declare they emit.
+
+    Returns `(markers, problems)`.
+
+    `markers` is `marker -> {"tests": [sym...], "sites": [lineno...]}`, keyed by
+    the *marker* rather than by the site, because two sites can be one fact:
+    `acpi::self_test` is called from both arms of one `if`/`else`, so seeing the
+    line proves an arm ran without saying which. That is exactly as much as the
+    serial log can prove, and pretending otherwise -- reporting one arm as
+    "never seen" because the other won -- would be a false alarm on code that
+    is correct by construction.
+
+    `problems` are hard failures, because the alternative is a note nobody acts
+    on. Two kinds:
+
+      missing   a gated site with no `RAN-IF` declaration. Whoever puts a
+                self-test behind a condition is the one person who knows what it
+                prints; extracting that later from a 47,000-line log is the cost
+                this pushes back onto them.
+      unfound   a declared literal that appears in no file defining the symbol
+                under test. This catches the failure that would otherwise be
+                invisible: rename the serial line, and the marker silently stops
+                matching, which reads downstream as "this suite stopped running"
+                -- a manufactured bug report against working code.
+    """
+    lines = src.split("\n")
+    markers, problems = {}, []
+    for lineno, text, syms, _stack in gated:
+        lit = marker_above(lines, lineno)
+        if lit is None:
+            problems.append(("missing", lineno, text, syms, None))
+            continue
+        homes = {defs[s][0] for s in syms if s in defs}
+        if not any(lit in files.get(rel, "") for rel in homes):
+            problems.append(("unfound", lineno, text, syms, lit))
+            continue
+        slot = markers.setdefault(lit, {"tests": [], "sites": []})
+        slot["sites"].append(lineno)
+        for s in syms:
+            if s not in slot["tests"]:
+                slot["tests"].append(s)
+    return markers, problems
+
+
+def report_marker_problems(problems, defs):
+    out = sys.stderr
+    print("", file=out)
+    print("=== GATED SELF-TESTS WITH NO USABLE `RAN-IF` MARKER: %d ==="
+          % len(problems), file=out)
+    print("", file=out)
+    print("A self-test behind a condition is coverage only on the boots where "
+          "the", file=out)
+    print("condition held, and nothing in the source can say whether it ever "
+          "did.", file=out)
+    print("The serial log can -- but only if it is known which line to look "
+          "for.", file=out)
+    print("", file=out)
+    for kind, lineno, text, syms, lit in problems:
+        print("  %s:%d" % (BOOT_ROOT, lineno), file=out)
+        print("      call:  %s" % text, file=out)
+        print("      tests: %s" % ", ".join(syms), file=out)
+        if kind == "missing":
+            print("      problem: no `// RAN-IF: \"...\"` comment directly "
+                  "above this call.", file=out)
+        else:
+            homes = sorted({defs[s][0] for s in syms if s in defs})
+            print("      problem: declared %r, which appears in none of: %s"
+                  % (lit, ", ".join(homes) or "(no defining file found)"),
+                  file=out)
+            print("      That marker can never match, so this site would read "
+                  "as never-run", file=out)
+            print("      forever.  Copy the exact `serial_println!` literal, "
+                  "tag included.", file=out)
+        print("", file=out)
+    print("Fix by adding, in the comment block immediately above the call, the "
+          "exact", file=out)
+    print("serial line the suite prints when it starts:", file=out)
+    print("", file=out)
+    print('      // RAN-IF: "[swap] Running disk backend self-test..."', file=out)
+    print("      mm::swap::self_test_disk();", file=out)
+    print("", file=out)
+    print("The tag matters: `Running self-test...` alone is printed by dozens "
+          "of", file=out)
+    print("modules, and a marker that matches another module's line reports "
+          "coverage", file=out)
+    print("this suite does not have.", file=out)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=None, help="kernel source root")
@@ -436,6 +591,10 @@ def main():
                     help="also list the kshell-only self-tests, not just count them")
     ap.add_argument("--list-gated", action="store_true",
                     help="also list the main.rs calls that sit inside a conditional")
+    ap.add_argument("--emit-markers", metavar="PATH",
+                    help="write the gated sites' RAN-IF markers as JSON to PATH "
+                         "(`-` for stdout), for a later pass to correlate "
+                         "against a serial log")
     ap.add_argument("--quiet", action="store_true", help="only print failures")
     args = ap.parse_args()
 
@@ -468,6 +627,26 @@ def main():
 
     gated, gated_ok = find_gated_calls(
         files[BOOT_ROOT], defs, by_qualified, by_bare, BOOT_ROOT)
+
+    # Only meaningful when the brace match succeeded. With `gated_ok` false the
+    # gated list is not merely incomplete, it is untrustworthy -- and accusing a
+    # site of a missing marker on the strength of a mis-parse is precisely the
+    # false positive that gets a guard silenced.
+    markers, marker_problems = ({}, [])
+    if gated_ok:
+        markers, marker_problems = collect_markers(
+            gated, files[BOOT_ROOT], files, defs)
+
+    if args.emit_markers and gated_ok:
+        import json
+        payload = {"root": BOOT_ROOT, "markers": markers}
+        if args.emit_markers == "-":
+            json.dump(payload, sys.stdout, indent=2, sort_keys=True)
+            sys.stdout.write("\n")
+        else:
+            with io.open(args.emit_markers, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh, indent=2, sort_keys=True)
+                fh.write("\n")
 
     dead, allowed = [], []
     for sym in sorted(defs):
@@ -515,11 +694,15 @@ def main():
               "not the" % BOOT_ROOT)
         print("same as being reached: a suite behind a condition that is false "
               "in CI has")
-        print("never run, however green the boot test looks.  Check each "
-              "against the")
-        print("serial log before citing it as coverage.")
+        print("never run, however green the boot test looks.  Each declares "
+              "the serial")
+        print("line it prints (`// RAN-IF: \"...\"`), so the log can be asked "
+              "rather than")
+        print("read: %d marker(s) cover the %d site(s)."
+              % (len(markers), len(gated)))
         if args.list_gated:
             print("")
+            lines = files[BOOT_ROOT].split("\n")
             for lineno, text, syms, stack in gated:
                 conds = " > ".join("%s (line %d)" % (fr[2].rstrip(" {"), fr[3])
                                    for fr in stack)
@@ -527,8 +710,13 @@ def main():
                 print("      call:  %s" % text)
                 print("      under: %s" % conds)
                 print("      tests: %s" % ", ".join(syms))
+                print("      ran-if: %r" % (marker_above(lines, lineno),))
         else:
             print("Re-run with --list-gated to see them.")
+
+    if marker_problems:
+        report_marker_problems(marker_problems, defs)
+        return 1
 
     if dead:
         print("")

@@ -100685,3 +100685,160 @@ twelve are twelve *because* the `pressed` guard is copied forward with the
 `impl App` block. The first app that moves it into `handle_key` without
 removing it from the arm reproduces this exactly -- and will pass its whole
 suite while doing so.
+
+### Lesson 93: a box sized by measuring one string and filled with another is a box that fits nothing (lane C, 2026-08-31)
+
+**In short:** `chess`'s layout decided whether an information panel was worth
+drawing by measuring the widest line it would hold. The widest line it
+measured was `"Arrows/Enter: Navigate"`. The widest line it drew was
+`"Arrows/Enter: Move"`. Six characters of column that no text ever occupied,
+and -- had the two been the other way round -- a hint clipped in exactly the
+narrow window the measurement exists to protect. Nothing failed. The panel
+looked right at every size anyone tried, because the error is in the *slack*,
+and slack is invisible until it runs out.
+
+**The shape of it:**
+
+```rust
+// in Layout::solve
+let panel_w_min = text::measure("Arrows/Enter: Navigate", label, Regular)
+    .max(...)
+    + pad * 2.0;
+```
+
+```rust
+// in draw_panel, forty lines away
+for hint in ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"] {
+    text_at(f, hint, ...);
+}
+```
+
+The two lists were written months apart by the same author. The drawn one was
+edited when the keyboard handling changed; the measured one was not, because
+nothing points from one to the other. A literal in a `measure` call and a
+literal in a `text_at` call are two unrelated facts as far as the compiler,
+the tests and the reader are concerned.
+
+**Why the tests did not catch it.** The obvious test -- "the panel is wide
+enough for the lines it holds" -- is the one that would have, and it existed
+in spirit: the wiring campaign writes exactly that test for every app with
+chrome. But writing it against `Layout::solve`'s own constant reproduces the
+bug in the test, and writing it against the drawn strings requires the drawn
+strings to be *reachable from the test*, which they were not: they were
+literals inside a `for` loop in a private drawing method.
+
+**The repair is to make the two lists one list, at module scope:**
+
+```rust
+/// The key hints printed at the foot of the panel.
+///
+/// Named, because the layout has to measure them to decide whether a panel is
+/// worth drawing at all, and a string measured in one place and drawn in
+/// another is a column sized for a line that is not the line it holds.
+const CONTROLS: [&str; 3] = ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"];
+```
+
+`Layout::solve` folds `text::measure` over `CONTROLS`; `draw_panel` iterates
+`CONTROLS`; the test iterates `CONTROLS`. Editing a hint now moves all three
+together, and the test is no longer a restatement of the layout's arithmetic
+but a genuine question put to it.
+
+**Test it at every width, not at the default one.** The first version of the
+test asked the question of `ChessApp::SIZE` alone and a mutation that replaced
+the whole measurement with `let panel_w_min = 20.0;` survived it -- at 900 px
+the panel is 28% of the window and comfortably wide either way. The
+measurement only decides anything in the windows near the limit, which are
+precisely the windows a single-size test does not visit. The test now sweeps
+280..=1600 in steps of 20 at three heights, skips the sizes that drop the
+panel, and asserts it checked more than fifty of them. That last assertion
+matters: without it a layout change that dropped the panel everywhere would
+turn the test into a loop that runs zero times and passes.
+
+**Where else to look.** Any `text::measure` whose argument is a literal. The
+question to ask is not "is this the right width" but "is this literal the
+same object as the one that gets drawn". Sites where the answer is "there is
+only one literal, and the layout reads it" are fine; sites where the answer
+requires comparing two files are the fault. A grep for `measure("` across
+`gui/` and `apps/` finds them; run on 2026-08-31 it returns about twenty
+production sites, and the first one checked was already wrong:
+
+`gomoku` (`apps/gomoku/src/main.rs:135`) sizes its panel from
+
+```rust
+let panel_w_min =
+    text::measure("Draws: 88", font, FontWeightHint::Regular).max(font * 6.0) + pad * 2.0;
+```
+
+and the panel draws `"\u{25CF} Black: {n}"`, `"\u{25CB} White: {n}"`,
+`"Draws: {n}"`, `"New game (N)"` and `"Undo (Z)"`. `"New game (N)"` is wider
+than `"Draws: 88"`, so the line that decides the width is not the line that
+was measured; the `.max(font * 6.0)` is a fudge factor standing in for the
+measurement that was not taken. `"Draws: 88"` also caps the draw count at two
+digits. Same repair as above: one named list, measured and drawn from it,
+tested across widths.
+
+Filed as its own task -- **audit the `measure("` sites in every wired app** --
+rather than fixed in passing, because the fix is per-app and each one wants
+its own width-swept test. The rest of the audit is written up in `todo.txt`,
+and it sharpens the rule worth carrying forward: **the fault appears when the
+`measure` and the `text_at` are in different functions.** Where the two
+literals sit a few lines apart in one body -- `life`, `defrag`, `sokoban`,
+`yahtzee`, `speedtest`, `renamer` -- a reader edits them together and every
+such pair in the tree agrees today. Where they are a layout function and a
+drawing function, as in `chess` and `gomoku`, they drift. `snake` and
+`stickynotes` are in the second shape and merely happen to be right.
+
+### Lesson 94: a branch the current constant makes unreachable is a landmine, not dead code (lane C, 2026-08-31)
+
+**In short:** `chess`'s minimax scored a leaf position from White's point of
+view when it was White's turn to choose and from Black's when it was Black's
+-- while the checkmate scores twelve lines below it were White-relative in
+both cases. Two different scales, compared against each other. The program
+nonetheless played correct chess for its whole life, because the only caller
+searches an even number of plies from a maximising root, so every leaf it
+reaches is a maximising one and the wrong arm is never taken. Change
+`AI_DEPTH` from 3 to 4 and the engine starts preferring blunders.
+
+**The code:**
+
+```rust
+fn minimax(board: &Board, depth: i32, ..., maximizing: bool) -> i32 {
+    if depth <= 0 {
+        let eval = evaluate(board);          // always White-relative
+        return if maximizing { eval } else { eval.saturating_neg() };
+    }
+    ...
+            return if maximizing {           // and these are not negated
+                KING_VALUE.saturating_add(depth).saturating_neg()
+            } else {
+                KING_VALUE.saturating_add(depth)
+            };
+```
+
+This is half a negamax bolted onto a minimax. Either convention is fine; the
+two together are not, and the tell is that the two `if maximizing` blocks in
+one function disagree about what the returned number means.
+
+**How it surfaced.** Only through mutation. A row that deleted the negation
+entirely -- `return eval;` -- survived the full suite, which is the sweep's
+way of saying *no input to this program can tell the two apart*. That is the
+same signal as lesson 92's duplicated condition and it deserves the same
+response: do not shrug and delete the row. Ask why the code cannot be reached,
+and the answer here was a parity relationship between a constant and a root
+flag, holding by luck across two functions that do not mention each other.
+
+**The repair is to remove the negation, not to test it.** The leaf now returns
+`evaluate(board)` unconditionally, which is what the mate scores already
+assumed, and the doc comment says so in the first line: *"Every score this
+returns is from White's point of view; `maximizing` says which side is
+choosing at this node, not which side the number is about."* A test asserts
+`minimax(board, 0, .., true) == minimax(board, 0, .., false) == evaluate(board)`
+so the two conventions cannot drift apart again.
+
+**Where else to look.** Search-like code where a flag and a depth constant
+interact: anything of the form `if maximizing`/`if color`/`side_sign` inside a
+function whose recursion alternates the flag. The question is whether *every*
+value of the flag is reachable at *every* return site, and the cheapest way to
+find out is to mutate each arm and see whether anything notices. More
+generally: when a mutation survives, the finding is never "the sweep row was
+bad" until you have established that the branch is reachable at all.

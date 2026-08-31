@@ -139,10 +139,10 @@ def main_line(text: str) -> int:
     return 1 if m is None else prod.count("\n", 0, m.start()) + 1
 
 
-# The count of findings as of 2026-08-30, so the gate can ratchet. Lower this
+# The count of findings as of 2026-08-31, so the gate can ratchet. Lower this
 # whenever apps are wired; the check fails if it is ever exceeded. It is a
 # ceiling, not a target -- see the module docstring on why it is not zero.
-BASELINE = 61
+BASELINE = 60
 
 
 # --------------------------------------------------------------------------

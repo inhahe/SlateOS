@@ -1104,16 +1104,21 @@ fn piece_square_value(piece: Piece, pos: Pos) -> i32 {
 }
 
 /// Minimax with alpha-beta pruning.
-/// Returns the evaluation score from the perspective of the side to move
-/// at the root call.
+///
+/// Every score this returns is from **White's** point of view, which is the
+/// side [`evaluate`] counts for: `maximizing` says which side is choosing at
+/// this node, not which side the number is about.
+///
+/// The leaf used to negate its evaluation when `!maximizing`, which said the
+/// opposite -- and disagreed with the mate scores three lines below, which are
+/// White-relative in both arms. It could not be caught by playing: the only
+/// caller searches [`AI_DEPTH`] - 1 = 2 ply from a `maximizing` root, so every
+/// leaf it reaches is a maximising one and the negated arm was never taken.
+/// Raising `AI_DEPTH` by one would have started comparing negated leaves with
+/// un-negated mates.
 fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing: bool) -> i32 {
     if depth <= 0 {
-        let eval = evaluate(board);
-        return if maximizing {
-            eval
-        } else {
-            eval.saturating_neg()
-        };
+        return evaluate(board);
     }
 
     let moves = board.generate_legal_moves();
@@ -1357,13 +1362,17 @@ impl ChessApp {
     /// it was consumed would ask the compositor for a repaint that draws the
     /// same picture.
     fn click_square(&mut self, pos: Pos) -> bool {
-        // The human plays White. While Black owes a reply the board is not
-        // White's to touch, which is a different thing from the game being
-        // over: `thinking` is a state the player can see and wait out.
-        if self.game_result != GameResult::Ongoing
-            || self.thinking
-            || self.board.side_to_move != Side::White
-        {
+        // The human plays White, so the board is White's to touch exactly when
+        // the game is live and the move is White's.
+        //
+        // This guard used to read `game_result != Ongoing || self.thinking ||
+        // side_to_move != White`, and `self.thinking` was a third copy of the
+        // clause beside it: `update_game_state` derives `thinking` as `result
+        // == Ongoing && side_to_move == Black`, so past the first clause it
+        // says precisely what the third says. No mutation of it could be
+        // caught, because no test could reach a state that told the two apart
+        // (known-issues lesson 92).
+        if self.game_result != GameResult::Ongoing || self.board.side_to_move != Side::White {
             return false;
         }
 
@@ -2417,6 +2426,16 @@ mod tests {
             .find(|m| m.from == Pos::new(4, 4) && m.to == Pos::new(5, 5) && m.is_en_passant);
         assert!(ep_move.is_some());
 
+        // d6 is empty too, and is not the en passant square. A pawn does not
+        // move diagonally onto an empty square, so the target has to be
+        // *matched*, not merely found to be vacant.
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(4, 4) && m.to == Pos::new(5, 3)),
+            "the pawn was offered a diagonal onto an empty square"
+        );
+
         // Execute the EP capture
         let mut test_board = board.clone();
         test_board.make_move_unchecked(*ep_move.unwrap());
@@ -2924,6 +2943,44 @@ mod tests {
         assert!(board.is_attacked_by(Pos::new(5, 4), Side::White));
         assert!(board.is_attacked_by(Pos::new(1, 2), Side::White));
         assert!(!board.is_attacked_by(Pos::new(4, 4), Side::White));
+        // A knight of our own standing a knight's move away is not an attack
+        // on us. Every caller of this asks it of the *opponent* -- may my king
+        // stand here, may I castle across this square -- so a side test that
+        // let either colour answer would make a king's own knight forbid it
+        // squares and forbid it castling.
+        assert!(!board.is_attacked_by(Pos::new(5, 4), Side::Black));
+    }
+
+    #[test]
+    fn test_square_attacked_by_king() {
+        // The eight squares beside a king are attacked by it, which is what
+        // stops the two kings ever standing next to each other. Nothing else
+        // in the generator says so: a king is not a slider and not a knight,
+        // so dropping its clause leaves a legal position with the kings
+        // touching.
+        let mut board = Board::empty();
+        place(&mut board, 3, 3, Side::White, PieceKind::King);
+        assert!(board.is_attacked_by(Pos::new(4, 4), Side::White));
+        assert!(board.is_attacked_by(Pos::new(3, 2), Side::White));
+        assert!(!board.is_attacked_by(Pos::new(5, 3), Side::White));
+        assert!(!board.is_attacked_by(Pos::new(4, 4), Side::Black));
+    }
+
+    #[test]
+    fn test_a_king_may_not_step_beside_the_other_king() {
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 0, Side::White, PieceKind::King);
+        place(&mut board, 2, 2, Side::Black, PieceKind::King);
+        let moves = moves_from(&board, Pos::new(0, 0));
+        assert!(
+            moves.iter().any(|m| m.to == Pos::new(0, 1)),
+            "the king cannot move at all"
+        );
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(1, 1)),
+            "the two kings were allowed to touch"
+        );
     }
 
     #[test]
@@ -3071,6 +3128,50 @@ mod tests {
         let score = minimax(&board, 2, i32::MIN + 1, i32::MAX - 1, true);
         // Score should be very high (near mate value)
         assert!(score > 10000, "Should find forced mate, got {score}");
+    }
+
+    #[test]
+    fn a_mate_delivered_sooner_scores_higher_than_the_same_mate_later() {
+        // The remaining depth is added to the mate score, which is what makes
+        // a mate in one beat a mate in three inside one search. The same
+        // arithmetic is visible from outside as this: search the same mate in
+        // one with more depth to spare and it scores higher, because more
+        // depth is left over when it lands.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 4, Side::White, PieceKind::King);
+        place(&mut board, 6, 0, Side::White, PieceKind::Rook);
+        place(&mut board, 5, 1, Side::White, PieceKind::Rook);
+        place(&mut board, 7, 7, Side::Black, PieceKind::King);
+        assert_eq!(
+            minimax(&board, 2, i32::MIN + 1, i32::MAX - 1, true),
+            KING_VALUE.saturating_add(1)
+        );
+        assert_eq!(
+            minimax(&board, 4, i32::MIN + 1, i32::MAX - 1, true),
+            KING_VALUE.saturating_add(3)
+        );
+    }
+
+    #[test]
+    fn the_search_scores_every_position_from_whites_side() {
+        // `maximizing` says who is choosing at this node, not whose point of
+        // view the number is from -- the mate scores are White-relative in
+        // both arms, so the leaf must be too. A leaf that negated itself for
+        // the minimising side would be comparing two different numbers.
+        let mut board = Board::empty();
+        place(&mut board, 0, 0, Side::White, PieceKind::King);
+        place(&mut board, 7, 7, Side::Black, PieceKind::King);
+        place(&mut board, 3, 3, Side::Black, PieceKind::Queen);
+        let eval = evaluate(&board);
+        assert!(eval < -800, "Black is a queen up: {eval}");
+        for maximizing in [true, false] {
+            assert_eq!(
+                minimax(&board, 0, i32::MIN + 1, i32::MAX - 1, maximizing),
+                eval,
+                "the leaf disagrees with the evaluation when maximizing={maximizing}"
+            );
+        }
     }
 
     // ── Algebraic notation tests ────────────────────────────────────
@@ -3496,6 +3597,7 @@ mod tests {
     fn the_board_stays_inside_the_window_it_was_given() {
         for size in [ChessApp::SIZE, SMALL, NARROW, (300.0, 300.0)] {
             let app = ChessApp::new();
+            let l = Layout::solve(size.0, size.1);
             for row in 0..8i8 {
                 for col in 0..8i8 {
                     let r = rect_of_sized(&app, Target::Square(row, col), size)
@@ -3506,6 +3608,14 @@ mod tests {
                             && r.right() <= size.0 + 0.01
                             && r.bottom() <= size.1 + 0.01,
                         "square {row},{col} at {r:?} leaves the {size:?} window"
+                    );
+                    // Inside the window is not enough: the header holds the
+                    // title and the status line, and a board that started at
+                    // the top of the window would be inside it and drawn over
+                    // the one line telling the player whose move it is.
+                    assert!(
+                        r.y >= l.header.bottom() - 0.01,
+                        "square {row},{col} at {r:?} is drawn over the header at {size:?}"
                     );
                 }
             }
@@ -3588,6 +3698,16 @@ mod tests {
         // window is not asked to repaint a picture that has not changed.
         assert_eq!(click_background(&mut app), EventResult::Ignored);
         assert!(app.selected.is_some());
+
+        // The top-left corner of the window is the header. A square is
+        // clickable where its ink is and nowhere else, so a hit box recorded
+        // anywhere but under the square it names is a square that can be
+        // played by clicking the title.
+        assert_eq!(
+            app.draw(SMALL).hit_test(0.5, 0.5),
+            None,
+            "the corner of the window belongs to a square"
+        );
     }
 
     #[test]
@@ -3665,15 +3785,33 @@ mod tests {
         // column sized for text it does not contain, which is how
         // "Arrows/Enter: Navigate" came to be measured for a panel that draws
         // "Arrows/Enter: Move".
-        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
-        for line in CONTROLS {
-            let w = text::measure(line, l.label, FontWeightHint::Regular);
-            assert!(w <= l.panel.w - l.pad * 2.0 + 0.01, "{line:?} does not fit");
+        //
+        // Every window that draws a panel is asked, not just the default one:
+        // a panel sized by a number rather than by a measurement is wide
+        // enough in a wide window and too narrow in the window that is
+        // actually near the limit, which is the only window the question is
+        // about.
+        let mut checked = 0;
+        for w in (280..=1600).step_by(20) {
+            for h in [400.0, 660.0, 900.0] {
+                #[expect(clippy::cast_precision_loss, reason = "widths well under 2^24")]
+                let l = Layout::solve(w as f32, h);
+                if l.panel.w <= 0.0 {
+                    continue;
+                }
+                checked += 1;
+                let room = l.panel.w - l.pad * 2.0;
+                for line in CONTROLS {
+                    let m = text::measure(line, l.label, FontWeightHint::Regular);
+                    assert!(m <= room + 0.01, "{line:?} does not fit at {w}x{h}");
+                }
+                for line in CAPTURED_HEADINGS {
+                    let m = text::measure(line, l.label, FontWeightHint::Bold);
+                    assert!(m <= room + 0.01, "{line:?} does not fit at {w}x{h}");
+                }
+            }
         }
-        for line in CAPTURED_HEADINGS {
-            let w = text::measure(line, l.label, FontWeightHint::Bold);
-            assert!(w <= l.panel.w - l.pad * 2.0 + 0.01, "{line:?} does not fit");
-        }
+        assert!(checked > 50, "only {checked} of those windows drew a panel");
     }
 
     #[test]
@@ -3883,6 +4021,33 @@ mod tests {
         assert_eq!(app.game_result, GameResult::Ongoing);
     }
 
+    #[test]
+    fn a_game_that_ended_on_whites_own_move_refuses_the_board_too() {
+        // The mate above left *Black* to move, so "the game is over" and "it
+        // is not White's move" were true together and either guard alone would
+        // have refused the click. A game can equally end with White to move --
+        // White stalemated, here -- and then the result is the only thing
+        // standing between the player and a board that answers clicks after
+        // the game has finished.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 0, Side::White, PieceKind::King);
+        place(&mut app.board, 2, 1, Side::Black, PieceKind::Queen);
+        place(&mut app.board, 7, 7, Side::Black, PieceKind::King);
+        app.update_game_state();
+        assert_eq!(app.game_result, GameResult::Stalemate);
+        assert_eq!(app.board.side_to_move, Side::White, "White is to move");
+        assert!(!app.thinking, "a finished game owes no reply");
+
+        assert_eq!(
+            click_sized(&mut app, Target::Square(0, 0), MouseButton::Left, SMALL),
+            EventResult::Ignored,
+            "White's king answered a click after the game had ended"
+        );
+        assert!(app.selected.is_none());
+    }
+
     // ── Window wiring: what the panel prints ─────────────────────────
 
     /// Every string the frame drew, in the order it drew them.
@@ -3988,8 +4153,16 @@ mod tests {
         for rank in 0..8i8 {
             let want = Pos::new(rank, 0).rank_char().expect("on the board");
             let r = l.square_rect(Pos::new(rank, 0));
+            // Left of the *grid*, not merely left of `board.x + margin`: the
+            // margin is a number the layout keeps whether or not it moved the
+            // grid over to make room, so a grid that started at the board's
+            // edge would put the a-file under its own rank numbers and this
+            // assertion would still hold if it were written against `margin`.
             let found = text.iter().any(|(s, x, y)| {
-                s.chars().eq([want]) && *x < l.board.x + l.margin && (*y - r.y).abs() < r.h
+                s.chars().eq([want])
+                    && *x >= l.board.x - 0.01
+                    && *x < l.origin.0
+                    && (*y - r.y).abs() < r.h
             });
             assert!(found, "rank {want} is not labelled beside its own row");
         }
@@ -4068,5 +4241,164 @@ mod tests {
             EventResult::Ignored
         );
         assert!(app.selected.is_none());
+    }
+
+    // ── Gaps the mutation sweep found ────────────────────────────────
+
+    /// The legal moves that start at `pos`.
+    fn moves_from(board: &Board, pos: Pos) -> Vec<Move> {
+        board
+            .generate_legal_moves()
+            .into_iter()
+            .filter(|m| m.from == pos)
+            .collect()
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_piece_changes_nothing() {
+        // Clicking the piece already selected repaints nothing, so claiming the
+        // click asks the compositor for a frame identical to the one on screen.
+        let mut app = ChessApp::new();
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+    }
+
+    #[test]
+    fn a_search_with_no_reply_still_settles_the_game() {
+        // Black to move, stalemated. The search returns nothing, and if that
+        // arm does not settle the game the status is stuck on "Black is
+        // thinking" and `thinking` stays true, so the board never comes back.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::Black;
+        place(&mut app.board, 7, 7, Side::Black, PieceKind::King);
+        place(&mut app.board, 5, 6, Side::White, PieceKind::Queen);
+        place(&mut app.board, 0, 0, Side::White, PieceKind::King);
+        app.thinking = true;
+        assert!(app.board.generate_legal_moves().is_empty());
+
+        assert!(app.think(), "the search ran");
+        assert_eq!(app.game_result, GameResult::Stalemate);
+        assert!(!app.thinking);
+        assert_ne!(app.status_message, "Black is thinking");
+    }
+
+    #[test]
+    fn off_board_squares_have_no_name() {
+        // Five sites used to write `b'a' + col as u8` for themselves, each of
+        // them able to name a square that does not exist -- `{` for the file
+        // after h, and a control character for the rank below 1.
+        assert_eq!(Pos::new(0, 8).file_char(), None);
+        assert_eq!(Pos::new(0, -1).file_char(), None);
+        assert_eq!(Pos::new(8, 0).rank_char(), None);
+        assert_eq!(Pos::new(-1, 0).rank_char(), None);
+        assert_eq!(Pos::new(0, 7).file_char(), Some('h'));
+        assert_eq!(Pos::new(7, 0).rank_char(), Some('8'));
+        assert_eq!(Pos::new(-1, 8).to_algebraic(), "");
+    }
+
+    #[test]
+    fn test_board_get_out_of_bounds() {
+        // "Off the board" is an answer the move generators need rather than a
+        // fault to be guarded against, and a negative row cast to `usize` is an
+        // enormous one that indexes somewhere real.
+        let board = Board::new();
+        assert_eq!(board.get(Pos::new(-1, 0)), None);
+        assert_eq!(board.get(Pos::new(0, -1)), None);
+        assert_eq!(board.get(Pos::new(8, 0)), None);
+        assert_eq!(board.get(Pos::new(0, 8)), None);
+    }
+
+    #[test]
+    fn test_board_set_out_of_bounds() {
+        // A piece set off the board would have to land on some square that is
+        // on it. Nothing may change.
+        let mut board = Board::new();
+        let before = board.squares;
+        for pos in [
+            Pos::new(-1, 0),
+            Pos::new(0, -1),
+            Pos::new(8, 0),
+            Pos::new(0, 8),
+        ] {
+            board.set(pos, Some(Piece::new(Side::White, PieceKind::Queen)));
+        }
+        assert_eq!(board.squares, before);
+    }
+
+    #[test]
+    fn test_knight_blocked_by_own_pieces() {
+        // A knight jumps over what is in the way, so the only thing that stops
+        // it is a piece of its own on the square it lands on.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 3, 3, Side::White, PieceKind::Knight);
+        place(&mut board, 5, 4, Side::White, PieceKind::Pawn);
+        place(&mut board, 5, 2, Side::Black, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(3, 3));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(5, 4)),
+            "the knight took its own pawn"
+        );
+        assert!(
+            moves.iter().any(|m| m.to == Pos::new(5, 2)),
+            "the knight would not take Black's pawn"
+        );
+    }
+
+    #[test]
+    fn test_king_blocked_by_own_pieces() {
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 3, 3, Side::White, PieceKind::King);
+        place(&mut board, 3, 4, Side::White, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(3, 3));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(3, 4)),
+            "the king took its own pawn"
+        );
+    }
+
+    #[test]
+    fn test_rook_blocked_by_own_piece() {
+        // The ray stops at the first piece, and a piece of our own is not
+        // captured -- nor is anything behind it reachable.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 0, Side::White, PieceKind::Rook);
+        place(&mut board, 0, 3, Side::White, PieceKind::Bishop);
+        place(&mut board, 0, 5, Side::Black, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(0, 0));
+        assert!(moves.iter().any(|m| m.to == Pos::new(0, 2)));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(0, 3)),
+            "the rook took its own bishop"
+        );
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(0, 5)),
+            "the rook reached through its own bishop"
+        );
+    }
+
+    #[test]
+    fn test_pawn_no_double_push_after_move() {
+        // The double push is the starting rank's privilege. A pawn that has
+        // already moved gets one square.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 2, 4, Side::White, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(2, 4));
+        assert!(moves.iter().any(|m| m.to == Pos::new(3, 4)));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(4, 4)),
+            "a pawn off its starting rank pushed two squares"
+        );
     }
 }

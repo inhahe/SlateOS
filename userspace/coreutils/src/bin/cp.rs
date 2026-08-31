@@ -452,12 +452,21 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
     }
 
     let dest_path = Path::new(dest);
-    // `is_dir` follows symlinks, which is right here: `cp a link-to-dir/` puts
-    // `a` inside the directory, as GNU does without `-T`.
-    let dest_is_dir = dest_path.is_dir();
+    // The destination is followed, which is right here: `cp a link-to-dir/`
+    // puts `a` inside the directory, as GNU does without `-T`.
+    let not_a_dir = dest_directory_error(dest_path);
+    let dest_is_dir = not_a_dir.is_none();
 
-    if sources.len() > 1 && !dest_is_dir {
-        let _ = writeln!(err, "cp: target {} is not a directory", quoteaf_os(dest));
+    // GNU reports *why* the last operand is not a directory, and the two
+    // reasons read differently: `cp a b nosuch` says "No such file or
+    // directory" while `cp a b afile` says "Not a directory". One fixed
+    // sentence for both loses the distinction that tells a user whether they
+    // mistyped the name or forgot to make the directory.
+    if sources.len() > 1
+        && let Some(e) = not_a_dir
+    {
+        let why = strerror(&e);
+        let _ = writeln!(err, "cp: target {}: {why}", quoteaf_os(dest));
         return false;
     }
 
@@ -468,6 +477,23 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
         }
     }
     ok
+}
+
+/// `None` if `dest` is a directory, otherwise the failure that says why not.
+///
+/// GNU asks this by *opening* the operand with `O_DIRECTORY` and keeping the
+/// errno. Asking `stat` gives the same two answers — `ENOENT` for a name that
+/// is not there, `ENOTDIR` for one that is something else — without needing
+/// `O_PATH`, which is a Linux extension the target does not have. The case the
+/// two could part company on is a directory that can be stat'd but not
+/// searched; `O_PATH` opens that successfully and so does `stat`, so they
+/// agree there too.
+fn dest_directory_error(dest: &Path) -> Option<io::Error> {
+    match fs::metadata(dest) {
+        Ok(m) if m.is_dir() => None,
+        Ok(_) => Some(io::Error::from(io::ErrorKind::NotADirectory)),
+        Err(e) => Some(e),
+    }
 }
 
 /// Copy one source. Returns `false` if it should count against the exit status.
@@ -529,21 +555,87 @@ fn copy_one<W: Write>(
         }
     };
 
-    // Module docs, bug 7. Two `stat` results rather than two strings, which is
-    // the only comparison that catches every spelling; GNU's `same_file_ok`
-    // makes the same one, at the same point in the same order.
-    if is_same_file(src_path, &metadata, &target) {
-        let _ = writeln!(
-            err,
-            "cp: {} and {} are the same file",
-            quoteaf_os(src),
-            quoteaf_os(&target)
-        );
-        return false;
+    // GNU stats the destination here, and a failure that is *not* "it isn't
+    // there" ends this operand rather than being rediscovered later while
+    // opening it: `cp a b/c` where `b` is a file says `cannot stat 'b/c'`, not
+    // `cannot create regular file 'b/c'`.
+    //
+    // Which stat is used follows GNU as well. A regular file can be written
+    // *through* a symlink, so a regular source looks at what the destination
+    // resolves to; a directory or a symlink cannot be, so those look at the
+    // destination name itself. That distinction is what makes `cp a
+    // dangling-link` reach the O_EXCL path in [`create_destination`] and be
+    // refused there, rather than being taken for an existing file here.
+    let use_lstat = metadata.is_dir() || metadata.file_type().is_symlink();
+    let dest_stat = if use_lstat {
+        fs::symlink_metadata(&target)
+    } else {
+        fs::metadata(&target)
+    };
+    let dest_meta = match dest_stat {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot stat {}: {why}", quoteaf_os(&target));
+            return false;
+        }
+    };
+
+    if let Some(dest_meta) = &dest_meta {
+        // Module docs, bug 7. `stat` results rather than strings, which is the
+        // only comparison that catches every spelling; GNU's `same_file_ok`
+        // makes the same one, at the same point in the same order. Asked only
+        // when the destination exists, again as GNU asks it.
+        if is_same_file(src_path, &target, flags.recursive) {
+            let _ = writeln!(
+                err,
+                "cp: {} and {} are the same file",
+                quoteaf_os(src),
+                quoteaf_os(&target)
+            );
+            return false;
+        }
+
+        // Neither kind can be put where the other is. Without these two the
+        // walk would go on and fail somewhere less informative — a directory
+        // source would report `cannot create directory … File exists` about a
+        // name that is not a directory at all.
+        if metadata.is_dir() && !dest_meta.is_dir() {
+            let _ = writeln!(
+                err,
+                "cp: cannot overwrite non-directory {} with directory {}",
+                quoteaf_os(&target),
+                quoteaf_os(src)
+            );
+            return false;
+        }
+        if !metadata.is_dir() && dest_meta.is_dir() {
+            let _ = writeln!(
+                err,
+                "cp: cannot overwrite directory {} with non-directory",
+                quoteaf_os(&target)
+            );
+            return false;
+        }
     }
 
     if metadata.file_type().is_symlink() {
         // Only reachable under `-r`; see the stat above.
+        //
+        // An existing destination is removed first. `symlinkat` has no
+        // "replace", and refusing instead would leave `cp -r` unable to update
+        // a tree it had already copied once — so GNU unlinks, under exactly
+        // this condition (`copy.c`: `dereference == DEREF_NEVER` and the source
+        // is not a regular file).
+        if dest_meta.is_some()
+            && let Err(e) = fs::remove_file(&target)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            let why = strerror(&e);
+            let _ = writeln!(err, "cp: cannot remove {}: {why}", quoteaf_os(&target));
+            return false;
+        }
         return match clone_symlink(src_path, &target) {
             Ok(()) => true,
             Err(e) => {
@@ -577,35 +669,50 @@ fn copy_one<W: Write>(
     copy_tree(src_path, permission_bits(&metadata), &target, err)
 }
 
-/// Does `dst` already name the very file `src_meta` describes?
+/// Would copying `src` to `dst` write over `src` itself?
 ///
-/// `false` when `dst` does not exist, which is the ordinary case and not an
-/// error worth distinguishing here: a destination that cannot be stat'd is one
-/// the copy will fail on anyway, with its own diagnostic.
+/// Both are *followed*, so a destination that is a symlink to the source counts
+/// — writing through it truncates the source exactly as surely as naming the
+/// source directly. The one exception is GNU's, and it is the reason `recursive`
+/// is a parameter: under `-r`, two names that are both symlinks are the same
+/// file only when they are the same *link*, because replacing one link with a
+/// copy of another does not touch what either points at. `cp -r linkA linkB`
+/// where both point at one file is therefore allowed, while `cp -r link file`
+/// — where `link` resolves to `file` — is not, and GNU makes exactly that
+/// distinction in `same_file_ok`.
 ///
-/// `metadata` and not `symlink_metadata` for the destination, deliberately. A
-/// destination that is a *symlink to the source* is the same file for this
-/// purpose — writing "through" it truncates the source exactly as surely as
-/// naming the source directly — and GNU stats it the same way for the same
-/// reason. The source's own stat is whatever the caller took: followed without
-/// `-r`, unfollowed with it, which is the distinction `-r` is for.
+/// `false` when either side cannot be stat'd. A source that is a dangling
+/// symlink is not the same file as anything, and a destination that cannot be
+/// reached will produce its own diagnostic a moment later.
 #[cfg(unix)]
-fn is_same_file(_src: &Path, src_meta: &fs::Metadata, dst: &Path) -> bool {
+fn is_same_file(src: &Path, dst: &Path, recursive: bool) -> bool {
     use std::os::unix::fs::MetadataExt;
-    match fs::metadata(dst) {
-        Ok(d) => d.dev() == src_meta.dev() && d.ino() == src_meta.ino(),
-        Err(_) => false,
+    fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+        a.dev() == b.dev() && a.ino() == b.ino()
+    }
+    if recursive {
+        let (sl, dl) = (fs::symlink_metadata(src), fs::symlink_metadata(dst));
+        if let (Ok(sl), Ok(dl)) = (&sl, &dl)
+            && sl.file_type().is_symlink()
+            && dl.file_type().is_symlink()
+        {
+            return same(sl, dl);
+        }
+    }
+    match (fs::metadata(src), fs::metadata(dst)) {
+        (Ok(a), Ok(b)) => same(&a, &b),
+        _ => false,
     }
 }
 
 /// Windows exposes a file's identity only through `windows_by_handle`, which is
 /// unstable, so the development host compares resolved paths instead. That
 /// still catches a repeated operand and a `.` or `..` in the middle of one; it
-/// misses a hard link and a symlink, which is why the guarantee is stated on
-/// the `#[cfg(unix)]` arm above — the arm the target OS and the certification
+/// misses a hard link, which is why the guarantee is stated on the
+/// `#[cfg(unix)]` arm above — the arm the target OS and the certification
 /// harness both use. The unit tests that pin the refusal run on both.
 #[cfg(not(unix))]
-fn is_same_file(src: &Path, _src_meta: &fs::Metadata, dst: &Path) -> bool {
+fn is_same_file(src: &Path, dst: &Path, _recursive: bool) -> bool {
     match (fs::canonicalize(src), fs::canonicalize(dst)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
@@ -1563,6 +1670,105 @@ mod tests {
         let (ok, err) = cp(&PLAIN, &[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // --------------------------------------------- which failure it reports --
+
+    /// GNU names the errno rather than restating the option's requirement, and
+    /// the two errnos read differently enough to matter: one says the name is
+    /// missing, the other that it is the wrong kind of thing.
+    #[test]
+    fn the_target_diagnostic_names_the_reason() {
+        let dir = scratch("target_why");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        let file = dir.join("plain");
+        fs::write(&a, b"1").unwrap();
+        fs::write(&b, b"2").unwrap();
+        fs::write(&file, b"3").unwrap();
+
+        let missing = dir.join("nosuch");
+        let (ok, e) = cp(&PLAIN, &[&a, &b, &missing]);
+        assert!(!ok);
+        assert!(
+            e.ends_with(": No such file or directory\n"),
+            "a name that is not there: {e}"
+        );
+
+        let (ok, e) = cp(&PLAIN, &[&a, &b, &file]);
+        assert!(!ok);
+        assert!(
+            e.ends_with(": Not a directory\n"),
+            "a name that is something else: {e}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination whose *parent* is not a directory is a failed `stat`, not
+    /// a failed create, and GNU says which. Reporting it at the create would
+    /// name the wrong operation and, once `cp` grows `-i`, would do so after
+    /// having already asked to overwrite something.
+    #[cfg(unix)]
+    #[test]
+    fn a_destination_under_a_plain_file_fails_at_the_stat() {
+        let dir = scratch("dst_stat");
+        let a = dir.join("a");
+        let blocking = dir.join("blocking");
+        fs::write(&a, b"1").unwrap();
+        fs::write(&blocking, b"2").unwrap();
+
+        let under = blocking.join("under");
+        let (ok, e) = cp(&PLAIN, &[&a, &under]);
+        assert!(!ok);
+        assert!(e.starts_with("cp: cannot stat "), "{e}");
+        assert!(e.ends_with(": Not a directory\n"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Under `-r` a symlink operand is copied as a link, so its own inode is
+    /// what a naive comparison sees — and that inode is never the destination's.
+    /// GNU resolves both sides unless *both* are links, which is what makes
+    /// `cp -r link file` a refusal where `link` points at `file`.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_operand_resolving_to_the_destination_is_refused() {
+        let dir = scratch("link_same");
+        let file = dir.join("file");
+        let link = dir.join("link");
+        fs::write(&file, b"kept").unwrap();
+        std::os::unix::fs::symlink("file", &link).unwrap();
+
+        let (ok, e) = cp(&RECURSIVE, &[&link, &file]);
+        assert!(!ok);
+        assert!(e.contains("are the same file"), "{e}");
+        assert_eq!(fs::read(&file).unwrap(), b"kept");
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of that rule: two *distinct* links to one file are not
+    /// the same file, because replacing one with a copy of the other leaves
+    /// what they point at alone.
+    #[cfg(unix)]
+    #[test]
+    fn two_symlinks_to_one_file_are_not_the_same_file() {
+        let dir = scratch("two_links");
+        let file = dir.join("file");
+        let one = dir.join("one");
+        let two = dir.join("two");
+        fs::write(&file, b"kept").unwrap();
+        std::os::unix::fs::symlink("file", &one).unwrap();
+        std::os::unix::fs::symlink("file", &two).unwrap();
+
+        let (ok, e) = cp(&RECURSIVE, &[&one, &two]);
+        assert!(ok, "{e}");
+        assert_eq!(fs::read(&file).unwrap(), b"kept", "the target is untouched");
         let _ = fs::remove_dir_all(&dir);
     }
 

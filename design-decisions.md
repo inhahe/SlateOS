@@ -53684,7 +53684,9 @@ exists to bury.
 
 ## 653. `SYS_FS_FSTATAT_PINNED` writes the 80-byte stat record, not the 64-byte metadata one — sharing an encoder is worth less than carrying the fields the caller needs
 
-**Date:** 2026-08-31 · **Decided by:** Claude (autonomous) — lane A, at lane B's
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous) — lane A, at lane B's
 request (`requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`)
 
 **In short:** syscall 663 is the race-free `fstatat` — "tell me about this name
@@ -53781,6 +53783,7 @@ Point the handler back at `pack_fs_meta_to_user` and restore the
 ## 654. `SYS_FS_FCHMODAT_PINNED` (665): chmod takes WRITE not METADATA, masks the mode to twelve bits, rejects unknown flags, and checks policy against the resolved target
 
 **Date:** 2026-08-31
+**Lane:** A
 **Decided by:** Claude (autonomous) — lane A, at lane B's request
 
 **In short:** `chmod -R` on a directory tree you do not control is the classic

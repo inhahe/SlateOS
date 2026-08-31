@@ -595,6 +595,25 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// had half enumerated and report success.  Truncation is always at a record
 /// boundary.
 pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
+/// `(dirfd, name ptr, name len, mode, flags) -> 0`.
+/// `AT_SYMLINK_NOFOLLOW_PINNED` (0x100) selects `lchmod` over `chmod`.
+///
+/// The two argument-checking rules point opposite ways, and it is deliberate:
+/// `mode` is **masked** to the low `0o7777` bits and its high bits are never an
+/// error, while `flags` **rejects** any bit it does not know.  An unrecognised
+/// flag changes what the call *does* — a mistranslated `AT_*` would turn a
+/// no-follow into a follow, which on this call is the escalation it exists to
+/// prevent — whereas the high bits of a mode are the file-type bits, which
+/// `chmod` has ignored since v7.  So nothing needs masking on this side, and
+/// nothing may be passed through unfiltered.
+///
+/// The mask is **twelve** bits, not nine: setuid, setgid and sticky survive it.
+///
+/// Requires `Rights::WRITE` on the handle where [`SYS_FS_FSTATAT_PINNED`] takes
+/// `Rights::METADATA`.  A handle that may only *observe* a file must not also
+/// be able to make it setuid, so a directory fd that serves a pinned `fstatat`
+/// will not necessarily serve a pinned `fchmodat`.
+pub const SYS_FS_FCHMODAT_PINNED: u64 = 665;
 
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;

@@ -2922,11 +2922,17 @@ pub(crate) fn resolve_dirfd_path(
 // that never came into it.  It also breaks with no attacker at all: rename the
 // directory and the descriptor names a path that no longer exists.
 //
-// `SYS_FS_UNLINKAT_PINNED` (662) and `SYS_FS_FSTATAT_PINNED` (663) resolve the
-// handle instead.  Where the arguments fit their shape — a real directory fd
-// and a single-component name — they are used, and the join is not reached at
-// all.  Everything else still goes through `resolve_dirfd_path`, because a
-// multi-component name is a walk and the calls deliberately refuse to walk.
+// `SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663) and
+// `SYS_FS_FCHMODAT_PINNED` (665) resolve the handle instead.  Where the
+// arguments fit their shape — a real directory fd and a single-component name —
+// they are used, and the join is not reached at all.  Everything else still
+// goes through `resolve_dirfd_path`, because a multi-component name is a walk
+// and the calls deliberately refuse to walk.
+//
+// The three are not equally urgent.  A pinned `fstatat` fooled by a swapped
+// directory reports the wrong size; a pinned `fchmodat` fooled by one puts a
+// mode — possibly setuid — on a file the caller never named.  That is why 665
+// was lane A's next delivery after `unlink` and not, say, `mkdirat`.
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
@@ -3001,6 +3007,10 @@ static PINNED_UNLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
 /// [`PINNED_UNLINKAT_ANSWERED`] on purpose — see the "own latch" paragraph in
 /// "The pinned `*at` fast path" above.
 static PINNED_FSTATAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 665.
+static PINNED_FCHMODAT_ANSWERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Turn a raw pinned-syscall return into either a final answer or a fallback.
@@ -3181,6 +3191,54 @@ unsafe fn try_pinned_fstatat(
         crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
     }
     Some(ret)
+}
+
+/// Chmod `path` under `dirfd` through syscall 665, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// This is the member of the family where the pin earns the most. `chmod -R`
+/// walking a tree it does not own is the classic swap-a-directory-for-a-symlink
+/// shape, and what lands at the far end of the swap is not a wrong answer but a
+/// mode — quite possibly setuid — on a file the caller never named. A pinned
+/// `fstatat` that is fooled reports the wrong size; a pinned `fchmodat` that is
+/// fooled hands out privilege.
+///
+/// The two arguments are filtered for opposite reasons. `flags` **must** be
+/// remapped rather than passed through, because 665 rejects a bit it does not
+/// know while [`fchmodat`]'s path route accepts and ignores `AT_EMPTY_PATH` —
+/// forwarding the caller's word would make a flag's meaning depend on which
+/// route ran. `mode` needs no masking at all, because 665 masks to the low
+/// `0o7777` bits itself and never errors on the rest; it is masked here anyway,
+/// to the same twelve bits `set_perms_path_ex` uses on the path route, so the
+/// two routes put the identical value on the wire. Two routes sending different
+/// numbers that happen to mean the same thing today is how a divergence gets
+/// introduced later without anyone editing either one.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string.
+unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(path) }?;
+    let base = pinned_base(dirfd)?;
+
+    let pinned_flags = if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        AT_SYMLINK_NOFOLLOW_PINNED
+    } else {
+        0
+    };
+    let ret = syscall5(
+        SYS_FS_FCHMODAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        u64::from(mode & 0o7777),
+        pinned_flags,
+    );
+    pinned_answer(ret, &PINNED_FCHMODAT_ANSWERED)
 }
 
 /// AT_FDCWD: use the current working directory.
@@ -3559,6 +3617,13 @@ pub extern "C" fn linkat(
 /// flag) — passing it here yields EINVAL.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
+///
+/// For the common shape — a real directory fd and a single-component name —
+/// this goes through [`try_pinned_fchmodat`], which has the kernel resolve the
+/// descriptor rather than the remembered path. See "The pinned `*at` fast path"
+/// above; of the calls that take it, this is the one where being fooled by a
+/// swapped directory hands out privilege rather than merely returning a wrong
+/// answer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32) -> i32 {
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) != 0 {
@@ -3593,6 +3658,11 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32)
     }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return apply(path);
+    }
+    // SAFETY: `path` is this function's own `*const u8` contract — null or a
+    // valid C string — which is what `try_pinned_fchmodat` requires.
+    if let Some(ret) = unsafe { try_pinned_fchmodat(dirfd, path, mode, flags) } {
+        return ret;
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
@@ -14294,7 +14364,7 @@ mod tests {
     mod pinned_at {
         use super::super::{
             AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, Stat, fstatat, is_pinnable_component, pinned_answer,
-            pinned_base, try_pinned_fstatat, try_pinned_unlinkat, unlinkat,
+            pinned_base, try_pinned_fchmodat, try_pinned_fstatat, try_pinned_unlinkat, unlinkat,
         };
         use crate::fdtable::{self, HandleKind};
 
@@ -14502,6 +14572,41 @@ mod tests {
                 assert_eq!(fstatat(4242, name.as_ptr(), core::ptr::null_mut(), 0), -1);
                 assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "{name:?}");
             }
+        }
+
+        /// The same for `fchmodat`, which has no output buffer and so declines
+        /// only on the shape of the name and the kind of the fd.
+        #[test]
+        fn every_pinned_fchmodat_attempt_declines_on_the_host() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+
+            // SAFETY: all the names are valid C strings.
+            unsafe {
+                assert_eq!(try_pinned_fchmodat(dir_fd, b"f\0".as_ptr(), 0o644, 0), None);
+                assert_eq!(
+                    try_pinned_fchmodat(dir_fd, b"f\0".as_ptr(), 0o644, AT_SYMLINK_NOFOLLOW),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_fchmodat(dir_fd, b"a/b\0".as_ptr(), 0o644, 0),
+                    None
+                );
+                assert_eq!(try_pinned_fchmodat(dir_fd, b".\0".as_ptr(), 0o644, 0), None);
+                assert_eq!(
+                    try_pinned_fchmodat(dir_fd, core::ptr::null(), 0o644, 0),
+                    None
+                );
+                // A non-directory fd, which is where `chmod -R` would land if
+                // it ever handed a file descriptor to the wrong argument.
+                let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 0x1234).expect("fd table full");
+                assert_eq!(
+                    try_pinned_fchmodat(pipe_fd, b"f\0".as_ptr(), 0o644, 0),
+                    None
+                );
+                assert!(fdtable::close_fd(pipe_fd).is_some());
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
         }
 
         /// What the per-syscall latch does, exercised directly.

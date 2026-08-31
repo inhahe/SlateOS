@@ -56,6 +56,11 @@ set -u
 # locale-dependent text of its own, but `write error` comes from `strerror`,
 # which does — so the fixed locale the shared preamble sets matters here too.)
 DIFF_PROG='echo'
+# Not the installed binary: WSL's coreutils is Ubuntu's `9.4-3ubuntu6.1` and
+# carries behavioural patches, so a green run against it certifies agreement
+# with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
+# and `design-decisions.md` 726.
+DIFF_GNU_SOURCE=9.4
 DIFF_REF="/usr/bin/echo /bin/echo"
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

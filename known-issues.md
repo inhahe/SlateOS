@@ -100194,7 +100194,7 @@ tests in `cp.rs` — one of which asserts the *bytes* of the source afterwards
 rather than the diagnostic, because the defect reported success and said
 nothing, and a test that checked only the message would have passed against it.
 
-## B-THE-DIFFERENTIAL-ORACLE-IS-DEBIAN-PATCHED (lane B, 2026-08-30) — MITIGATED, and an inventory
+## B-THE-DIFFERENTIAL-ORACLE-IS-DEBIAN-PATCHED (lane B, 2026-08-30) — FIXED, and an inventory
 
 **In short:** The `scripts/*-diff.sh` harnesses are how this project knows its
 utilities behave like GNU's: each runs our program and "GNU's" side by side and
@@ -100202,10 +100202,13 @@ compares. The GNU side was whatever the machine had installed, and that binary
 is **not** GNU's — WSL ships Ubuntu's `coreutils 9.4-3ubuntu6.1`, which carries
 Debian and Ubuntu patches that change behaviour. Two of those patches are known
 to reach a harness here, and the changelog names four more that could. The
-mitigation is `DIFF_GNU_SOURCE` (`design-decisions.md` §726): a harness can now
-be compared against the GNU release tarball, built from source. It is opt-in,
-so **this entry stays open until every affected harness is converted**, and it
-is the place to record patches as they are found.
+fix is `DIFF_GNU_SOURCE` (`design-decisions.md` §726): a harness is compared
+against the GNU release tarball, built from source. **Every coreutils harness
+is now converted** (2026-08-30), so the GNU side really is GNU's. The entry
+stays as the record of what was wrong, of the patch inventory below, and of the
+one gap that is left — the built reference is compiled without ACL, xattr and
+capability support, which needs the operator to install three `-dev` packages.
+It is also the place to record distribution patches as they are found.
 
 ### Why this is not a theoretical concern
 
@@ -100251,10 +100254,10 @@ whether it has been checked.
 | `cp-n.diff` (Debian #1058752) | `cp -n` skips silently, exit 0, plus a parse-time warning | `cp-diff.sh` | **yes** — see above; harness converted 2026-08-30 |
 | `treat-devtmpfs-and-squashfs-as-dummy-filesystems.patch` | `df`/`du` hide `/dev` and `/snap/*` rows | `df-diff.sh`, `du-diff.sh` | **yes** — §700; both harnesses converted 2026-08-30 |
 | `80_fedora_sysinfo.patch` | `uname -i -p` print the real processor rather than `unknown` | none | no harness yet |
-| `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch` | `tail` on sysfs files with a 64 K page | `tail-diff.sh` | unchecked; the fixture is ordinary files, so probably not |
-| `CVE-2024-0684.patch` | `split --line-bytes` heap overflow fix (also upstream in 9.5) | `split-diff.sh` | unchecked; a fix, so the patched binary is the *more* correct one |
+| `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch` | `tail` on sysfs files with a 64 K page | `tail-diff.sh` | **no** — converted 2026-08-30, no count moved; no fixture is on sysfs |
+| `CVE-2024-0684.patch` | `split --line-bytes` heap overflow fix (also upstream in 9.5) | `split-diff.sh` | **no** — converted 2026-08-30, no count moved |
 | `suppress-permission-denied-errors-on-nfs.patch` | `ls -l` does not report EACCES reading attributes over NFS | `ls-diff.sh` | **no** — that harness builds 9.5 from the tarball |
-| `99_float_endian_detection.patch` | floating-point endianness detection at configure time | `printf-diff.sh`, `extfloat-diff.sh` | unchecked; a build-configuration fix, so likely a no-op on x86-64 |
+| `99_float_endian_detection.patch` | floating-point endianness detection at configure time | `printf-diff.sh`, `extfloat-diff.sh` | **no** — `printf-diff.sh` converted 2026-08-30, no count moved; `extfloat-diff.sh` has no coreutils reference at all |
 
 `ls-diff.sh`'s immunity is accidental — it built its own reference since §366
 for an unrelated reason (9.4 and 9.5 lay columns out differently). That is
@@ -100282,17 +100285,51 @@ and 3 xfails, none of them about the distribution. `du-diff.sh` moved no count
 at all: 188 pass, 5 xfail, exactly as before, which is the outcome the note
 below predicts for most of the remaining conversions and is still worth having.
 
-Remaining, in the order they matter:
+Done since, and this is the last of it: **the remaining 37 coreutils harnesses
+→ 9.4** (2026-08-30), in one sweep. Every coreutils harness in `scripts/` now
+compares against the built tarball, so the gap this entry describes is closed;
+it is left here as the record of it rather than as live work.
 
-1. **The rest of the coreutils harnesses**, one at a time. A conversion that
-   changes no count is still worth committing: it converts an unexamined
-   assumption into a checked one.
-2. **`printf`, `split` and `tail`** carry a specific hypothesis each from the
-   table above; converting them tests it.
+The three that carried a named hypothesis from the table above were the point
+of the sweep, and all three came back a no-op — which is a result, not a
+non-result. Each had been an unchecked "probably":
 
-Harnesses whose reference is *not* coreutils are out of scope and always were:
-`awk`, `bc`, `cmp` (diffutils), `ed`, `find` and `xargs` (findutils), `grep`,
-`more` (util-linux), `osh`/`sh` (bash), `sed`, `tar`.
+| Harness | Hypothesis | Measured |
+|---|---|---|
+| `tail-diff.sh` | sysfs patch unreachable: no fixture is on sysfs | 218 pass, 2 xfail — unchanged |
+| `split-diff.sh` | CVE-2024-0684 makes the *installed* binary the more correct one, so a difference here would be legitimate | 207 pass, 5 xfail — unchanged |
+| `printf-diff.sh` | float-endianness is a configure-time fix, a no-op on x86-64 | 1197 pass, 5 xfail — unchanged |
+
+The other 34 moved no count either. That is the expected outcome and was
+always the argument for doing it: it converts an unexamined assumption into a
+checked one, and every case written against these harnesses from now on is
+certified against GNU rather than against Ubuntu.
+
+One harness needed a new mechanism to get there. **`test` cannot attest its own
+version**: it has no options at all, so `--version` is an ordinary
+one-argument expression and a non-empty string is true — `test --version`
+prints nothing and exits 0, on the built 9.4 and on the installed binary
+alike. The version guard therefore read `test-diff: … is not coreutils 9.4
+(it says: )` for a tree that was exactly right. `diff-wsl.sh` grew
+`DIFF_GNU_VERIFY_WITH` for it: the tree is one `make` of one tarball, so any
+sibling in it attests the version, and `test-diff.sh` borrows `cat`. The guard
+keeps its full strength — still a real runtime check on a real binary, still
+fatal. The alternative of skipping verification whenever `--version` produced
+nothing recognisable was rejected: that is also exactly what a *wrong* binary
+would produce.
+
+The same knob fixed a defect the sweep exposed in the three **family**
+harnesses. `write-error`, `digest` and `interleave` name themselves for the
+property they test, and there is no `src/write-error` in the coreutils tree to
+ask, so the witness defaults to the first `DIFF_BINS` entry rather than to
+`DIFF_PROG`.
+
+Remaining: nothing, for coreutils. Harnesses whose reference is *not* coreutils
+are out of scope and always were: `awk`, `bc`, `cmp` (diffutils), `ed`, `find`
+and `xargs` (findutils), `grep`, `more` (util-linux), `osh`/`sh` (bash), `sed`,
+`tar`, `time`, and `extfloat` (whose reference is a C probe it compiles
+itself). The one live item left under this heading is the ACL/xattr/capability
+gap immediately below, which needs the operator.
 
 ### A second, smaller gap: the built reference is upstream's source, not its build
 

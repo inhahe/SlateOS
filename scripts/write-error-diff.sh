@@ -101,6 +101,11 @@ set -u
 # set: that is exactly the arrangement this harness wants, and it used to build
 # an equivalent one by hand.
 DIFF_PROG='write-error'
+# Not the installed binary: WSL's coreutils is Ubuntu's `9.4-3ubuntu6.1` and
+# carries behavioural patches, so a green run against it certifies agreement
+# with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
+# and `design-decisions.md` 726.
+DIFF_GNU_SOURCE=9.4
 DIFF_NO_REF=1
 DIFF_NEED="timeout"
 DIFF_BINS="basename cat comm dirname echo expand fold head join logname md5sum

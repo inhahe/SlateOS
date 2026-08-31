@@ -64,6 +64,13 @@ set -u
 # name `tail` so `argv[0]` matches. See `scripts/diff-wsl.sh`. `timeout` is
 # named because every invocation below is bounded with it; see `run_side`.
 DIFF_PROG='tail'
+# Not `/usr/bin/tail`. Debian carries
+# `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch`, which changes
+# how `tail -f` reads a file whose st_blksize exceeds BUFSIZ -- sysfs on a
+# 64 K-page kernel. No fixture here is on sysfs, so the hypothesis is that this
+# changes nothing; converting is how that stops being a hypothesis. See
+# `diff-wsl.sh`'s "Why a built reference" and `design-decisions.md` 726.
+DIFF_GNU_SOURCE=9.4
 DIFF_NEED=timeout
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"

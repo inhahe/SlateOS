@@ -81,6 +81,12 @@ set -u
 # which finds the shell builtin: the preamble is sourced by a shell, and the
 # builtin is not the program under comparison. See `scripts/printf-probe.sh`.
 DIFF_PROG='printf'
+# Not `/usr/bin/printf`. Debian carries `99_float_endian_detection.patch`,
+# which changes how `configure` decides the floating-point byte order -- and
+# `printf %a`/`%e` are where that would show. On x86-64 it is almost certainly
+# a no-op, which is the hypothesis. See `diff-wsl.sh`'s "Why a built
+# reference".
+DIFF_GNU_SOURCE=9.4
 DIFF_REF="/usr/bin/printf /bin/printf"
 DIFF_NEED="timeout python3"
 # shellcheck source=diff-wsl.sh

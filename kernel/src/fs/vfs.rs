@@ -269,8 +269,12 @@ pub struct FileMeta {
 
     // --- Extended attributes ---
     /// Arbitrary key-value metadata pairs.
-    /// Keys are UTF-8 strings, values are byte vectors.
-    pub xattrs: Vec<(String, Vec<u8>)>,
+    ///
+    /// Both halves are byte vectors: a name is an opaque NUL-terminated byte
+    /// string, exactly as a path component is, and typing it as a `String`
+    /// meant a filesystem could hold a name this struct was unable to report.
+    /// See `design-decisions.md` §660.
+    pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
 
     // --- Link count ---
     /// Number of hard links pointing to the underlying data.
@@ -717,10 +721,24 @@ pub trait FileSystem: Send {
         self.set_times(path, accessed_ns, modified_ns)
     }
 
+    // --- Extended attributes ---
+    //
+    // A key is `&[u8]`, not `&str`, for the same reason a `Path` is: the name
+    // is an opaque NUL-terminated byte string that the kernel does not get to
+    // interpret, and a filesystem written by Linux may well carry one that is
+    // not UTF-8.  Typing it as a `str` did not merely reject such a name — the
+    // `from_utf8` sat inside the loop that reads *every* attribute on the
+    // inode, so one bad name failed the whole inode and took the ordinary
+    // attributes down with it.  See `design-decisions.md` §660.
+
     /// Get an extended attribute value by key.
     ///
+    /// Returns [`KernelError::NoAttribute`] when the object exists but carries
+    /// no attribute by that name — never `NotFound`, which is reserved for the
+    /// *path* not resolving.  A caller has to tell those apart.
+    ///
     /// Default: not supported.
-    fn get_xattr(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         let _ = (path, key);
         Err(KernelError::NotSupported)
     }
@@ -728,15 +746,19 @@ pub trait FileSystem: Send {
     /// Set an extended attribute.
     ///
     /// Default: not supported.
-    fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         let _ = (path, key, value);
         Err(KernelError::NotSupported)
     }
 
     /// Remove an extended attribute.
     ///
+    /// Returns [`KernelError::NoAttribute`] when the attribute was already
+    /// absent, which is what lets a "remove if present" idiom be written
+    /// without a racy pre-flight probe.
+    ///
     /// Default: not supported.
-    fn remove_xattr(&mut self, path: &Path, key: &str) -> KernelResult<()> {
+    fn remove_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         let _ = (path, key);
         Err(KernelError::NotSupported)
     }
@@ -744,7 +766,7 @@ pub trait FileSystem: Send {
     /// List all extended attribute keys for a path.
     ///
     /// Default: empty list.
-    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<String>> {
+    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         let _ = path;
         Ok(Vec::new())
     }
@@ -756,22 +778,22 @@ pub trait FileSystem: Send {
     // without following. ---
 
     /// No-follow analogue of [`get_xattr`](Self::get_xattr) (`lgetxattr`).
-    fn get_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         self.get_xattr(path, key)
     }
 
     /// No-follow analogue of [`set_xattr`](Self::set_xattr) (`lsetxattr`).
-    fn set_xattr_no_follow(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_no_follow(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         self.set_xattr(path, key, value)
     }
 
     /// No-follow analogue of [`remove_xattr`](Self::remove_xattr) (`lremovexattr`).
-    fn remove_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<()> {
+    fn remove_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         self.remove_xattr(path, key)
     }
 
     /// No-follow analogue of [`list_xattrs`](Self::list_xattrs) (`llistxattr`).
-    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<String>> {
+    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         self.list_xattrs(path)
     }
 
@@ -4094,7 +4116,7 @@ impl Vfs {
     }
 
     /// Get an extended attribute value.
-    pub fn get_xattr(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
+    pub fn get_xattr(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_path_access(&path, PathAccess::Read)?;
@@ -4103,7 +4125,7 @@ impl Vfs {
     }
 
     /// Set an extended attribute.
-    pub fn set_xattr(path: impl AsRef<Path>, key: &str, value: &[u8]) -> KernelResult<()> {
+    pub fn set_xattr(path: impl AsRef<Path>, key: &[u8], value: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
@@ -4119,7 +4141,7 @@ impl Vfs {
     }
 
     /// Remove an extended attribute.
-    pub fn remove_xattr(path: impl AsRef<Path>, key: &str) -> KernelResult<()> {
+    pub fn remove_xattr(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
@@ -4135,7 +4157,7 @@ impl Vfs {
     }
 
     /// List all extended attribute keys.
-    pub fn list_xattrs(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
+    pub fn list_xattrs(path: impl AsRef<Path>) -> KernelResult<Vec<Vec<u8>>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_path_access(&path, PathAccess::Read)?;
@@ -4148,7 +4170,7 @@ impl Vfs {
     // is a link.  Intermediate symlinks are still resolved. ---
 
     /// Get an xattr WITHOUT following a trailing symlink (`lgetxattr`).
-    pub fn get_xattr_no_follow(path: impl AsRef<Path>, key: &str) -> KernelResult<Vec<u8>> {
+    pub fn get_xattr_no_follow(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<Vec<u8>> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Read)?;
@@ -4159,7 +4181,7 @@ impl Vfs {
     /// Set an xattr WITHOUT following a trailing symlink (`lsetxattr`).
     pub fn set_xattr_no_follow(
         path: impl AsRef<Path>,
-        key: &str,
+        key: &[u8],
         value: &[u8],
     ) -> KernelResult<()> {
         let path = path.as_ref();
@@ -4177,7 +4199,7 @@ impl Vfs {
     }
 
     /// Remove an xattr WITHOUT following a trailing symlink (`lremovexattr`).
-    pub fn remove_xattr_no_follow(path: impl AsRef<Path>, key: &str) -> KernelResult<()> {
+    pub fn remove_xattr_no_follow(path: impl AsRef<Path>, key: &[u8]) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
@@ -4193,7 +4215,7 @@ impl Vfs {
     }
 
     /// List xattr keys WITHOUT following a trailing symlink (`llistxattr`).
-    pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<String>> {
+    pub fn list_xattrs_no_follow(path: impl AsRef<Path>) -> KernelResult<Vec<Vec<u8>>> {
         let path = path.as_ref();
         let path = Self::resolve_no_follow(path)?;
         check_path_access(&path, PathAccess::Read)?;

@@ -2173,7 +2173,7 @@ pub fn self_test() -> KernelResult<()> {
     // Skipped gracefully if the root FS lacks symlink/xattr support.
     let nfx_target = "/handle_nfx_target.txt";
     let nfx_link = "/handle_nfx_link";
-    let nfx_key = "user.nfx";
+    let nfx_key: &[u8] = b"user.nfx";
     crate::fs::Vfs::remove(nfx_link).ok();
     crate::fs::Vfs::remove(nfx_target).ok();
     let nfx_ready = crate::selftest_setup!(
@@ -2205,12 +2205,33 @@ pub fn self_test() -> KernelResult<()> {
         }
         // ... and the TARGET (follow) must NOT see it — the write to the
         // link did not leak to the pointed-at file.
+        //
+        // The error has to be `NoAttribute`, not merely *some* error: the
+        // target file plainly exists (we wrote it above), so a `NotFound` here
+        // would be the kernel saying the file is gone when it means the
+        // attribute is absent.  Accepting any `Err` is what let those two be
+        // conflated for as long as they were.  See `design-decisions.md` §660.
         match crate::fs::Vfs::get_xattr(nfx_link, nfx_key) {
-            Err(_) => {}
-            Ok(v) => {
+            Err(KernelError::NoAttribute) => {}
+            other => {
                 crate::serial_println!(
-                    "[fs::handle]   FAIL: no-follow xattr leaked to target: {:?}",
-                    v
+                    "[fs::handle]   FAIL: target should report NoAttribute, got {:?}",
+                    other
+                );
+                nfx_cleanup();
+                return Err(KernelError::InternalError);
+            }
+        }
+        // The other half of the same distinction: a path that does not resolve
+        // is still `NotFound`.  One code for both would make these two calls
+        // indistinguishable, and a caller cannot branch on a difference it
+        // cannot see.
+        match crate::fs::Vfs::get_xattr("/handle_nfx_absent.txt", nfx_key) {
+            Err(KernelError::NotFound) => {}
+            other => {
+                crate::serial_println!(
+                    "[fs::handle]   FAIL: missing path should report NotFound, got {:?}",
+                    other
                 );
                 nfx_cleanup();
                 return Err(KernelError::InternalError);

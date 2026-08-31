@@ -129,16 +129,23 @@ fn read_user_path(ptr: u64, len: usize) -> Result<crate::fs::path::PathBuf, Kern
     Ok(crate::fs::path::PathBuf::from(bytes))
 }
 
-/// Copy a NUL-terminated user string into a kernel `String`.
+/// Copy a NUL-terminated user string in as bytes.
 ///
 /// The terminator-delimited counterpart to [`read_user_path`], for arguments
 /// that arrive as a bare C string with no length beside them — xattr keys,
 /// mount options, and similar.  See
 /// [`crate::mm::user::read_user_cstr`] for why the scan cannot be done in
 /// place over the user mapping.
-fn read_user_cstring(ptr: u64, max: usize) -> Result<alloc::string::String, KernelError> {
-    let bytes = crate::mm::user::read_user_cstr(ptr, max)?;
-    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+///
+/// Bytes, not `String`: a C string is a NUL-terminated byte sequence, and
+/// which of those sequences are also valid UTF-8 is not the kernel's business
+/// at this boundary any more than it is for a path.  This used to end in a
+/// `String::from_utf8(…).map_err(|_| InvalidArgument)`, which rejected an
+/// xattr name that the filesystem underneath was perfectly able to store and
+/// return — so a name written by a Linux tool could not afterwards be read,
+/// removed, or even named.  See `design-decisions.md` §660.
+fn read_user_cbytes(ptr: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
+    crate::mm::user::read_user_cstr(ptr, max)
 }
 
 // ---------------------------------------------------------------------------
@@ -10896,7 +10903,7 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -10957,7 +10964,7 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -11000,7 +11007,7 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -11079,7 +11086,7 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
         for key in &keys {
             // The trailing NUL is already there from the zero fill.
             if let Some(dst) = packed.get_mut(offset..offset.saturating_add(key.len())) {
-                dst.copy_from_slice(key.as_bytes());
+                dst.copy_from_slice(key);
             }
             offset = offset.saturating_add(key.len().saturating_add(1));
         }

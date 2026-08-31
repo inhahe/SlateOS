@@ -1398,6 +1398,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::FileTooLarge => errno::EFBIG,
         KernelError::CrossDevice => errno::EXDEV,
         KernelError::StaleHandle => errno::ESTALE,
+        KernelError::NoAttribute => errno::ENODATA,
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::DeviceBusy => errno::EBUSY,

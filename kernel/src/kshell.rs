@@ -24030,6 +24030,10 @@ fn cmd_stat(args: &str) {
             if !meta.xattrs.is_empty() {
                 shell_println!("  Xattrs:");
                 for (key, value) in &meta.xattrs {
+                    // The key is bytes (§660); octal-escape it rather than
+                    // formatting it as text, so a name that is not UTF-8 is
+                    // shown as itself and stays distinct from every other name.
+                    let key = crate::fs::escape::escape_octal(key, &[]);
                     if value.len() <= 64 {
                         // Short value — display inline.
                         let display = if value.iter().all(|&b| b >= 0x20 && b < 0x7F) {
@@ -127086,8 +127090,18 @@ fn cmd_xattr(args: &str) {
                 if keys.is_empty() {
                     shell_println!("(no extended attributes)");
                 } else {
+                    // Keys are bytes, and `xattr list` is the one place that
+                    // shows a name the kernel did not choose. Writing them
+                    // through `shell_write_bytes` rather than formatting them
+                    // as text keeps a name that is not UTF-8 legible as
+                    // itself; a `from_utf8_lossy` here would map every
+                    // undecodable byte to one U+FFFD, so two different
+                    // attributes would list under the same displayed name and
+                    // neither could then be fetched by what was printed.
                     for key in &keys {
-                        shell_println!("  {}", key);
+                        shell_print!("  ");
+                        shell_write_bytes(key);
+                        shell_println!();
                     }
                 }
             }
@@ -127110,7 +127124,7 @@ fn cmd_xattr(args: &str) {
                 set_exit(1);
                 return;
             }
-            match crate::fs::Vfs::get_xattr(file, key) {
+            match crate::fs::Vfs::get_xattr(file, key.as_bytes()) {
                 Ok(val) => {
                     // Try to display as UTF-8, fall back to hex.
                     if let Ok(s) = core::str::from_utf8(&val) {
@@ -127140,7 +127154,7 @@ fn cmd_xattr(args: &str) {
                 set_exit(1);
                 return;
             }
-            match crate::fs::Vfs::set_xattr(file, key, value.as_bytes()) {
+            match crate::fs::Vfs::set_xattr(file, key.as_bytes(), value.as_bytes()) {
                 Ok(()) => {
                     shell_println!("Set {}={} on {}", key, value, file);
                 }
@@ -127156,7 +127170,7 @@ fn cmd_xattr(args: &str) {
                 set_exit(1);
                 return;
             }
-            match crate::fs::Vfs::remove_xattr(file, key) {
+            match crate::fs::Vfs::remove_xattr(file, key.as_bytes()) {
                 Ok(()) => {
                     shell_println!("Removed '{}' from {}", key, file);
                 }

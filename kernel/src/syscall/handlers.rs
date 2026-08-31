@@ -9393,7 +9393,28 @@ pub fn sys_fs_unlinkat_pinned(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: directory handle; `0` is not the cwd and is rejected as
 /// `InvalidHandle` (§648).  `arg1`: name pointer.
 /// `arg2`: name length.  `arg3`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
-/// `arg4`: output buffer of `FS_META_SIZE` bytes.
+/// `arg4`: output buffer of [`FS_STAT_RESULT_LEN`] bytes — the *same* record
+/// `SYS_FS_STAT` and `SYS_FS_LSTAT` write, from the same encoder.
+///
+/// This deliberately writes the 80-byte stat record rather than the 64-byte
+/// `FS_META_SIZE` one it originally shared with `SYS_FS_METADATA`.  The 64-byte
+/// record has no field for the **inode number**, and the sole purpose of this
+/// call is to back a race-free `fstatat`, which fills a `struct stat`.  A
+/// missing `st_ino` does not fail loudly; it is a *plausible* value that
+/// silently breaks unrelated things — `cp src dst` refuses legitimate copies
+/// because same-file detection is `st_dev`/`st_ino` equality and every inode
+/// compares equal, `du` and `tar` coalesce an entire tree into one file when
+/// de-duplicating hard links, `find -samefile` matches everything, and `ls -i`
+/// prints a column of zeros.  The 64-byte record also lacks the hard-link count
+/// (`st_nlink`, which `rm` consults to decide whether removing a name destroys
+/// the data) and the block count.
+///
+/// Changed while this syscall still had **no callers at all**, at lane B's
+/// request (`requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`),
+/// which is the only moment it is free: widening a record with live callers
+/// costs a second syscall number forever.  Filesystems that cannot supply an
+/// inode already report `ino == 0` through `SYS_FS_STAT`, so this makes nothing
+/// worse for them — it only gives the value somewhere to go.
 pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::METADATA) {
         return SyscallResult::err(e);
@@ -9410,9 +9431,7 @@ pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
     // Validated before anything is read, so a bad output pointer cannot be
     // used to learn whether a name exists.
-    if let Err(e) =
-        crate::mm::user::validate_user_write(args.arg4, crate::syscall::number::FS_META_SIZE)
-    {
+    if let Err(e) = crate::mm::user::validate_user_write(args.arg4, FS_STAT_RESULT_LEN) {
         return SyscallResult::err(e);
     }
 
@@ -9430,7 +9449,58 @@ pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    match pack_fs_meta_to_user(&meta, args.arg4) {
+    match write_fs_stat_result(args.arg4, &meta) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_FS_FCHMODAT_PINNED` — change the permission bits of `name` within the
+/// directory a handle was opened on, refusing if the handle no longer denotes
+/// that directory.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: mode.  `arg4`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
+///
+/// Requires `Rights::WRITE`, not `Rights::METADATA`. Reading metadata and
+/// changing a mode are not the same authority: a handle that may only *observe*
+/// a file must not be able to make it setuid. `SYS_FS_FSTATAT_PINNED` takes
+/// `METADATA` for the same reason in reverse.
+pub fn sys_fs_fchmodat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    // Unknown flag bits are refused rather than ignored, as in
+    // `sys_fs_unlinkat_pinned`: a caller that mistranslated a Linux `AT_*`
+    // constant should fail on its first call rather than silently get a
+    // different operation.
+    let flags = args.arg4;
+    if flags & !crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let no_follow = flags & crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0;
+
+    // Twelve bits, not nine, so setuid/setgid/sticky survive -- §639, where a
+    // nine-bit mask dropped the setuid bit with no error. The bits above the
+    // twelve are the file-type bits of a `mode_t`, which `chmod` has ignored
+    // since v7 and which Linux masks off here too, so masking rather than
+    // refusing is the compatible answer and the one lane B can translate to
+    // without a second mask of its own.
+    #[allow(clippy::cast_possible_truncation)]
+    let permissions = (args.arg3 as u16) & 0o7777;
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::set_permissions_at_pinned(&dir, name.as_bytes(), permissions, no_follow) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10463,9 +10533,12 @@ pub fn sys_fs_metadata(args: &SyscallArgs) -> SyscallResult {
 /// Pack a [`crate::fs::FileMeta`] into the `FS_META_SIZE` wire record and
 /// deliver it to `dst` in userspace.
 ///
-/// Shared by `SYS_FS_METADATA` and `SYS_FS_FSTATAT_PINNED` so the two cannot
-/// drift: one decoder in userspace should serve both, and that is only true
-/// if one encoder in the kernel produces both.
+/// The encoder for `SYS_FS_METADATA` alone.  `SYS_FS_FSTATAT_PINNED` used to
+/// share it — the argument being that one decoder in userspace should serve
+/// both — but that argument only holds when both callers want the same
+/// *fields*, and they do not: `fstatat` fills a `struct stat`, which needs an
+/// inode number, a hard-link count and a block count that this 64-byte record
+/// has no room for.  663 now uses [`write_fs_stat_result`] (§653).
 ///
 /// Packed in the kernel, then delivered as one copy.  The fields used to be
 /// stored one at a time through `dst as *mut u8`, which was wrong on three

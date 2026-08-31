@@ -110,9 +110,13 @@ for h in scripts/*-diff.sh; do
     # `case` below, which is the only reason it was caught at all -- and the
     # `rc` they set was in turn swallowed by a caller that piped this through
     # `tail`, which the header already warns against for a different reason.
+    # Quoted, because `sh` and `bash` are also command names and an unquoted
+    # `run=sh` is indistinguishable from a forgotten `$(...)` -- SC2209, which
+    # is a real bug class even though it is not one here. The quotes say
+    # "the string `sh`", which is what is meant, to shellcheck and to a reader.
     case $(head -n 1 "$h") in
-        *bash) run=bash ;;
-        *)     run=sh ;;
+        *bash) run='bash' ;;
+        *)     run='sh' ;;
     esac
     "$run" "$h" >"$log" 2>&1
     out=$(tail -n 1 "$log")

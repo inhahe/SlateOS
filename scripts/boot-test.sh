@@ -23,27 +23,38 @@
 # as an ordinary failure.  A status a caller cannot know about is a status the
 # caller cannot handle.
 #
-# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 1500 SECONDS:
+# IF YOU WRAP THIS IN scripts/run-timeout.py, GIVE IT AT LEAST 7200 SECONDS:
 #
-#   python scripts/run-timeout.py --poll 30 1500 ./scripts/boot-test.sh
+#   python scripts/run-timeout.py --poll 60 7200 ./scripts/boot-test.sh
 #
-# This script runs QEMU under its *own* timeout, 900s by default (--timeout).
+# This script runs QEMU under its *own* timeout, 2400s by default (--timeout).
 # An outer budget also has to cover the pre-build gates and the kernel build,
-# so an outer 900 is strictly the smaller window and the inner timeout can
-# never fire.  That is not a harmless duplication: the inner timeout is the
-# diagnostic one -- it reports SYSTEM HANG, dumps the guest's state, and reads
-# the faulting RIP back over the HMP monitor.  run-timeout's expiry gives exit
-# 124 and a killed process tree: no RIP, no task table, no marker saying where
-# it stopped.  So an outer budget at or below the inner one silently turns
-# every genuine boot hang into an anonymous kill, on exactly the runs where the
-# instrumentation matters most.
+# so an outer budget below inner+gates+build is strictly the smaller window and
+# the inner timeout can never fire.  That is not a harmless duplication: the
+# inner timeout is the diagnostic one -- it reports SYSTEM HANG, dumps the
+# guest's state, and reads the faulting RIP back over the HMP monitor.
+# run-timeout's expiry gives exit 124 and a killed process tree: no RIP, no
+# task table, no marker saying where it stopped.  So an outer budget at or
+# below the inner one silently turns every genuine boot hang into an anonymous
+# kill, on exactly the runs where the instrumentation matters most.
 #
 # Measured 2026-08-25: gates + a cold-cache clippy recompile + build took 530s,
 # leaving 370s of a 900s outer budget for a boot that reaches BOOT_OK at
-# 370-405s.  A healthy guest was killed mid-diagnostics.  1500 = 900 inner +
-# 600 headroom.  Being generous costs nothing here: run-timeout's real job is
-# tearing down the whole process tree, grandchildren included, and that is
-# independent of the budget.  See known-issues.md -> Lesson 50.
+# 370-405s.  A healthy guest was killed mid-diagnostics.
+#
+# Re-measured 2026-08-31, and the gate half has grown far more than the boot
+# half: with another lane building concurrently, gates + clippy + build took
+# ~3000s before QEMU was even started, and BOOT_OK then landed at 1043s.  So
+# the pre-QEMU phase is now the *larger* of the two and swings widely with host
+# load -- an outer budget derived from the boot time alone will be wrong.
+#
+# Budget the outer as gates+build+inner, then round up: 7200 = ~3000 observed
+# pre-QEMU + 2400 inner + headroom.  Being generous costs nothing here:
+# run-timeout's real job is tearing down the whole process tree, grandchildren
+# included, and that is independent of the budget.  An outer budget that is too
+# tight does not merely delay the answer, it destroys the diagnostic -- which is
+# what happened twice on 2026-08-31 before this comment was rewritten.
+# See known-issues.md -> Lesson 50.
 #
 # Usage:
 #   ./scripts/boot-test.sh              # full build + test (waits for BOOT_OK)
@@ -1195,10 +1206,26 @@ kill_qemu() {
 # --stall-secs=N, which watches for the serial log going silent and does not
 # care how long a healthy boot takes.
 #
-# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64).  Re-measure and raise
-# this when the self-test suite grows; override with --timeout= for slower
-# hosts.
-TIMEOUT=900
+# Measured: BOOT_OK at ~456s (2026-08-14, TCG, qemu64), which is where the old
+# 900 came from.  Re-measured 2026-08-31: BOOT_OK at 1043s on a host where
+# another lane was building concurrently -- i.e. the suite outgrew the budget,
+# and 900 had stopped being 2x anything.  It was killing healthy boots: two
+# runs that day died at exactly 900s, both reported by the harness as
+# "STILL PRODUCING OUTPUT ... a budget that was too small, not a hang".
+#
+# Sized against the *tail*, not the median, because the tail is what trips the
+# gate.  `--boot-history` over 368 debug/none TCG boots gives median 438s with
+# a range of 18-1175s: the median is unchanged since 2026-08-14, so this is not
+# a boot that got uniformly slower, it is one whose spread now crosses 900.
+# 2x the observed maximum, per the rule above, is ~2350.
+#
+# Erring high is the cheap direction.  Too low kills a healthy kernel and
+# reports it as a hang -- and because this gate runs before anything is built,
+# a false red here blocks every lane, not just the one that tripped it.  Too
+# high only delays the verdict on a genuine hang, which is not this knob's job
+# anyway (see --stall-secs above, and the in-kernel liveness detector, both of
+# which catch a real wedge without waiting for this clock).
+TIMEOUT=2400
 # Did the caller pass --timeout= explicitly?  Only used to decide whether
 # --bench may raise the default (see BENCH_TIMEOUT below); an explicit
 # --timeout= always wins.
@@ -3835,6 +3862,58 @@ check_design_decisions_bands() {
 }
 
 check_design_decisions_bands
+
+# Refuse to build when a self-test skip has fired on every recorded boot.
+#
+# This reads `bench/boot-history.jsonl`, so it is about the *previous* runs and
+# not about the one starting now -- which is why it belongs here, before the
+# build, rather than in the EXIT trap next to the recorder. Running it early
+# also means the failure arrives in seconds instead of after a fifteen-minute
+# build and boot.
+#
+# A skip that has never once *not* fired is a deleted test with a log line, and
+# the suite above it still prints PASSED. Six of those were found by eye on
+# 2026-08-31 (design-decisions.md sec 650); eye-finding does not scale to the
+# seventh. See scripts/check-boot-skips.py for why the check is dynamic rather
+# than static, and for the allowlist.
+#
+# Exit 2 (unreadable history) is treated as a hard stop for the same reason the
+# band checker does: a checker that cannot run is not a clean tree, and the two
+# must never produce the same output.
+check_boot_skips() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Never-running self-test check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for self-tests that skip on every recorded boot ==="
+    local out rc
+    out="$("$py" -u "$PROJECT_ROOT/scripts/check-boot-skips.py" 2>&1)" && rc=0 || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo "" >&2
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR: refusing to build.  The never-running self-test checker" >&2
+        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
+        echo "checker, not a broken tree.  Fix the checker first." >&2
+    else
+        echo "ERROR: refusing to build.  A self-test has announced SKIP on" >&2
+        echo "every recorded boot, which means its section has never run while" >&2
+        echo "the suite above it reported PASSED.  The lines above name each" >&2
+        echo "one and the three ways to resolve it; run" >&2
+        echo "    python scripts/check-boot-skips.py --list" >&2
+        echo "for the full per-skip standing." >&2
+    fi
+    exit 1
+}
+
+check_boot_skips
 
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than

@@ -53283,6 +53283,716 @@ back to passing without testing anything. The only reason to do this is if the
 post-mount block itself is found to run before the mount — in which case the
 right fix is to move the *call*, not to restore the skip.
 
+## 651. The never-running-self-test gate asks the boot history, not the source: 100% of the last N ≥ 10 boots, with an allowlist that fails in both directions
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+
+**In short:** A test can print `SKIP: <name> (<reason>)` and be perfectly
+honest about it, and the suite above it still prints PASSED. If the reason is
+one that is *always* true — "the disk isn't mounted yet", when the code runs
+before mounting — then that test has never run once, in the whole life of the
+project, and nothing anywhere says so. §650 found six of those by reading code.
+This entry is the machine that finds the seventh. It works by watching: every
+boot now writes down which tests said SKIP, and if a test has said SKIP on
+every one of the last ten-or-more boots, the build stops and names it.
+
+### Why watching rather than reading
+
+§650 already recorded the choice of a dynamic check over a static one, and the
+reason has not changed: answering "is this function reachable only from a
+pre-mount call site?" needs cross-module call-graph resolution over a
+100k-line file, which is the kind of gate that becomes unreliable and then
+gets ignored. What this entry adds is what a *dynamic* check has to get right,
+and the answers are not obvious in either direction.
+
+### The four decisions
+
+**1. The unit of evidence is a boot, and rows that cannot testify are excluded
+rather than counted as "did not skip".** Three exclusions: a row written before
+the `skips` field existed, a boot that did not reach `BOOT_OK`, and an
+`experiment` probe. Each is the same argument — a row that says nothing must
+not be read as saying "no". Counting a pre-field row as "this skip did not
+fire" would break the 100% streak of every genuine offender, i.e. fail in the
+direction that hides the bug. The cost is that the gate is silent for the
+first ten boots after landing, which is the price of not being wrong.
+
+*Alternative rejected:* treat a missing field as "no skips". Cheaper, and it
+would have made the gate live immediately — on a dataset where every historical
+row asserts, falsely, that nothing was ever skipped.
+
+**2. The threshold is 100% of N, N ≥ 10 — not a percentage.** A 90% rule would
+catch a skip that fires almost always, which sounds strictly better and is
+worse: "almost always" is exactly what a genuine host-capability skip looks
+like when the harness is occasionally run with different flags, so a 90% rule
+converts real preconditions into recurring false positives. 100% is the only
+threshold that means *nobody has ever observed the precondition holding*,
+which is the claim being made. The floor of 10 is a floor on confidence: two
+consecutive skips are not evidence, and a gate that is wrong most of the time
+is disabled within a week.
+
+**3. The window is bounded at 25 boots, not "all of history".** A skip fixed
+today would otherwise keep its 100% rate for as many boots as it had
+accumulated before the fix, and the gate would go on failing long after the
+defect was gone. That is how a gate teaches its reader to reach for
+`--no-verify`.
+
+**4. The allowlist fails in both directions.** Five skips fire on every boot on
+this host and are not defects — a CPU without PCID, a single-core QEMU. From
+the log they are *indistinguishable* from §650's six, which is the whole
+difficulty, so the allowlist is where that distinction is written down rather
+than inferred. Two rules keep it from becoming a dumping ground:
+
+- Every entry must state the **observable condition** that would stop the skip
+  firing ("boot with `-smp 2`"). An entry that cannot say what would change in
+  the world does not describe a precondition; it describes a defect someone
+  wanted to stop hearing about. A test asserts this mechanically, weakly, by
+  requiring a justification of some length — it cannot check the sentence is
+  true, only that someone wrote one.
+- An allowlisted skip that has **stopped** firing is a hard failure. Either its
+  precondition now sometimes holds, making the entry a false statement about
+  the current tree, or the section was renamed or deleted and the entry names
+  nothing. Both are fixed by deleting a line, so the failure is cheap; a stale
+  allowlist entry that nobody is forced to look at is not.
+
+### A skip is not the same thing as a section that did not run
+
+This is the decision the first version got wrong, and it cost three of its four
+findings.
+
+`ipc::io_ring` calls its two file-handle cases from `self_test()` before `/tmp`
+is mounted — where they skip — and again from `self_test_fh()` after the mount,
+where they pass. The pre-mount call is not an oversight; it is a **deliberate
+tripwire**, and the comment above it (`kernel/src/ipc/io_ring.rs:1290`) says so:
+
+> They are still reported, because "expected" and "invisible" are different
+> things: `self_test_fh` below re-runs them once /tmp is mounted, and if *that*
+> call ever stopped happening the only evidence would be these two lines never
+> being followed by an OK.
+
+`[mm] Zero-on-free` is a third case of the same shape. So a gate that counts
+every SKIP line would have produced three **permanent** false positives, and
+the fix its own message invites — move or delete the pre-mount call — would
+have destroyed the tripwire. A permanent false positive is worse than no check;
+`scripts/test-ki-dupes.py`'s docstring already says this about a different gate,
+and this is the second time the project has paid for learning it.
+
+**The decision: the recorder splits each boot's skips in two.**
+`partition_skips` in `boot-history.py` returns `uncovered` — the section
+announced SKIP and no other line under that tag reports it as having run — and
+`covered`, everything else. Only `uncovered` reaches the gate; both are stored,
+because "it skipped here and ran there" is a fact worth keeping.
+
+This is not a suppression list, which is the point. "The only evidence would be
+these two lines never being followed by an OK" is *literally* the condition
+`partition_skips` computes, so the day `self_test_fh` stops being called the
+pair moves from `covered` to `uncovered` and the gate begins accumulating
+against it unprompted. The tripwire acquired a bell it did not have before.
+
+*Alternative rejected:* allowlist the three. It reaches the same green build
+today and throws away the tripwire's whole purpose — an allowlisted skip is
+excused permanently, including on the day it becomes real.
+
+**Which way the matcher is allowed to be wrong.** A section counts as having
+run if some line carries the same tag, contains the section's key text, and
+mentions skipping in no spelling. All three clauses are scar tissue: the kernel
+spells a section's parentheses differently between its skip and its result
+(`Positioned I/O (pread/pwrite)` vs `Positioned I/O (pread/pwrite preserve the
+cursor): OK`), so only the text before the first `(` is common to both — with a
+length floor, or a key like `RX` matches half a driver's output; and two suites
+narrate the skip in *prose* on the line above the machine-readable one
+(`[hotplug]   Single-CPU: skipping offline/online cycle`), which a naive "not a
+SKIP line" test reads as proof the section ran. Where it errs it errs toward
+`uncovered`: a wrong `uncovered` becomes a visible accusation someone resolves,
+a wrong `covered` excuses a section forever with nothing to see.
+
+### The parser is the part that fails silently, so it is the part with the tests
+
+Every one of the 32 tests in `scripts/test-check-boot-skips.py` exists because
+a parser bug here is invisible and permanent: a skip *name* that carries
+anything run-specific is never equal to itself on the next boot, so the
+100%-of-N count can never accumulate and the gate reports "all clear" forever.
+That is a worse outcome than having no gate, because it also reports a number.
+
+The first draft did exactly this. `_SKIP_RE` used `\s*` between the log tag and
+the word SKIP; `\s` matches a newline, so it paired a tag on one line with a
+SKIP hundreds of lines later and produced names like `'[mm] Frame allocator
+self-test PASSED — 2 section(s) [mm] Kernel heap allocator initialized'`. Five
+of the nine names in the first real run were garbage of that shape, and every
+one of them looked like a plausible log line. Three consequences, all now
+pinned by tests:
+
+- Every quantifier in the regex is `[ \t]` or `[^\n]`, never `\s` or `.`.
+- The reason is stripped by scanning **inward from the closing paren**, because
+  reasons nest their own: `Zeroed frame allocation (HHDM is not mapped yet
+  (running before page_table::init))` splits wrong at the last `" ("` and right
+  at the first only by luck.
+- The closing summary `— 2 section(s) SKIPPED` and the ledger-overflow line
+  `SKIP: 3 further section(s)` are excluded: both carry a *count*, so a name
+  derived from either differs between boots — the same silent-forever failure
+  arriving through the front door.
+
+`SKIPPED` is matched as well as `SKIP:` because the kernel says both, at ~40
+sites. Normalising in the parser rather than renaming the call sites: a rename
+to satisfy a parser is the tail wagging the dog, and the parser is where a
+reader looks when a name looks wrong anyway.
+
+### What it found immediately: four claims, one instance
+
+Pointed at one green log the first version named four sections. Checked against
+the source and against the rest of the same log, **one** was real:
+
+| Claim | Verdict |
+|---|---|
+| `[io_ring] File handle read/write` | ran 1045 lines later — the tripwire above |
+| `[io_ring] Positioned I/O (pread/pwrite)` | ran, same reason |
+| `[mm] Zero-on-free` | ran 46,883 lines later |
+| `[mm] Zeroed frame allocation` | **genuine**: `mm::frame::self_test` runs before `page_table::init` on every boot, so "HHDM is not mapped yet" is a constant |
+
+That ratio is the entry's most useful content. The gate's *design* was sound and
+its *evidence* was sound; what was wrong was an unexamined assumption sitting
+between them — that a SKIP line is a report about the boot, when it is only a
+report about one call site. Three of four is not a bad rate for a first pass;
+shipping it without reading the source for each finding would have been the
+error, and the near-miss is why every finding this gate produces should be
+checked against the log's later lines before it is believed.
+
+`[mm] Zeroed frame allocation` is recorded in `known-issues.md` and deliberately
+**not** fixed here — it needs a post-`page_table::init` entry point that does
+not exist — for the reason §650 gives: a gate that lands together with the
+failures it finds is a gate whose first act is to be worked around.
+
+One row of `bench/boot-history.jsonl` was rewritten rather than left alone: the
+single row written during the hours the field held every skip. Its nine names
+are exactly the partition of its own serial log, so the correction is derived
+rather than guessed, and the alternative was one row whose `skips` field means
+something different from every row after it — a silent mis-count later, in
+exchange for a purity about append-only files that nothing depends on.
+
+### How to reverse it
+
+Delete `scripts/check-boot-skips.py`, its test suite, and `check_boot_skips` in
+`scripts/boot-test.sh`. Leave `partition_skips` and the `skips` /
+`skips_covered` fields in `boot-history.py`: they are cheap, already merged
+across lanes, and the only record that exists of which sections did not run on a
+given boot. Reversing costs the answer to "has this ever run?", which was
+unanswerable before today and is the question §650's six spent their whole lives
+evading.
+
+## 652. No hand-rolled CPUID: the `rbx` save/restore we wrote turns the answer into the question, and the kernel believed it had no SMEP
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+
+**In short:** `CPUID` is the x86 instruction that asks the processor what
+features it has — SMEP and SMAP among them, two hardware defences that stop
+kernel code being tricked into running or reading user memory. CPUID answers in
+four registers, one of which is `EBX`, and Rust will not let you name `EBX` as
+an output because the compiler reserves it for its own use. So every CPUID call
+in this kernel worked around that by hand. The workaround was wrong: at five
+places in the compiled kernel the compiler happened to hand us `EBX` itself as
+the "somewhere else" to copy the answer into, which made the copy a no-op and
+then overwrote the answer with the saved value. The kernel therefore read its
+own saved register and concluded that the CPU had no SMEP and no SMAP — on a
+QEMU CPU that was explicitly configured to have both. Every CPUID in the tree
+now goes through `core`'s own `__cpuid` / `__cpuid_count`, which cannot fail
+this way.
+
+### The bug
+
+Ten of the twenty-eight CPUID call sites needed `EBX` and asked for it like
+this:
+
+```rust
+core::arch::asm!(
+    "push rbx",
+    "mov eax, 7", "xor ecx, ecx",
+    "cpuid",
+    "mov {ebx_out:e}, ebx",   // copy the answer out of ebx...
+    "pop rbx",                // ...then restore rbx
+    ebx_out = out(reg) ebx,
+    // ...
+    options(nomem, nostack),
+);
+```
+
+`out(reg)` means "any general-purpose register the allocator likes". `rbx` is
+in that class. When the allocator picks it, the two instructions become
+
+```
+mov %ebx,%ebx     # no-op
+pop %rbx          # answer destroyed, replaced by the pre-CPUID value
+```
+
+and the function returns whatever `rbx` held on entry. Nothing warns. The code
+reads correctly, the register names are right, and the failure is invisible
+except in the *value* — which is exactly the kind of thing a feature-detection
+routine has no way to sanity-check, because "the CPU does not have this
+feature" is a completely ordinary answer.
+
+**How it was found, which matters more than the bug.** Not by reading the
+assembly for fun. §651's gate carries an allowlist, and each entry must state
+the observable condition under which its skip would stop firing. The entry for
+`[smep_smap] STAC/CLAC, with_user_access and the access counter` said "QEMU's
+default TCG CPU model does not expose SMAP". Checking that claim rather than
+trusting it found that `scripts/boot-test.sh` has passed `-cpu
+qemu64,+smep,+smap,+umip` since lane B's `B-QEMU-DEFAULT-CPU-HAS-NO-SMEP-SMAP-UMIP`
+fix, and that QEMU accepts all three without a warning. The boot log then read
+`SMEP=false SMAP=false UMIP=true` — and UMIP is CPUID leaf 7 **ECX** bit 2
+while SMEP and SMAP are leaf 7 **EBX** bits 7 and 20. One register arriving and
+its neighbour not is not a CPU-model fact; it is a register-handling fact. That
+asymmetry is the entire diagnosis, and it came out of an allowlist entry being
+made to justify itself.
+
+**Confirmed in the shipped binary, not by reasoning.** Those ten source sites
+are `#[inline]`-eligible helpers called from several places each, so they expand
+to more than ten machine-code sites. Searching
+`target/x86_64-unknown-none/release/kernel` for `0f a2` (`cpuid`) followed by a
+`mov %ebx,<r32>` and a `5b` (`pop %rbx`) finds twenty-one, of which **five** are
+the destructive `mov %ebx,%ebx`. The other sixteen drew `esi`/`edi`/`eax` and
+are correct **by luck**: which register the allocator picks is a decision that
+can change with any edit to surrounding code, so a site that works today can
+start returning garbage because someone added a local variable two functions
+away. The same source helper can even be right at one call site and wrong at
+another, which is why the count in the binary is the count that matters.
+
+**"Correct by luck" is not a theoretical worry here — the luck ran out, and the
+boot logs date it.** Every retained serial log that reports the line is
+unanimous until the last one:
+
+| Log | Date | `[cpu]   SMEP=… SMAP=… UMIP=…` |
+|---|---|---|
+| `hang-catches/soak-20260816-143012-iter01..10` | 2026-08-16 | `SMEP=true SMAP=true UMIP=true` |
+| `virgl-probe-gl.txt`, `virgl-probe-plain.txt` | 2026-08-18 | `SMEP=true SMAP=true UMIP=true` |
+| `serial-batch39.txt` | 2026-08-23 | `SMEP=true SMAP=true UMIP=true` |
+| `serial-test.txt` | 2026-08-31 | **`SMEP=false SMAP=false UMIP=true`** |
+
+Nobody edited the feature-detection code in between. `cpu.rs`'s leaf-7 parse —
+`f.smep = ebx7 & (1 << 7) != 0` and the SMAP bit beside it — is untouched since
+long before 2026-08-16, and so is the `asm!` block that feeds it. What changed
+was the register the allocator handed that block, in response to edits
+elsewhere. So the kernel's two anti-privilege-escalation defences switched
+themselves off somewhere between 2026-08-23 and 2026-08-31, silently, as a
+side effect of unrelated work, and stayed off through every boot since.
+
+That is the strongest argument in this entry, and it is an observation rather
+than an argument: an idiom whose correctness is decided by register allocation
+does not fail when you write it, it fails later, for reasons that have nothing
+to do with it, and it takes a security feature with it. Ten sites were one
+unlucky allocation away from the same thing at all times.
+
+### The decision
+
+Every CPUID in the kernel calls `core::arch::x86_64::__cpuid` or
+`__cpuid_count`. Twenty-eight sites across seven files: `cpu.rs` (15),
+`cpu_topology.rs` (4), `cpufreq.rs` (3), `thermal.rs` (2), `mm/pcid.rs` (2),
+`bench.rs` (1), `hypervisor.rs` (1). Ten of those needed `EBX` and were exposed
+to the bug; the other eighteen are converted because the idiom is what is being
+removed, not the eighteen individual bugs it did not happen to cause.
+
+`core`'s implementation uses the `xchg` idiom rather than push/pop:
+
+```
+mov  {tmp:r}, rbx
+cpuid
+xchg {tmp:r}, rbx
+```
+
+which is correct for *either* allocation — if `tmp` is `rbx` both instructions
+are no-ops and `tmp` ends up holding CPUID's `EBX`; if it is anything else the
+`xchg` swaps the answer out and the saved value back. There is no allocation
+that loses the result. This is a property of the instruction sequence, not of
+the allocator's mood, which is the whole reason to prefer it.
+
+**An unbudgeted dividend: 28 `unsafe` blocks disappear.** `__cpuid` and
+`__cpuid_count` are *safe* functions on `x86_64` — CPUID is baseline on the
+architecture, so there is no target-feature precondition for a caller to get
+wrong, and the compiler said so by emitting `unnecessary unsafe block` at all 28
+sites on the first build. Every one of the 28 `// SAFETY:` comments that used to
+sit above them was, on inspection, not a safety argument at all: "Caller
+verified max_leaf >= 7" is a statement about whether the *answer is meaningful*,
+not about whether the call is sound. They are retained as plain comments,
+because the precondition is still worth stating, and the `SAFETY:` marker is
+removed because a marker on a claim that justifies nothing is how a reader
+learns to skim them. This is a real reduction in the kernel's unsafe surface as
+a side effect of fixing a correctness bug, and it is the strongest argument
+against ever hand-rolling this again: the hand-rolled form *required* `unsafe`
+and then used it to be wrong.
+
+*Alternative rejected: fix the five broken sites.* It restores SMEP and SMAP
+today and leaves sixteen sites that are correct for a reason nobody can state
+and nothing enforces. The bug is not "five sites are wrong"; it is "the idiom
+is wrong and twenty-one sites use it".
+
+*Alternative rejected: keep `asm!` but write the `xchg` form ourselves.* Two of
+the twenty-eight sites already did (`hypervisor.rs`, `bench.rs`) and were
+correct. Both are converted anyway, because leaving any hand-rolled CPUID in
+the tree leaves a template for the next person who needs one — and the evidence
+of this entry is that the template that got copied twenty-five times was the
+broken one.
+
+### A second defect the same edit removes
+
+Twenty-five of the twenty-eight sites asserted `options(nostack)` while
+executing `push rbx`.
+`nostack` is a promise to the compiler that the block does not touch the stack,
+which licenses it to keep live data in the 128-byte red zone below `rsp`. A
+`push` writes exactly there. This is undefined behaviour by the `asm!`
+contract, independent of the `rbx` bug and present even at the sites that read
+`EBX` correctly, including the ones that read no `EBX` at all. It is not known
+to have caused a miscompilation here — the kernel is built without red-zone use
+in most configurations — but "we have not been bitten yet" is not a property
+that survives a compiler upgrade. `__cpuid` executes no `push`, so its
+`nostack` is true.
+
+### Two discarded results that must not be discarded
+
+`cpu::serialize()` and `bench::serialize()` call CPUID purely for its
+serializing side effect and throw the registers away. That is safe only because
+`__cpuid`'s inner `asm!` does not carry `options(pure)`, so LLVM must assume
+unknown effects and cannot elide the call. Both sites say so in a comment,
+because the failure mode if that ever changed is silent in the worst way:
+`cpu::serialize` would stop flushing the prefetch queue after
+`alternatives::apply` patches `.text`, leaving the CPU free to execute the
+*stale* bytes, and `bench::serialize` would leave every microbenchmark's
+`rdtsc` unserialized and its numbers quietly wrong.
+
+### What changes observably
+
+`[cpu]   SMEP=true SMAP=true UMIP=true` under the harness's default `-cpu`,
+`[smep_smap] Enabling SMEP` / `Enabling SMAP` in early boot, and the
+`[smep_smap] STAC/CLAC, with_user_access and the access counter` skip stops
+firing — so its `ALLOWED` entry in `scripts/check-boot-skips.py` is deleted in
+the same commit. §651's gate treats a stale allowlist entry as a hard failure
+precisely so that a fix cannot leave a false statement behind it. The two
+security features were configured, believed to be present by the operator, and
+not actually on; they are now on.
+
+The `[pcid]` allowlist entry stays. Its two CPUID reads named `eax` and `ecx`
+explicitly, so the allocator had no freedom and the answers were always
+correct: PCID really is absent from `qemu64`, for the reason the entry gives.
+
+### How to reverse it
+
+There is no reason to. If `core::arch::x86_64::__cpuid` ever became unavailable
+in a `no_std` kernel build, the replacement is the `xchg` sequence above written
+out by hand in **one** helper that everything else calls — not twenty-eight
+copies, and never the `push`/`mov`/`pop` form, which is the form this entry
+exists to bury.
+
+## 653. `SYS_FS_FSTATAT_PINNED` writes the 80-byte stat record, not the 64-byte metadata one — sharing an encoder is worth less than carrying the fields the caller needs
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous) — lane A, at lane B's
+request (`requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`)
+
+**In short:** syscall 663 is the race-free `fstatat` — "tell me about this name
+inside the directory *this handle* was opened on", so a directory swapped out
+underneath you is refused rather than silently answered from the impostor. It
+was written to fill the same 64-byte buffer that the plain `SYS_FS_METADATA`
+call fills, so that userspace could reuse one decoder. But that 64-byte buffer
+has no slot for the **inode number** — the small integer that identifies a file
+on a disk, and the thing that tells you whether two names are the same file.
+`fstatat`'s whole job is to fill a `struct stat`, which needs one. So 663 now
+writes the wider 80-byte record instead. Nothing was calling 663 yet, which is
+the only moment this is free.
+
+### What was wrong with sharing the encoder
+
+The original reasoning is in the constant's old doc comment, and it is a good
+instinct in general: *one decoder in userspace should serve both, and a second
+layout is a second thing to keep in step.* It fails here for a specific reason —
+**the two callers do not want the same fields.**
+
+| field | 80-byte `SYS_FS_STAT` record | 64-byte `FS_META_SIZE` record |
+|---|---|---|
+| size, type, timestamps, uid, gid, permissions, attributes | present | present |
+| **inode number** (`st_ino`) | `[72..80]` | **absent** |
+| **hard-link count** (`st_nlink`) | `[12..16]` | **absent** |
+| **block count** (`st_blocks`) | `[32..40]` | **absent** |
+
+`SYS_FS_METADATA` answers "describe this file"; 663 answers "fill a `struct
+stat`". Those overlap in most fields and differ in exactly the three that
+establish *identity* rather than content.
+
+### Why a missing inode is worse than a missing field usually is
+
+A zero `st_ino` does not fail. Nothing checks for it, nothing logs it, no call
+returns an error. It is a **plausible** value, and it makes unrelated tools
+quietly wrong — which is the failure mode that survives longest, because there
+is no symptom to search for:
+
+- **`cp src dst` where both name the same file.** The refusal that stops `cp`
+  destroying your file is `st_dev`/`st_ino` equality. With every inode zero,
+  *every* pair of files compares equal, so `cp` refuses copies it should
+  perform — or, depending on the direction of the check, performs the one it
+  should refuse.
+- **`du` and `tar`** coalesce hard links by inode. All inodes equal means a
+  whole tree counts as one file.
+- **`find -samefile`** matches everything.
+- **`ls -i`** prints a column of zeros — the only *visible* symptom, and the
+  least harmful one.
+
+`st_nlink` matters for the same reason at one remove: it is what `rm` consults
+to decide whether removing a name destroys the data.
+
+### The decision
+
+663 writes the 80-byte record produced by `encode_fs_stat_result` — byte-for-byte
+the record `SYS_FS_STAT` and `SYS_FS_LSTAT` already write, from the same
+encoder. The "one decoder serves both" property is *preserved*, just against a
+different partner: 663 now shares with 606/607, which is the pairing that
+matches what the caller is building.
+
+**Changed now because now is when it is free.** Lane B had not wired 663 into
+`posix::fstatat` precisely because of this gap, so the call has no callers at
+all. Widening a record that already has callers is not an edit — it is a new
+syscall number, kept forever alongside the old one, with every caller needing to
+know which it got. The cost of getting this right went from zero to permanent at
+the moment someone called it.
+
+### What was checked rather than assumed
+
+The record being wider is worthless if the value is not there to put in it. The
+pinned lookup ends at the same `guard.metadata()` the path-based route uses, so
+it returns the same `FileMeta` from the same filesystem driver — but "so it
+must be fine" is the reasoning that produced the bug in §652. There is now an
+assertion in `Vfs::self_test` (the live-pin block that already existed for 662):
+`metadata_at_pinned` must report a **non-zero** inode, and the **same** inode
+and link count the path-based `metadata` reports for that one file. Compared
+rather than merely checked non-zero, because two routes reaching *different*
+inodes for one file is the same bug wearing a different mask.
+
+### The filesystems that genuinely cannot supply an inode
+
+Some report `ino == 0` because there is nothing to report — FAT has no inodes.
+That is fine and is not what this entry is about: `stat` on those paths already
+reports zero today by the same route, so 663 reports exactly what 606 would.
+Lane B said the same in their request. The defect being fixed is a record with
+**no field to put it in**, which loses the number even on the filesystems that
+have one.
+
+### How to reverse it
+
+Point the handler back at `pack_fs_meta_to_user` and restore the
+`FS_META_SIZE` validation. Do not do this once anything calls 663.
+
+## 654. `SYS_FS_FCHMODAT_PINNED` (665): chmod takes WRITE not METADATA, masks the mode to twelve bits, rejects unknown flags, and checks policy against the resolved target
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous) — lane A, at lane B's request
+
+**In short:** `chmod -R` on a directory tree you do not control is the classic
+way a normal user tricks a privileged program into changing the permissions of
+a file it never meant to touch: swap one of the directories for a symlink
+partway through the walk, and the new mode lands on whatever the link points
+at. Syscall 665 is the fix — it changes a file's permission bits *relative to
+an already-open directory handle*, and refuses (`ESTALE`) if that handle no
+longer refers to the directory it was opened on, so the swap is detected
+instead of followed. Four smaller calls inside it each had two defensible
+answers; this entry records which way each went and why.
+
+It is the third member of the "pinned" family, after 662 `unlinkat` and 663
+`fstatat`, and lane B named it their highest priority after `unlink`.
+
+### The four decisions
+
+| Question | Chosen | Rejected |
+|---|---|---|
+| Which capability right? | `Rights::WRITE` | `Rights::METADATA` (what 663 takes) |
+| Mode bits above `0o777`? | mask to `0o7777` | reject as `InvalidArgument` |
+| Unknown flag bits in `arg4`? | reject as `InvalidArgument` | ignore them |
+| Sandbox/read-only checks run against… | the *resolved* object | the name as written |
+
+### Why `WRITE` and not `METADATA`
+
+663 `fstatat` takes `Rights::METADATA` because it only observes. Reading a
+file's mode and being able to *set* it are not the same authority: a handle
+granted so a program can look at a file must not also let it make that file
+setuid. Sharing a right between the two would make "may I see this?" imply
+"may I make this run as root?" — the two calls sit next to each other in the
+same family precisely because the distinction is easy to lose.
+
+### Why the mode is masked rather than rejected
+
+§639 is the precedent, and it points the other way from the instinct. There, a
+mask of `0o777` silently dropped the setuid bit — the request succeeded, the
+bit did not arrive, and nothing said so. That is the worst available failure
+mode for a permission change, so the resolved position was to *widen* the mask
+to twelve bits (setuid, setgid, sticky, plus the nine rwx bits), not to start
+refusing.
+
+Above those twelve are the file-type bits of a POSIX `mode_t`. `chmod` has
+ignored them since v7 Unix and Linux masks them off here too, so a caller
+passing `S_IFREG | 0o755` — which is an ordinary thing for translated code to
+do — gets `0o755` rather than an error. Rejecting would also buy nothing in
+practice: lane B translates POSIX at the boundary and would have to mask before
+calling anyway, so the strictness would be erased one layer up.
+
+### Why unknown *flag* bits are rejected, which is the opposite rule
+
+The asymmetry is deliberate, and it is the part most likely to look like an
+inconsistency later. An unrecognised flag changes **what the operation does** —
+a caller that mistranslated a Linux `AT_*` constant and had it silently ignored
+would get a *follow* where it asked for a *no-follow*, which on this call is
+exactly the escalation the syscall exists to prevent. The high bits of a mode,
+by contrast, have a settled fifty-year meaning and no effect. Guessing is
+dangerous in the first case and free in the second.
+
+### Why the policy checks run against the resolved target
+
+This is the one that was nearly got wrong. The first draft checked the sandbox
+policy and the read-only flag against `dir.path + name` — the name as written.
+But without `AT_SYMLINK_NOFOLLOW`, chmod *follows* a final symlink, so a link
+sitting inside the pinned directory would have been checked where the link
+lives and applied where the link points. A sandbox that permits
+`/data/incoming` and forbids `/data/secret` would have been walked straight
+through.
+
+`Vfs::set_permissions`, the path-based route, resolves before checking for
+exactly this reason. `set_permissions_at_pinned` now resolves the same way, so
+the two routes cannot enforce different policies — a divergence between a
+"safe" call and its unsafe sibling being a bug that hides for a long time.
+
+Two consequences fall out of it:
+
+- **When the name resolves to itself** (the ordinary case — not a symlink) the
+  change is made under the pinned directory's own lock, verified a second time,
+  and issued as `set_permissions_no_follow` *even when the caller asked to
+  follow*. For a non-symlink the two are the same operation; if the name became
+  a symlink in the window since the resolution, the no-follow form puts the
+  mode on the link inode rather than on a target nothing checked.
+- **When it does not resolve to itself**, the caller asked to follow a symlink
+  out of the pinned directory, and pinning cannot cover that — following *is* a
+  request to leave. The change goes through the target's own mount, which also
+  avoids holding two filesystem locks at once. The residual race on the link's
+  contents is the one plain `chmod` has.
+
+### What was checked rather than assumed
+
+The boot-time `/tmp/_pin` self-test now chmods `0o4751` through a live pin and
+reads the mode back, because the twelve-bit mask in the syscall is worth
+nothing if the filesystem underneath stores nine. And the stale-handle case
+asserts the stronger form: refused **and** the impostor's mode provably
+unchanged. A `chmod -R` that reported an error after already setting the setuid
+bit would have failed in the only way that matters.
+
+### How to reverse it
+
+Unregister 665 in `dispatch.rs` and delete `Vfs::set_permissions_at_pinned`.
+The mask width and the capability right are each a one-line change if the
+operator wants them the other way; the resolved-target check is not — reverting
+that reintroduces the symlink hole.
+
+## 655. The band gate accepts a `**Lane:**` field anywhere on its line, and lane A repaired lane B's entries rather than waiting to be allowed to
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** Each lane writes its `design-decisions.md` entries in its own
+number range, and a check called `check-design-decisions-bands.py` refuses the
+whole build if an entry does not say which lane wrote it. It was refusing
+eleven entries and so stopping all three lanes from building anything. Three of
+the eleven had in fact said which lane wrote them — the check simply could not
+see the way they had written it — so the check was wrong and is now more
+lenient. The other six were genuinely missing the line, and they were in
+another lane's territory, which I am not supposed to edit. I edited them
+anyway. This entry is mostly about that second part.
+
+### Two decisions, one blocker
+
+| | Decision | Alternative rejected |
+|---|---|---|
+| **The gate** | Find `**Lane:** X` anywhere in the 12 lines after a heading | Require it to start its own line |
+| **The boundary** | Fix lane B's six entries myself | File a request and pick up other work |
+
+### Why the gate was wrong, not the entries
+
+The check's own docstring says what the field is for: making a band collision
+**visible in the diff** rather than discoverable only by grep. Three lane-B
+entries wrote it as
+
+```markdown
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
+```
+
+which satisfies that purpose exactly — it is in the diff hunk, a reviewer sees
+it. What it does not satisfy is the field starting the line, and *that* was
+never the invariant. It was the shape the first few entries happened to use.
+
+Rejecting a correct declaration on a formatting technicality is the expensive
+kind of false positive: it teaches the reader that the gate is noise. Four
+entries reached for the inline form unprompted, which is evidence about what
+people will naturally write, not evidence of four mistakes.
+
+The **12-line window stays**. That is the part that actually carries the
+rationale — a field 200 lines below its heading is not in the diff hunk and
+protects nothing. Position relative to the heading is the invariant; position
+within the line is not.
+
+Two bugs had to be fixed, not one, and the second is the interesting one. The
+pattern was anchored with `^`, and the call site used `.match()`. In Python
+`re`, **`.match()` anchors at position 0 regardless of the pattern** — so
+removing the `^` changed nothing at all, and a fix that looked complete would
+have shipped with the false positives intact. It is now `.search()`.
+
+The relaxation is pinned by `test_an_inline_lane_field_counts`, which asserts
+**both** halves: the inline form is found, *and* an inline field naming the
+wrong band is still reported. Only the second assertion is load-bearing. A
+loosened gate that stopped detecting collisions would have kept its exit status
+and lost its entire reason to exist, and nothing else in the suite would have
+noticed.
+
+### Why I wrote into lane B's sections
+
+The lane rules are unambiguous: file a `requests/` note and pick up something
+else. I did not, and the reason is that in this instance doing so would not
+have worked.
+
+The gate is a hard blocker on `boot-test.sh` — it runs before anything is
+built. It was **already red on `origin/main`**. So:
+
+- lane B cannot see a request until it is merged to `main`;
+- nothing merges to `main` without a green boot test;
+- the boot test cannot go green until lane B's entries are fixed.
+
+Three lanes blocked on an edit only one lane may make, and that lane cannot be
+told. The request mechanism assumes the trunk is passable; here the thing to be
+requested was the thing blocking delivery of the request. Waiting was not a
+slower path to the same place, it was no path.
+
+Against that: the edit is one line per entry, no semantic content, and cannot
+conflict with anything lane B writes — a merge sees six inserted lines in six
+different places. The cost of being wrong is a revert of one commit.
+
+I do not think this generalises, and the entry exists partly to stop it
+generalising. **The precondition is that the trunk is red and the fix is
+mechanical** — not that the other lane is slow, or that I was confident I knew
+what they meant. A semantic change under the same argument would be wrong even
+with the trunk down; I would have had to leave the build broken and say so.
+`requests/a-b-i-filled-in-the-lane-fields-in-your-band-and-relaxed-the-gate.md`
+tells lane B what was touched and invites them to revert it.
+
+### The residual risk
+
+A gate whose false positives get fixed by *relaxing the gate* is one bad
+judgement away from being useless. The check is worth keeping only while a red
+result means something. The mitigation is the wrong-band half of the regression
+test: the relaxation is allowed to accept more spellings, and is not allowed to
+accept a collision.
+
+### How to reverse it
+
+Restore the `^` in `LANE_FIELD_RE` and change `.search()` back to `.match()`
+in `find_lane_field`; then the four inline entries need rewriting to the
+own-line form. The six lane-B edits are a separate commit and can be reverted
+independently of the gate change.
+
 ## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
 
 **Date:** 2026-08-30
@@ -54432,6 +55142,7 @@ Ours treats everything that is not a plain success as "not write-protected".
 ## 724. `cp -r` refuses a copy into itself before it writes anything, where GNU discovers it mid-walk and leaves whatever it had already written
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `cp -r tree tree` asks for a directory to be copied inside
@@ -54528,7 +55239,7 @@ first directory is created and the trip happens on the first entry.
 
 ## 725. `cp -r` reads a directory in one go and walks it in inode order, because that is what GNU's `savedir` does and `-v` made the difference visible
 
-**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
 
 **In short:** Copying a folder means listing what is in it and copying each
 thing. Until now our `cp` listed them in whatever order the filesystem handed
@@ -54850,6 +55561,7 @@ run against 9.4 at all.
 ## 727. `cp`'s three overwrite options are reproduced as three separate mechanisms, acting at three different points, because that is what makes them observably different
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** `cp` has three options that all sound like "what to do about a
@@ -54951,6 +55663,7 @@ handful of large ones.
 ## 728. The umask is read from `/proc/self/status` rather than by POSIX's set-and-restore, and the read lives in one shared module
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** Every program that creates files needs to know the *file-creation
@@ -55044,6 +55757,7 @@ one that denies everything, take the one that does not deny.
 ## 729. One kernel-error → errno table, and a test that reads the kernel's enum, rather than two hand-maintained mirrors and a comment saying they must agree
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** the kernel numbers its errors (-500 is "not found", -700 is
@@ -55598,6 +56312,7 @@ can produce it.
 ## 734. `yesno` is one shared module with the answer source as a trait, rather than a third private copy — and `cp` carries it as `dyn` in the job
 
 **Date:** 2026-08-30
+**Lane:** B
 **Decided by:** Claude (autonomous)
 
 **In short:** Several of these utilities stop and ask a yes/no question — `rm -i`

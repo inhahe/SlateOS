@@ -119,6 +119,45 @@ def free_gib(path):
     return shutil.disk_usage(path).free / GIB
 
 
+def rmtree_fast(path):
+    """Delete `path` recursively, using the platform's native bulk remover.
+
+    `shutil.rmtree` is the obvious choice and it is the wrong one *here*, by
+    roughly two orders of magnitude.  It walks the tree in Python and issues a
+    separate `unlink`/`rmdir` per entry, each crossing the interpreter boundary;
+    on Windows every one of those also pays the filesystem-filter tax that
+    antivirus and the search indexer levy per file operation.  A cargo
+    `target/` is several hundred thousand tiny files, which is the worst
+    possible shape for that.  Measured on this volume: `shutil.rmtree` cleared
+    ~1.4 GiB in ten minutes, i.e. an entire `target/` would have taken hours,
+    which is why a run of this script was killed and this function written.
+    `rd /s /q` does the same walk inside one native process and finishes in
+    about a minute.
+
+    This is the same rule CLAUDE.md already states for interactive cleanup
+    ("delete large trees with `rd /s /q` from a real `cmd`, not `rm -rf`
+    through MSYS").  The script that exists *specifically* to delete large
+    trees should not be the one place that ignores it.
+
+    Falls back to `shutil.rmtree` if the native command is unavailable or
+    fails, so the behaviour is never worse than it was -- only faster when it
+    can be.  Errors are swallowed either way: a stray handle blocking one
+    unlink is a space leak, not a correctness problem, and the caller checks
+    `os.path.exists` afterwards and says so.
+    """
+    if os.name == "nt":
+        # `rd` is a cmd builtin, so it needs a shell.  Pass the path as a
+        # single argv element and let subprocess quote it -- these paths
+        # contain spaces ("visual studio projects").
+        rc, _out = run(["cmd", "/c", "rd", "/s", "/q", path])
+        if rc == 0 and not os.path.exists(path):
+            return
+        # Fall through: `rd` returns non-zero if anything at all was locked,
+        # but it still deleted everything it could, so the fallback below has
+        # far less to do than it would have had.
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def dir_size_gib(path):
     """Total size of `path` in GiB. Unreadable entries count as zero."""
     total = 0
@@ -343,7 +382,7 @@ def reclaim_dir(path, dry_run, sizes, log):
     volume = os.path.dirname(path) or path
     before = free_gib(volume)
     log("  reclaiming     %s" % path)
-    shutil.rmtree(staged, ignore_errors=True)
+    rmtree_fast(staged)
     if os.path.exists(staged):
         # A stray handle can survive the rename and block individual unlinks.
         # The tree is already out of the way under a name nothing looks for, so
@@ -403,7 +442,7 @@ def reclaim_staged(trees, dry_run, log):
                 continue
             before = free_gib(tree)
             log("  finishing      %s" % path)
-            shutil.rmtree(path, ignore_errors=True)
+            rmtree_fast(path)
             if os.path.exists(path):
                 log("  WARNING: %s still will not delete; a process holds it "
                     "open" % path)

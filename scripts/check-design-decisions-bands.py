@@ -114,7 +114,24 @@ BAND_ROW_RE = re.compile(
 )
 BAND_LANE_RE = re.compile(r"lane\s+([ABC])\b", re.IGNORECASE)
 
-LANE_FIELD_RE = re.compile(r"^\*\*Lane:\*\*\s*([ABC])\b")
+# Deliberately NOT anchored to the start of a line. The header of an entry is
+# written both ways in practice --
+#
+#     **Date:** 2026-08-30
+#     **Lane:** B
+#
+# and the one-line form
+#
+#     **Date:** 2026-08-30 · **Decided by:** ... · **Lane:** B
+#
+# -- and this used to accept only the first. That cost more than it bought:
+# four entries (725, 731, 732, 733) reached for the inline form unprompted and
+# three of them *did* declare their lane, correctly, and were failed anyway.
+# The rule this gate enforces is that the field is **visible in the diff next
+# to the heading**, and the inline form satisfies that exactly as well; the
+# line it sits on is house style, not the invariant. What still carries the
+# rationale is the *window* below, and that is unchanged.
+LANE_FIELD_RE = re.compile(r"\*\*Lane:\*\*\s*([ABC])\b")
 
 # How far below a heading the **Lane:** field may sit. The established shape is
 # Date / Decided by / Lane in the first four lines; 12 leaves room for a
@@ -250,7 +267,10 @@ def find_lane_field(lines, heading):
     for line in lines[start:start + LANE_FIELD_WINDOW]:
         if line.startswith("## "):
             break  # ran into the next section
-        m = LANE_FIELD_RE.match(line)
+        # `search`, not `match`: `match` anchors at position 0 whatever the
+        # pattern says, which is what made the inline `... · **Lane:** B` form
+        # invisible even after the `^` came off the regex.
+        m = LANE_FIELD_RE.search(line)
         if m:
             return m.group(1).upper()
     return None

@@ -3451,6 +3451,113 @@ impl Vfs {
         }
     }
 
+    /// Change the permission bits of `name` within the directory a handle was
+    /// opened on, refusing if the handle no longer denotes that directory.
+    ///
+    /// This is the entry point `fchmodat` needs, and it is the highest-value
+    /// member of the pinned family after `unlink`. `chmod -R` walking a tree it
+    /// does not control is the classic privilege-escalation shape: an attacker
+    /// who can swap a directory for a symlink mid-walk gets the mode applied to
+    /// whatever the link names. A path-based `fchmodat` re-derives the directory
+    /// by name on every entry and so cannot tell that it happened; this one
+    /// verifies the handle still denotes the directory it was opened on and
+    /// fails with `StaleHandle` if it does not.
+    ///
+    /// `no_follow` selects `AT_SYMLINK_NOFOLLOW`: the mode lands on the link
+    /// inode itself rather than on its target. Following is the POSIX default
+    /// and is what `chmod` without `-h` wants; the pin protects the *directory*
+    /// either way, which is where the race lives.
+    ///
+    /// What the pin does *not* protect is a followed symlink's target: asking
+    /// to follow is asking to leave the directory. So the sandbox and
+    /// read-only checks are run against the resolved object rather than the
+    /// name, which is what stops a link inside the pinned directory from
+    /// carrying a chmod to somewhere policy forbids.
+    ///
+    /// Verified twice, for the reason
+    /// [`unlink_at_pinned`](Self::unlink_at_pinned) is: pass 1 refuses an
+    /// already-stale handle before any policy check runs, and pass 2 happens
+    /// under the same lock as the change itself, so nothing can move the
+    /// directory between the check and the write.
+    pub fn set_permissions_at_pinned(
+        dir: &PinnedDir,
+        name: &[u8],
+        permissions: u16,
+        no_follow: bool,
+    ) -> KernelResult<()> {
+        check_at_name(name)?;
+
+        // Pass 1: an already-stale handle is refused before anything with a
+        // side effect, and before the policy checks below can report on a
+        // directory the caller no longer holds.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+        }
+
+        // `name` is known to be a single component, so this join names the
+        // object the caller meant.  The namespace check applies to the name as
+        // given, before any symlink is followed, so a link cannot be used to
+        // reach out of the caller's namespace.
+        let child = dir.path.join(name);
+        crate::ipc::namespace::check_writable(&child)?;
+
+        // The remaining checks must describe the object that actually changes,
+        // not the name used to reach it.  Without `no_follow`, chmod follows a
+        // final symlink; checking `child` would evaluate the sandbox policy and
+        // the read-only flag where the *link* lives while the mode landed on
+        // the target.  `Vfs::set_permissions` resolves before checking for
+        // exactly this reason, and resolving the same way here is what keeps
+        // the pinned and path-based routes from enforcing different policies.
+        // chmod is a metadata write, so the gate is `PathAccess::Metadata` and
+        // a writable mount, not `PathAccess::Write`.
+        let target = if no_follow {
+            Self::resolve_no_follow(&child)?
+        } else {
+            Self::resolve_follow(&child)?
+        };
+        check_writable(&target)?;
+        check_path_access(&target, PathAccess::Metadata)?;
+
+        if target == child {
+            // The ordinary case: `name` is not a symlink, so the object being
+            // changed is inside the directory the pin verified.  Do it under
+            // the pin's own lock, verified a second time, so nothing can move
+            // the directory between the check and the write.
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            let child_rel = dir_rel.join(name);
+            // `no_follow` unconditionally, even when the caller asked to
+            // follow.  The resolution above established that `name` is not a
+            // symlink; if it *became* one in the window since, a following
+            // write would land the mode on a target that was never checked.
+            // For a non-symlink the two calls are the same operation, so this
+            // costs nothing and closes that window.
+            guard.set_permissions_no_follow(&child_rel, permissions)?;
+        } else {
+            // `name` is a symlink and the caller asked to follow it, so the
+            // object being chmod-ed is outside the pinned directory and
+            // possibly on another mount.  Pinning cannot cover this: following
+            // is an explicit request to leave, and the residual race on the
+            // link's own contents is the one plain `chmod` has too.  Operating
+            // through the target's own mount also avoids holding two
+            // filesystem locks at once.
+            let (fs, _id, _opts, relative) = resolve_mount(&target)?;
+            let mut guard = fs.lock();
+            if no_follow {
+                guard.set_permissions_no_follow(&relative, permissions)?;
+            } else {
+                guard.set_permissions(&relative, permissions)?;
+            }
+        }
+
+        super::notify::emit_metadata(&target);
+        super::journal::record(super::journal::JournalEventType::Modified, &target);
+        Ok(())
+    }
+
     /// List the directory `dir` denotes, refusing if it no longer denotes the
     /// directory it was opened on.
     ///
@@ -6818,8 +6925,8 @@ pub fn self_test() -> KernelResult<()> {
             // unconditionally would satisfy every assertion further down --
             // the swap assertions only prove a refusal happens, not that it
             // happens for the right reason.
-            match Vfs::metadata_at_pinned(&pin, b"victim", false) {
-                Ok(m) if m.size == 8 => {}
+            let pinned_meta = match Vfs::metadata_at_pinned(&pin, b"victim", false) {
+                Ok(m) if m.size == 8 => m,
                 other => {
                     serial_println!(
                         "[vfs]   FAIL: metadata_at_pinned through a live pin = {:?}, want size 8",
@@ -6827,6 +6934,51 @@ pub fn self_test() -> KernelResult<()> {
                     );
                     return Err(KernelError::InvalidArgument);
                 }
+            };
+
+            // The pinned lookup must carry the *identity* fields, not just the
+            // size.  `SYS_FS_FSTATAT_PINNED` (663) exists to back a race-free
+            // `fstatat`, which fills a `struct stat`; if this path returned a
+            // `FileMeta` whose `ino` were zero, widening 663's record to the
+            // 80-byte stat layout (§653) would have bought nothing, and the
+            // failure would be silent -- a zero inode is a plausible value, so
+            // `cp` refuses legitimate copies and `find -samefile` matches
+            // everything, with no error anywhere.  Compared against the
+            // path-based answer rather than merely checked non-zero, because
+            // the two routes reaching *different* inodes for one file is the
+            // same bug wearing a different mask.
+            let path_meta = match Vfs::metadata("/tmp/_pin/real/victim") {
+                Ok(m) => m,
+                Err(e) => {
+                    serial_println!(
+                        "[vfs]   FAIL: path-based metadata on the file the pin just described = \
+                         {e:?} -- the comparison below has nothing to compare against"
+                    );
+                    return Err(e);
+                }
+            };
+            if pinned_meta.ino == 0 {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned returned ino 0 on a filesystem that \
+                     assigns inodes -- 663's stat record would report st_ino == 0"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if pinned_meta.ino != path_meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned ino {} != path-based stat ino {} for one file",
+                    pinned_meta.ino,
+                    path_meta.ino
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if pinned_meta.nlinks != path_meta.nlinks {
+                serial_println!(
+                    "[vfs]   FAIL: metadata_at_pinned nlinks {} != path-based stat nlinks {}",
+                    pinned_meta.nlinks,
+                    path_meta.nlinks
+                );
+                return Err(KernelError::InvalidArgument);
             }
             match Vfs::readdir_pinned(&pin) {
                 Ok(v) if v.iter().any(|e| e.name.as_bytes() == b"victim") => {}
@@ -6837,6 +6989,44 @@ pub fn self_test() -> KernelResult<()> {
                         other.map(|v| v.len())
                     );
                     return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // chmod through a live pin, and the twelve-bit question. Masking a
+            // mode to nine bits drops setuid with no error (§639), which is the
+            // worst way for a permission request to fail; the syscall masks to
+            // `0o7777`, but that is only worth anything if the filesystem
+            // underneath actually stores the high three. So this asserts the
+            // bit survives the round trip rather than assuming it does.
+            Vfs::set_permissions_at_pinned(&pin, b"victim", 0o4751, false)?;
+            match Vfs::metadata_at_pinned(&pin, b"victim", false) {
+                Ok(m) if m.permissions == 0o4751 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: set_permissions_at_pinned(0o4751) then read back = {:?}, \
+                         want 0o4751 -- setuid must survive, not be silently masked off",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The same one-component containment `unlink` has. `..` is the
+            // load-bearing one: a chmod that climbed out of the verified
+            // directory would be the exact privilege escalation the pin exists
+            // to stop.
+            for bad in [&b".."[..], b".", b"a/b", b"", b"/etc"] {
+                match Vfs::set_permissions_at_pinned(&pin, bad, 0o777, false) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: set_permissions_at_pinned(.., {:?}) = {:?}, \
+                             want InvalidArgument",
+                            core::str::from_utf8(bad).unwrap_or("<non-utf8>"),
+                            other
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
                 }
             }
 
@@ -6920,6 +7110,49 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
 
+            // chmod is the one where a wrong answer is a privilege escalation
+            // rather than an information leak, so it gets the stronger form of
+            // the assertion: refused, *and* the impostor's file is provably
+            // untouched. A `chmod -R` that reported an error but had already
+            // set the setuid bit would have failed in the way that matters.
+            let before = match Vfs::metadata("/tmp/_pin/real/victim") {
+                Ok(m) => m.permissions,
+                Err(e) => {
+                    serial_println!(
+                        "[vfs]   FAIL: cannot read the impostor's mode before the stale chmod \
+                         ({e:?}) -- the comparison below would have nothing to compare against"
+                    );
+                    return Err(e);
+                }
+            };
+            match Vfs::set_permissions_at_pinned(&pin, b"victim", 0o4777, false) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: set_permissions_at_pinned through a swapped directory = \
+                         {other:?}, want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            let after = match Vfs::metadata("/tmp/_pin/real/victim") {
+                Ok(m) => m.permissions,
+                Err(e) => {
+                    serial_println!(
+                        "[vfs]   FAIL: the impostor's file is unreadable after the stale chmod \
+                         ({e:?}) -- a refusal must leave it exactly as it was"
+                    );
+                    return Err(e);
+                }
+            };
+            if after != before {
+                serial_println!(
+                    "[vfs]   FAIL: the stale chmod was reported as refused but still changed the \
+                     impostor's mode ({before:#o} -> {after:#o})"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+
             // A pin taken on the impostor is live again, and unlink without
             // AT_REMOVEDIR still refuses a directory rather than leaving the
             // choice to whatever the filesystem's `remove` happens to do.
@@ -6966,7 +7199,9 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!(
             "[vfs]   pinned fd-relative primitives: OK (a directory swapped out \
              from under the pin is refused with StaleHandle and the impostor's \
-             file is untouched; `..`, `.`, `a/b` and an empty name are refused)"
+             file and mode are untouched; `..`, `.`, `a/b` and an empty name \
+             are refused; a live pin reports a matching inode and preserves \
+             setuid through chmod)"
         );
     } else {
         skips.record("pinned fd-relative primitives", "/tmp not mounted");

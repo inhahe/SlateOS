@@ -247,6 +247,12 @@ xfail_case() {
 # `cp` refuses.
 missing() { xfail_case "not implemented by this cp" "$@"; }
 
+# The reason six copy-into-itself cases are expected to differ. Both sides
+# print the same diagnostic and exit 1; what differs is the debris left on
+# disk, and GNU's debris is not a fixed thing to match -- see section 9 and
+# design-decisions.md 724.
+SELF_RESIDUE='GNU leaves a partial copy, we leave the tree untouched'
+
 echo "cp-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
@@ -432,9 +438,11 @@ TREE='mktree; mkdir -p dir/tree; printf keep > dir/tree/keep.txt'
 run_case -r tree dir
 TREE='mktree; printf blocking > dst'
 run_case -r tree dst
-# Two trees into one directory.
+# Two trees into one directory. The second names the destination as a source
+# as well, which is a copy into itself; see section 9 for why the residue is
+# not something to match.
 run_case -r tree dir dst
-run_case -r tree dir dir
+xfail_case "$SELF_RESIDUE" -r tree dir dir
 
 # A tree several levels deep, so that a walk which only descends one level is
 # visible.
@@ -477,14 +485,29 @@ run_case -r treelink/ dst
 # inside the source, so a `cp` that went ahead would copy what it had just
 # written. Both sides are expected to refuse; the header explains why no case
 # here names a bare `..`.
+#
+# The six marked `xfail_case` agree on stderr and on exit status and differ
+# only in what is left on disk. Ours refuses before creating anything; GNU
+# notices only when its walk trips over the destination directory it made
+# earlier, and keeps whatever it copied first. That residue is not a behaviour
+# to match: `copy_dir` visits entries in inode order
+# (`savedir (…, SAVEDIR_SORT_FASTREAD)`), so how much gets copied first depends
+# on the inode number the kernel allocated for the destination. Measured on
+# ext4 under coreutils 9.4, `cp -r . dst` over the same 100 files left the
+# complete copy when the destination drew a high inode and a single empty
+# directory when 1900 deletions made a low one available. See
+# design-decisions.md 724.
+#
+# The four left as `run_case` agree completely, because there the destination
+# already exists and GNU creates no directory to trip over.
 
-run_case -r tree tree
+xfail_case "$SELF_RESIDUE" -r tree tree
 run_case -r tree .
 run_case -r tree ./
-run_case -r tree tree/sub
-run_case -r . dst
-run_case -r ./ dst
-run_case -r tree/.. dst
+xfail_case "$SELF_RESIDUE" -r tree tree/sub
+xfail_case "$SELF_RESIDUE" -r . dst
+xfail_case "$SELF_RESIDUE" -r ./ dst
+xfail_case "$SELF_RESIDUE" -r tree/.. dst
 run_case -r tree/. dst
 run_case -r tree/sub/.. dst
 run_case -r tree/ dst

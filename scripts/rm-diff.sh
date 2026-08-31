@@ -84,13 +84,29 @@ case_no=0
 # --- the fixture --------------------------------------------------------------
 # A small tree, built in a fixed order.
 #
-# The order is load-bearing and not merely tidy. Neither `rm` sorts: GNU passes
-# a null comparison function to `fts_open`, and ours iterates `read_dir`, so
-# both walk a directory in readdir order. On ext4 a directory this small is a
-# linear one, whose readdir order is insertion order — so two directories built
-# by the same commands in the same sequence enumerate the same way, and `-v`
-# output can be compared line for line. Build a fixture out of a `for` loop
-# over an unsorted glob and that stops being true.
+# What makes `-v` output comparable line for line is that neither `rm` sorts:
+# GNU passes a null comparison function to `fts_open`, and ours iterates
+# `read_dir`, so both walk a directory in raw readdir order and get the same
+# answer from the same directory.
+#
+# This used to say that readdir order is insertion order "on ext4 a directory
+# this small". Measured on 2026-08-30, that is false — `dir_index` is on, so
+# even a three-entry directory is hashed:
+#
+#     $ ls -f tree            $ ls -i tree
+#     .. a.txt link sub .     674264 a.txt   674266 link   674263 sub
+#
+# — readdir gives a.txt, link, sub while insertion order was sub, a.txt, link.
+# The conclusion survives and is stronger than the reasoning it had: hash order
+# is a function of the *names*, so two case directories holding the same names
+# enumerate identically however they were built. What would break that is a
+# fixture whose two sides hold different names — a `for` loop over an unsorted
+# glob, say, or a name derived from a timestamp or a pid.
+#
+# `cp` is the one place in this family where the sides *did* diverge, and for a
+# different reason: GNU's `cp` does sort, by inode, via `savedir (…,
+# SAVEDIR_SORT_FASTREAD)`. See `design-decisions.md` §725 and
+# `read_dir_fastread` in `cp.rs`.
 mktree() {
   mkdir -p tree/sub
   printf 'a\n' > tree/a.txt

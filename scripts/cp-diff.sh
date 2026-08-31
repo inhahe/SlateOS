@@ -78,14 +78,16 @@ case_no=0
 # A small tree, a loose file, an empty directory, and one symlink, built in a
 # fixed order.
 #
-# The order is load-bearing rather than tidy, for the reason `rm-diff.sh`'s
-# fixture gives: neither program sorts a directory it walks — GNU passes a null
-# comparison to `fts_open`, ours iterates `read_dir` — so both take readdir
-# order, which on an ext4 directory this small is insertion order. Two
-# directories built by the same commands in the same sequence therefore
-# enumerate identically, and the diagnostics from a partly-failing walk can be
-# compared line for line. `cp` has no `-v` yet; when it lands, this is what
-# will let its output be compared at all.
+# The order is load-bearing rather than tidy. Both programs walk a directory in
+# *inode* order -- GNU through `savedir (dir, SAVEDIR_SORT_FASTREAD)`, ours
+# through `read_dir_fastread`, which reproduces it -- and on a fresh ext4
+# directory inode order is the order the entries were created. So two case
+# directories built by the same commands in the same sequence enumerate
+# identically, which is what lets `-rv`'s stdout and the diagnostics from a
+# partly-failing walk be compared line for line at all.
+#
+# It follows that a case which creates extra fixture files through `TREE` has
+# them *after* the four `mktree` makes, in the order its own commands run.
 #
 # `tree/link` points at a *sibling*, relatively. That is the shape that tells a
 # clone from a dereference without a second lookup: cloned, it still resolves
@@ -780,18 +782,25 @@ run_case -v file.txt file.txt dir
 run_case -v -t dir file.txt tree/a.txt
 run_case -v -T file.txt new.txt
 
-# Directories. Only `tree/sub`, which holds exactly one entry: with more than
-# one, the order of the lines is the order the directory was *read* in, and
-# that is a thing the two programs decide separately. Measured on `tree`, whose
-# three entries GNU names in the order sub, a.txt, link and ours names in the
-# order a.txt, link, sub. Until that is settled the wider tree cannot be
-# compared here without certifying an accident.
+# Directories. The order of these lines is the order the directory was *read*
+# in, which is the one thing about `-rv` that is not obvious: both programs
+# walk a directory in inode order, which on ext4 is neither name order nor
+# `readdir` order. `tree` here holds `a.txt`, `sub` and `link`, created in the
+# order sub, a.txt, link, and both name them in that order and not the other
+# two -- so these cases certify `read_dir_fastread`'s sort and would go red
+# without it.
+run_case -rv tree dst
+run_case -rv tree dir
 run_case -rv tree/sub dst
 run_case -rv tree/sub dir
 TREE='mktree; mkdir -p dst/sub'
 run_case -rv tree/sub dst
 TREE='mktree; mkdir -p dst/sub; printf old > dst/sub/b.txt'
 run_case -rv tree/sub dst
+TREE='mktree; mkdir -p tree/sub/deeper; printf d > tree/sub/deeper/d.txt'
+run_case -rv tree dst
+TREE='mktree; mkdir dst; printf keep > dst/keep.txt'
+run_case -rv tree dst
 
 # A symlink is announced like anything else that is not a directory, and the
 # line names the link rather than what it points at.

@@ -1268,10 +1268,10 @@ fn copy_tree<O: Write, E: Write>(
     // with the mode it is supposed to have. GNU carries the mode over in this
     // case too, and a `dst` left at the forced owner-rwx would be a copy of a
     // 0500 directory that anyone could write into.
-    match fs::read_dir(src) {
+    match read_dir_fastread(src) {
         Ok(entries) => {
             for entry in entries {
-                if !copy_entry(&entry, src, dest, job) {
+                if !copy_entry(&entry, dest, job) {
                     ok = false;
                 }
             }
@@ -1325,28 +1325,71 @@ fn copy_tree<O: Write, E: Write>(
     ok
 }
 
+/// Every entry of `src`, read in one go and put in the order GNU walks them.
+///
+/// This is gnulib's `savedir (dir, SAVEDIR_SORT_FASTREAD)`, which is what
+/// `copy.c`'s `copy_dir` calls, reproduced for two reasons that are the same
+/// reason twice.
+///
+/// **The order is observable now.** Until `--verbose` there was no way to tell
+/// what order a tree was walked in — the copy it leaves is the same either way
+/// — and `fs::read_dir`'s raw `readdir` order was as good as any. `cp -rv` puts
+/// that order on stdout, and on ext4 the two disagree: a directory holding
+/// `a.txt`, `sub` and `link` created in the order `sub`, `a.txt`, `link` is
+/// named by GNU in creation order and by an unsorted `readdir` in hash order.
+/// Neither is more correct, but only one of them is GNU's, and this program's
+/// job is to be indistinguishable from GNU.
+///
+/// **And the order GNU picked is the fast one**, which is why gnulib calls it
+/// `FASTREAD` rather than `SORTED`. Inode number is roughly on-disk position on
+/// every filesystem that allocates inodes in tables, so walking a directory in
+/// inode order turns the scattered reads of a `stat` per entry into a forward
+/// scan. That is a real win on a cold cache and costs one sort of a list that
+/// had to be materialised anyway.
+///
+/// The eager read is gnulib's too, and it changes one thing besides order: a
+/// `readdir` that fails part-way through now abandons the whole directory
+/// rather than copying the entries it had already seen. `savedir` returns
+/// `NULL` in exactly that case, and `copy_dir` reports it as the one
+/// `cannot access` diagnostic — so this is not a new behaviour so much as the
+/// one GNU always had.
+///
+/// # Errors
+///
+/// Opening the directory, or any `readdir` within it.
+fn read_dir_fastread(src: &Path) -> io::Result<Vec<fs::DirEntry>> {
+    // `mut` is written only by the `#[cfg(unix)]` arm below. Off Unix there is
+    // no inode to sort by, so the binding is never assigned to and the compiler
+    // would rightly say so.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut entries: Vec<fs::DirEntry> = fs::read_dir(src)?.collect::<io::Result<Vec<_>>>()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirEntryExt as _;
+        // `d_ino` straight out of the `dirent`, not a `stat` — the sort must
+        // not cost what it is there to save. Unstable sort because gnulib's
+        // `qsort_r` is unstable too, and the only way to get a tie is two hard
+        // links to one inode in one directory, where the two orders differ in
+        // which of two names is copied first and in nothing else.
+        entries.sort_unstable_by_key(fs::DirEntry::ino);
+    }
+    // Off Unix there is nothing to sort by, which is also gnulib's answer:
+    // `SAVEDIR_SORT_FASTREAD` degrades to `SAVEDIR_SORT_NONE` where
+    // `D_INO_IN_DIRENT` is not defined. See the `#[cfg(unix)]` arm above.
+    Ok(entries)
+}
+
 /// One entry of a directory being walked. Split out of [`copy_tree`] only to
 /// keep the mode bookkeeping either side of the walk readable in one screen.
+///
+/// The containing directory is no longer a parameter: the `readdir` that could
+/// fail now happens in [`read_dir_fastread`], so the only caller that ever had
+/// to name the *source directory* in a diagnostic is the one that reads it.
 fn copy_entry<O: Write, E: Write>(
-    entry: &io::Result<fs::DirEntry>,
-    src: &Path,
+    entry: &fs::DirEntry,
     dest: &Path,
     job: &mut Job<'_, O, E>,
 ) -> bool {
-    let entry = match entry {
-        Ok(e) => e,
-        Err(e) => {
-            // The source directory is what could not be read, so it is what is
-            // named — this said `dest` before, which is a directory that was
-            // created successfully a moment earlier and had nothing to do with
-            // the failure. Same sentence as the whole-directory failure in
-            // [`copy_tree`]: GNU reads a directory in one go, so it has no
-            // separate wording for giving up part-way through.
-            let why = strerror(e);
-            let _ = writeln!(job.err, "cp: cannot access {}: {why}", quoteaf_os(src));
-            return false;
-        }
-    };
     let from = entry.path();
     let to = dest.join(entry.file_name());
 
@@ -2702,6 +2745,63 @@ mod tests {
         let (rendered_src, _) = line.rsplit_once(" -> ").unwrap_or((line, ""));
         assert!(rendered_src.starts_with('\''), "{rendered_src}");
         assert!(rendered_src.ends_with("a b'"), "{rendered_src}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------- the order a directory is read --
+
+    /// Whatever the order, every entry has to come out exactly once. Asserted
+    /// on both platforms, because only one of them sorts and a sort that drops
+    /// or duplicates an entry would be a silently incomplete copy.
+    #[test]
+    fn the_directory_read_returns_every_entry_once() {
+        let dir = scratch("read_all");
+        for name in ["a", "b", "c", "d"] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+        fs::create_dir(dir.join("sub")).unwrap();
+
+        let mut got: Vec<String> = read_dir_fastread(&dir)
+            .unwrap()
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        got.sort();
+        assert_eq!(got, ["a", "b", "c", "d", "sub"]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// And on Unix the order is inode-ascending, which is gnulib's
+    /// `SAVEDIR_SORT_FASTREAD` and therefore GNU `cp`'s. Asserted against the
+    /// inodes themselves rather than against a fixed list of names: what the
+    /// filesystem allocates is its business, and the claim being made is only
+    /// that whatever it allocated comes back in order.
+    ///
+    /// Five entries rather than two, because a two-element list is sorted by
+    /// half the possible implementations of `sort` including several wrong
+    /// ones.
+    #[cfg(unix)]
+    #[test]
+    fn the_directory_read_is_in_inode_order() {
+        use std::os::unix::fs::DirEntryExt as _;
+
+        let dir = scratch("read_ino");
+        // Names deliberately anti-correlated with creation order, so that a
+        // sort by *name* would produce a different answer and be caught.
+        for name in ["e", "d", "c", "b", "a"] {
+            fs::write(dir.join(name), b"x").unwrap();
+        }
+
+        let inodes: Vec<u64> = read_dir_fastread(&dir)
+            .unwrap()
+            .iter()
+            .map(fs::DirEntry::ino)
+            .collect();
+        assert_eq!(inodes.len(), 5);
+        assert!(
+            inodes.windows(2).all(|w| w[0] <= w[1]),
+            "not ascending: {inodes:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

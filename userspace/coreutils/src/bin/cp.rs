@@ -767,6 +767,7 @@ Usage: cp [OPTION]... SOURCE DEST
   or:  cp [OPTION]... SOURCE... DIRECTORY
 Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
+  -a, --archive         same as -dR --preserve=all
       --backup[=CONTROL]  make a backup of each existing destination file
   -b                    like --backup but does not accept an argument
   -d                    same as --no-dereference --preserve=links
@@ -4867,6 +4868,94 @@ mod tests {
                 e.sentence
             );
         }
+    }
+
+    /// The option spellings [`help_text`] documents, read out of the text
+    /// itself: every line indented under the option list whose first word is an
+    /// option, up to the two-space gap before the description, split on `", "`
+    /// and cut at the `=` or `[` that introduces a value.
+    fn documented_options() -> HashSet<String> {
+        let mut set = HashSet::new();
+        for line in help_text().lines() {
+            let Some(rest) = line.strip_prefix("  ") else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            if !rest.starts_with('-') {
+                continue;
+            }
+            for token in rest.split("  ").next().unwrap_or(rest).split(", ") {
+                let name = token.split(['=', '[']).next().unwrap_or(token).trim();
+                if name.starts_with('-') {
+                    set.insert(name.to_string());
+                }
+            }
+        }
+        set
+    }
+
+    /// Whether this argv gets past "recognised, but not implemented here".
+    fn is_implemented(argv: &[&str]) -> bool {
+        match parse_args(&args(argv)) {
+            Err(e) => !e.sentence.contains("not implemented"),
+            Ok(_) => true,
+        }
+    }
+
+    /// `--help` names every option this `cp` acts on, and names nothing else.
+    ///
+    /// Derived from [`SHORT_OPTIONS`] and [`LONG_OPTIONS`] rather than written
+    /// out, because a hand-written list would be the same document as the help
+    /// text and would go wrong in the same way at the same moment. It already
+    /// had: `-a` was implemented, tested and shipped with no help line at all,
+    /// and nothing noticed, because no test read the help.
+    #[test]
+    fn help_documents_exactly_the_options_this_cp_has() {
+        let mut implemented: HashSet<String> = HashSet::new();
+
+        for (name, takes) in LONG_OPTIONS {
+            // A value is attached rather than given as the next word, so that a
+            // value-taking option cannot swallow `a` and turn this into a test
+            // about operand arity.
+            let spelled = match takes {
+                Takes::Nothing => format!("--{name}"),
+                Takes::Optional | Takes::Required => format!("--{name}=x"),
+            };
+            if is_implemented(&[&spelled, "a", "b"]) {
+                implemented.insert(format!("--{name}"));
+            }
+        }
+
+        let letters = SHORT_OPTIONS.as_bytes();
+        let mut i = 0;
+        while i < letters.len() {
+            let c = char::from(letters[i]);
+            let takes = letters.get(i + 1) == Some(&b':');
+            i += usize::from(takes) + 1;
+            let spelled = if takes {
+                format!("-{c}x")
+            } else {
+                format!("-{c}")
+            };
+            if is_implemented(&[&spelled, "a", "b"]) {
+                implemented.insert(format!("-{c}"));
+            }
+        }
+
+        // `--path` is `--parents` under another name and would never get a line
+        // of its own, so it must not reach this comparison as a *separate*
+        // option. It does not, because `--parents` is not implemented -- if it
+        // ever is, this assertion is the reminder to decide which spelling the
+        // help names.
+        let documented = documented_options();
+        let mut missing: Vec<&String> = implemented.difference(&documented).collect();
+        let mut extra: Vec<&String> = documented.difference(&implemented).collect();
+        missing.sort();
+        extra.sort();
+        assert!(
+            missing.is_empty() && extra.is_empty(),
+            "implemented but undocumented: {missing:?}; documented but not implemented: {extra:?}"
+        );
     }
 
     // --------------------------------------------- -p and the preserve list --

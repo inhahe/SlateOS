@@ -1882,6 +1882,7 @@ fn main() -> ExitCode {
 mod tests {
     use super::*;
     use guitk::event::Modifiers;
+    use guitk::probe;
 
     fn make_key(key: Key, text: Option<char>) -> KeyEvent {
         KeyEvent {
@@ -2598,6 +2599,778 @@ mod tests {
             (fill - want).abs() < 0.5,
             "{typed} of {total} characters typed should fill {want} of the \
              {track}-wide track, not {fill}"
+        );
+    }
+
+    // =======================================================================
+    // Wiring: the window, the layout, the mouse and the scroll
+    // =======================================================================
+
+    /// The window every test that does not say otherwise is read against.
+    const W: (f32, f32) = TypingTutorApp::SIZE;
+
+    /// The sizes a claim about the layout has to hold at.
+    ///
+    /// A narrow one, a short one, a tall one and a very large one. Two sizes
+    /// cannot separate a formula that scales from one that is merely
+    /// proportional to the one number both happen to share (lesson 86).
+    const SIZES: [(f32, f32); 6] = [
+        (320.0, 240.0),
+        (400.0, 900.0),
+        (620.0, 560.0),
+        (900.0, 400.0),
+        (1280.0, 800.0),
+        (1920.0, 1080.0),
+    ];
+
+    /// True when `body` is painted with its origin inside `r`.
+    ///
+    /// A hit box says a click lands somewhere; this says the user can see what
+    /// they are aiming at (`known-issues.md` lesson 81).
+    fn text_inside(frame: &Frame<Target>, body: &str, r: Rect) -> bool {
+        frame.commands().iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, x, y, .. }
+                if text.as_str() == body && r.contains(*x, *y))
+        })
+    }
+
+    /// An app on the typing view, `typed` characters into lesson `idx`, all of
+    /// them correct.
+    fn typed_into(idx: usize, typed: usize) -> TypingTutorApp {
+        let mut app = TypingTutorApp::new();
+        app.start_lesson(idx);
+        for _ in 0..typed {
+            let session = app.session.as_ref().expect("a session");
+            let Some(&ch) = session.text.get(session.cursor) else {
+                break;
+            };
+            app.handle_key(&make_key(Key::A, Some(ch)));
+        }
+        app
+    }
+
+    // --- The window ---------------------------------------------------------
+
+    /// The frame is painted to the edges of whatever window it is given, not to
+    /// the edges of the one the program was written for.
+    #[test]
+    fn the_background_covers_the_window_at_every_size() {
+        for size in SIZES {
+            let app = TypingTutorApp::new();
+            let frame = app.frame(size.0, size.1);
+            assert!(
+                frame.commands().iter().any(|c| matches!(c,
+                    RenderCommand::FillRect { x, y, width, height, .. }
+                        if *x == 0.0 && *y == 0.0
+                            && (*width - size.0).abs() < 0.01
+                            && (*height - size.1).abs() < 0.01)),
+                "no background covering {size:?}"
+            );
+        }
+    }
+
+    /// Nothing the app draws is placed outside the window it was given.
+    ///
+    /// Unclipped, deliberately: `Frame::hit` drops a box that is empty after
+    /// clipping, so testing hit boxes here would be asking a question whose
+    /// answer the clip already guaranteed (lesson 80). This walks the paint.
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        for size in SIZES {
+            for view in [
+                AppView::LessonSelect,
+                AppView::Typing,
+                AppView::Results,
+                AppView::Statistics,
+            ] {
+                let mut app = typed_into(0, 12);
+                app.results.push(SessionResult {
+                    lesson_title: String::from("Practice"),
+                    category: LessonCategory::HomeRow,
+                    wpm: 42.0,
+                    accuracy: 97.5,
+                    duration_ms: 65_000,
+                    text_length: 120,
+                });
+                app.view = view;
+                for cmd in app.frame(size.0, size.1).commands() {
+                    let (x, y) = match cmd {
+                        RenderCommand::FillRect { x, y, .. } | RenderCommand::Text { x, y, .. } => {
+                            (*x, *y)
+                        }
+                        _ => continue,
+                    };
+                    assert!(
+                        x >= -1.5 && y >= -1.5 && x <= size.0 && y <= size.1,
+                        "{view:?} draws at ({x}, {y}), outside a {size:?} window"
+                    );
+                }
+            }
+        }
+    }
+
+    // --- The layout ---------------------------------------------------------
+
+    /// A taller window shows more lessons, and the count is the body's height
+    /// divided by a row -- not a constant, and not a share of the window.
+    #[test]
+    fn a_taller_window_lists_more_lessons() {
+        let short = Layout::solve(620.0, 300.0);
+        let tall = Layout::solve(620.0, 1000.0);
+        assert!(
+            tall.rows_visible() > short.rows_visible(),
+            "300 px shows {} rows and 1000 px shows {} -- the list does not \
+             grow with the window",
+            short.rows_visible(),
+            tall.rows_visible()
+        );
+        // And the rows are the same height in both, so what grew is the number
+        // of lessons and not the size of each.
+        assert!(
+            tall.row < short.row * 2.0,
+            "the rows grew with the window instead of the list growing"
+        );
+    }
+
+    /// Every visible row is inside the body, and no two of them overlap.
+    #[test]
+    fn rows_tile_the_body_without_overlapping() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            let n = l.rows_visible();
+            for i in 0..n {
+                let r = l.row_rect(i);
+                assert!(
+                    r.y >= l.body.y - 0.01 && r.bottom() <= l.body.bottom() + 0.01,
+                    "row {i} of {n} at {r:?} leaves the body {:?} at {size:?}",
+                    l.body
+                );
+                if i > 0 {
+                    let above = l.row_rect(i - 1);
+                    assert!(
+                        r.y >= above.bottom() - 0.01,
+                        "row {i} at {r:?} overlaps row {} at {above:?}",
+                        i - 1
+                    );
+                }
+            }
+        }
+    }
+
+    /// A window too short for a row says zero rather than one.
+    ///
+    /// One is the tempting answer and the wrong one: a row drawn in a body that
+    /// cannot hold it is a row drawn over the footer.
+    #[test]
+    fn a_body_too_short_for_a_row_shows_none() {
+        let l = Layout::solve(620.0, 40.0);
+        if l.body.h < l.row {
+            assert_eq!(
+                l.rows_visible(),
+                0,
+                "{:?} fits no row but claims one",
+                l.body
+            );
+        }
+    }
+
+    /// The card grid wraps to as many columns as fit and no more, and the cards
+    /// in a row do not overlap.
+    #[test]
+    fn cards_tile_their_row_without_overlapping() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            assert!(
+                (1..=3).contains(&l.cards_across),
+                "{} cards across at {size:?}",
+                l.cards_across
+            );
+            for i in 1..l.cards_across {
+                let left = l.card_rect(i - 1);
+                let right = l.card_rect(i);
+                assert!(
+                    right.x >= left.right() - 0.01,
+                    "card {i} at {right:?} overlaps card {} at {left:?} at {size:?}",
+                    i - 1
+                );
+            }
+            let last = l.card_rect(l.cards_across - 1);
+            assert!(
+                last.right() <= l.body.right() + 0.01,
+                "the last card in a row at {last:?} leaves the body {:?} at {size:?}",
+                l.body
+            );
+            // The next one wraps rather than continuing off the edge.
+            let wrapped = l.card_rect(l.cards_across);
+            assert!(
+                wrapped.y > l.body.y,
+                "card {} did not wrap to a second row at {size:?}",
+                l.cards_across
+            );
+        }
+    }
+
+    // --- The mouse ----------------------------------------------------------
+
+    /// Every lesson row on screen can be clicked, and the click selects the
+    /// lesson whose title is drawn in that row.
+    ///
+    /// The row's own title, not "some lesson": the index the hit box carries is
+    /// into `lessons` and the drawing walks the *filtered* list, and confusing
+    /// the two is the bug this app already had.
+    #[test]
+    fn clicking_a_row_selects_the_lesson_drawn_in_it() {
+        let app = TypingTutorApp::new();
+        let frame = app.draw(W);
+        for idx in 0..app.lessons.len() {
+            let Some(r) = probe::rect_of(&app, Target::Lesson(idx)) else {
+                continue;
+            };
+            assert!(
+                text_inside(&frame, &app.lessons[idx].title, r),
+                "row {idx} is clickable but lesson {:?} is not drawn in it",
+                app.lessons[idx].title
+            );
+            let mut app = TypingTutorApp::new();
+            assert_eq!(
+                probe::click(&mut app, Target::Lesson(idx)),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                app.selected_lesson, idx,
+                "clicking row {idx} selected lesson {}",
+                app.selected_lesson
+            );
+        }
+    }
+
+    /// A second click on the row already selected starts it.
+    ///
+    /// The same two-step the arrow keys and Enter give, so the mouse cannot
+    /// start a lesson the user has not seen highlighted.
+    #[test]
+    fn a_second_click_on_the_selected_row_starts_the_lesson() {
+        let mut app = TypingTutorApp::new();
+        probe::click(&mut app, Target::Lesson(2));
+        assert_eq!(
+            app.view,
+            AppView::LessonSelect,
+            "one click started a lesson"
+        );
+        assert!(app.session.is_none());
+        probe::click(&mut app, Target::Lesson(2));
+        assert_eq!(
+            app.view,
+            AppView::Typing,
+            "the second click did not start it"
+        );
+        assert_eq!(app.selected_lesson, 2);
+    }
+
+    /// The filter chip is a button, it says what it filters by, and clicking it
+    /// walks the categories.
+    #[test]
+    fn the_filter_chip_says_what_it_does_and_does_it() {
+        let mut app = TypingTutorApp::new();
+        for expected in LessonCategory::all() {
+            let before = app.category_filter;
+            let label = match before {
+                None => String::from("All Categories"),
+                Some(cat) => format!("Category: {}", cat.name()),
+            };
+            let r = probe::rect_of(&app, Target::Filter).expect("the filter chip");
+            assert!(
+                text_inside(&app.draw(W), &label, r),
+                "the chip is clickable but does not say {label:?}"
+            );
+            assert_eq!(
+                probe::click(&mut app, Target::Filter),
+                EventResult::Consumed
+            );
+            assert_eq!(
+                app.category_filter,
+                Some(*expected),
+                "the chip did not step to {expected:?}"
+            );
+        }
+        probe::click(&mut app, Target::Filter);
+        assert_eq!(app.category_filter, None, "the filter did not wrap to all");
+    }
+
+    /// Filtering leaves the cursor on a lesson the filter admits.
+    ///
+    /// It used to set `selected_lesson = 0`, which is a lesson the new filter
+    /// shows only when it happens to admit lesson zero's category -- otherwise
+    /// the highlight was on a row that was not drawn.
+    #[test]
+    fn filtering_moves_the_cursor_to_a_lesson_the_filter_admits() {
+        let mut app = TypingTutorApp::new();
+        for _ in 0..LessonCategory::all().len() {
+            probe::click(&mut app, Target::Filter);
+            let shown = app.filtered_lessons();
+            assert!(
+                shown.contains(&app.selected_lesson),
+                "filter {:?} shows {shown:?} and the cursor is on {}",
+                app.category_filter,
+                app.selected_lesson
+            );
+        }
+    }
+
+    /// The Stats chip is a button that opens the statistics view.
+    #[test]
+    fn the_stats_chip_opens_the_statistics_view() {
+        let mut app = TypingTutorApp::new();
+        let r = probe::rect_of(&app, Target::Stats).expect("the stats chip");
+        assert!(text_inside(&app.draw(W), "Stats", r));
+        assert_eq!(probe::click(&mut app, Target::Stats), EventResult::Consumed);
+        assert_eq!(app.view, AppView::Statistics);
+    }
+
+    /// Every view the user can be taken away from offers a way back, and the
+    /// way back is a button that is drawn.
+    #[test]
+    fn every_view_away_from_the_list_has_a_labelled_way_back() {
+        for (view, label) in [
+            (AppView::Typing, "Esc"),
+            (AppView::Results, "Lessons"),
+            (AppView::Statistics, "Lessons"),
+        ] {
+            let mut app = typed_into(0, 4);
+            app.view = view;
+            let r = probe::rect_of(&app, Target::Back)
+                .unwrap_or_else(|| panic!("{view:?} offers no way back"));
+            assert!(
+                text_inside(&app.draw(W), label, r),
+                "{view:?}'s Back button is clickable but unlabelled"
+            );
+            assert_eq!(probe::click(&mut app, Target::Back), EventResult::Consumed);
+            assert_eq!(app.view, AppView::LessonSelect, "{view:?} did not go back");
+        }
+    }
+
+    /// Retry is on the results screen, is labelled, and starts the same lesson
+    /// over from the beginning.
+    #[test]
+    fn retry_restarts_the_lesson_that_was_just_finished() {
+        let mut app = typed_into(3, 6);
+        app.view = AppView::Results;
+        let r = probe::rect_of(&app, Target::Retry).expect("the retry button");
+        assert!(text_inside(&app.draw(W), "Retry", r));
+        assert_eq!(probe::click(&mut app, Target::Retry), EventResult::Consumed);
+        assert_eq!(app.view, AppView::Typing);
+        assert_eq!(app.selected_lesson, 3, "retry changed the lesson");
+        assert_eq!(
+            app.session.as_ref().expect("a session").cursor,
+            0,
+            "retry did not start from the beginning"
+        );
+    }
+
+    /// A click on nothing changes nothing and says so.
+    ///
+    /// `Ignored`, not `Consumed`: a click the app did not use must not ask for
+    /// a repaint of a picture that has not changed.
+    #[test]
+    fn a_click_on_empty_space_is_ignored() {
+        let mut app = TypingTutorApp::new();
+        let before = (app.view, app.selected_lesson, app.category_filter);
+        let Some((x, y)) = probe::bare_point(&app, W) else {
+            return;
+        };
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Left, W),
+            EventResult::Ignored
+        );
+        assert_eq!((app.view, app.selected_lesson, app.category_filter), before);
+    }
+
+    /// A control is clickable wherever the window puts it.
+    ///
+    /// The point is read from the frame drawn at that size, which is the whole
+    /// reason the drawn size is stored: a window the user resized used to be
+    /// clicked against a picture drawn at 620x560.
+    #[test]
+    fn the_controls_move_with_the_window_and_are_still_clickable() {
+        for size in SIZES {
+            let mut app = TypingTutorApp::new();
+            let Some(r) = probe::rect_of_sized(&app, Target::Stats, size) else {
+                continue;
+            };
+            assert_eq!(
+                app.click_at(r.x + r.w / 2.0, r.y + r.h / 2.0, MouseButton::Left, size),
+                EventResult::Consumed,
+                "the Stats chip at {r:?} does not answer a click at {size:?}"
+            );
+            assert_eq!(app.view, AppView::Statistics, "at {size:?}");
+        }
+    }
+
+    // --- Scrolling ----------------------------------------------------------
+
+    /// A list longer than the window scrolls, and scrolling brings rows that
+    /// were off the bottom onto the screen.
+    #[test]
+    fn the_wheel_reveals_lessons_that_were_off_the_bottom() {
+        // Short enough that the twelve default lessons cannot all fit.
+        let size = (620.0, 260.0);
+        let mut app = TypingTutorApp::new();
+        let capacity = Layout::solve(size.0, size.1).rows_visible();
+        assert!(
+            capacity > 0 && capacity < app.lessons.len(),
+            "this test needs a window that shows some but not all lessons"
+        );
+        let hidden = app.lessons.len() - capacity;
+        let last = app.lessons.len() - 1;
+        assert!(
+            probe::rect_of_sized(&app, Target::Lesson(last), size).is_none(),
+            "the last lesson is already on screen"
+        );
+        for _ in 0..=hidden {
+            app.scroll_at(size.0 / 2.0, size.1 / 2.0, -1.0, size);
+        }
+        assert!(
+            probe::rect_of_sized(&app, Target::Lesson(last), size).is_some(),
+            "scrolling to the end never brought the last lesson into view"
+        );
+    }
+
+    /// The wheel at the end of the list is ignored rather than consumed.
+    #[test]
+    fn a_wheel_notch_that_moves_nothing_is_ignored() {
+        let size = (620.0, 260.0);
+        let mut app = TypingTutorApp::new();
+        assert_eq!(
+            app.scroll_at(size.0 / 2.0, size.1 / 2.0, 1.0, size),
+            Some(EventResult::Ignored),
+            "scrolling up from the top asked for a repaint"
+        );
+        for _ in 0..40 {
+            app.scroll_at(size.0 / 2.0, size.1 / 2.0, -1.0, size);
+        }
+        assert_eq!(
+            app.scroll_at(size.0 / 2.0, size.1 / 2.0, -1.0, size),
+            Some(EventResult::Ignored),
+            "scrolling down from the end asked for a repaint"
+        );
+    }
+
+    /// A list that fits does not scroll at all.
+    #[test]
+    fn a_list_that_fits_does_not_scroll() {
+        let size = (620.0, 1400.0);
+        let mut app = TypingTutorApp::new();
+        assert!(Layout::solve(size.0, size.1).rows_visible() >= app.lessons.len());
+        app.scroll_at(size.0 / 2.0, size.1 / 2.0, -1.0, size);
+        assert_eq!(app.scroll_offset, 0, "a list that fits scrolled anyway");
+    }
+
+    /// Walking off the bottom with the arrow keys scrolls the list rather than
+    /// moving the cursor to a row that is not drawn.
+    #[test]
+    fn the_cursor_key_scrolls_the_list_to_follow_the_cursor() {
+        let size = (620.0, 260.0);
+        let mut app = TypingTutorApp::new();
+        let capacity = Layout::solve(size.0, size.1).rows_visible();
+        assert!(capacity > 0 && capacity < app.lessons.len());
+        for _ in 0..app.lessons.len() {
+            app.key_at(&make_key(Key::Down, None), size);
+            assert!(
+                probe::rect_of_sized(&app, Target::Lesson(app.selected_lesson), size).is_some(),
+                "the cursor is on lesson {} and that row is not on screen",
+                app.selected_lesson
+            );
+        }
+    }
+
+    // --- The typing panel ---------------------------------------------------
+
+    /// The panel scrolls to keep the character being typed on screen.
+    ///
+    /// The old fixed panel showed the first few lines of every lesson and the
+    /// cursor walked off the bottom of it. The cursor's highlight is the box
+    /// under the current character, so this asks whether that box was drawn at
+    /// all -- which is the same question as whether the cursor is in view.
+    #[test]
+    fn the_typing_panel_follows_the_cursor() {
+        let size = (300.0, 300.0);
+        let mut app = TypingTutorApp::new();
+        // The longest lesson, so the text is many lines in a narrow window.
+        let longest = app
+            .lessons
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, l)| l.text.len())
+            .map_or(0, |(i, _)| i);
+        app.start_lesson(longest);
+        let total = app.session.as_ref().expect("a session").text.len();
+        for n in 0..total {
+            let session = app.session.as_ref().expect("a session");
+            let Some(&ch) = session.text.get(session.cursor) else {
+                break;
+            };
+            app.key_at(&make_key(Key::A, Some(ch)), size);
+            if app.view != AppView::Typing {
+                break;
+            }
+            let frame = app.frame(size.0, size.1);
+            let highlight = frame.commands().iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { color, .. }
+                    if *color == hex(COL_SURFACE1))
+            });
+            assert!(
+                highlight,
+                "after {n} characters the cursor's highlight is not drawn -- \
+                 the panel is not following the typist"
+            );
+        }
+    }
+
+    /// The lesson text is drawn in the monospace family it is measured in.
+    ///
+    /// The two have to agree: the pen is advanced by `measure_in(.., Mono)`,
+    /// and if the renderer is left in the proportional face then every advance
+    /// is a measurement of a font that is not being used.
+    #[test]
+    fn the_lesson_text_is_drawn_in_the_family_it_is_measured_in() {
+        let app = typed_into(0, 3);
+        let cmds = app.frame(W.0, W.1).commands().to_vec();
+        let pushed = cmds.iter().position(|c| {
+            matches!(
+                c,
+                RenderCommand::PushFont {
+                    family: FontFamily::Mono
+                }
+            )
+        });
+        let popped = cmds
+            .iter()
+            .position(|c| matches!(c, RenderCommand::PopFont));
+        let (pushed, popped) = (pushed.expect("no mono scope"), popped.expect("no pop"));
+        assert!(
+            pushed < popped,
+            "the font scope is closed before it is opened"
+        );
+        let glyphs = cmds
+            .get(pushed..popped)
+            .expect("the scope")
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::Text { .. }))
+            .count();
+        assert!(glyphs > 3, "only {glyphs} characters inside the mono scope");
+    }
+
+    /// A character that has been typed correctly is drawn in the correct
+    /// colour, a mistyped one in the error colour, and an untouched one in
+    /// neither.
+    #[test]
+    fn each_character_is_coloured_by_how_it_was_typed() {
+        let mut app = TypingTutorApp::new();
+        app.start_lesson(0);
+        // One right, then one deliberately wrong.
+        let first = app.session.as_ref().expect("a session").text[0];
+        app.handle_key(&make_key(Key::A, Some(first)));
+        let second = app.session.as_ref().expect("a session").text[1];
+        let wrong = if second == 'z' { 'q' } else { 'z' };
+        app.handle_key(&make_key(Key::A, Some(wrong)));
+
+        let frame = app.frame(W.0, W.1);
+        let mut in_mono = false;
+        let mut colours = Vec::new();
+        for cmd in frame.commands() {
+            match cmd {
+                RenderCommand::PushFont { .. } => in_mono = true,
+                RenderCommand::PopFont => in_mono = false,
+                RenderCommand::Text { color, .. } if in_mono => colours.push(*color),
+                _ => {}
+            }
+        }
+        assert_eq!(colours.first().copied(), Some(hex(COL_GREEN)));
+        assert_eq!(colours.get(1).copied(), Some(hex(COL_RED)));
+        assert_eq!(
+            colours.get(3).copied(),
+            Some(hex(COL_SURFACE2)),
+            "an untouched character is not drawn as pending"
+        );
+    }
+
+    // --- The clock, end to end ----------------------------------------------
+
+    /// The window loop is asked for a tick, and the tick is what moves the
+    /// clock. Neither half is any use without the other: `advance_time` was
+    /// correct and tested throughout the period when nothing called it.
+    #[test]
+    fn the_app_asks_the_window_loop_for_a_clock() {
+        let app = TypingTutorApp::new();
+        let interval = App::tick_interval(&app).expect("a typing tutor needs a clock");
+        assert!(
+            interval <= Duration::from_millis(500),
+            "a WPM figure updated every {interval:?} is a stopwatch that stutters"
+        );
+    }
+
+    /// A tick during a lesson asks for a repaint; a tick on a still view does
+    /// not.
+    #[test]
+    fn only_the_view_with_a_clock_repaints_on_a_tick() {
+        let mut app = typed_into(0, 2);
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 100 }),
+            EventResult::Consumed
+        );
+        app.view = AppView::LessonSelect;
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 100 }),
+            EventResult::Ignored,
+            "the lesson list asked to be redrawn sixty times a second"
+        );
+    }
+
+    /// Closing the window exits rather than being handled as an ordinary event.
+    #[test]
+    fn a_close_request_exits() {
+        let mut app = TypingTutorApp::new();
+        assert!(matches!(
+            App::on_event(&mut app, &Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    /// A consumed event asks for a repaint and an ignored one does not.
+    #[test]
+    fn the_window_repaints_for_what_the_app_used_and_not_for_what_it_did_not() {
+        let mut app = TypingTutorApp::new();
+        assert!(matches!(
+            App::on_event(&mut app, &Event::Key(make_key(Key::Down, None))),
+            Response::Redraw
+        ));
+        assert!(matches!(
+            App::on_event(&mut app, &Event::FocusIn),
+            Response::Idle
+        ));
+    }
+
+    /// `render` draws at the size it is given and remembers it, so the next
+    /// click is read against the picture the user actually clicked on.
+    #[test]
+    fn rendering_remembers_the_size_the_frame_was_drawn_at() {
+        let mut app = TypingTutorApp::new();
+        let tree = App::render(&mut app, 1024.0, 768.0);
+        assert!(!tree.commands.is_empty());
+        assert!((app.width - 1024.0).abs() < f32::EPSILON);
+        assert!((app.height - 768.0).abs() < f32::EPSILON);
+    }
+
+    // --- Rating and the results screen --------------------------------------
+
+    /// Each rating band is reported at its own boundary and one below it.
+    #[test]
+    fn the_rating_bands_are_where_they_say_they_are() {
+        assert_eq!(wpm_rating(80.0), "Expert!");
+        assert_eq!(wpm_rating(79.9), "Advanced");
+        assert_eq!(wpm_rating(60.0), "Advanced");
+        assert_eq!(wpm_rating(59.9), "Intermediate");
+        assert_eq!(wpm_rating(40.0), "Intermediate");
+        assert_eq!(wpm_rating(39.9), "Beginner");
+        assert_eq!(wpm_rating(20.0), "Beginner");
+        assert_eq!(wpm_rating(19.9), "Keep Practicing!");
+        assert_eq!(wpm_rating(0.0), "Keep Practicing!");
+    }
+
+    /// The results screen shows the six figures it claims to, each under its
+    /// own name and inside its own card.
+    #[test]
+    fn every_results_card_shows_its_own_figure() {
+        let mut app = typed_into(0, 10);
+        app.view = AppView::Results;
+        let session = app.session.as_ref().expect("a session");
+        let secs = session.elapsed_ms(app.current_time_ms) / 1000;
+        let want = [
+            ("WPM", format!("{:.0}", session.wpm(app.current_time_ms))),
+            ("Accuracy", format!("{:.1}%", session.accuracy())),
+            ("Time", format!("{}:{:02}", secs / 60, secs % 60)),
+            ("Keystrokes", session.total_keystrokes.to_string()),
+            ("Correct", session.correct_keystrokes.to_string()),
+            ("Errors", session.incorrect_keystrokes.to_string()),
+        ];
+        let l = Layout::solve(1280.0, 800.0);
+        let frame = app.frame(1280.0, 800.0);
+        for (i, (name, value)) in want.iter().enumerate() {
+            let card = l.card_rect(i);
+            assert!(
+                text_inside(&frame, name, card),
+                "card {i} does not name itself {name:?}"
+            );
+            assert!(
+                text_inside(&frame, value, card),
+                "card {i} ({name}) does not show {value:?}"
+            );
+        }
+    }
+
+    /// The statistics table shows the newest result first.
+    #[test]
+    fn the_history_table_is_newest_first() {
+        let mut app = TypingTutorApp::new();
+        for n in 0..3u32 {
+            app.results.push(SessionResult {
+                lesson_title: format!("Lesson {n}"),
+                category: LessonCategory::HomeRow,
+                wpm: f64::from(n) * 10.0,
+                accuracy: 90.0,
+                duration_ms: 10_000,
+                text_length: 40,
+            });
+        }
+        app.view = AppView::Statistics;
+        let names: Vec<String> = app
+            .frame(1280.0, 800.0)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } if text.starts_with("Lesson ") => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                String::from("Lesson 2"),
+                String::from("Lesson 1"),
+                String::from("Lesson 0")
+            ]
+        );
+    }
+
+    /// A history row is drawn in its lesson's category colour, which is the
+    /// only thing that says what kind of practice it was.
+    #[test]
+    fn a_history_row_carries_its_category_colour() {
+        let mut app = TypingTutorApp::new();
+        app.results.push(SessionResult {
+            lesson_title: String::from("Numbers drill"),
+            category: LessonCategory::Numbers,
+            wpm: 30.0,
+            accuracy: 88.0,
+            duration_ms: 20_000,
+            text_length: 60,
+        });
+        app.view = AppView::Statistics;
+        let drawn = app
+            .frame(1280.0, 800.0)
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text { text, color, .. } if text == "Numbers drill" => Some(*color),
+                _ => None,
+            })
+            .expect("the row is drawn");
+        assert_eq!(
+            drawn,
+            LessonCategory::Numbers.color(),
+            "the row is not in its category's colour"
         );
     }
 

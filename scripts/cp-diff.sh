@@ -1615,7 +1615,7 @@ run_case file.txt new.txt --no-preserve
 run_case file.txt new.txt --preserve=
 
 # =============================================================================
-# 18. --preserve=links
+# 18. --preserve=links, and -d
 # =============================================================================
 # The one `--preserve` word that is not an attribute of a file but a
 # relationship between two of them: when two sources turn out to be one inode,
@@ -1733,6 +1733,29 @@ run_case -v a b o/b dir
 run_case --preserve=links tree/a.txt new.txt
 run_case --preserve=mode,links file.txt new.txt
 
+# `-d` is this option and `-P` in one letter, so its cases belong here rather
+# than in section 15: what the letter adds to `-P` is the linking.
+run_case -d tree/link dst
+TREE='mktree; printf body > a; ln a b'
+run_case -dv a b dir
+TREE='mktree; printf r > real; ln -s real la; ln la lb'
+run_case -dv la lb dir
+# The two halves are assignments and override independently, in either order.
+TREE='mktree; printf r > real; ln -s real la; ln -s real lb'
+run_case -dL la lb dir
+TREE='mktree; printf body > a; ln a b'
+run_case -d --no-preserve=links a b dir
+TREE='mktree; printf body > a; ln a b'
+run_case -Ld a b dir
+# `-d` is not `-dR`: without `-r` a directory operand is still refused.
+run_case -d tree dst
+run_case -dr tree dst
+# And it does not set `require_preserve`, which is the one thing separating it
+# from the spelled-out pair. Both succeed here; the difference is only visible
+# when an attribute cannot be carried, which needs a second user to arrange.
+run_case -d file.txt new.txt
+run_case -P --preserve=links file.txt new.txt
+
 # =============================================================================
 # 19. Options GNU has and this cp has not
 # =============================================================================
@@ -1750,9 +1773,6 @@ missing --backup file.txt tree/a.txt
 missing --backup=numbered file.txt tree/a.txt
 missing --copy-contents -r tree dst
 missing --debug file.txt new.txt
-# `-d` is `--no-dereference` *and* `--preserve=links`. Both halves exist now;
-# the letter itself is not yet wired to them.
-missing -d tree/link dst
 missing -l file.txt new.txt
 missing --link file.txt new.txt
 missing --one-file-system -r tree dst

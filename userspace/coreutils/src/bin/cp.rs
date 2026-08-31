@@ -149,9 +149,10 @@
 //! `-T`/`--no-target-directory`, `-v`/`--verbose`, the three symlink policies
 //! `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`, the four
 //! overwrite policies `-f`/`--force`, `-n`/`--no-clobber`,
-//! `-i`/`--interactive` and `--remove-destination`, and
+//! `-i`/`--interactive` and `--remove-destination`,
 //! `-p`/`--preserve`/`--no-preserve` for the three attributes POSIX names plus
-//! `links`. The rest are recognised and rejected with a message
+//! `links`, and `-d`, which is the last two together.
+//! The rest are recognised and rejected with a message
 //! saying they are not implemented, rather than ignored, and they are listed in
 //! [`LONG_OPTIONS`] anyway because the table is what decides whether an
 //! abbreviation is ambiguous.
@@ -159,12 +160,9 @@
 //! Ignoring them would be worse than refusing in almost every case: `-l` and
 //! `-s` ask for a link rather than a copy, and `--sparse=always` asks for a
 //! file whose holes survive. Every one of those, ignored, produces a
-//! destination that looks right and is not. `-d` is refused for a subtler
-//! version of the same reason: it is `-P` *plus* `--preserve=links`, and
-//! honouring only one half would turn two hard-linked sources into two
-//! independent copies without saying so. Both halves exist now, so `-d` is
-//! refused only until the letter is wired to them. `-a` is `-dR
-//! --preserve=all`, and so waits on `all`.
+//! destination that looks right and is not. `-a` is `-dR --preserve=all`, and
+//! so waits on `all` — honouring the `-dR` half alone would silently drop the
+//! attributes the option's whole point is to carry.
 //!
 //! `--preserve` is the one option that is *partly* here, so it is refused a
 //! word at a time rather than whole: `--preserve=mode,timestamps,ownership`
@@ -651,6 +649,7 @@ Usage: cp [OPTION]... SOURCE DEST
   or:  cp [OPTION]... SOURCE... DIRECTORY
 Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
+  -d                    same as --no-dereference --preserve=links
   -f, --force           if an existing destination file cannot be
                           opened, remove it and try again
   -H                    follow command-line symbolic links in SOURCE
@@ -739,14 +738,22 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // same, and there is no diagnostic for giving two of them — unlike
             // `-t`, where a repeat is an error.
             //
-            // `-d` is deliberately *not* here. It is `--no-dereference` and
-            // `--preserve=links` together (`cp.c:1044`), and half of `-d` would
-            // be the silent wrong answer the module docs are about: two
-            // hard-linked sources would arrive as two independent copies with
-            // nothing said. Both halves exist now; the letter is wired to them
-            // in its own change, not by being quietly folded into this arm.
             Opt::Short(b'P', _) | Opt::Long("no-dereference", _) => {
                 flags.dereference = Deref::Never;
+            }
+            // `-d` is `-P` *plus* `--preserve=links` (`cp.c:1044`), which is
+            // why it is a separate arm rather than a second spelling of `-P`:
+            // honouring only the dereference half would turn two hard-linked
+            // sources into two independent copies with nothing said, which is
+            // the silent wrong answer the module docs are about.
+            //
+            // It sets the two fields directly and leaves `require_preserve`
+            // alone, because GNU's `case 'd'` does. That is what makes `cp -d`
+            // and `cp -P --preserve=links` differ in one observable way: only
+            // the second promises to fail if an attribute cannot be carried.
+            Opt::Short(b'd', _) => {
+                flags.dereference = Deref::Never;
+                flags.preserve.links = true;
             }
             Opt::Short(b'L', _) | Opt::Long("dereference", _) => {
                 flags.dereference = Deref::Always;
@@ -3957,10 +3964,7 @@ mod tests {
             // `-S` is here with a value attached: it takes a required one, so
             // bare `-S` would swallow the operand after it and this would be an
             // arity test rather than a rejection test.
-            // `-d` is here and `-P` is not, though the two set the same
-            // dereference policy: `-d` is also `--preserve=links`, and the
-            // letter is not yet wired to both halves. See the parse arm.
-            "-a", "-b", "-d", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
+            "-a", "-b", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -4161,6 +4165,42 @@ mod tests {
 
         let (i, _) = run_parse(&["--preserve=links", "--no-preserve=links", "a", "b"]);
         assert!(!i.preserve.links, "the last word wins, as for every other");
+    }
+
+    /// `-d` is two options in one letter, and neither half is optional.
+    ///
+    /// The `require_preserve` half of the assertion is the one worth having:
+    /// GNU's `case 'd'` sets the two fields and nothing else, so `cp -d` and
+    /// `cp -P --preserve=links` are the same command but for the promise to
+    /// fail when an attribute cannot be carried — which only the spelled-out
+    /// one makes.
+    #[test]
+    fn d_is_no_dereference_and_preserve_links() {
+        let (f, _) = run_parse(&["-d", "a", "b"]);
+        assert_eq!(f.dereference, Deref::Never);
+        assert!(f.preserve.links);
+        assert_eq!(
+            Preserve {
+                links: false,
+                ..f.preserve
+            },
+            Preserve::NONE,
+            "-d carries no other attribute"
+        );
+        assert!(!f.require_preserve, "GNU's `case 'd'` does not set it");
+        assert!(!f.recursive, "-d is not -dR");
+
+        // Both halves are ordinary assignments, so a later option overrides
+        // either one independently — `cp -dL` follows links and still links,
+        // `cp -d --no-preserve=links` keeps the links themselves and does not.
+        let (g, _) = run_parse(&["-d", "-L", "a", "b"]);
+        assert_eq!(g.dereference, Deref::Always);
+        assert!(g.preserve.links);
+        let (h, _) = run_parse(&["-d", "--no-preserve=links", "a", "b"]);
+        assert_eq!(h.dereference, Deref::Never);
+        assert!(!h.preserve.links);
+        let (i, _) = run_parse(&["-L", "-d", "a", "b"]);
+        assert_eq!(i.dereference, Deref::Never, "the last one wins");
     }
 
     /// `--preserve=all` is refused for `xattr` specifically — the only one of

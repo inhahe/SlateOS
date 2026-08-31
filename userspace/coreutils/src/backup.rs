@@ -190,10 +190,24 @@ pub fn suffix(explicit: Option<&OsStr>) -> Vec<u8> {
 /// always needs the other — `Simple` without a suffix cannot name anything, and
 /// `Numbered` still needs the suffix for the "would this backup destroy the
 /// source?" check that `cp` makes before it starts.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Backup {
     kind: BackupType,
     suffix: Vec<u8>,
+}
+
+/// [`Backup::disabled`], so that a utility's options struct can `derive(Default)`
+/// and get "no `-b` was given" rather than something subtly different.
+///
+/// Not `derive`d, and the difference is not cosmetic: the derived value would
+/// pair `BackupType::None` with an *empty* suffix, and an empty suffix makes
+/// every name look like its own backup to `cp`'s "backing up X might destroy
+/// the source" check — which reads the suffix before it looks at the type. See
+/// [`Backup::disabled`].
+impl Default for Backup {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 impl Backup {

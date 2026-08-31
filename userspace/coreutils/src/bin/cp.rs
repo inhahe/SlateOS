@@ -245,11 +245,13 @@
 //! and the five behaviours a collapsed version could not produce — is
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
+use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fsattr::{self, Link, On, Owner, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
+use coreutils::pathname;
+use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::collections::{HashMap, HashSet};
@@ -538,7 +540,10 @@ impl Preserve {
     }
 }
 
-#[derive(Default)]
+// `Clone` for exactly one caller — [`same_name_backup_rewrite`], which is
+// upstream's `x_tmp = *x` and needs a second options value that differs from
+// the user's in one field.
+#[derive(Clone, Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct CpFlags {
     recursive: bool,
@@ -613,6 +618,18 @@ struct CpFlags {
     /// stick would otherwise print a line per file about attributes the user
     /// never mentioned, on a copy that succeeded.
     reduce_diagnostics: bool,
+    /// `-b` / `--backup[=CONTROL]` and `-S`/`--suffix=SUFFIX`: what happens to
+    /// a destination that is about to be replaced. GNU's `x.backup_type`
+    /// together with the `simple_backup_suffix` global; see
+    /// [`coreutils::backup`] for why the two are one value here.
+    ///
+    /// Reaches further into this file than an option that renames one file has
+    /// any right to. Backups turn the destination `stat` into an `lstat`,
+    /// suppress the "specified more than once" warning, suppress two of the
+    /// three just-created guards, and are the only reason a failed copy has
+    /// anything to undo. Each of those sites names the `copy.c` line it comes
+    /// from.
+    backup: backup::Backup,
 }
 
 impl CpFlags {
@@ -750,6 +767,8 @@ Usage: cp [OPTION]... SOURCE DEST
   or:  cp [OPTION]... SOURCE... DIRECTORY
 Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
+      --backup[=CONTROL]  make a backup of each existing destination file
+  -b                    like --backup but does not accept an argument
   -d                    same as --no-dereference --preserve=links
   -f, --force           if an existing destination file cannot be
                           opened, remove it and try again
@@ -767,6 +786,7 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
                           attempting to open it (contrast with --force)
   -r, -R, --recursive   copy directories recursively.  Symbolic links are
                           copied as symbolic links, not followed.
+  -S, --suffix=SUFFIX   override the usual backup suffix
   -t, --target-directory=DIRECTORY
                         copy all SOURCE arguments into DIRECTORY
   -T, --no-target-directory
@@ -782,6 +802,19 @@ modification times, and 'links' to make a hard link where two sources
 turn out to be one file.  GNU's other two words -- 'context' and
 'xattr' -- and 'all', which includes them, are accepted only by
 --no-preserve.
+
+The backup suffix is '~', unless set with --suffix or SIMPLE_BACKUP_SUFFIX.
+The version control method may be selected via the --backup option or through
+the VERSION_CONTROL environment variable.  Here are the values:
+
+  none, off       never make backups (even if --backup is given)
+  numbered, t     make numbered backups
+  existing, nil   numbered if numbered backups exist, simple otherwise
+  simple, never   always make simple backups
+
+As a special case, cp makes a backup of SOURCE when the force and backup
+options are given and SOURCE and DEST are the same name for an existing,
+regular file.
 
 To copy a file whose name starts with a '-', for example '-foo',
 use one of these commands:
@@ -807,6 +840,22 @@ use one of these commands:
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = CpFlags::default();
     let mut paths: Vec<OsString> = Vec::new();
+
+    // The three halves of the backup family, kept as locals through the loop
+    // and resolved into [`CpFlags::backup`] after it — which is where GNU
+    // resolves them too (`cp.c:1233`), and not merely for tidiness. Whether a
+    // backup is made and *what it is named* are two separate questions with two
+    // separate answers, and both can be settled by options given in either
+    // order: `cp -S .bak --backup=simple` and `cp --backup=simple -S .bak` are
+    // the same command. Resolving as we go would make the first `-b` read a
+    // suffix a later `-S` was about to replace.
+    //
+    // `make_backups` is the one that is not simply "was an option given": both
+    // `-b` and `-S` set it, so `cp -S .bak a b` backs up without `-b` ever
+    // appearing. See the `-S` arm.
+    let mut make_backups = false;
+    let mut version_control: Option<OsString> = None;
+    let mut backup_suffix: Option<OsString> = None;
 
     for item in CP.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, ALIASES) {
         match item? {
@@ -914,6 +963,39 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 flags.require_preserve = true;
                 flags.reduce_diagnostics = true;
             }
+            // The short spelling's slot is always empty — `b` has no colon in
+            // [`SHORT_OPTIONS`], as in GNU, and the help line says so: "like
+            // --backup but does not accept an argument". It is bound anyway
+            // because upstream's `case 'b'` reads `optarg` for both spellings
+            // and gets a null for one of them; writing that out is cheaper than
+            // a second arm that would have to be kept in step with this one.
+            //
+            // The `if let` rather than a plain assignment is upstream's `if
+            // (optarg)` (`cp.c:1028`), and it is what makes `cp
+            // --backup=numbered -b` stay numbered: a later bare `-b` turns
+            // backups on again without erasing the word an earlier one chose.
+            Opt::Short(b'b', value) | Opt::Long("backup", value) => {
+                make_backups = true;
+                if let Some(word) = value {
+                    version_control = Some(word);
+                }
+            }
+            // `-S` sets `make_backups` **as well as** the suffix (`cp.c:1190`),
+            // which is the surprising half: `cp -S .bak a b` makes a backup
+            // although `-b` was never given. Omitting that line would make
+            // `-S` alone silently do nothing, which is the shape of wrong
+            // answer this file's module docs are about — the copy succeeds and
+            // the file the user meant to keep is gone.
+            Opt::Short(b'S', value) | Opt::Long("suffix", value) => {
+                // Unreachable: `S:` in [`SHORT_OPTIONS`] and `Takes::Required`
+                // in [`LONG_OPTIONS`] both make the parser supply a value or
+                // fail before this point.
+                let Some(given) = value else {
+                    return Err(CP.short_missing_argument(b'S'));
+                };
+                make_backups = true;
+                backup_suffix = Some(given);
+            }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // Everything else in the two tables is an option GNU has and this
@@ -926,6 +1008,45 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(other, _) => return Err(unimplemented_short(other)),
         }
     }
+
+    // GNU's `cp.c:1220`, and it is a real contradiction rather than a tidiness
+    // rule: `-n` says "leave the destination exactly as it is" and `-b` says
+    // "move the destination aside", so a command with both has asked for the
+    // file to stay and to go. Refused rather than resolved, because either
+    // resolution silently ignores half of what was typed.
+    //
+    // Reachable through `-S` as well as `-b`, since `-S` sets `make_backups`:
+    // `cp -n -S .bak a b` fails with this. Measured.
+    //
+    // The wording is upstream's verbatim, including the long spellings for
+    // options that may have been given short — GNU names the concepts, not the
+    // letters the user typed.
+    //
+    // `usage_referring` and not `usage`: upstream reaches this through
+    // `usage (EXIT_FAILURE)` (`cp.c:1223`) rather than through `die`, so the
+    // sentence is followed by `Try 'cp --help' for more information.` It is the
+    // only diagnostic this program has that carries the referral, which is why
+    // it is worth a comment — the neighbouring ones deliberately do not.
+    if make_backups && flags.interactive == Interactive::AlwaysNo {
+        return Err(
+            CP.usage_referring("options --backup and --no-clobber are mutually exclusive".into())
+        );
+    }
+
+    // The type is asked for only when an option asked for backups; the suffix
+    // is settled unconditionally, exactly as upstream does it. That asymmetry
+    // is load-bearing in one direction only: `$VERSION_CONTROL` alone must
+    // never enable backups (which is why [`backup::control`] is not called
+    // here without `make_backups`), while `$SIMPLE_BACKUP_SUFFIX` alone is
+    // harmless because nothing reads the suffix unless backups are on.
+    flags.backup = if make_backups {
+        backup::Backup::new(
+            backup::control(CP, version_control.as_deref())?,
+            backup::suffix(backup_suffix.as_deref()),
+        )
+    } else {
+        backup::Backup::disabled()
+    };
 
     Ok(Request::Run(flags, paths))
 }
@@ -1085,7 +1206,8 @@ struct Job<'a, O: Write, E: Write> {
     answers: &'a mut dyn Answers,
 }
 
-/// `--verbose`'s one line about one copy: `'src' -> 'dst'`.
+/// `--verbose`'s one line about one copy: `'src' -> 'dst'`, and with `-b`
+/// `'src' -> 'dst' (backup: 'dst~')`.
 ///
 /// Three measured facts are packed into four lines of code, and each of them is
 /// a way the obvious implementation would be wrong:
@@ -1106,14 +1228,42 @@ struct Job<'a, O: Write, E: Write> {
 ///   either — piping the two together reorders them there too.
 ///
 /// *When* it is called is the part that is not local to this function, and is
-/// documented at each of the four call sites: after every refusal and before the
-/// copy for a non-directory, and only on the `mkdir` actually happening for a
-/// directory.
-fn announce<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path, dst: &Path) {
+/// documented at each of the two call sites: after every refusal and after the
+/// backup but before the copy for a non-directory, and only on the `mkdir`
+/// actually happening for a directory.
+///
+/// `backup` is `None` at the directory call site and always will be: `cp` backs
+/// a destination up only when it is *not* a directory (`copy.c:2524`), and a
+/// directory source onto a non-directory destination is refused earlier with
+/// `cannot overwrite non-directory`. `mv` is the utility for which that
+/// combination exists, and it does not share this function.
+fn announce<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    src: &Path,
+    dst: &Path,
+    backup: Option<&Path>,
+) {
     if !job.flags.verbose {
         return;
     }
-    let _ = writeln!(job.out, "{} -> {}", quoteaf_os(src), quoteaf_os(dst));
+    match backup {
+        // One `writeln!` and not two, because the parenthesis is part of *this*
+        // line rather than a note after it: GNU's `emit_verbose` prints the
+        // arrow with `printf` and only then the suffix, with the newline last.
+        // Two writes would let a `cp -v … | head` truncate between them.
+        Some(name) => {
+            let _ = writeln!(
+                job.out,
+                "{} -> {} (backup: {})",
+                quoteaf_os(src),
+                quoteaf_os(dst),
+                quoteaf_os(name)
+            );
+        }
+        None => {
+            let _ = writeln!(job.out, "{} -> {}", quoteaf_os(src), quoteaf_os(dst));
+        }
+    }
 }
 
 /// Copy every source onto the destination.
@@ -1207,7 +1357,23 @@ fn copy_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> 
             }
         }
     };
-    let dest_path = Path::new(dest);
+    // `cp -f -b foo foo`, which GNU answers by rewriting the command rather
+    // than by refusing it. See [`same_name_backup_rewrite`].
+    let rewritten = same_name_backup_rewrite(sources, dest, dest_is_dir, flags);
+    let dest_path = rewritten
+        .as_ref()
+        .map_or(Path::new(dest), |(name, _)| Path::new(name));
+    // Upstream's `x = &x_tmp`: from here on the copy runs under the rewritten
+    // options, and everything above ran under the ones the user gave. A
+    // reborrow rather than a second `Job`-shaped branch, so that the loop below
+    // stays the one loop.
+    let job = &mut Job {
+        flags: rewritten.as_ref().map_or(flags, |(_, f)| f),
+        copied: &mut *job.copied,
+        out: &mut *job.out,
+        err: &mut *job.err,
+        answers: &mut *job.answers,
+    };
 
     // Both "named twice" problems need two sources to exist at all, so GNU
     // builds the tables only in that case and this follows it — not to save the
@@ -1223,6 +1389,66 @@ fn copy_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> 
         }
     }
     ok
+}
+
+/// GNU's `cp --force --backup foo foo` conversion (`cp.c:797`), which turns the
+/// command into `cp --force foo fooSUFFIX` and switches backups **off**.
+///
+/// Worth understanding as a rewrite rather than as a special case, because the
+/// alternative reading gets the result wrong in a way that looks right. Left
+/// alone, `cp -fb foo foo` would reach the ordinary path, back `foo` up to
+/// `foo~`, find the source gone, and fail — having moved the user's file to a
+/// name they did not ask for. Upstream instead observes that "back this up and
+/// then copy it onto itself" is precisely "copy it to its backup name", and
+/// issues that copy. The result is a `foo~` holding `foo`'s bytes with `foo`
+/// still in place, which is what `cp -fb foo foo` is *for*.
+///
+/// Four conditions, all upstream's:
+///
+/// * **`-f`.** Without it the command is refused as "the same file" instead.
+///   Upstream gives no reason and there is no obvious one beyond backwards
+///   compatibility, but it is measurable: `cp -b foo foo` fails.
+/// * **Backups are on**, or there is no name to rewrite to.
+/// * **The two operands are byte-identical.** `STREQ`, not "same file" — so
+///   `cp -fb foo ./foo` is *not* rewritten and does fail. Faithful, and the
+///   distinction is upstream's to defend, not this port's.
+/// * **The destination exists and is a regular file.** A directory or a device
+///   has no business being copied onto its own backup name.
+///
+/// The suffix must be worked out *before* backups are switched off, because it
+/// is the backup type that decides the name — upstream flags that ordering with
+/// a comment of its own.
+///
+/// Returns `None` when the command is left alone, which includes the case where
+/// the backup name could not be worked out at all. That degrades to the
+/// ordinary path and its `'foo' and 'foo' are the same file`, which is a true
+/// statement about a command that is not going to run either way.
+fn same_name_backup_rewrite(
+    sources: &[OsString],
+    dest: &OsString,
+    dest_is_dir: bool,
+    flags: &CpFlags,
+) -> Option<(OsString, CpFlags)> {
+    if dest_is_dir || !flags.force || !flags.backup.enabled() {
+        return None;
+    }
+    // Exactly one source. Upstream reaches this code only in its `n_files == 2`
+    // branch; here the same thing is said by asking, because the count was
+    // settled further up.
+    let [source] = sources else {
+        return None;
+    };
+    if source != dest {
+        return None;
+    }
+    let target = Path::new(dest);
+    if !fs::metadata(target).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    let name = flags.backup.find_name(target).ok()?;
+    let mut without_backups = flags.clone();
+    without_backups.backup = backup::Backup::disabled();
+    Some((name.into_os_string(), without_backups))
 }
 
 /// `None` if `dest` is a directory, otherwise the failure that says why not.
@@ -1418,13 +1644,23 @@ impl Dest {
 /// through it — which is what makes `cp --remove-destination a dangling-link`
 /// replace the link instead of refusing.
 ///
+/// `--backup` joins that group for the same reason (`copy.c:2313`) and with the
+/// same kind of consequence. The destination is about to be *renamed*, and a
+/// rename moves the link rather than what it points at. Without this line, `cp
+/// -b a link-to-b` would follow the link, conclude it was looking at `b`, and
+/// then rename the link anyway — leaving `b` neither backed up nor overwritten
+/// while a fresh regular `link-to-b` appeared beside it. Measured against 9.4,
+/// which backs up the link itself.
+///
 /// # Errors
 ///
 /// Any `stat` failure other than "it isn't there", which is [`Dest::New`], and
 /// other than `ELOOP` under `-f`, which is [`Dest::Opaque`].
 fn stat_destination(src_meta: &fs::Metadata, target: &Path, flags: &CpFlags) -> io::Result<Dest> {
-    let use_lstat =
-        src_meta.is_dir() || src_meta.file_type().is_symlink() || flags.remove_destination;
+    let use_lstat = src_meta.is_dir()
+        || src_meta.file_type().is_symlink()
+        || flags.remove_destination
+        || flags.backup.enabled();
     let stat = if use_lstat {
         fs::symlink_metadata(target)
     } else {
@@ -1674,12 +1910,21 @@ fn overwrite_allowed<O: Write, E: Write>(
 /// true` and matters twice over: [`create_destination`] must then create
 /// rather than truncate, and [`place_source`]'s symlink arm must not announce
 /// a second `removed` for a name that is already gone.
+///
+/// **A destination that `--backup` is about to move aside is left alone.**
+/// Upstream this unlink is not a separate step but the `else if` of the backup
+/// block (`copy.c:2568`), and reading the two as independent removes the very
+/// file the backup exists to keep: `cp --remove-destination -b a b` would
+/// delete `b`, find nothing to rename, and report a plain copy — which is
+/// `--backup` silently doing nothing at all. See [`backup_takes_destination`],
+/// which is that `if`'s condition and is asked here for its `else`.
 fn remove_destination_first<O: Write, E: Write>(
+    src: &Path,
     target: &Path,
     dest: &mut Dest,
     job: &mut Job<'_, O, E>,
 ) -> bool {
-    if !job.flags.remove_destination {
+    if !job.flags.remove_destination || backup_takes_destination(src, dest, job.flags) {
         return true;
     }
     match dest {
@@ -1766,11 +2011,22 @@ fn copy_one<O: Write, E: Write>(
     // Identity, not spelling: `cp a ./a d` is the same request twice. But two
     // hard links to one inode are two entries, and copying both is a
     // legitimate thing to ask for, so [`same_entry`] separates them.
+    //
+    // `--backup` turns the warning off (`copy.c:2283`), because with it the
+    // repeat is no longer pointless: `cp -b a a d` copies `a` to `d/a`, then
+    // moves that `d/a` to `d/a~` and copies `a` again. Silly, but it is what
+    // was asked for and every file survives it.
+    //
+    // The backup test comes *last* in the chain rather than first, and that is
+    // deliberate: upstream skips the lookup but still runs `record_file`
+    // (`copy.c:2291`), and [`Seen::saw_source`] is the lookup and the record in
+    // one call. Testing earlier would short-circuit past the recording.
     if !metadata.is_dir()
         && let Some(seen) = seen.as_deref_mut()
         && let Some(id) = file_id(src_path, &metadata)
         && let Some(entry) = entry_id(src_path)
         && seen.saw_source(id, entry)
+        && !flags.backup.enabled()
     {
         let _ = writeln!(
             job.err,
@@ -1861,7 +2117,16 @@ fn copy_one<O: Write, E: Write>(
         // the copy of `a` it made a moment ago. Nothing about the two operands
         // is wrong on its own; what is wrong is the pair, and only a record of
         // what this command already wrote can see it.
+        //
+        // `--backup=numbered` — and *only* numbered — lifts it (`copy.c:2474`),
+        // because numbered backups are the one shape under which the second
+        // operand cannot destroy the first: `d/a` becomes `d/a.~1~` and stays.
+        // Simple and existing backups both reuse one name, so `cp -b a other/a
+        // d` would write `d/a~` twice and lose the first copy after all; GNU
+        // keeps the refusal for them and upstream's own comment says so —
+        // "Note that it works fine if you use --backup=numbered."
         if !dest_meta.is_dir()
+            && flags.backup.kind() != BackupType::Numbered
             && let Some(seen) = seen.as_deref_mut()
             && let Some(id) = file_id(&target, dest_meta)
             && seen.made(&target, id)
@@ -1890,7 +2155,7 @@ fn copy_one<O: Write, E: Write>(
     // just-created *symlink* one below (`copy.c:2591`). Which is observable —
     // the symlink guard re-`lstat`s, so a link this command created and then
     // unlinked here is not there to be complained about.
-    if !remove_destination_first(&target, &mut dest_state, job) {
+    if !remove_destination_first(src_path, &target, &mut dest_state, job) {
         return false;
     }
 
@@ -1900,7 +2165,14 @@ fn copy_one<O: Write, E: Write>(
     // link's target rather than the link — and writing through it would
     // clobber whatever the link points at. GNU asks this separately for the
     // same reason, with its own `lstat`.
-    if let Some(seen) = seen.as_deref_mut()
+    //
+    // Any `--backup` lifts it (`copy.c:2594`), and here the reason is that the
+    // premise has gone: with backups on the destination was `lstat`ed above,
+    // so a symlink destination has already been renamed out of the way and
+    // there is nothing left to copy *through*. Unlike the guard above, this one
+    // is off for every backup shape, not only numbered.
+    if !flags.backup.enabled()
+        && let Some(seen) = seen.as_deref_mut()
         && let Ok(link_meta) = fs::symlink_metadata(&target)
         && link_meta.file_type().is_symlink()
         && let Some(id) = file_id(&target, &link_meta)
@@ -2345,7 +2617,56 @@ fn place_entity<O: Write, E: Write>(
     let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
     let dest_multiply_linked =
         job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
-    if dest_exists && !dest_is_dir && (metadata.file_type().is_symlink() || dest_multiply_linked) {
+
+    // `-b`: the destination is moved aside rather than written over, and this is
+    // GNU's block at `copy.c:2517`. It is the `if` whose `else if` is the unlink
+    // below, in upstream too — the two are alternatives, and reading them as
+    // independent would unlink the very destination that had just been renamed
+    // out of harm's way, which is the backup made and then thrown away. The
+    // condition itself is [`backup_takes_destination`], which documents its three
+    // clauses and is asked for its `else` by [`remove_destination_first`].
+    let mut moved_aside: Option<PathBuf> = None;
+    if backup_takes_destination(src_path, dest, job.flags) {
+        // The one refusal, and it is the reason `cp` needs the *suffix* even
+        // when the type is numbered: `cd /tmp; rm -f a a~; : > a; echo A > a~;
+        // cp --backup=simple a~ a` would name the backup of `a` exactly `a~`,
+        // rename the source on top of itself, and leave two empty files where
+        // there had been one empty and one full. Upstream's own comment carries
+        // that recipe verbatim. Numbered backups are exempt because the name
+        // they choose is never one the user typed.
+        if job.flags.backup.kind() != BackupType::Numbered
+            && source_is_dst_backup(src_path, metadata, target, job.flags.backup.simple_suffix())
+        {
+            let _ = writeln!(
+                job.err,
+                "cp: backing up {} might destroy source;  {} not copied",
+                quoteaf_os(target),
+                quoteaf_os(src_path)
+            );
+            return Placed::Failed;
+        }
+        match job.flags.backup.rename(target) {
+            Ok(name) => moved_aside = Some(name),
+            // "Nothing was there" is not a failure: upstream's `else if (errno
+            // != ENOENT)`. It can happen even though the `stat` above found
+            // something, because the two are separate syscalls — and it is the
+            // ordinary answer for a *dangling* symlink destination under a
+            // simple rename that has already moved it.
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                let why = strerror(&e);
+                let _ = writeln!(job.err, "cp: cannot backup {}: {why}", quoteaf_os(target));
+                return Placed::Failed;
+            }
+        }
+        // Upstream's `new_dst = true`, set on both of the paths above: whether
+        // the destination was renamed away or was never there, the name is free
+        // now and the copy must create rather than open.
+        dest_exists = false;
+    } else if dest_exists
+        && !dest_is_dir
+        && (metadata.file_type().is_symlink() || dest_multiply_linked)
+    {
         if !remove_before_writing(target, job) {
             return Placed::Failed;
         }
@@ -2357,8 +2678,13 @@ fn place_entity<O: Write, E: Write>(
     // attempted, not what worked. Directories are the exception and announce
     // themselves, from inside [`copy_tree`], because GNU will not say it made
     // one until the `mkdir` has actually happened (`copy.c:2625`).
+    //
+    // The backup name goes into the line, which is why the block above is
+    // *before* this one rather than after: `cp -vb a b` prints
+    // `'a' -> 'b' (backup: 'b~')`, one line naming both the copy and the move
+    // that made room for it.
     if !metadata.is_dir() {
-        announce(job, src_path, target);
+        announce(job, src_path, target, moved_aside.as_deref());
     }
 
     // `--preserve=links`: the second name for an inode is a hard link to where
@@ -2385,6 +2711,12 @@ fn place_entity<O: Write, E: Write>(
             return if create_hard_link(&earlier, target, job) {
                 Placed::Linked
             } else {
+                // GNU reaches its `un_backup` label from here too (`copy.c:2705`
+                // is one of eleven `goto`s to it), and does *not* run the
+                // `forget_created` half — `earlier_file` is non-null on this
+                // path, which is exactly the `recorded == None` this branch
+                // leaves behind. See the tail below.
+                un_backup(moved_aside.as_deref(), target, job);
                 Placed::Failed
             };
         }
@@ -2399,11 +2731,141 @@ fn place_entity<O: Write, E: Write>(
     // report `cannot create hard link` in place of the failure that actually
     // happened. The guard there is `earlier_file == nullptr`, which is this
     // `recorded.is_some()` — the linking path above never reaches here.
-    if !ok && let Some(id) = recorded {
-        job.copied.forget(id);
+    if !ok {
+        if let Some(id) = recorded {
+            job.copied.forget(id);
+        }
+        // And the half the label is named for. In upstream's order: forget
+        // first, then put the backup back.
+        un_backup(moved_aside.as_deref(), target, job);
     }
 
     if ok { Placed::Copied } else { Placed::Failed }
+}
+
+/// GNU's `un_backup` label (`copy.c:3364`): a copy that failed after its
+/// destination had been renamed away must put the destination back.
+///
+/// Without it a failed `cp -b a b` would leave no `b` at all — the copy did not
+/// happen, and the file that *was* `b` is now sitting under a name the user did
+/// not ask for and may not think to look under. That is `-b` losing a file,
+/// which is the one thing `-b` exists to prevent.
+///
+/// A failure to restore is reported and nothing more: the return value is
+/// already "this operand failed", and there is no second thing to try. GNU says
+/// the same and also carries on.
+fn un_backup<O: Write, E: Write>(
+    moved_aside: Option<&Path>,
+    target: &Path,
+    job: &mut Job<'_, O, E>,
+) {
+    let Some(backup) = moved_aside else {
+        return;
+    };
+    match fs::rename(backup, target) {
+        Ok(()) => {
+            if job.flags.verbose {
+                let _ = writeln!(
+                    job.out,
+                    "{} -> {} (unbackup)",
+                    quoteaf_os(backup),
+                    quoteaf_os(target)
+                );
+            }
+        }
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                job.err,
+                "cp: cannot un-backup {}: {why}",
+                quoteaf_os(target)
+            );
+        }
+    }
+}
+
+/// gnulib's `dot_or_dotdot (last_component (src_name))`: whether the source
+/// names a directory's own entry for itself or for its parent.
+///
+/// Textual, not resolved — `a/.` answers yes and `a/b` answers no even when `b`
+/// is a link to `a`. That is upstream's question and it is the right one here:
+/// what it guards is `cp -rb a/. d`, where the destination about to be backed
+/// up is the very directory the copy is going to fill.
+///
+/// Trailing slashes count, as they do in gnulib: `last_component("a/./")` is
+/// `"./"`, which is neither `.` nor `..`. Faithful rather than tidy — the two
+/// differ only for a source spelled with a trailing slash after a dot, and
+/// diverging there would be a divergence nobody had measured.
+/// Whether [`place_entity`]'s backup block will move this destination aside —
+/// the `if` at `copy.c:2517`, written once because two places need it.
+///
+/// [`place_entity`] asks it to decide whether to make a backup;
+/// [`remove_destination_first`] asks it to decide whether *not* to unlink,
+/// because upstream that unlink is this block's `else if` rather than a step of
+/// its own. Keeping the condition in one function is what stops the two
+/// drifting into a state where both fire, which is a destination deleted and
+/// then "backed up" from nothing.
+///
+/// The three conditions are upstream's:
+///
+/// * **The destination is there.** Nothing to move aside otherwise, and the
+///   whole of `copy.c`'s surrounding block is inside `rename_errno == EEXIST`,
+///   which is set only when the destination's `stat` succeeded.
+/// * **The destination is not a directory.** Upstream writes this as
+///   `x->move_mode || ! S_ISDIR (…)`, with a `FIXME` saying `mv` backs up a
+///   destination directory and `cp` deliberately does not — so that `cp -rb`
+///   can merge into an existing hierarchy instead of renaming it away.
+/// * **The source's last component is not `.` or `..`.** `cp -rb a/. d` copies
+///   `a`'s *contents* into an existing `d`, so backing up `d` would move the
+///   directory the copy is about to fill.
+///
+/// [`Dest::Opaque`] answers `false` to the second, which reads like a
+/// difference from upstream and cannot be reached: a destination is only
+/// `Opaque` when its `stat` failed with `ELOOP`, and with backups on
+/// [`stat_destination`] uses `lstat`, which a symlink loop does not trouble.
+fn backup_takes_destination(src: &Path, dest: &Dest, flags: &CpFlags) -> bool {
+    flags.backup.enabled()
+        && dest.exists()
+        && !dest.metadata().is_some_and(fs::Metadata::is_dir)
+        && !src_base_is_dot_or_dotdot(src)
+}
+
+fn src_base_is_dot_or_dotdot(src: &Path) -> bool {
+    let raw = os_bytes(src.as_os_str());
+    let base = pathname::last_component(&raw);
+    base == b"." || base == b".."
+}
+
+/// GNU's `source_is_dst_backup` (`copy.c:2161`): would backing the destination
+/// up rename the source on top of itself?
+///
+/// Two tests, and both are needed. The names must line up — the source's last
+/// component must be the destination's plus the simple suffix — *and* the file
+/// that would be created must actually be this source, which only a `stat` can
+/// say. Names alone would refuse `cp -b other/a~ a`, where `other/a~` has
+/// nothing to do with `a`; a `stat` alone would be asking about a file that
+/// does not exist yet.
+///
+/// The `stat` follows symlinks, as upstream's `fstatat(…, 0)` does.
+fn source_is_dst_backup(src: &Path, src_meta: &fs::Metadata, target: &Path, suffix: &[u8]) -> bool {
+    let src_raw = os_bytes(src.as_os_str());
+    let src_base = pathname::last_component(&src_raw);
+    let target_raw = os_bytes(target.as_os_str());
+    let Some(stem) = src_base.strip_suffix(suffix) else {
+        return false;
+    };
+    if stem != pathname::last_component(&target_raw) {
+        return false;
+    }
+    // The name the backup *would* take, which for a simple or existing backup
+    // of an untaken name is the destination with the suffix stuck on.
+    let mut would_be = target_raw.into_owned();
+    would_be.extend_from_slice(suffix);
+    let would_be = PathBuf::from(os_from_bytes(&would_be));
+    match fs::metadata(&would_be) {
+        Ok(m) => file_id(&would_be, &m) == file_id(src, src_meta),
+        Err(_) => false,
+    }
 }
 
 /// The three kinds, dispatched. Split from [`place_entity`] only so that the
@@ -2828,7 +3290,7 @@ fn copy_tree<O: Write, E: Write>(
                 // `cp -rv a b` where `b/a` already exists announces the files
                 // it refreshes and says nothing about the directory holding
                 // them — the directory was not copied, it was reused.
-                announce(job, src, dest);
+                announce(job, src, dest, None);
                 // The adjustment in the opposite direction from the debt: a
                 // source that is not owner-rwx — 0500 is perfectly ordinary —
                 // would leave this process unable to fill the directory it has
@@ -3044,7 +3506,7 @@ fn copy_entry<O: Write, E: Write>(
             return false;
         }
     }
-    if !remove_destination_first(&to, &mut dest_state, job) {
+    if !remove_destination_first(&from, &to, &mut dest_state, job) {
         return false;
     }
 
@@ -4363,12 +4825,7 @@ mod tests {
     /// told to leave alone.
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in [
-            // `-S` is here with a value attached: it takes a required one, so
-            // bare `-S` would swallow the operand after it and this would be an
-            // arity test rather than a rejection test.
-            "-b", "-l", "-s", "-S.bak", "-u", "-x", "-Z",
-        ] {
+        for flag in ["-l", "-s", "-u", "-x", "-Z"] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -4382,7 +4839,6 @@ mod tests {
     fn unimplemented_long_options_are_rejected_by_name() {
         for name in [
             "--attributes-only",
-            "--backup",
             "--copy-contents",
             "--link",
             "--one-file-system",
@@ -5084,101 +5540,135 @@ mod tests {
     /// Every option off — `cp a b` with nothing else given.
     ///
     /// The named sets below are each this with one or two fields changed, built
-    /// with `..OFF` rather than spelled out in full. That is not brevity for its
-    /// own sake: written out, each constant repeats every field, so adding an
-    /// option to [`CpFlags`] means editing eleven constants, and a reader cannot
-    /// see at a glance which field a given set is *about*. With `..OFF` the
-    /// difference is the whole body.
-    const OFF: CpFlags = CpFlags {
-        recursive: false,
-        target_directory: None,
-        no_target_directory: false,
-        verbose: false,
-        dereference: Deref::Undefined,
-        interactive: Interactive::Unspecified,
-        force: false,
-        remove_destination: false,
-        preserve: Preserve::NONE,
-        explicit_no_preserve_mode: false,
-        require_preserve: false,
-        require_preserve_xattr: false,
-        reduce_diagnostics: false,
-    };
-    const PLAIN: CpFlags = OFF;
-    const RECURSIVE: CpFlags = CpFlags {
-        recursive: true,
-        ..OFF
-    };
+    /// with `..off()` rather than spelled out in full. That is not brevity for
+    /// its own sake: written out, each set repeats every field, so adding an
+    /// option to [`CpFlags`] means editing two dozen of them, and a reader
+    /// cannot see at a glance which field a given set is *about*. With
+    /// `..off()` the difference is the whole body.
+    ///
+    /// A function and not a `const`, which every one of these was until `-b`
+    /// arrived. [`CpFlags::backup`] owns its suffix (a `Vec<u8>`, because the
+    /// bytes come from `-S`'s argument), so `CpFlags` has a destructor — and
+    /// `..off()` *drops* the fields it did not take, which a constant may not do
+    /// at compile time. Calling a function per set costs an allocation nobody
+    /// times and keeps the `..` shorthand that makes the sets readable.
+    fn off() -> CpFlags {
+        CpFlags {
+            recursive: false,
+            target_directory: None,
+            no_target_directory: false,
+            verbose: false,
+            dereference: Deref::Undefined,
+            interactive: Interactive::Unspecified,
+            force: false,
+            remove_destination: false,
+            preserve: Preserve::NONE,
+            explicit_no_preserve_mode: false,
+            require_preserve: false,
+            require_preserve_xattr: false,
+            reduce_diagnostics: false,
+            backup: backup::Backup::disabled(),
+        }
+    }
+    fn plain() -> CpFlags {
+        off()
+    }
+    fn recursive() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            ..off()
+        }
+    }
     /// `-T`, which the two above never set. Named for what it does rather than
     /// for the letter: the destination is a name, not a directory to fill.
-    const AS_NAME: CpFlags = CpFlags {
-        no_target_directory: true,
-        ..OFF
-    };
-    const VERBOSE: CpFlags = CpFlags {
-        verbose: true,
-        ..OFF
-    };
-    const VERBOSE_RECURSIVE: CpFlags = CpFlags {
-        recursive: true,
-        verbose: true,
-        ..OFF
-    };
+    fn as_name() -> CpFlags {
+        CpFlags {
+            no_target_directory: true,
+            ..off()
+        }
+    }
+    fn verbose() -> CpFlags {
+        CpFlags {
+            verbose: true,
+            ..off()
+        }
+    }
+    fn verbose_recursive() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            verbose: true,
+            ..off()
+        }
+    }
     // The three below are `#[cfg(unix)]` because every test that uses one has
     // to create a symlink to mean anything, and the development host cannot.
     // Without the gate they are dead code there and the build is not warning-
     // free. [`the_dereference_table`] needs no filesystem and so runs on both.
     /// `-P`: the link, not its target, with no `-r` to make that the default.
     #[cfg(unix)]
-    const NO_DEREF: CpFlags = CpFlags {
-        dereference: Deref::Never,
-        ..OFF
-    };
+    fn no_deref() -> CpFlags {
+        CpFlags {
+            dereference: Deref::Never,
+            ..off()
+        }
+    }
     /// `-Lr`: follow every link, including ones found inside the tree.
     #[cfg(unix)]
-    const DEREF_ALL_R: CpFlags = CpFlags {
-        recursive: true,
-        dereference: Deref::Always,
-        ..OFF
-    };
+    fn deref_all_r() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            dereference: Deref::Always,
+            ..off()
+        }
+    }
     /// `-Hr`: follow the operand, keep the links found underneath it. The one
     /// combination in which the two questions have different answers.
     #[cfg(unix)]
-    const DEREF_CMD_R: CpFlags = CpFlags {
-        recursive: true,
-        dereference: Deref::CommandLine,
-        ..OFF
-    };
+    fn deref_cmd_r() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            dereference: Deref::CommandLine,
+            ..off()
+        }
+    }
     /// `-fv`. The overwrite sets are verbose because the whole difference
     /// between `-f` and `--remove-destination` is which line comes out first.
     /// `#[cfg(unix)]` for the same reason as the three above: every test that
     /// uses one needs either a symlink or a mode that denies.
     #[cfg(unix)]
-    const FORCE_V: CpFlags = CpFlags {
-        force: true,
-        verbose: true,
-        ..OFF
-    };
+    fn force_v() -> CpFlags {
+        CpFlags {
+            force: true,
+            verbose: true,
+            ..off()
+        }
+    }
     /// `--remove-destination -v`.
     #[cfg(unix)]
-    const REMOVE_DEST_V: CpFlags = CpFlags {
-        remove_destination: true,
-        verbose: true,
-        ..OFF
-    };
+    fn remove_dest_v() -> CpFlags {
+        CpFlags {
+            remove_destination: true,
+            verbose: true,
+            ..off()
+        }
+    }
     /// `-nv`.
-    const NO_CLOBBER_V: CpFlags = CpFlags {
-        interactive: Interactive::AlwaysNo,
-        verbose: true,
-        ..OFF
-    };
+    fn no_clobber_v() -> CpFlags {
+        CpFlags {
+            interactive: Interactive::AlwaysNo,
+            verbose: true,
+            ..off()
+        }
+    }
     /// `-i`. Not verbose, unlike the three above: `-i`'s interesting output is
     /// the question, which goes to stderr, and a `-v` line on stdout would only
     /// be noise in the tests that assert stderr is *exactly* the question.
-    const ASK: CpFlags = CpFlags {
-        interactive: Interactive::AskUser,
-        ..OFF
-    };
+    fn ask() -> CpFlags {
+        CpFlags {
+            interactive: Interactive::AskUser,
+            ..off()
+        }
+    }
 
     /// `copy_all` plus whatever it wrote to its error sink.
     ///
@@ -5243,7 +5733,7 @@ mod tests {
         let a = dir.join("a");
         let b = dir.join("b");
         fs::write(&a, b"hello").unwrap();
-        let (ok, err) = cp(&PLAIN, &[&a, &b]);
+        let (ok, err) = cp(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(fs::read(&a).unwrap(), b"hello", "the source stays");
@@ -5258,7 +5748,7 @@ mod tests {
         let sub = dir.join("sub");
         fs::write(&a, b"x").unwrap();
         fs::create_dir(&sub).unwrap();
-        let (ok, err) = cp(&PLAIN, &[&a, &sub]);
+        let (ok, err) = cp(&plain(), &[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
         let _ = fs::remove_dir_all(&dir);
@@ -5280,14 +5770,14 @@ mod tests {
         fs::write(&file, b"3").unwrap();
 
         let missing = dir.join("nosuch");
-        let (ok, e) = cp(&PLAIN, &[&a, &b, &missing]);
+        let (ok, e) = cp(&plain(), &[&a, &b, &missing]);
         assert!(!ok);
         assert!(
             e.ends_with(": No such file or directory\n"),
             "a name that is not there: {e}"
         );
 
-        let (ok, e) = cp(&PLAIN, &[&a, &b, &file]);
+        let (ok, e) = cp(&plain(), &[&a, &b, &file]);
         assert!(!ok);
         assert!(
             e.ends_with(": Not a directory\n"),
@@ -5310,7 +5800,7 @@ mod tests {
         fs::write(&blocking, b"2").unwrap();
 
         let under = blocking.join("under");
-        let (ok, e) = cp(&PLAIN, &[&a, &under]);
+        let (ok, e) = cp(&plain(), &[&a, &under]);
         assert!(!ok);
         assert!(e.starts_with("cp: cannot stat "), "{e}");
         assert!(e.ends_with(": Not a directory\n"), "{e}");
@@ -5330,7 +5820,7 @@ mod tests {
         fs::write(&file, b"kept").unwrap();
         std::os::unix::fs::symlink("file", &link).unwrap();
 
-        let (ok, e) = cp(&RECURSIVE, &[&link, &file]);
+        let (ok, e) = cp(&recursive(), &[&link, &file]);
         assert!(!ok);
         assert!(e.contains("are the same file"), "{e}");
         assert_eq!(fs::read(&file).unwrap(), b"kept");
@@ -5357,7 +5847,7 @@ mod tests {
         std::os::unix::fs::symlink("file", &one).unwrap();
         std::os::unix::fs::symlink("file", &two).unwrap();
 
-        let (ok, e) = cp(&RECURSIVE, &[&one, &two]);
+        let (ok, e) = cp(&recursive(), &[&one, &two]);
         assert!(ok, "{e}");
         assert_eq!(fs::read(&file).unwrap(), b"kept", "the target is untouched");
         let _ = fs::remove_dir_all(&dir);
@@ -5383,7 +5873,7 @@ mod tests {
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second").unwrap();
 
-        let (ok, e) = cp(&PLAIN, &[&first, &second, &dest]);
+        let (ok, e) = cp(&plain(), &[&first, &second, &dest]);
         assert!(!ok, "the pair must count against the exit status");
         // Not asserted against a whole quoted path: the scratch directory is
         // absolute and its spelling differs by host.
@@ -5415,7 +5905,7 @@ mod tests {
         let plain = other.join("l");
         fs::write(&plain, b"second").unwrap();
 
-        let (ok, e) = cp(&RECURSIVE, &[&link, &plain, &dest]);
+        let (ok, e) = cp(&recursive(), &[&link, &plain, &dest]);
         assert!(!ok, "{e}");
         assert!(e.contains("through just-created symlink"), "{e}");
         assert_eq!(
@@ -5435,7 +5925,7 @@ mod tests {
         fs::write(&f, b"body").unwrap();
         let dotted = dir.join(".").join("f");
 
-        let (ok, e) = cp(&PLAIN, &[&f, &dotted, &dest]);
+        let (ok, e) = cp(&plain(), &[&f, &dotted, &dest]);
         assert!(ok, "a repeat is not an error: {e}");
         assert!(e.contains("specified more than once"), "{e}");
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"body");
@@ -5457,7 +5947,7 @@ mod tests {
         fs::create_dir_all(src.join("sub")).unwrap();
         fs::create_dir(&dest).unwrap();
 
-        let (ok, e) = cp(&RECURSIVE, &[&src.join("."), &src, &dest]);
+        let (ok, e) = cp(&recursive(), &[&src.join("."), &src, &dest]);
         assert!(!ok, "{e}");
         assert!(e.contains("will not create hard link"), "{e}");
         // The first spelling was copied; only the second is refused.
@@ -5519,7 +6009,7 @@ mod tests {
     fn a_directory_reached_by_walking_is_refused_a_second_time() {
         let (dir, parent, dest) = nested_pair("walked_repeat");
 
-        let (ok, e) = cp(&RECURSIVE, &[&parent.join("child"), &parent, &dest]);
+        let (ok, e) = cp(&recursive(), &[&parent.join("child"), &parent, &dest]);
         assert!(!ok, "{e}");
         assert!(e.contains("will not create hard link"), "{e}");
         assert!(
@@ -5552,7 +6042,7 @@ mod tests {
 
         let flags = CpFlags {
             dereference: Deref::Always,
-            ..RECURSIVE
+            ..recursive()
         };
         let (ok, e) = cp(&flags, &[&parent.join("child"), &parent, &dest]);
         assert!(ok, "{e}");
@@ -5575,7 +6065,7 @@ mod tests {
     fn a_walk_that_arrives_first_does_not_refuse_the_operand() {
         let (dir, parent, dest) = nested_pair("walk_then_operand");
 
-        let (ok, e) = cp(&RECURSIVE, &[&parent, &parent.join("child"), &dest]);
+        let (ok, e) = cp(&recursive(), &[&parent, &parent.join("child"), &dest]);
         assert!(ok, "{e}");
         assert_eq!(
             fs::read(dest.join("parent").join("child").join("f")).unwrap(),
@@ -5600,7 +6090,7 @@ mod tests {
 
         let flags = CpFlags {
             target_directory: Some(dest.clone().into_os_string()),
-            ..PLAIN
+            ..plain()
         };
         let (ok, e) = cp(&flags, &[&a]);
         assert!(ok, "{e}");
@@ -5615,14 +6105,14 @@ mod tests {
     #[test]
     fn a_target_directory_that_is_not_one_says_so() {
         let dir = scratch("t_notdir");
-        let plain = dir.join("plain");
-        fs::write(&plain, b"x").unwrap();
+        let not_a_dir = dir.join("plain");
+        fs::write(&not_a_dir, b"x").unwrap();
         let a = dir.join("a");
         fs::write(&a, b"A").unwrap();
 
         let flags = CpFlags {
-            target_directory: Some(plain.clone().into_os_string()),
-            ..PLAIN
+            target_directory: Some(not_a_dir.clone().into_os_string()),
+            ..off()
         };
         let (ok, e) = cp(&flags, &[&a]);
         assert!(!ok);
@@ -5639,7 +6129,7 @@ mod tests {
         let flags = CpFlags {
             target_directory: Some(OsString::from("nosuch")),
             no_target_directory: true,
-            ..OFF
+            ..off()
         };
         let (ok, e) = cp(&flags, &[Path::new("a"), Path::new("b")]);
         assert!(!ok);
@@ -5653,7 +6143,10 @@ mod tests {
     /// it the destination is one name, so the third operand has nowhere to go.
     #[test]
     fn a_third_operand_has_nowhere_to_go_under_no_target_directory() {
-        let (ok, e) = cp(&AS_NAME, &[Path::new("a"), Path::new("b"), Path::new("c")]);
+        let (ok, e) = cp(
+            &as_name(),
+            &[Path::new("a"), Path::new("b"), Path::new("c")],
+        );
         assert!(!ok);
         assert!(e.starts_with("cp: extra operand "), "{e}");
         assert!(e.contains("'c'"), "{e}");
@@ -5670,7 +6163,7 @@ mod tests {
         let d = dir.join("d");
         fs::create_dir(&d).unwrap();
 
-        let (ok, e) = cp(&AS_NAME, &[&a, &d]);
+        let (ok, e) = cp(&as_name(), &[&a, &d]);
         assert!(!ok);
         assert!(e.contains("cannot overwrite directory"), "{e}");
         assert!(!d.join("a").exists(), "nothing went inside it");
@@ -5687,7 +6180,7 @@ mod tests {
         let d = dir.join("d");
         fs::create_dir(&d).unwrap();
 
-        let (ok, e) = cp(&PLAIN, &[&a, &d]);
+        let (ok, e) = cp(&plain(), &[&a, &d]);
         assert!(ok, "{e}");
         assert_eq!(fs::read(d.join("a")).unwrap(), b"A");
         let _ = fs::remove_dir_all(&dir);
@@ -5708,7 +6201,7 @@ mod tests {
 
         let flags = CpFlags {
             recursive: true,
-            ..AS_NAME
+            ..as_name()
         };
         let (ok, e) = cp(&flags, &[&src, &dst]);
         assert!(ok, "{e}");
@@ -5735,7 +6228,7 @@ mod tests {
 
         let flags = CpFlags {
             target_directory: Some(dest.clone().into_os_string()),
-            ..PLAIN
+            ..plain()
         };
         let (ok, e) = cp(&flags, &[&f, &dotted]);
         assert!(ok, "{e}");
@@ -5756,7 +6249,7 @@ mod tests {
         let b = dir.join("b");
         fs::write(&a, b"hello").unwrap();
 
-        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &b]);
+        let (ok, out, err) = cp_out(&verbose(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "", "a report of work done is not a diagnostic");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
@@ -5772,7 +6265,7 @@ mod tests {
         let b = dir.join("b");
         fs::write(&a, b"hello").unwrap();
 
-        let (ok, out, err) = cp_out(&PLAIN, &[&a, &b]);
+        let (ok, out, err) = cp_out(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, "");
         assert_eq!(err, "");
@@ -5790,7 +6283,7 @@ mod tests {
 
         // The failure is `cannot stat`, from before the announcement — so this
         // one is *not* announced, which is the other half of the rule.
-        let (ok, out, err) = cp_out(&VERBOSE, &[&missing, &b]);
+        let (ok, out, err) = cp_out(&verbose(), &[&missing, &b]);
         assert!(!ok);
         assert!(err.contains("cannot stat"), "{err}");
         assert_eq!(out, "", "a source that could not be stat'd is not a copy");
@@ -5805,7 +6298,7 @@ mod tests {
         fs::create_dir(&d).unwrap();
         let onto = d.join("a");
         fs::create_dir(&onto).unwrap();
-        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &d]);
+        let (ok, out, err) = cp_out(&verbose(), &[&a, &d]);
         assert!(!ok);
         assert!(err.contains("cannot overwrite directory"), "{err}");
         assert_eq!(out, "");
@@ -5822,7 +6315,7 @@ mod tests {
         fs::write(src.join("f"), b"F").unwrap();
         let dst = dir.join("dst");
 
-        let (ok, out, err) = cp_out(&VERBOSE_RECURSIVE, &[&src, &dst]);
+        let (ok, out, err) = cp_out(&verbose_recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         let lines: Vec<&str> = out.lines().collect();
@@ -5854,7 +6347,7 @@ mod tests {
         fs::create_dir(&dst).unwrap();
         fs::create_dir(dst.join("src")).unwrap();
 
-        let (ok, out, err) = cp_out(&VERBOSE_RECURSIVE, &[&src, &dst]);
+        let (ok, out, err) = cp_out(&verbose_recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(
@@ -5886,7 +6379,7 @@ mod tests {
         let c = dir.join("c");
         fs::write(&a, b"x").unwrap();
 
-        let (ok, out, err) = cp_out(&VERBOSE, &[&a, &c]);
+        let (ok, out, err) = cp_out(&verbose(), &[&a, &c]);
         assert!(ok, "{err}");
         let line = out.strip_suffix('\n').unwrap_or(&out);
         let (rendered_src, _) = line.rsplit_once(" -> ").unwrap_or((line, ""));
@@ -5921,7 +6414,7 @@ mod tests {
             let flags = CpFlags {
                 recursive,
                 dereference,
-                ..PLAIN
+                ..plain()
             };
             assert_eq!(
                 (flags.follow_operand(), flags.follow_walked()),
@@ -5942,7 +6435,7 @@ mod tests {
         std::os::unix::fs::symlink("file", &link).unwrap();
         let dst = dir.join("dst");
 
-        let (ok, e) = cp(&NO_DEREF, &[&link, &dst]);
+        let (ok, e) = cp(&no_deref(), &[&link, &dst]);
         assert!(ok, "{e}");
         let meta = fs::symlink_metadata(&dst).unwrap();
         assert!(meta.file_type().is_symlink(), "a link, not its target");
@@ -5964,10 +6457,10 @@ mod tests {
         std::os::unix::fs::symlink("file", &one).unwrap();
         std::os::unix::fs::symlink("file", &two).unwrap();
 
-        let (ok, e) = cp(&NO_DEREF, &[&one, &two]);
+        let (ok, e) = cp(&no_deref(), &[&one, &two]);
         assert!(ok, "{e}");
         assert_eq!(e, "");
-        let (ok, e) = cp(&PLAIN, &[&one, &two]);
+        let (ok, e) = cp(&plain(), &[&one, &two]);
         assert!(!ok, "followed, they are one file");
         assert!(e.contains("are the same file"), "{e}");
         let _ = fs::remove_dir_all(&dir);
@@ -5990,7 +6483,7 @@ mod tests {
         std::os::unix::fs::symlink("sub", src.join("dlink")).unwrap();
         let dst = dir.join("d");
 
-        let (ok, e) = cp(&DEREF_ALL_R, &[&src, &dst]);
+        let (ok, e) = cp(&deref_all_r(), &[&src, &dst]);
         assert!(ok, "{e}");
         assert!(
             !fs::symlink_metadata(dst.join("flink"))
@@ -6025,7 +6518,7 @@ mod tests {
         std::os::unix::fs::symlink("nowhere", src.join("dangle")).unwrap();
         let dst = dir.join("d");
 
-        let (ok, e) = cp(&DEREF_ALL_R, &[&src, &dst]);
+        let (ok, e) = cp(&deref_all_r(), &[&src, &dst]);
         assert!(!ok, "one entry failed, so the copy failed");
         assert!(e.contains("cannot stat "), "{e}");
         assert!(e.contains("dangle"), "{e}");
@@ -6052,7 +6545,7 @@ mod tests {
         std::os::unix::fs::symlink("t", &dlink).unwrap();
         let dst = dir.join("d");
 
-        let (ok, e) = cp(&DEREF_CMD_R, &[&dlink, &dst]);
+        let (ok, e) = cp(&deref_cmd_r(), &[&dlink, &dst]);
         assert!(ok, "{e}");
         assert!(
             dst.is_dir() && !fs::symlink_metadata(&dst).unwrap().file_type().is_symlink(),
@@ -6086,7 +6579,7 @@ mod tests {
 
         let flags = CpFlags {
             verbose: true,
-            ..NO_DEREF
+            ..no_deref()
         };
         let (ok, out, err) = cp_out(&flags, &[&one, &two]);
         assert!(ok, "{err}");
@@ -6186,7 +6679,7 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         let (b, witness) = linked_destination(&dir);
 
-        let (ok, out, err) = cp_out(&FORCE_V, &[&a, &b]);
+        let (ok, out, err) = cp_out(&force_v(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
@@ -6209,7 +6702,7 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         let (b, witness) = linked_destination(&dir);
 
-        let (ok, out, err) = cp_out(&REMOVE_DEST_V, &[&a, &b]);
+        let (ok, out, err) = cp_out(&remove_dest_v(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(body(&b), b"A");
@@ -6251,12 +6744,12 @@ mod tests {
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o400)).unwrap();
 
         // Without `-f` it is a plain failure and the destination is untouched.
-        let (ok, err) = cp(&VERBOSE, &[&a, &ro]);
+        let (ok, err) = cp(&verbose(), &[&a, &ro]);
         assert!(!ok);
         assert!(err.contains("cannot create regular file"), "{err}");
         assert_eq!(body(&ro), b"BBBB");
 
-        let (ok, out, err) = cp_out(&FORCE_V, &[&a, &ro]);
+        let (ok, out, err) = cp_out(&force_v(), &[&a, &ro]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(
@@ -6290,7 +6783,7 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         std::os::unix::fs::symlink("nowhere", &dang).unwrap();
 
-        for flags in [&VERBOSE, &FORCE_V] {
+        for flags in [&verbose(), &force_v()] {
             let (ok, out, err) = cp_out(flags, &[&a, &dang]);
             assert!(!ok, "{out}");
             assert!(
@@ -6316,7 +6809,7 @@ mod tests {
 
         // `--remove-destination` is the option that gets past it, because it
         // never asks whether the link resolves.
-        let (ok, out, err) = cp_out(&REMOVE_DEST_V, &[&a, &dang]);
+        let (ok, out, err) = cp_out(&remove_dest_v(), &[&a, &dang]);
         assert!(ok, "{err}");
         assert!(out.starts_with("removed "), "{out}");
         assert_eq!(body(&dang), b"A");
@@ -6344,13 +6837,13 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         fs::write(&t, b"OLD").unwrap();
         std::os::unix::fs::symlink("target", &lnk).unwrap();
-        let (ok, err) = cp(&FORCE_V, &[&a, &lnk]);
+        let (ok, err) = cp(&force_v(), &[&a, &lnk]);
         assert!(ok, "{err}");
         assert_eq!(body(&t), b"A", "written through the link");
         assert!(fs::symlink_metadata(&lnk).unwrap().file_type().is_symlink());
 
         fs::write(&t, b"OLD").unwrap();
-        let (ok, err) = cp(&REMOVE_DEST_V, &[&a, &lnk]);
+        let (ok, err) = cp(&remove_dest_v(), &[&a, &lnk]);
         assert!(ok, "{err}");
         assert_eq!(body(&t), b"OLD", "the target was not touched");
         assert_eq!(body(&lnk), b"A");
@@ -6373,11 +6866,11 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         std::os::unix::fs::symlink("a", &me).unwrap();
 
-        let (ok, err) = cp(&VERBOSE, &[&a, &me]);
+        let (ok, err) = cp(&verbose(), &[&a, &me]);
         assert!(!ok);
         assert!(err.contains("are the same file"), "{err}");
 
-        let (ok, err) = cp(&REMOVE_DEST_V, &[&a, &me]);
+        let (ok, err) = cp(&remove_dest_v(), &[&a, &me]);
         assert!(ok, "{err}");
         assert_eq!(body(&me), b"A");
         assert_eq!(body(&a), b"A", "the source survived");
@@ -6395,7 +6888,7 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
-        let (ok, out, err) = cp_out(&NO_CLOBBER_V, &[&a, &b]);
+        let (ok, out, err) = cp_out(&no_clobber_v(), &[&a, &b]);
         assert!(!ok, "the status is 1, not 0");
         assert_eq!(err, format!("cp: not replacing {}\n", quoteaf_os(&b)));
         assert_eq!(out, "", "and no verbose line, because nothing was copied");
@@ -6412,7 +6905,7 @@ mod tests {
         let b = dir.join("b");
         fs::write(&a, b"A").unwrap();
 
-        let (ok, out, err) = cp_out(&NO_CLOBBER_V, &[&a, &b]);
+        let (ok, out, err) = cp_out(&no_clobber_v(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
         assert_eq!(body(&b), b"A");
@@ -6432,7 +6925,7 @@ mod tests {
         fs::write(d.join("2"), b"kept").unwrap();
 
         let (ok, out, err) = cp_out(
-            &NO_CLOBBER_V,
+            &no_clobber_v(),
             &[&dir.join("1"), &dir.join("2"), &dir.join("3"), &d],
         );
         assert!(!ok);
@@ -6467,7 +6960,7 @@ mod tests {
                 recursive: true,
                 interactive: Interactive::AlwaysNo,
                 verbose: true,
-                ..OFF
+                ..off()
             },
             &[&src, &dst],
         );
@@ -6497,7 +6990,7 @@ mod tests {
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
-        let (ok, out, err, asked) = cp_answering(&ASK, &[&a, &b], &["y\n"]);
+        let (ok, out, err, asked) = cp_answering(&ask(), &[&a, &b], &["y\n"]);
         assert!(ok, "{err}");
         assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
         assert_eq!(out, "", "and nothing on stdout without -v");
@@ -6519,7 +7012,7 @@ mod tests {
         fs::write(&b, b"BBBB").unwrap();
 
         for answers in [&["n\n"][..], &[][..]] {
-            let (ok, out, err, asked) = cp_answering(&ASK, &[&a, &b], answers);
+            let (ok, out, err, asked) = cp_answering(&ask(), &[&a, &b], answers);
             assert!(!ok, "a decline is a failure, like -n's refusal");
             assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
             assert_eq!(out, "");
@@ -6542,7 +7035,7 @@ mod tests {
         let b = dir.join("b");
         fs::write(&a, b"A").unwrap();
 
-        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &b], &["n"]);
+        let (ok, _out, err, asked) = cp_answering(&ask(), &[&a, &b], &["n"]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(asked, 0);
@@ -6564,7 +7057,7 @@ mod tests {
         }
 
         let (ok, _out, err, asked) = cp_answering(
-            &ASK,
+            &ask(),
             &[&dir.join("1"), &dir.join("2"), &dir.join("3"), &d],
             &["y", "n", "y"],
         );
@@ -6605,7 +7098,7 @@ mod tests {
             &CpFlags {
                 recursive: true,
                 interactive: Interactive::AskUser,
-                ..OFF
+                ..off()
             },
             &[&src, &dst],
             &["n"],
@@ -6642,12 +7135,12 @@ mod tests {
         let a = dir.join("a");
         fs::write(&a, b"A").unwrap();
 
-        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &a], &["y"]);
+        let (ok, _out, err, asked) = cp_answering(&ask(), &[&a, &a], &["y"]);
         assert!(!ok);
         assert!(err.contains("are the same file"), "{err}");
         assert_eq!(asked, 0, "no question was put, so the `y` went unused");
 
-        let (ok, err) = cp(&NO_CLOBBER_V, &[&a, &a]);
+        let (ok, err) = cp(&no_clobber_v(), &[&a, &a]);
         assert!(!ok);
         assert!(err.contains("not replacing"), "{err}");
         assert_eq!(body(&a), b"A");
@@ -6672,7 +7165,7 @@ mod tests {
         fs::write(&b, b"BBBB").unwrap();
         set_test_mode(&b, 0o444);
 
-        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &b], &["n"]);
+        let (ok, _out, err, asked) = cp_answering(&ask(), &[&a, &b], &["n"]);
         assert!(!ok);
         assert_eq!(
             err,
@@ -6687,12 +7180,12 @@ mod tests {
             CpFlags {
                 interactive: Interactive::AskUser,
                 force: true,
-                ..OFF
+                ..off()
             },
             CpFlags {
                 interactive: Interactive::AskUser,
                 remove_destination: true,
-                ..OFF
+                ..off()
             },
         ] {
             let (ok, _out, err, asked) = cp_answering(&flags, &[&a, &b], &["n"]);
@@ -6725,7 +7218,7 @@ mod tests {
             &CpFlags {
                 interactive: Interactive::AskUser,
                 verbose: true,
-                ..OFF
+                ..off()
             },
             &[&a, &b],
             &["y"],
@@ -6753,7 +7246,7 @@ mod tests {
         fs::create_dir_all(dst.join("src")).unwrap();
         std::os::unix::fs::symlink("elsewhere", dst.join("src").join("link")).unwrap();
 
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(
@@ -6780,17 +7273,17 @@ mod tests {
             CpFlags {
                 no_target_directory: true,
                 force: true,
-                ..OFF
+                ..off()
             },
             CpFlags {
                 no_target_directory: true,
                 remove_destination: true,
-                ..OFF
+                ..off()
             },
             CpFlags {
                 no_target_directory: true,
                 interactive: Interactive::AlwaysNo,
-                ..OFF
+                ..off()
             },
         ] {
             let (ok, err) = cp(&over, &[&a, &d]);
@@ -6798,6 +7291,340 @@ mod tests {
             assert!(d.is_dir(), "still a directory");
             assert!(d.join("witness").is_file(), "and still has its contents");
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------------- -b, --backup and -S --
+
+    /// `-b`, i.e. `--backup` with no word: [`BackupType::NumberedExisting`] and
+    /// the default suffix.
+    fn backup_b() -> CpFlags {
+        CpFlags {
+            backup: backup::Backup::new(BackupType::NumberedExisting, b"~".to_vec()),
+            ..off()
+        }
+    }
+
+    /// The same, verbose, because the `(backup: …)` clause is half of what `-b`
+    /// is observable through.
+    fn backup_bv() -> CpFlags {
+        CpFlags {
+            verbose: true,
+            ..backup_b()
+        }
+    }
+
+    #[test]
+    fn backup_moves_the_destination_aside_and_keeps_its_bytes() {
+        let dir = scratch("backup_simple");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"NEW").unwrap();
+        fs::write(&b, b"OLD").unwrap();
+
+        let (ok, out, err) = cp_out(&backup_bv(), &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(
+            out,
+            format!(
+                "{} -> {} (backup: {})\n",
+                quoteaf_os(&a),
+                quoteaf_os(&b),
+                quoteaf_os(dir.join("b~"))
+            )
+        );
+        assert_eq!(body(&b), b"NEW");
+        assert_eq!(body(&dir.join("b~")), b"OLD");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Nothing to move aside is not an error, and prints no `(backup: …)`.
+    #[test]
+    fn a_destination_that_is_not_there_is_not_backed_up() {
+        let dir = scratch("backup_absent");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"NEW").unwrap();
+
+        let (ok, out, err) = cp_out(&backup_bv(), &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
+        assert!(!dir.join("b~").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-S` turns backups **on** by itself, and is not merely a name for the
+    /// ones `-b` asked for: GNU's `case 'S'` is `make_backups = true;
+    /// backup_suffix = optarg;` (`cp.c:1190`), the same first line as `case
+    /// 'b'`. Asserted with and without the `-b` it does not need, because the
+    /// tempting reading — a suffix that only takes effect alongside `-b` —
+    /// leaves `cp -S .bak a b` silently overwriting.
+    #[test]
+    fn a_suffix_turns_backups_on_by_itself() {
+        for spelling in [&["-S", ".bak"][..], &["-b", "-S", ".bak"][..]] {
+            let (f, _) = run_parse(&[spelling, &["a", "b"]].concat());
+            assert!(f.backup.enabled(), "{spelling:?}: -S must turn backups on");
+
+            let dir = scratch("suffix");
+            let a = dir.join("a");
+            let b = dir.join("b");
+            fs::write(&a, b"NEW").unwrap();
+            fs::write(&b, b"OLD").unwrap();
+            let (ok, err) = cp(&f, &[&a, &b]);
+            assert!(ok, "{err}");
+            assert_eq!(body(&b), b"NEW");
+            assert_eq!(body(&dir.join("b.bak")), b"OLD", "{spelling:?}");
+            assert!(!dir.join("b~").exists(), "{spelling:?}: the suffix is -S's");
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// `--backup=numbered` names `b.~1~`, and again `b.~2~`.
+    #[test]
+    fn numbered_backups_count_up() {
+        let (f, _) = run_parse(&["--backup=numbered", "a", "b"]);
+        let dir = scratch("backup_numbered");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&b, b"OLD1").unwrap();
+        fs::write(&a, b"NEW1").unwrap();
+        assert!(cp(&f, &[&a, &b]).0);
+        fs::write(&a, b"NEW2").unwrap();
+        assert!(cp(&f, &[&a, &b]).0);
+
+        assert_eq!(body(&dir.join("b.~1~")), b"OLD1");
+        assert_eq!(body(&dir.join("b.~2~")), b"NEW1");
+        assert_eq!(body(&b), b"NEW2");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `existing` — which bare `-b` selects — is numbered only where numbered
+    /// backups are already there, and simple otherwise. Both halves in one
+    /// test, because the difference between them *is* the option.
+    #[test]
+    fn existing_follows_what_the_directory_already_has() {
+        let dir = scratch("backup_existing");
+        let a = dir.join("a");
+        fs::write(&a, b"NEW").unwrap();
+
+        let plain_dst = dir.join("b");
+        fs::write(&plain_dst, b"OLD").unwrap();
+        assert!(cp(&backup_b(), &[&a, &plain_dst]).0);
+        assert_eq!(body(&dir.join("b~")), b"OLD", "no numbers here, so simple");
+
+        let numbered_dst = dir.join("c");
+        fs::write(&numbered_dst, b"OLD").unwrap();
+        fs::write(dir.join("c.~1~"), b"ANCIENT").unwrap();
+        assert!(cp(&backup_b(), &[&a, &numbered_dst]).0);
+        assert_eq!(
+            body(&dir.join("c.~2~")),
+            b"OLD",
+            "numbers here, so numbered"
+        );
+        assert!(!dir.join("c~").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--backup` and `--no-clobber` are refused together, and — unlike every
+    /// other diagnostic this program has — the sentence carries the referral,
+    /// because upstream reaches it through `usage (EXIT_FAILURE)` rather than
+    /// `die` (`cp.c:1223`).
+    #[test]
+    fn backup_and_no_clobber_are_refused_with_the_referral() {
+        for spelling in [
+            ["-n", "-b"],
+            ["-b", "-n"],
+            ["--backup", "--no-clobber"],
+            ["-n", "-S.bak"],
+        ] {
+            let e = fail(&[spelling[0], spelling[1], "a", "b"]);
+            assert_eq!(
+                e.sentence, "options --backup and --no-clobber are mutually exclusive",
+                "{spelling:?}"
+            );
+            assert!(e.referral.is_some(), "{spelling:?}: needs the Try line");
+        }
+    }
+
+    /// `--no-clobber --backup=none` is refused too, which is not obvious: the
+    /// two are asked about in the order GNU asks them, and the check is on
+    /// *whether an option was given* (`make_backups`, `cp.c:1220`) rather than
+    /// on the type it resolved to — which happens thirteen lines later
+    /// (`cp.c:1233`). So a `--backup` that turned itself off still counts.
+    #[test]
+    fn backup_none_still_counts_as_having_asked() {
+        let e = fail(&["--no-clobber", "--backup=none", "a", "b"]);
+        assert_eq!(
+            e.sentence,
+            "options --backup and --no-clobber are mutually exclusive"
+        );
+    }
+
+    /// On its own, though, `--backup=none` leaves backups off — the resolution
+    /// the check above deliberately does not wait for.
+    #[test]
+    fn backup_none_makes_no_backup() {
+        let (f, p) = run_parse(&["--backup=none", "a", "b"]);
+        assert!(!f.backup.enabled());
+        assert_eq!(p, vec!["a", "b"]);
+    }
+
+    /// An unknown word names itself and lists the ones that would have worked.
+    #[test]
+    fn an_unknown_backup_word_is_rejected_by_name() {
+        let e = fail(&["--backup=zz", "a", "b"]);
+        assert!(e.sentence.contains("invalid argument"), "{:?}", e.sentence);
+        assert!(e.sentence.contains("zz"), "{:?}", e.sentence);
+        assert!(e.sentence.contains("numbered"), "{:?}", e.sentence);
+    }
+
+    /// A simple backup whose name is the source is refused rather than made:
+    /// `cp --backup=simple a~ a` would name `a`'s backup `a~`, overwrite the
+    /// source with itself, and leave two copies of nothing. Upstream carries
+    /// this recipe as a comment; this is it.
+    #[test]
+    fn a_backup_that_would_be_the_source_is_refused() {
+        let dir = scratch("backup_eats_src");
+        let a = dir.join("a");
+        let a_tilde = dir.join("a~");
+        fs::write(&a, b"EMPTYISH").unwrap();
+        fs::write(&a_tilde, b"THE ONLY COPY").unwrap();
+
+        let f = CpFlags {
+            backup: backup::Backup::new(BackupType::Simple, b"~".to_vec()),
+            ..off()
+        };
+        let (ok, err) = cp(&f, &[&a_tilde, &a]);
+        assert!(!ok);
+        assert!(err.contains("might destroy source"), "{err}");
+        assert_eq!(body(&a_tilde), b"THE ONLY COPY", "left where it was");
+        assert_eq!(body(&a), b"EMPTYISH", "and not written over");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The numbered type is exempt from that refusal, because the name it picks
+    /// is never one the user typed.
+    #[test]
+    fn a_numbered_backup_of_the_sources_own_name_is_made() {
+        let dir = scratch("backup_numbered_src");
+        let a = dir.join("a");
+        let a_tilde = dir.join("a~");
+        fs::write(&a, b"OLD").unwrap();
+        fs::write(&a_tilde, b"NEW").unwrap();
+
+        let f = CpFlags {
+            backup: backup::Backup::new(BackupType::Numbered, b"~".to_vec()),
+            ..off()
+        };
+        let (ok, err) = cp(&f, &[&a_tilde, &a]);
+        assert!(ok, "{err}");
+        assert_eq!(body(&dir.join("a.~1~")), b"OLD");
+        assert_eq!(body(&a), b"NEW");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `--remove-destination` and `--backup` are upstream's `if` and `else if`
+    /// (`copy.c:2517`), not two steps: the backup happens and the unlink does
+    /// **not**. Read as independent, this deletes the very file the backup
+    /// exists to keep — the destination is removed, the rename finds nothing,
+    /// and `--backup` silently does nothing at all.
+    #[cfg(unix)]
+    #[test]
+    fn remove_destination_gives_way_to_a_backup() {
+        let dir = scratch("backup_vs_rmdest");
+        let a = dir.join("a");
+        fs::write(&a, b"NEW").unwrap();
+        let (b, witness) = linked_destination(&dir);
+
+        let f = CpFlags {
+            remove_destination: true,
+            ..backup_bv()
+        };
+        let (ok, out, err) = cp_out(&f, &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert!(!out.contains("removed"), "must not unlink as well: {out}");
+        assert!(out.contains("(backup: "), "{out}");
+        assert_eq!(body(&b), b"NEW");
+        assert_eq!(body(&dir.join("b~")), b"BBBB", "the backup, not a deletion");
+        assert_eq!(body(&witness), b"BBBB", "renamed aside, so the link holds");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A destination directory is not moved aside, so `cp -rb` merges into an
+    /// existing hierarchy and backs up the *files* it lands on. Upstream writes
+    /// the condition as `x->move_mode || ! S_ISDIR (…)` with a `FIXME` saying
+    /// `mv` does back up a directory and `cp` deliberately does not.
+    #[test]
+    fn a_destination_directory_is_merged_into_and_its_files_backed_up() {
+        let dir = scratch("backup_tree");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), b"NEW").unwrap();
+        let dst = dir.join("dst");
+        fs::create_dir_all(dst.join("src")).unwrap();
+        fs::write(dst.join("src/f"), b"OLD").unwrap();
+
+        let f = CpFlags {
+            recursive: true,
+            ..backup_b()
+        };
+        let (ok, err) = cp(&f, &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert!(dst.join("src").is_dir(), "not renamed away");
+        assert!(!dst.join("src~").exists());
+        assert_eq!(body(&dst.join("src/f")), b"NEW");
+        assert_eq!(body(&dst.join("src/f~")), b"OLD");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A source whose last component is `.` copies the *contents* into the
+    /// destination, so backing the destination up would move the directory the
+    /// copy is about to fill.
+    #[test]
+    fn a_dot_source_does_not_back_up_the_destination() {
+        let dir = scratch("backup_dot");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("f"), b"NEW").unwrap();
+        let dst = dir.join("dst");
+        fs::create_dir(&dst).unwrap();
+
+        let f = CpFlags {
+            recursive: true,
+            ..backup_b()
+        };
+        let (ok, err) = cp(&f, &[&src.join("."), &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(body(&dst.join("f")), b"NEW");
+        assert!(!dir.join("dst~").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A backup made for a copy that then failed is put back, which is
+    /// upstream's `un_backup` (`copy.c:3350`). Without it a failed `cp -b`
+    /// leaves *no* file under the destination's own name — the worst of both.
+    #[cfg(unix)]
+    #[test]
+    fn a_backup_is_restored_when_the_copy_fails() {
+        if root() {
+            return; // 0000 denies nobody here, so the copy would succeed.
+        }
+        let dir = scratch("backup_un");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"NEW").unwrap();
+        fs::write(&b, b"OLD").unwrap();
+        set_test_mode(&a, 0o000);
+
+        let (ok, err) = cp(&backup_b(), &[&a, &b]);
+        assert!(!ok, "an unreadable source cannot be copied");
+        assert!(err.contains("cannot open"), "{err}");
+        assert_eq!(body(&b), b"OLD", "put back under its own name");
+        assert!(!dir.join("b~").exists(), "and not left as the backup");
+        set_test_mode(&a, 0o600);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -6872,7 +7699,7 @@ mod tests {
         fs::write(&one, b"body").unwrap();
         fs::hard_link(&one, &two).unwrap();
 
-        let (ok, e) = cp(&PLAIN, &[&one, &two, &dest]);
+        let (ok, e) = cp(&plain(), &[&one, &two, &dest]);
         assert!(ok, "{e}");
         assert_eq!(e, "", "nothing to warn about");
         assert_eq!(fs::read(dest.join("one")).unwrap(), b"body");
@@ -6891,8 +7718,8 @@ mod tests {
         let f = dir.join("f");
         fs::write(&f, b"body").unwrap();
 
-        assert!(cp(&PLAIN, &[&f, &dest]).0);
-        let (ok, e) = cp(&PLAIN, &[&f, &dest]);
+        assert!(cp(&plain(), &[&f, &dest]).0);
+        let (ok, e) = cp(&plain(), &[&f, &dest]);
         assert!(ok, "{e}");
         assert_eq!(e, "");
         let _ = fs::remove_dir_all(&dir);
@@ -6913,28 +7740,34 @@ mod tests {
     /// near [`PLAIN`] because it and its two variants are `#[cfg(unix)]`, and an
     /// unused constant is a warning on the development host.
     #[cfg(unix)]
-    const LINKS: CpFlags = CpFlags {
-        preserve: Preserve {
-            links: true,
-            ..Preserve::NONE
-        },
-        ..OFF
-    };
+    fn links() -> CpFlags {
+        CpFlags {
+            preserve: Preserve {
+                links: true,
+                ..Preserve::NONE
+            },
+            ..off()
+        }
+    }
     /// `-v --preserve=links`. Most of these tests want it: the option's two
     /// orderings — whether `removed` comes before or after the arrow — are
     /// visible only in the verbose output, and getting them backwards is the
     /// mistake the obvious implementation makes.
     #[cfg(unix)]
-    const LINKS_V: CpFlags = CpFlags {
-        verbose: true,
-        ..LINKS
-    };
+    fn links_v() -> CpFlags {
+        CpFlags {
+            verbose: true,
+            ..links()
+        }
+    }
     /// `-rv --preserve=links`.
     #[cfg(unix)]
-    const LINKS_RV: CpFlags = CpFlags {
-        recursive: true,
-        ..LINKS_V
-    };
+    fn links_rv() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            ..links_v()
+        }
+    }
 
     /// `p`'s inode number, for asserting that two names are one file.
     ///
@@ -6964,7 +7797,7 @@ mod tests {
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
 
-        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        let (ok, out, err) = cp_out(&links_v(), &[&a, &b, &d]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(
@@ -6996,7 +7829,7 @@ mod tests {
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
 
-        let (ok, err) = cp(&PLAIN, &[&a, &b, &d]);
+        let (ok, err) = cp(&plain(), &[&a, &b, &d]);
         assert!(ok, "{err}");
         assert_ne!(ino(&d.join("a")), ino(&d.join("b")));
         let _ = fs::remove_dir_all(&dir);
@@ -7017,7 +7850,7 @@ mod tests {
         let d = dir.join("d");
         fs::create_dir(&d).unwrap();
 
-        let (ok, err) = cp(&LINKS_RV, &[&s, &d]);
+        let (ok, err) = cp(&links_rv(), &[&s, &d]);
         assert!(ok, "{err}");
         let out = d.join("s");
         assert_eq!(ino(&out.join("x")), ino(&out.join("y")));
@@ -7043,7 +7876,7 @@ mod tests {
         fs::write(&dst, b"OLD").unwrap();
         fs::hard_link(&dst, &witness).unwrap();
 
-        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &d]);
+        let (ok, out, err) = cp_out(&links_v(), &[&a, &d]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         let lines: Vec<&str> = out.lines().collect();
@@ -7074,7 +7907,7 @@ mod tests {
         fs::hard_link(&a, &b).unwrap();
         fs::write(d.join("b"), b"OLD").unwrap();
 
-        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        let (ok, out, err) = cp_out(&links_v(), &[&a, &b, &d]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         let lines: Vec<&str> = out.lines().collect();
@@ -7096,11 +7929,11 @@ mod tests {
         for flags in [
             CpFlags {
                 dereference: Deref::Always,
-                ..LINKS
+                ..links()
             },
             CpFlags {
                 dereference: Deref::CommandLine,
-                ..LINKS
+                ..links()
             },
         ] {
             let dir = scratch("links_deref");
@@ -7135,7 +7968,7 @@ mod tests {
 
         let flags = CpFlags {
             dereference: Deref::Never,
-            ..LINKS
+            ..links()
         };
         let (ok, err) = cp(&flags, &[&la, &lb, &d]);
         assert!(ok, "{err}");
@@ -7161,7 +7994,7 @@ mod tests {
 
         let flags = CpFlags {
             dereference: Deref::Never,
-            ..LINKS
+            ..links()
         };
         let (ok, err) = cp(&flags, &[&la, &lb, &d]);
         assert!(ok, "{err}");
@@ -7198,7 +8031,7 @@ mod tests {
         fs::hard_link(&a, &b).unwrap();
         fs::set_permissions(&a, fs::Permissions::from_mode(0o000)).unwrap();
 
-        let (ok, out, err) = cp_out(&LINKS_V, &[&a, &b, &d]);
+        let (ok, out, err) = cp_out(&links_v(), &[&a, &b, &d]);
         assert!(!ok, "an unreadable source is a failure");
         assert_eq!(out.lines().count(), 2, "both were announced: {out}");
         assert_eq!(
@@ -7232,7 +8065,7 @@ mod tests {
         fs::write(o.join("b"), b"other").unwrap();
         let other = o.join("b");
 
-        let (ok, err) = cp(&LINKS, &[&a, &b, &other, &d]);
+        let (ok, err) = cp(&links(), &[&a, &b, &other, &d]);
         assert!(ok, "no refusal, because `d/b` was never recorded: {err}");
         assert_eq!(err, "");
         assert_eq!(fs::read(d.join("b")).unwrap(), b"other");
@@ -7250,7 +8083,7 @@ mod tests {
         fs::write(o.join("b"), b"other").unwrap();
         let other = o.join("b");
 
-        let (ok, err) = cp(&PLAIN, &[&a, &b, &other, &d]);
+        let (ok, err) = cp(&plain(), &[&a, &b, &other, &d]);
         assert!(!ok);
         assert!(err.contains("will not overwrite just-created"), "{err}");
         assert_eq!(fs::read(d.join("b")).unwrap(), b"body");
@@ -7357,7 +8190,7 @@ mod tests {
             let b = dir.join(format!("b{i}"));
             fs::write(&a, b"x").unwrap();
             set_test_mode(&a, src_mode);
-            let (ok, err) = with_umask(mask, || cp(&PLAIN, &[&a, &b]));
+            let (ok, err) = with_umask(mask, || cp(&plain(), &[&a, &b]));
             assert!(ok, "{err}");
             assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
         }
@@ -7378,7 +8211,7 @@ mod tests {
         fs::write(&b, b"narrow").unwrap();
         set_test_mode(&b, 0o600);
 
-        let (ok, err) = cp(&PLAIN, &[&a, &b]);
+        let (ok, err) = cp(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(&b).unwrap(), b"wide", "contents are copied");
         assert_eq!(mode_of(&b), 0o600, "permissions are not");
@@ -7405,7 +8238,7 @@ mod tests {
             fs::create_dir(&a).unwrap();
             fs::write(a.join("inner"), b"x").unwrap();
             set_test_mode(&a, src_mode);
-            let (ok, err) = with_umask(mask, || cp(&RECURSIVE, &[&a, &b]));
+            let (ok, err) = with_umask(mask, || cp(&recursive(), &[&a, &b]));
             assert!(ok, "{err}");
             assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
             assert!(b.join("inner").is_file(), "and it was actually filled");
@@ -7427,7 +8260,7 @@ mod tests {
         fs::write(a.join("inner"), b"x").unwrap();
         set_test_mode(&a, 0o500);
 
-        let (ok, err) = cp(&RECURSIVE, &[&a, &b]);
+        let (ok, err) = cp(&recursive(), &[&a, &b]);
         assert!(ok, "{err}");
         assert!(b.join("inner").is_file(), "contents got in");
         assert_eq!(mode_of(&b), 0o500, "and the mode went on afterwards");
@@ -7449,67 +8282,83 @@ mod tests {
     /// `-p` and nothing else, spelled as a value so a test can say what it
     /// means rather than which letters produce it.
     #[cfg(unix)]
-    const PRESERVE: CpFlags = CpFlags {
-        preserve: Preserve::posix(),
-        require_preserve: true,
-        ..OFF
-    };
+    fn preserve() -> CpFlags {
+        CpFlags {
+            preserve: Preserve::posix(),
+            require_preserve: true,
+            ..off()
+        }
+    }
     /// `-rp`.
     #[cfg(unix)]
-    const PRESERVE_R: CpFlags = CpFlags {
-        recursive: true,
-        preserve: Preserve::posix(),
-        require_preserve: true,
-        ..OFF
-    };
+    fn preserve_r() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            preserve: Preserve::posix(),
+            require_preserve: true,
+            ..off()
+        }
+    }
     /// `--preserve=xattr`: the one spelling that insists.
     #[cfg(unix)]
-    const XATTR_ONLY: CpFlags = CpFlags {
-        preserve: Preserve {
-            xattr: true,
-            ..Preserve::NONE
-        },
-        require_preserve: true,
-        require_preserve_xattr: true,
-        ..OFF
-    };
+    fn xattr_only() -> CpFlags {
+        CpFlags {
+            preserve: Preserve {
+                xattr: true,
+                ..Preserve::NONE
+            },
+            require_preserve: true,
+            require_preserve_xattr: true,
+            ..off()
+        }
+    }
     /// `--preserve=all`: everything, best-effort about the attributes.
     #[cfg(unix)]
-    const PRESERVE_ALL: CpFlags = CpFlags {
-        preserve: Preserve::ALL,
-        require_preserve: true,
-        ..OFF
-    };
+    fn preserve_all() -> CpFlags {
+        CpFlags {
+            preserve: Preserve::ALL,
+            require_preserve: true,
+            ..off()
+        }
+    }
     /// `-a`: `PRESERVE_ALL` plus `-dR`, and silent about an attribute it could
     /// not carry.
     #[cfg(unix)]
-    const ARCHIVE: CpFlags = CpFlags {
-        recursive: true,
-        dereference: Deref::Never,
-        preserve: Preserve::ALL,
-        require_preserve: true,
-        reduce_diagnostics: true,
-        ..OFF
-    };
+    fn archive() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            dereference: Deref::Never,
+            preserve: Preserve::ALL,
+            require_preserve: true,
+            reduce_diagnostics: true,
+            ..off()
+        }
+    }
     /// The three above with `-RT`, for the tests whose destination has to be an
     /// existing directory *itself* rather than a directory to copy into.
     #[cfg(unix)]
-    const XATTR_ONLY_RT: CpFlags = CpFlags {
-        recursive: true,
-        no_target_directory: true,
-        ..XATTR_ONLY
-    };
+    fn xattr_only_rt() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            no_target_directory: true,
+            ..xattr_only()
+        }
+    }
     #[cfg(unix)]
-    const PRESERVE_ALL_RT: CpFlags = CpFlags {
-        recursive: true,
-        no_target_directory: true,
-        ..PRESERVE_ALL
-    };
+    fn preserve_all_rt() -> CpFlags {
+        CpFlags {
+            recursive: true,
+            no_target_directory: true,
+            ..preserve_all()
+        }
+    }
     #[cfg(unix)]
-    const ARCHIVE_T: CpFlags = CpFlags {
-        no_target_directory: true,
-        ..ARCHIVE
-    };
+    fn archive_t() -> CpFlags {
+        CpFlags {
+            no_target_directory: true,
+            ..archive()
+        }
+    }
 
     #[cfg(unix)]
     fn mtime_of(p: &Path) -> std::time::SystemTime {
@@ -7543,7 +8392,7 @@ mod tests {
         set_test_mode(&a, 0o741);
         let want = stamp(&a, 1_000_000_000);
 
-        let (ok, err) = with_umask(0o077, || cp(&PRESERVE, &[&a, &b]));
+        let (ok, err) = with_umask(0o077, || cp(&preserve(), &[&a, &b]));
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(mode_of(&b), 0o741, "the umask does not apply to -p");
@@ -7563,7 +8412,7 @@ mod tests {
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o4755);
 
-        let (ok, err) = cp(&PRESERVE, &[&a, &b]);
+        let (ok, err) = cp(&preserve(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(mode_of(&b), 0o4755);
         let _ = fs::remove_dir_all(&dir);
@@ -7581,7 +8430,7 @@ mod tests {
                 ..Preserve::NONE
             },
             require_preserve: true,
-            ..OFF
+            ..off()
         };
         let only_times = CpFlags {
             preserve: Preserve {
@@ -7589,7 +8438,7 @@ mod tests {
                 ..Preserve::NONE
             },
             require_preserve: true,
-            ..OFF
+            ..off()
         };
         let dir = scratch("p_alone");
 
@@ -7630,12 +8479,12 @@ mod tests {
                 ..Preserve::NONE
             },
             require_preserve: true,
-            ..OFF
+            ..off()
         };
         let symlink_t = CpFlags {
             no_target_directory: true,
             dereference: Deref::Never,
-            ..OFF
+            ..off()
         };
         let dir = scratch("d_keep");
         let a = dir.join("a");
@@ -7685,9 +8534,9 @@ mod tests {
     fn an_extended_attribute_crosses_under_every_option_that_asks() {
         const VALUE: &[u8] = b"\x00\xff\x80not text";
         let asked = [
-            ("--preserve=xattr", XATTR_ONLY),
-            ("--preserve=all", PRESERVE_ALL),
-            ("-a", ARCHIVE),
+            ("--preserve=xattr", xattr_only()),
+            ("--preserve=all", preserve_all()),
+            ("-a", archive()),
         ];
         for (spelling, flags) in asked {
             let dir = scratch("x_cross");
@@ -7725,7 +8574,7 @@ mod tests {
             return;
         }
 
-        let (ok, err) = cp(&PRESERVE, &[&a, &b]);
+        let (ok, err) = cp(&preserve(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(
             xattr_of(&b, b"user.tag"),
@@ -7753,9 +8602,9 @@ mod tests {
             return; // root may write to a directory whose mode forbids it.
         }
         let rows: [(&str, CpFlags, bool, bool); 3] = [
-            ("--preserve=xattr", XATTR_ONLY_RT, true, false),
-            ("--preserve=all", PRESERVE_ALL_RT, true, true),
-            ("-a", ARCHIVE_T, false, true),
+            ("--preserve=xattr", xattr_only_rt(), true, false),
+            ("--preserve=all", preserve_all_rt(), true, true),
+            ("-a", archive_t(), false, true),
         ];
         for (spelling, flags, speaks, succeeds) in rows {
             let dir = scratch("x_loud");
@@ -7798,7 +8647,7 @@ mod tests {
                 ..Preserve::NONE
             },
             require_preserve: true,
-            ..OFF
+            ..off()
         };
         let dir = scratch("p_own");
         let a = dir.join("a");
@@ -7828,7 +8677,7 @@ mod tests {
         set_test_mode(&b, 0o600);
         stamp(&b, 1_400_000_000);
 
-        let (ok, err) = cp(&PRESERVE, &[&a, &b]);
+        let (ok, err) = cp(&preserve(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(&b).unwrap(), b"new");
         assert_eq!(mode_of(&b), 0o741);
@@ -7859,7 +8708,7 @@ mod tests {
         let inner = stamp(&sub, 1_000_000_000);
         let outer = stamp(&src, 1_100_000_000);
 
-        let (ok, err) = with_umask(0o022, || cp(&PRESERVE_R, &[&src, &dst]));
+        let (ok, err) = with_umask(0o022, || cp(&preserve_r(), &[&src, &dst]));
         assert!(ok, "{err}");
         assert!(dst.join("sub").join("f").is_file(), "and it was filled");
         assert_eq!(mtime_of(&dst.join("sub")), inner);
@@ -7886,7 +8735,7 @@ mod tests {
         fs::write(src.join("f"), b"x").unwrap();
         set_test_mode(&src, 0o500);
 
-        let (ok, err) = cp(&PRESERVE_R, &[&src, &dst]);
+        let (ok, err) = cp(&preserve_r(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert!(dst.join("f").is_file(), "contents got in");
         assert_eq!(mode_of(&dst), 0o500);
@@ -7906,7 +8755,7 @@ mod tests {
             dereference: Deref::Never,
             preserve: Preserve::posix(),
             require_preserve: true,
-            ..OFF
+            ..off()
         };
         let dir = scratch("p_link");
         let target = dir.join("target");
@@ -7933,12 +8782,12 @@ mod tests {
     fn no_preserve_mode_gives_a_new_destination_the_default() {
         let flags = CpFlags {
             explicit_no_preserve_mode: true,
-            ..OFF
+            ..off()
         };
         let flags_r = CpFlags {
             recursive: true,
             explicit_no_preserve_mode: true,
-            ..OFF
+            ..off()
         };
         let dir = scratch("no_p_mode");
 
@@ -7970,7 +8819,7 @@ mod tests {
     fn no_preserve_mode_leaves_an_existing_destination_alone() {
         let flags = CpFlags {
             explicit_no_preserve_mode: true,
-            ..OFF
+            ..off()
         };
         let dir = scratch("no_p_over");
         let a = dir.join("a");
@@ -7995,7 +8844,7 @@ mod tests {
         let dir = scratch("same_file");
         let a = dir.join("a");
         fs::write(&a, b"contents").unwrap();
-        let (ok, err) = cp(&PLAIN, &[&a, &a]);
+        let (ok, err) = cp(&plain(), &[&a, &a]);
         assert!(!ok, "should have been refused");
         assert!(err.contains("are the same file"), "{err}");
         assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
@@ -8012,7 +8861,7 @@ mod tests {
         fs::write(&a, b"contents").unwrap();
         fs::create_dir(&sub).unwrap();
         let dotted = sub.join("..").join("a");
-        let (ok, err) = cp(&PLAIN, &[&a, &dotted]);
+        let (ok, err) = cp(&plain(), &[&a, &dotted]);
         assert!(!ok, "should have been refused: {err}");
         assert!(err.contains("are the same file"), "{err}");
         assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
@@ -8029,7 +8878,7 @@ mod tests {
         let b = dir.join("b");
         fs::write(&a, b"new").unwrap();
         fs::write(&b, b"old").unwrap();
-        let (ok, err) = cp(&PLAIN, &[&a, &b]);
+        let (ok, err) = cp(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(fs::read(&b).unwrap(), b"new");
@@ -8038,14 +8887,14 @@ mod tests {
 
     #[test]
     fn no_operands_names_the_missing_thing() {
-        let (ok, err) = cp(&PLAIN, &[]);
+        let (ok, err) = cp(&plain(), &[]);
         assert!(!ok);
         assert!(err.contains("missing file operand"), "{err}");
     }
 
     #[test]
     fn one_operand_names_it() {
-        let (ok, err) = cp(&PLAIN, &[Path::new("solo")]);
+        let (ok, err) = cp(&plain(), &[Path::new("solo")]);
         assert!(!ok);
         assert!(err.contains("missing destination file operand"), "{err}");
         assert!(err.contains("solo"), "{err}");
@@ -8056,7 +8905,7 @@ mod tests {
         let dir = scratch("needs_r");
         let sub = dir.join("sub");
         fs::create_dir(&sub).unwrap();
-        let (ok, err) = cp(&PLAIN, &[&sub, &dir.join("copy")]);
+        let (ok, err) = cp(&plain(), &[&sub, &dir.join("copy")]);
         assert!(!ok);
         assert!(err.contains("omitting directory"), "{err}");
         assert!(!dir.join("copy").exists());
@@ -8073,7 +8922,7 @@ mod tests {
         fs::write(src.join("deep/deeper/bottom"), b"3").unwrap();
 
         let dst = dir.join("dst");
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(dst.join("top")).unwrap(), b"1");
         assert_eq!(fs::read(dst.join("deep/mid")).unwrap(), b"2");
@@ -8090,7 +8939,7 @@ mod tests {
         let c = dir.join("c");
         fs::write(&a, b"a").unwrap();
         fs::write(&c, b"c").unwrap();
-        let (ok, err) = cp(&PLAIN, &[&a, &dir.join("gone"), &c, &sub]);
+        let (ok, err) = cp(&plain(), &[&a, &dir.join("gone"), &c, &sub]);
         assert!(!ok, "the missing source must count against the status");
         assert!(err.contains("gone"), "{err}");
         assert!(sub.join("a").is_file(), "the first source must still copy");
@@ -8110,13 +8959,13 @@ mod tests {
         fs::write(src.join("f"), b"x").unwrap();
 
         // `cp -r src src` — the target resolves to `src/src`.
-        let (ok, err) = cp(&RECURSIVE, &[&src, &src]);
+        let (ok, err) = cp(&recursive(), &[&src, &src]);
         assert!(!ok);
         assert!(err.contains("into itself"), "{err}");
         assert!(!src.join("src").exists());
 
         // `cp -r src src/nested` — the same thing spelled differently.
-        let (ok, err) = cp(&RECURSIVE, &[&src, &src.join("nested")]);
+        let (ok, err) = cp(&recursive(), &[&src, &src.join("nested")]);
         assert!(!ok, "{err}");
         assert!(err.contains("into itself"), "{err}");
         let _ = fs::remove_dir_all(&dir);
@@ -8136,7 +8985,7 @@ mod tests {
         fs::create_dir(&dst).unwrap();
         fs::write(dir.join("sibling"), b"x").unwrap();
 
-        let (ok, err) = cp(&RECURSIVE, &[&inner.join(".."), &dst]);
+        let (ok, err) = cp(&recursive(), &[&inner.join(".."), &dst]);
         assert!(!ok);
         assert!(err.contains("into itself"), "{err}");
         assert!(
@@ -8161,7 +9010,7 @@ mod tests {
         fs::create_dir(&dst).unwrap();
         fs::write(src.join("sub").join("f"), b"x").unwrap();
 
-        let (ok, err) = cp(&RECURSIVE, &[&src.join("."), &dst]);
+        let (ok, err) = cp(&recursive(), &[&src.join("."), &dst]);
         assert!(ok, "{err}");
         assert!(dst.join("sub").join("f").is_file(), "{err}");
         assert!(
@@ -8184,7 +9033,7 @@ mod tests {
         std::os::unix::fs::symlink("..", src.join("sub/loop")).unwrap();
 
         let dst = dir.join("dst");
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(dst.join("sub/f")).unwrap(), b"x");
         let link = fs::symlink_metadata(dst.join("sub/loop")).unwrap();
@@ -8211,7 +9060,7 @@ mod tests {
         std::os::unix::fs::symlink("real", src.join("link")).unwrap();
 
         let dst = dir.join("dst");
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         let meta = fs::symlink_metadata(dst.join("link")).unwrap();
         assert!(meta.file_type().is_symlink(), "a link must stay a link");
@@ -8233,7 +9082,7 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
         let out = dir.join("out");
-        let (ok, err) = cp(&PLAIN, &[&link, &out]);
+        let (ok, err) = cp(&plain(), &[&link, &out]);
         assert!(ok, "{err}");
         let meta = fs::symlink_metadata(&out).unwrap();
         assert!(
@@ -8257,7 +9106,7 @@ mod tests {
         fs::set_permissions(&src, fs::Permissions::from_mode(0o700)).unwrap();
 
         let dst = dir.join("copy");
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "a private directory must stay private");
@@ -8280,7 +9129,7 @@ mod tests {
         fs::write(&odd, b"x").unwrap();
 
         let dst = dir.join("dst");
-        let (ok, err) = cp(&RECURSIVE, &[&src, &dst]);
+        let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
 
         let mut want = dst.clone().into_os_string().into_vec();

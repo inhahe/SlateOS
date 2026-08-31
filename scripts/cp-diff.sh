@@ -251,11 +251,11 @@ hardlinks() {
 # the only trace was `cat: b: No such file or directory` on the harness's own
 # stderr. A blind spot that announces itself and is still a blind spot.
 #
-# The `cat: …: Permission denied` lines that remain are section 11's, and are
-# the *symmetric* kind: the case makes a file unreadable on both sides, so both
-# bodies come out empty and the comparison says nothing about that one file
-# rather than saying something false about it. Same bargain as `snapshot`'s
-# discarded `find` errors, for the same reason.
+# The `cat: …: Permission denied` lines that remain are sections 11's and
+# 19's, and are the *symmetric* kind: a case makes a file unreadable on both
+# sides, so both bodies come out empty and the comparison says nothing about
+# that one file rather than saying something false about it. Same bargain as
+# `snapshot`'s discarded `find` errors, for the same reason.
 contents() {
   ( cd "$1" 2>/dev/null || return 0
     find . -type f -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z \
@@ -280,7 +280,14 @@ ANSWERS=
 # `-p` cases, which are the only ones whose fixture pins those times; see
 # `snapshot`.
 STAMPS=
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; }
+# `VAR=value` words placed in the environment of both sides. Two variables reach
+# this program, both of them the backup section's: `VERSION_CONTROL` supplies
+# the word that `--backup` was not given, and `SIMPLE_BACKUP_SUFFIX` the suffix
+# that `-S` was not. They are knobs rather than a fixed export because each one
+# is *overridden* by its option, so the interesting cases are the pairs — the
+# variable alone, and the variable with the option that beats it.
+ENVV=()
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -311,7 +318,9 @@ run_one() {
     # differs for a reason that has nothing to do with either program.
     # Prepended rather than replacing `PATH`, so `timeout` is still findable.
     PATH="$bindir/$side:$PATH"
-    diff_run timeout -k 2 30 cp "$@" >"$out" 2>"$err"
+    # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
+    # whose *name* is chosen by the case rather than by this line.
+    diff_run timeout -k 2 30 env "${ENVV[@]}" cp "$@" >"$out" 2>"$err"
   ) <"$answers"
   echo $? >"$rcf"
   return 0
@@ -355,6 +364,7 @@ compare() {
   local label="cp $*"
   [ -z "$ANSWERS" ] || label="$label   [in: ${ANSWERS//$'\n'/\\n}]"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
+  [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
@@ -1880,7 +1890,317 @@ run_case -d file.txt new.txt
 run_case -P --preserve=links file.txt new.txt
 
 # =============================================================================
-# 19. Options GNU has and this cp has not
+# 19. -b, --backup and -S: the destination that was already there
+# =============================================================================
+# One option that renames one file, and nine places in `copy.c` that behave
+# differently once it is on. That ratio is the reason this section is the
+# longest here: every case below whose options do not obviously concern backups
+# is pinning one of those nine, and each was found by reading `copy.c` rather
+# than by imagining what `--backup` ought to touch.
+#
+#   * the destination is `lstat`ed rather than `stat`ed (`copy.c:2308`), so a
+#     symlink destination is moved aside *as a symlink* instead of being
+#     followed to whatever it names;
+#   * "source file specified more than once" is not warned about (`:2283`),
+#     though the source is still recorded, so the second copy of one source
+#     into one directory proceeds;
+#   * "will not overwrite just-created" is lifted, but only for
+#     `--backup=numbered` (`:2473`) -- upstream's own comment says "it works
+#     fine if you use --backup=numbered" and means only that one;
+#   * the same guard for a just-created *symlink* is lifted for every backup
+#     type (`:2591`), which is a different condition at a different site and
+#     reads like a slip until both are pinned;
+#   * a backup is refused outright when it would land on the source
+#     (`source_is_dst_backup`, `:2161`) -- and that refusal is itself skipped
+#     for `--backup=numbered`, which cannot collide;
+#   * the pre-copy unlink is the backup's `else` (`:2517`/`:2570`), not its
+#     neighbour, so a destination that was renamed aside is never also removed;
+#   * `-v` grows a `(backup: ...)` clause (`:2082`), and only when one was made;
+#   * a copy that fails after a backup was made puts it back (`un_backup`,
+#     `:3350`), announcing that too under `-v`;
+#   * and `cp -f -b foo foo` is *rewritten* rather than refused (`cp.c:797`),
+#     into a copy of `foo` onto `foo`'s backup name with backups then turned
+#     off.
+#
+# Two of the option's halves live in the environment rather than in the command
+# line, which is what [`ENVV`] is for. Neither variable turns backups on by
+# itself -- that takes the option -- so every environment case comes in a pair
+# with the same variable and no option.
+
+# --- the option's three spellings, and the shape they default to --------------
+run_case -b file.txt tree/a.txt
+run_case --backup file.txt tree/a.txt
+run_case --backup= file.txt tree/a.txt
+# A destination that is not there has nothing to move aside, and the option is
+# silent about it -- including under `-v`, whose clause is printed only when a
+# backup was actually made.
+run_case -bv file.txt new.txt
+run_case -bv file.txt tree/a.txt
+
+# --- the control words, whole and abbreviated ---------------------------------
+# All eight, because they are four meanings under two spellings each and a
+# table that pairs one of them wrongly is invisible until that word is used.
+run_case --backup=none file.txt tree/a.txt
+run_case --backup=off file.txt tree/a.txt
+run_case --backup=simple file.txt tree/a.txt
+run_case --backup=never file.txt tree/a.txt
+run_case --backup=existing file.txt tree/a.txt
+run_case --backup=nil file.txt tree/a.txt
+run_case --backup=numbered file.txt tree/a.txt
+run_case --backup=t file.txt tree/a.txt
+# Abbreviated: ambiguity is judged by *value*, so `ne` is fine (only `never`)
+# and `n` is not (`none` and `numbered` disagree, `never` and `nil` too).
+run_case --backup=nu file.txt tree/a.txt
+run_case --backup=ne file.txt tree/a.txt
+run_case --backup=ni file.txt tree/a.txt
+run_case --backup=n file.txt tree/a.txt
+run_case --backup=zz file.txt tree/a.txt
+run_case --backup=NUMBERED file.txt tree/a.txt
+# The word is read even when the option is repeated, and the last one wins --
+# except that a *bare* `-b` after a worded one leaves the word alone, because
+# upstream's `case 'b'` assigns only `if (optarg)`.
+run_case --backup=numbered -b file.txt tree/a.txt
+run_case -b --backup=numbered file.txt tree/a.txt
+run_case --backup=numbered --backup=simple file.txt tree/a.txt
+
+# --- what `existing` looks at -------------------------------------------------
+# The distinction between the three shapes is only visible against a directory
+# that already holds one kind of backup or the other.
+TREE='mktree; : > tree/a.txt.~1~'
+run_case --backup=existing file.txt tree/a.txt
+TREE='mktree; : > tree/a.txt.~1~'
+run_case --backup=simple file.txt tree/a.txt
+TREE='mktree; : > tree/a.txt~'
+run_case --backup=existing file.txt tree/a.txt
+TREE='mktree; : > tree/a.txt.~9~'
+run_case --backup=numbered file.txt tree/a.txt
+# `.~9~` to `.~10~` is the carry that grows the name by a digit, and `.~09~` is
+# not a version at all -- a leading zero is what makes the string comparison a
+# valid ordering, so upstream refuses to read one.
+TREE='mktree; : > tree/a.txt.~9~; : > tree/a.txt.~10~'
+run_case -b file.txt tree/a.txt
+TREE='mktree; : > tree/a.txt.~09~'
+run_case -b file.txt tree/a.txt
+# A backup of a *different* name in the same directory must not be counted.
+TREE='mktree; : > tree/a.txt2.~7~; : > tree/b.txt.~7~'
+run_case --backup=numbered file.txt tree/a.txt
+
+# --- the suffix ---------------------------------------------------------------
+run_case -S .bak -b file.txt tree/a.txt
+run_case --suffix=.bak -b file.txt tree/a.txt
+# `-S` alone turns backups on (`cp.c:1190`), which is not what "override the
+# usual backup suffix" suggests and is what upstream does.
+run_case -S .bak file.txt tree/a.txt
+run_case --suffix=.bak file.txt tree/a.txt
+# An unusable suffix falls back to `~` *silently*: empty, or not its own last
+# component. A merely trailing slash is neither, so it is accepted -- and the
+# rename it then asks for is one the filesystem refuses.
+run_case -S '' -b file.txt tree/a.txt
+run_case -S a/b -b file.txt tree/a.txt
+run_case -S / -b file.txt tree/a.txt
+run_case -S x/ -b file.txt tree/a.txt
+# A numbered backup ignores the suffix; `existing` uses it only when it falls
+# back to a simple one, which is the pair that says the fallback is real.
+run_case -S .bak --backup=numbered file.txt tree/a.txt
+run_case -S .bak --backup=existing file.txt tree/a.txt
+TREE='mktree; : > tree/a.txt.~1~'
+run_case -S .bak --backup=existing file.txt tree/a.txt
+
+# --- the two environment variables --------------------------------------------
+ENVV=(VERSION_CONTROL=numbered); run_case -b file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=t); run_case -b file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=simple); run_case -b file.txt tree/a.txt
+# Unset and empty are one case: `version && *version` in `xget_version`.
+ENVV=(VERSION_CONTROL=); run_case -b file.txt tree/a.txt
+# The option beats the variable, and a bare `-b` does not count as a word.
+ENVV=(VERSION_CONTROL=numbered); run_case --backup=simple file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=simple); run_case --backup=numbered file.txt tree/a.txt
+# A bad word from the environment is refused against a different context name:
+# `$VERSION_CONTROL` rather than `backup type`, which is the whole reason
+# upstream passes the context in.
+ENVV=(VERSION_CONTROL=zz); run_case -b file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=n); run_case -b file.txt tree/a.txt
+# ...but only when the option was given. Neither variable enables anything on
+# its own, so the bad word is not even looked at.
+ENVV=(VERSION_CONTROL=numbered); run_case file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=zz); run_case file.txt tree/a.txt
+ENVV=(SIMPLE_BACKUP_SUFFIX=.bk); run_case -b file.txt tree/a.txt
+ENVV=(SIMPLE_BACKUP_SUFFIX=); run_case -b file.txt tree/a.txt
+ENVV=(SIMPLE_BACKUP_SUFFIX=a/b); run_case -b file.txt tree/a.txt
+ENVV=(SIMPLE_BACKUP_SUFFIX=.bk); run_case -S .opt -b file.txt tree/a.txt
+# `-S ''` is a *choice*, and an unusable one, rather than a request to consult
+# the environment: the variable is read only when the option is absent.
+ENVV=(SIMPLE_BACKUP_SUFFIX=.bk); run_case -S '' -b file.txt tree/a.txt
+ENVV=(SIMPLE_BACKUP_SUFFIX=.bk); run_case file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=numbered SIMPLE_BACKUP_SUFFIX=.bk); run_case -b file.txt tree/a.txt
+ENVV=(VERSION_CONTROL=existing SIMPLE_BACKUP_SUFFIX=.bk); run_case -b file.txt tree/a.txt
+
+# --- --backup and --no-clobber are mutually exclusive -------------------------
+# Checked after the option loop and so order-independent, and checked on
+# `make_backups` rather than on the resolved type -- which is why
+# `--backup=none` is still refused, having set the flag on its way to meaning
+# "no backups", and why `-S` is refused too, having set it without being
+# spelled like a backup option at all.
+run_case -n -b file.txt tree/a.txt
+run_case -b -n file.txt tree/a.txt
+run_case --backup --no-clobber file.txt tree/a.txt
+run_case --no-clobber --backup=none file.txt tree/a.txt
+run_case -n -S .bak file.txt tree/a.txt
+# `-n` and `-i` are two values of one field, so a later `-i` un-refuses it.
+ANSWERS='y'$'\n'
+run_case -n -i -b file.txt tree/a.txt
+run_case -i -n -b file.txt tree/a.txt
+# And `-i` itself is compatible: a backup is made after the answer, not before,
+# so a `n` leaves the destination and its would-be backup alone.
+ANSWERS='y'$'\n'
+run_case -i -bv file.txt tree/a.txt
+ANSWERS='n'$'\n'
+run_case -i -bv file.txt tree/a.txt
+
+# --- the destination's shape --------------------------------------------------
+# The `lstat` flip. Without backups the symlink is followed and `file.txt` is
+# rewritten through it; with them the symlink itself is renamed aside and the
+# destination becomes a regular file, which is a different tree in three
+# columns at once.
+TREE='mktree; ln -s file.txt sl'
+run_case -v tree/a.txt sl
+TREE='mktree; ln -s file.txt sl'
+run_case -bv tree/a.txt sl
+TREE='mktree; ln -s nowhere sl'
+run_case -bv tree/a.txt sl
+TREE='mktree; ln -s . sl'
+run_case -bv tree/a.txt sl
+# A hard-linked destination: without backups both names change, with them the
+# other name keeps the old bytes. Only the `links{}` column can tell these two
+# apart, which is why it exists.
+TREE='mktree; printf x > h1; ln h1 h2'
+run_case -v file.txt h1
+TREE='mktree; printf x > h1; ln h1 h2'
+run_case -bv file.txt h1
+# A directory destination is a place to copy *into*, so the backup is of the
+# name inside it, if anything is there under that name.
+run_case -bv file.txt dir
+TREE='mktree; printf old > dir/file.txt'
+run_case -bv file.txt dir
+# And a directory that a recursive copy meets is never itself backed up
+# (`!S_ISDIR(dst_sb.st_mode)`), only the files under it.
+TREE='mktree; mkdir -p dst/tree/sub; printf old > dst/tree/a.txt; printf oldb > dst/tree/sub/b.txt'
+run_case -rbv tree dst
+TREE='mktree; mkdir -p dst/tree; printf old > dst/tree/link'
+run_case -rbv tree dst
+TREE='mktree; mkdir -p dst/tree; printf old > dst/tree/sub'
+run_case -rbv tree dst
+
+# --- the two just-created guards, which are gated differently -----------------
+# Two sources landing on one destination name. Without backups the second is
+# refused; with `--backup=numbered` it proceeds and the first becomes `.~1~`;
+# with any *other* backup type it is still refused, because the guard names
+# that one type and no other.
+TREE='mktree; mkdir s2; printf second > s2/b.txt'
+run_case -v tree/sub/b.txt s2/b.txt dir
+TREE='mktree; mkdir s2; printf second > s2/b.txt'
+run_case -bv tree/sub/b.txt s2/b.txt dir
+TREE='mktree; mkdir s2; printf second > s2/b.txt'
+run_case --backup=numbered -v tree/sub/b.txt s2/b.txt dir
+TREE='mktree; mkdir s2; printf second > s2/b.txt'
+run_case --backup=existing -v tree/sub/b.txt s2/b.txt dir
+# The same guard for a symlink is lifted for *every* backup type, which is the
+# difference this pair exists to hold still.
+TREE='mktree; mkdir p q; ln -s x p/s; ln -s y q/s'
+run_case -dv p/s q/s dir
+TREE='mktree; mkdir p q; ln -s x p/s; ln -s y q/s'
+run_case -dbv p/s q/s dir
+TREE='mktree; mkdir p q; ln -s x p/s; ln -s y q/s'
+run_case -dv --backup=numbered p/s q/s dir
+# One source named twice: the warning is suppressed under any backup type, but
+# what happens next is decided by the guard above, so only the numbered case
+# gets as far as making a second copy.
+run_case -v file.txt file.txt dir
+run_case -bv file.txt file.txt dir
+run_case --backup=numbered -v file.txt file.txt dir
+
+# --- a backup that would land on the source -----------------------------------
+# `cp -b a~ a` would rename `a` onto `a~`, which is the file being copied. The
+# refusal is by name *and* by inode, and is skipped for `--backup=numbered`,
+# whose name cannot collide.
+TREE='mktree; printf NEW > a; printf OLD > a~'
+run_case --backup=simple a~ a
+TREE='mktree; printf NEW > a; printf OLD > a~'
+run_case -b a~ a
+TREE='mktree; printf NEW > a; printf OLD > a~'
+run_case --backup=numbered a~ a
+TREE='mktree; printf NEW > a; printf OLD > a.bak'
+run_case -S .bak a.bak a
+# `existing` is *not* `numbered`, so the refusal applies to it even in a
+# directory where it would in fact have chosen a numbered name.
+TREE='mktree; printf NEW > a; printf OLD > a~; : > a.~1~'
+run_case -b a~ a
+# The name matching is not enough on its own: `a~` here is not `d/a`'s backup,
+# and `d/a~` does not exist, so the copy proceeds.
+TREE='mktree; mkdir d; printf NEW > d/a; printf OTHER > a~'
+run_case -bv a~ d/a
+# Nor is the inode enough: a second name for the same file that does not end in
+# the suffix is an ordinary source.
+TREE='mktree; printf NEW > a; printf OLD > a~; ln a~ hard'
+run_case -bv hard a
+
+# --- cp --force --backup with one name for both operands ----------------------
+# Not refused as "the same file" but rewritten (`cp.c:797`): the destination
+# becomes the backup name and backups are then turned off, so the file ends up
+# copied to its own backup and left in place. All four conditions are load
+# bearing, so each is denied in turn below.
+TREE='mktree; printf F > foo'
+run_case -fbv foo foo
+TREE='mktree; printf F > foo'
+run_case -f --backup=numbered -v foo foo
+TREE='mktree; printf F > foo'
+run_case -f -S .bak -v foo foo
+# Without `-f`, the ordinary same-file refusal.
+TREE='mktree; printf F > foo'
+run_case -bv foo foo
+# Without backups, likewise.
+TREE='mktree; printf F > foo'
+run_case -fv foo foo
+# Not a regular file: a symlink to one, and a directory.
+TREE='mktree; printf F > t; ln -s t sl'
+run_case -fbv sl sl
+TREE='mktree; mkdir fd'
+run_case -fbv fd fd
+# Not one source: two operands and a directory destination is a different shape
+# entirely, and the rewrite must not fire.
+TREE='mktree; printf F > foo'
+run_case -fbv foo foo dir
+# The same name spelled two ways is not "the same name" -- the test is on the
+# operands as given, so this one is the ordinary same-file refusal.
+TREE='mktree; printf F > foo'
+run_case -fbv ./foo foo
+
+# --- the pre-copy unlink is the backup's else ---------------------------------
+# `--remove-destination` and `-f` both remove a destination in their own way,
+# and neither may remove one that was just renamed aside.
+run_case --remove-destination -bv file.txt tree/a.txt
+run_case -fbv file.txt tree/a.txt
+TREE='mktree; ln -s file.txt sl'
+run_case --remove-destination -bv tree/a.txt sl
+
+# --- putting a backup back when the copy fails --------------------------------
+# The one path that reaches `un_backup`. It needs a copy that fails *after* the
+# destination has been renamed aside, which means an unreadable source -- so
+# these are guarded like the rest of the permission cases, and are skipped when
+# the harness runs as root.
+if [ "$(id -u)" -ne 0 ]; then
+  TREE='mktree; chmod 000 file.txt'
+  run_case -bv file.txt tree/a.txt
+  TREE='mktree; chmod 000 file.txt; : > tree/a.txt.~1~'
+  run_case --backup=numbered -v file.txt tree/a.txt
+  # And the other failure, which is the backup's own: a destination directory
+  # that cannot be written to, where the rename fails and nothing is copied.
+  TREE='mktree; chmod 500 tree'
+  run_case -bv file.txt tree/a.txt
+fi
+
+# =============================================================================
+# 20. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -1889,9 +2209,6 @@ run_case -P --preserve=links file.txt new.txt
 # produces a destination that looks right and is not.
 
 missing --attributes-only file.txt new.txt
-missing -b file.txt tree/a.txt
-missing --backup file.txt tree/a.txt
-missing --backup=numbered file.txt tree/a.txt
 missing --copy-contents -r tree dst
 missing --debug file.txt new.txt
 missing -l file.txt new.txt
@@ -1909,8 +2226,6 @@ missing --reflink=auto file.txt new.txt
 missing -s file.txt new.txt
 missing --symbolic-link file.txt new.txt
 missing --sparse=auto file.txt new.txt
-missing -S .bak -b file.txt tree/a.txt
-missing --suffix=.bak -b file.txt tree/a.txt
 missing --strip-trailing-slashes tree/ dst
 missing -u file.txt tree/a.txt
 missing --update file.txt tree/a.txt
@@ -1919,7 +2234,7 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 20. Where a source's last component lands
+# 21. Where a source's last component lands
 # =============================================================================
 # Which name a source arrives under, when the destination is a directory and so
 # one has to be chosen. GNU chooses in four lines (`do_copy`, `cp.c:734`): take
@@ -1976,7 +2291,7 @@ run_case -r tree tree dir
 run_case -r tree ./tree dir
 
 # =============================================================================
-# 21. --help and --version
+# 22. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

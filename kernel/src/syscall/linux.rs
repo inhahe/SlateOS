@@ -48231,8 +48231,9 @@ pub fn self_test_statfs_root() -> crate::error::KernelResult<()> {
 ///
 /// Runs after the `/tmp` memfs is mounted (so writes succeed) rather than in
 /// [`self_test`], which precedes VFS init and therefore only sees a read-only
-/// root — the in-`self_test` rename round-trip skips there. Uses `/tmp` paths
-/// so the writable memfs exercises the same-mount (atomic) branches.
+/// root. Uses `/tmp` paths so the writable memfs exercises the same-mount
+/// (atomic) branches. The `/`-rooted rename round-trip that complements this
+/// one lives in [`self_test_fs`], for the same reason.
 ///
 /// Coverage:
 ///  1. no-replace rename onto a FREE destination → succeeds, src gone, dst present;
@@ -50726,6 +50727,288 @@ pub fn self_test_process_vm_cross_as() -> crate::error::KernelResult<()> {
     cleanup();
     serial_println!(
         "[syscall/linux]   process_vm cross-AS: DEBUG-cap gate + remote read/write: OK"
+    );
+    Ok(())
+}
+
+/// The Linux-translation self-test cases that need a mounted, writable root.
+///
+/// **Why this is a second entry point rather than a skip inside [`self_test`].**
+/// Both cases below used to sit inline in `self_test`'s
+/// `self_test_mkdir_rename_family` group, each guarded by
+/// `is_mounted_rw("/")`. That guard is honest — it is a fact looked up in the
+/// mount table, which is what design-decisions.md §270 asks for — but
+/// `self_test` runs at boot Step 11 and the root filesystem mounts at Step 20f,
+/// so the guard was not *sometimes* false: it was false on every boot that has
+/// ever run, and neither case had executed once. A skip that has never not
+/// fired is a deletion with a log line.
+///
+/// Called from `main.rs` after the mount, alongside
+/// [`crate::ipc::io_ring::self_test_fh`], [`crate::syscall::dispatch::self_test_fs`]
+/// and [`crate::proc::spawn::self_test_fs`], which exist for the same reason.
+/// See `known-issues.md`
+/// `A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN`.
+///
+/// There is deliberately no writability guard left in either case. Before the
+/// mount, "root is not writable yet" is a fact about the boot stage; after it,
+/// it is a defect, and answering a defect with a SKIP is how these two came to
+/// spend their whole lives unrun.
+pub fn self_test_fs() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    serial_println!("[syscall/linux] Running post-mount translation self-test...");
+
+    test_linux_mkdir_rmdir_unlink_roundtrip()?;
+    test_linux_rename_roundtrip()?;
+
+    serial_println!("[syscall/linux] Post-mount translation self-test PASSED");
+    Ok(())
+}
+
+/// Real round-trip through the native VFS for the directory/unlink family.
+///
+/// Exercises: `mkdir(new) -> 0`, `mkdir(existing) -> EEXIST`,
+/// `unlink(dir) -> EISDIR`, `rmdir(dir) -> 0`, `rmdir(gone) -> ENOENT`, and for
+/// a regular file `rmdir(file) -> ENOTDIR`, `unlink(file) -> 0`,
+/// `unlink(gone) -> ENOENT`.
+#[inline(never)]
+fn test_linux_mkdir_rmdir_unlink_roundtrip() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    let probe_dir = "/__mutate_selftest_dir__";
+    let _ = crate::fs::Vfs::rmdir(probe_dir); // clean any stale slate
+    // The precondition is still checked, but as an assertion rather than a
+    // gate: this function runs only after the root mount, so a read-only root
+    // here is a boot-sequencing defect and must fail loudly.
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        serial_println!(
+            "[syscall/linux]   FAIL: post-mount self-test ran but / is not mounted read-write"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if let Err(e) = crate::fs::Vfs::mkdir(probe_dir) {
+        serial_println!(
+            "[syscall/linux]   FAIL: / is mounted read-write but mkdir({}) failed: {:?}",
+            probe_dir,
+            e
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Undo the probe; the dispatch path recreates it below.
+    let _ = crate::fs::Vfs::rmdir(probe_dir);
+    let dir_buf = b"/__mutate_selftest_dir__\0";
+    let dir_ptr = dir_buf.as_ptr() as u64;
+    core::hint::black_box(&dir_buf);
+    // mkdir(new) -> 0.
+    let a = SyscallArgs {
+        arg0: dir_ptr,
+        arg1: 0o755,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let v = dispatch_linux(nr::MKDIR, &a).value;
+    if v != 0 {
+        serial_println!("[syscall/linux]   FAIL: mkdir(new) -> {} (expected 0)", v);
+        let _ = crate::fs::Vfs::rmdir(probe_dir);
+        return Err(KernelError::InternalError);
+    }
+    // mkdir(existing) -> EEXIST.
+    let v = dispatch_linux(nr::MKDIR, &a).value;
+    if v != -i64::from(errno::EEXIST) {
+        serial_println!(
+            "[syscall/linux]   FAIL: mkdir(existing) -> {} (expected EEXIST)",
+            v
+        );
+        let _ = crate::fs::Vfs::rmdir(probe_dir);
+        return Err(KernelError::InternalError);
+    }
+    // unlink(dir) -> EISDIR (cannot unlink a directory).
+    let a_u = SyscallArgs {
+        arg0: dir_ptr,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let v = dispatch_linux(nr::UNLINK, &a_u).value;
+    if v != -i64::from(errno::EISDIR) {
+        serial_println!(
+            "[syscall/linux]   FAIL: unlink(dir) -> {} (expected EISDIR)",
+            v
+        );
+        let _ = crate::fs::Vfs::rmdir(probe_dir);
+        return Err(KernelError::InternalError);
+    }
+    // rmdir(dir) -> 0.
+    let v = dispatch_linux(nr::RMDIR, &a).value;
+    if v != 0 {
+        serial_println!("[syscall/linux]   FAIL: rmdir(dir) -> {} (expected 0)", v);
+        return Err(KernelError::InternalError);
+    }
+    // rmdir(gone) -> ENOENT.
+    let v = dispatch_linux(nr::RMDIR, &a).value;
+    if v != -i64::from(errno::ENOENT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rmdir(gone) -> {} (expected ENOENT)",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    // Regular-file leg: write a file via the VFS, then exercise the syscall
+    // paths.  The write is a hard requirement, not a sub-gate: when it used to
+    // be `if write_file(..).is_ok()`, a failing write silently skipped three
+    // assertions and the section still printed OK.
+    let file_path = "/__mutate_selftest_file__";
+    if let Err(e) = crate::fs::Vfs::write_file(file_path, b"x") {
+        serial_println!(
+            "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+            file_path,
+            e
+        );
+        return Err(KernelError::InternalError);
+    }
+    let file_buf = b"/__mutate_selftest_file__\0";
+    let file_ptr = file_buf.as_ptr() as u64;
+    core::hint::black_box(&file_buf);
+    let a_f = SyscallArgs {
+        arg0: file_ptr,
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    // rmdir(regular file) -> ENOTDIR.
+    let v = dispatch_linux(nr::RMDIR, &a_f).value;
+    if v != -i64::from(errno::ENOTDIR) {
+        serial_println!(
+            "[syscall/linux]   FAIL: rmdir(file) -> {} (expected ENOTDIR)",
+            v
+        );
+        let _ = crate::fs::Vfs::remove(file_path);
+        return Err(KernelError::InternalError);
+    }
+    // unlink(file) -> 0.
+    let v = dispatch_linux(nr::UNLINK, &a_f).value;
+    if v != 0 {
+        serial_println!("[syscall/linux]   FAIL: unlink(file) -> {} (expected 0)", v);
+        let _ = crate::fs::Vfs::remove(file_path);
+        return Err(KernelError::InternalError);
+    }
+    // unlink(gone) -> ENOENT.
+    let v = dispatch_linux(nr::UNLINK, &a_f).value;
+    if v != -i64::from(errno::ENOENT) {
+        serial_println!(
+            "[syscall/linux]   FAIL: unlink(gone) -> {} (expected ENOENT)",
+            v
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip (0/EEXIST/EISDIR/0/ENOENT/ENOTDIR): OK"
+    );
+    Ok(())
+}
+
+/// Real round-trip for `rename`: the move succeeds and emits the MOVED pair,
+/// and a follow-up `renameat2(RENAME_NOREPLACE)` onto the now-existing
+/// destination returns `EEXIST`.
+#[inline(never)]
+fn test_linux_rename_roundtrip() -> crate::error::KernelResult<()> {
+    use crate::serial_println;
+
+    let rsrc = "/__rename_selftest_src__";
+    let rdst = "/__rename_selftest_dst__";
+    let _ = crate::fs::Vfs::remove(rsrc);
+    let _ = crate::fs::Vfs::remove(rdst);
+    // Assertion, not a gate -- see `test_linux_mkdir_rmdir_unlink_roundtrip`.
+    if !crate::fs::selftest::is_mounted_rw("/") {
+        serial_println!(
+            "[syscall/linux]   FAIL: post-mount self-test ran but / is not mounted read-write"
+        );
+        return Err(KernelError::InternalError);
+    }
+    if let Err(e) = crate::fs::Vfs::write_file(rsrc, b"x") {
+        serial_println!(
+            "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
+            rsrc,
+            e
+        );
+        return Err(KernelError::InternalError);
+    }
+    let src_buf = b"/__rename_selftest_src__\0";
+    let src_ptr = src_buf.as_ptr() as u64;
+    let dst_buf = b"/__rename_selftest_dst__\0";
+    let dst_ptr = dst_buf.as_ptr() as u64;
+    core::hint::black_box(&src_buf);
+    core::hint::black_box(&dst_buf);
+    // rename(src, dst) -> 0.
+    let a = SyscallArgs {
+        arg0: src_ptr,
+        arg1: dst_ptr,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let v = dispatch_linux(nr::RENAME, &a).value;
+    if v != 0 {
+        serial_println!(
+            "[syscall/linux]   FAIL: rename(src,dst) -> {} (expected 0)",
+            v
+        );
+        let _ = crate::fs::Vfs::remove(rsrc);
+        let _ = crate::fs::Vfs::remove(rdst);
+        return Err(KernelError::InternalError);
+    }
+    // Source gone, destination present.
+    if crate::fs::Vfs::stat(rsrc).is_ok() {
+        serial_println!("[syscall/linux]   FAIL: rename left source behind");
+        let _ = crate::fs::Vfs::remove(rdst);
+        return Err(KernelError::InternalError);
+    }
+    if crate::fs::Vfs::stat(rdst).is_err() {
+        serial_println!("[syscall/linux]   FAIL: rename did not create destination");
+        return Err(KernelError::InternalError);
+    }
+    // RENAME_NOREPLACE onto the existing destination -> EEXIST.  Recreating the
+    // source is a hard requirement for the same reason as the file leg above:
+    // as `if write_file(..).is_ok()` it could drop the EEXIST assertion without
+    // changing the printed verdict.
+    if let Err(e) = crate::fs::Vfs::write_file(rsrc, b"y") {
+        serial_println!(
+            "[syscall/linux]   FAIL: recreating {} for the NOREPLACE leg failed: {:?}",
+            rsrc,
+            e
+        );
+        let _ = crate::fs::Vfs::remove(rdst);
+        return Err(KernelError::InternalError);
+    }
+    let a = SyscallArgs {
+        arg0: 0,
+        arg1: src_ptr,
+        arg2: 0,
+        arg3: dst_ptr,
+        arg4: 1,
+        arg5: 0,
+    };
+    let v = dispatch_linux(nr::RENAMEAT2, &a).value;
+    if v != -i64::from(errno::EEXIST) {
+        serial_println!(
+            "[syscall/linux]   FAIL: renameat2(NOREPLACE,existing) -> {} (expected EEXIST)",
+            v
+        );
+        let _ = crate::fs::Vfs::remove(rsrc);
+        let _ = crate::fs::Vfs::remove(rdst);
+        return Err(KernelError::InternalError);
+    }
+    let _ = crate::fs::Vfs::remove(rsrc);
+    let _ = crate::fs::Vfs::remove(rdst);
+    serial_println!(
+        "[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK"
     );
     Ok(())
 }
@@ -57293,10 +57576,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     serial_println!("[syscall/linux] Running translation self-test...");
 
-    // Sections that skip record why here, so the closing PASSED line names
-    // them.  A skip that never reaches the summary makes a half-run
-    // byte-indistinguishable from a full one.
-    let mut skips = crate::fs::selftest::Skips::new();
+    // No `Skips` recorder here any more.  The only two sections that could
+    // skip were the mkdir and rename round-trips, and both have moved to
+    // `self_test_fs`, which runs after the root mount and asserts rather than
+    // skips.  Every case below either passes or fails, so a half-run is no
+    // longer representable and there is nothing for a recorder to record.
 
     // (1) errno mapping round-trips for every variant in the table.
     self_test_errno_mapping()?;
@@ -72399,12 +72683,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    self_test_mkdir_rename_family(&mut skips)?;
+    self_test_mkdir_rename_family()?;
 
     #[inline(never)]
-    fn self_test_mkdir_rename_family(
-        skips: &mut crate::fs::selftest::Skips,
-    ) -> crate::error::KernelResult<()> {
+    fn self_test_mkdir_rename_family() -> crate::error::KernelResult<()> {
         use crate::serial_println;
         // mkdir / mkdirat / rmdir / unlink / unlinkat / rename family —
         // pointer validation plus principled errno.
@@ -72582,148 +72864,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // Real round-trip through the native VFS, gated on a writability
-            // probe so a read-only root still passes the suite.  Exercises:
-            //   mkdir(new) -> 0, mkdir(existing) -> EEXIST,
-            //   unlink(dir) -> EISDIR, rmdir(dir) -> 0, rmdir(gone) -> ENOENT,
-            //   and for a regular file: rmdir(file) -> ENOTDIR,
-            //   unlink(file) -> 0, unlink(gone) -> ENOENT.
-            let probe_dir = "/__mutate_selftest_dir__";
-            let _ = crate::fs::Vfs::rmdir(probe_dir); // clean any stale slate
-            // The precondition is a fact looked up in the mount table, not an
-            // inference from a failed mkdir: inferring it would let the very
-            // regression this section exists to catch switch the section off.
-            // Once the mount says read-write, a failing mkdir is a defect.
-            let writable = crate::fs::selftest::is_mounted_rw("/");
-            if writable {
-                if let Err(e) = crate::fs::Vfs::mkdir(probe_dir) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: / is mounted read-write but mkdir({}) failed: {:?}",
-                        probe_dir,
-                        e
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Undo the probe; the dispatch path recreates it below.
-                let _ = crate::fs::Vfs::rmdir(probe_dir);
-                let dir_buf = b"/__mutate_selftest_dir__\0";
-                let dir_ptr = dir_buf.as_ptr() as u64;
-                core::hint::black_box(&dir_buf);
-                // mkdir(new) -> 0.
-                let a = SyscallArgs {
-                    arg0: dir_ptr,
-                    arg1: 0o755,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let v = dispatch_linux(nr::MKDIR, &a).value;
-                if v != 0 {
-                    serial_println!("[syscall/linux]   FAIL: mkdir(new) -> {} (expected 0)", v);
-                    let _ = crate::fs::Vfs::rmdir(probe_dir);
-                    return Err(KernelError::InternalError);
-                }
-                // mkdir(existing) -> EEXIST.
-                let v = dispatch_linux(nr::MKDIR, &a).value;
-                if v != -i64::from(errno::EEXIST) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: mkdir(existing) -> {} (expected EEXIST)",
-                        v
-                    );
-                    let _ = crate::fs::Vfs::rmdir(probe_dir);
-                    return Err(KernelError::InternalError);
-                }
-                // unlink(dir) -> EISDIR (cannot unlink a directory).
-                let a_u = SyscallArgs {
-                    arg0: dir_ptr,
-                    arg1: 0,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let v = dispatch_linux(nr::UNLINK, &a_u).value;
-                if v != -i64::from(errno::EISDIR) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: unlink(dir) -> {} (expected EISDIR)",
-                        v
-                    );
-                    let _ = crate::fs::Vfs::rmdir(probe_dir);
-                    return Err(KernelError::InternalError);
-                }
-                // rmdir(dir) -> 0.
-                let v = dispatch_linux(nr::RMDIR, &a).value;
-                if v != 0 {
-                    serial_println!("[syscall/linux]   FAIL: rmdir(dir) -> {} (expected 0)", v);
-                    return Err(KernelError::InternalError);
-                }
-                // rmdir(gone) -> ENOENT.
-                let v = dispatch_linux(nr::RMDIR, &a).value;
-                if v != -i64::from(errno::ENOENT) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: rmdir(gone) -> {} (expected ENOENT)",
-                        v
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                // Regular-file leg: write a file via the VFS, then exercise the
-                // syscall paths.
-                let file_path = "/__mutate_selftest_file__";
-                if crate::fs::Vfs::write_file(file_path, b"x").is_ok() {
-                    let file_buf = b"/__mutate_selftest_file__\0";
-                    let file_ptr = file_buf.as_ptr() as u64;
-                    core::hint::black_box(&file_buf);
-                    let a_f = SyscallArgs {
-                        arg0: file_ptr,
-                        arg1: 0,
-                        arg2: 0,
-                        arg3: 0,
-                        arg4: 0,
-                        arg5: 0,
-                    };
-                    // rmdir(regular file) -> ENOTDIR.
-                    let v = dispatch_linux(nr::RMDIR, &a_f).value;
-                    if v != -i64::from(errno::ENOTDIR) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: rmdir(file) -> {} (expected ENOTDIR)",
-                            v
-                        );
-                        let _ = crate::fs::Vfs::remove(file_path);
-                        return Err(KernelError::InternalError);
-                    }
-                    // unlink(file) -> 0.
-                    let v = dispatch_linux(nr::UNLINK, &a_f).value;
-                    if v != 0 {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: unlink(file) -> {} (expected 0)",
-                            v
-                        );
-                        let _ = crate::fs::Vfs::remove(file_path);
-                        return Err(KernelError::InternalError);
-                    }
-                    // unlink(gone) -> ENOENT.
-                    let v = dispatch_linux(nr::UNLINK, &a_f).value;
-                    if v != -i64::from(errno::ENOENT) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: unlink(gone) -> {} (expected ENOENT)",
-                            v
-                        );
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                serial_println!(
-                    "[syscall/linux]   mkdir/rmdir/unlink native-VFS round-trip (0/EEXIST/EISDIR/0/ENOENT/ENOTDIR): OK"
-                );
-            } else {
-                skips.record(
-                    "mkdir/rmdir/unlink native-VFS round-trip",
-                    "/ is not mounted read-write",
-                );
-                serial_println!(
-                    "[syscall/linux]   SKIP: mkdir/rmdir/unlink native-VFS round-trip (/ is not mounted read-write)"
-                );
-            }
+            // The real mkdir/rmdir/unlink round-trip that used to sit here
+            // now lives in `test_linux_mkdir_rmdir_unlink_roundtrip`, called
+            // from `self_test_fs` after the root mount.  It was guarded by
+            // `is_mounted_rw("/")`, and this function runs at boot Step 11 —
+            // before the mount — so the guard was false on every boot the
+            // project has ever taken and the round-trip had never executed.
 
             // Batch 313: unlinkat int truncation — high-half register
             // garbage must be stripped before the flags mask check.
@@ -72913,94 +73059,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // Real round-trip, gated on writability: rename moves a file and
-            // emits the MOVED pair; a follow-up NOREPLACE onto the now-existing
-            // destination must return EEXIST.
-            let rsrc = "/__rename_selftest_src__";
-            let rdst = "/__rename_selftest_dst__";
-            let _ = crate::fs::Vfs::remove(rsrc);
-            let _ = crate::fs::Vfs::remove(rdst);
-            // Mount-table fact, not an inferred error -- see the mkdir probe
-            // above for why the distinction matters.
-            if crate::fs::selftest::is_mounted_rw("/") {
-                if let Err(e) = crate::fs::Vfs::write_file(rsrc, b"x") {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: / is mounted read-write but writing {} failed: {:?}",
-                        rsrc,
-                        e
-                    );
-                    return Err(KernelError::InternalError);
-                }
-                let src_buf = b"/__rename_selftest_src__\0";
-                let src_ptr = src_buf.as_ptr() as u64;
-                let dst_buf = b"/__rename_selftest_dst__\0";
-                let dst_ptr = dst_buf.as_ptr() as u64;
-                core::hint::black_box(&src_buf);
-                core::hint::black_box(&dst_buf);
-                // rename(src, dst) -> 0.
-                let a = SyscallArgs {
-                    arg0: src_ptr,
-                    arg1: dst_ptr,
-                    arg2: 0,
-                    arg3: 0,
-                    arg4: 0,
-                    arg5: 0,
-                };
-                let v = dispatch_linux(nr::RENAME, &a).value;
-                if v != 0 {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: rename(src,dst) -> {} (expected 0)",
-                        v
-                    );
-                    let _ = crate::fs::Vfs::remove(rsrc);
-                    let _ = crate::fs::Vfs::remove(rdst);
-                    return Err(KernelError::InternalError);
-                }
-                // Source gone, destination present.
-                if crate::fs::Vfs::stat(rsrc).is_ok() {
-                    serial_println!("[syscall/linux]   FAIL: rename left source behind");
-                    let _ = crate::fs::Vfs::remove(rdst);
-                    return Err(KernelError::InternalError);
-                }
-                if crate::fs::Vfs::stat(rdst).is_err() {
-                    serial_println!("[syscall/linux]   FAIL: rename did not create destination");
-                    return Err(KernelError::InternalError);
-                }
-                // RENAME_NOREPLACE onto the existing destination -> EEXIST.
-                if crate::fs::Vfs::write_file(rsrc, b"y").is_ok() {
-                    let a = SyscallArgs {
-                        arg0: 0,
-                        arg1: src_ptr,
-                        arg2: 0,
-                        arg3: dst_ptr,
-                        arg4: 1,
-                        arg5: 0,
-                    };
-                    let v = dispatch_linux(nr::RENAMEAT2, &a).value;
-                    if v != -i64::from(errno::EEXIST) {
-                        serial_println!(
-                            "[syscall/linux]   FAIL: renameat2(NOREPLACE,existing) -> {} (expected EEXIST)",
-                            v
-                        );
-                        let _ = crate::fs::Vfs::remove(rsrc);
-                        let _ = crate::fs::Vfs::remove(rdst);
-                        return Err(KernelError::InternalError);
-                    }
-                }
-                let _ = crate::fs::Vfs::remove(rsrc);
-                let _ = crate::fs::Vfs::remove(rdst);
-                serial_println!(
-                    "[syscall/linux]   rename native-VFS round-trip (move + NOREPLACE EEXIST): OK"
-                );
-            } else {
-                skips.record(
-                    "rename native-VFS round-trip",
-                    "/ is not mounted read-write",
-                );
-                serial_println!(
-                    "[syscall/linux]   SKIP: rename native-VFS round-trip (/ is not mounted read-write)"
-                );
-            }
+            // The real rename round-trip that used to sit here now lives in
+            // `test_linux_rename_roundtrip`, called from `self_test_fs` after
+            // the root mount, for the same reason as the mkdir round-trip
+            // above.
 
             // Batch 314: renameat2 unsigned-int truncation — high-half
             // register garbage must be stripped before the flags mask
@@ -106175,10 +106237,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         Ok(())
     }
 
-    skips.report("[syscall/linux]");
-    serial_println!(
-        "[syscall/linux] Translation self-test PASSED{}",
-        skips.suffix()
-    );
+    serial_println!("[syscall/linux] Translation self-test PASSED");
     Ok(())
 }

@@ -2867,13 +2867,11 @@ pub(crate) extern "C" fn userspace_entry_trampoline(info_raw: u64) {
 // ---------------------------------------------------------------------------
 
 /// Run spawn self-tests.
+///
+/// `proc::self_test()` runs during boot *before* filesystem init, so the two
+/// sections that need a real file handle cannot run here at all. They are in
+/// [`self_test_fs`], which `main.rs` calls after the root mount.
 pub fn self_test() -> KernelResult<()> {
-    // `proc::self_test()` runs during boot *before* filesystem init, so the
-    // two sections that need a real file handle can legitimately not run.
-    // They must say so where the reader looks — at the end of the suite —
-    // rather than as one SKIP line lost among a hundred OK lines.
-    let mut skips = crate::fs::selftest::Skips::new();
-
     test_spawn_from_elf()?;
     test_spawn_invalid_elf()?;
     test_spawn_with_capabilities()?;
@@ -2889,12 +2887,10 @@ pub fn self_test() -> KernelResult<()> {
     test_process_kill()?;
     test_no_frame_leak()?;
     test_fd_map_entry_layout()?;
-    test_spawn_with_fd_map(&mut skips)?;
     test_spawn_with_empty_fd_map()?;
     test_spawn_fd_map_invalid_handle()?;
     test_spawn_with_pty_master()?;
     test_spawn_pty_master_not_owned()?;
-    test_take_initial_fds_one_shot(&mut skips)?;
     test_spawn_args_header_layout()?;
     test_spawn_with_argv()?;
     test_spawn_with_argv_envp()?;
@@ -2909,7 +2905,30 @@ pub fn self_test() -> KernelResult<()> {
     test_pie_aslr_window()?;
     test_brk_aslr_gap()?;
 
-    skips.report("[spawn]");
+    Ok(())
+}
+
+/// The spawn cases that need a mounted root and a real file handle.
+///
+/// **Why a second entry point rather than a skip inside [`self_test`].** Both
+/// of these used to sit in `self_test`, each guarded by `is_mounted_rw("/")`.
+/// The guard is honest — a fact looked up in the mount table, which is what
+/// design-decisions.md §270 asks for — but `proc::self_test()` runs at boot
+/// Step 19 and the root filesystem mounts at Step 20f, so the guard was never
+/// once true and neither case had ever executed. A skip that has never *not*
+/// fired is a deletion with a log line.
+///
+/// Called from `main.rs` after the mount, alongside
+/// [`crate::syscall::dispatch::self_test_fs`] and
+/// [`crate::ipc::io_ring::self_test_fh`]. See `known-issues.md`
+/// `A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN`.
+pub fn self_test_fs() -> KernelResult<()> {
+    serial_println!("[spawn] Running post-mount spawn self-test...");
+
+    test_spawn_with_fd_map()?;
+    test_take_initial_fds_one_shot()?;
+
+    serial_println!("[spawn] Post-mount spawn self-test PASSED");
     Ok(())
 }
 
@@ -32065,22 +32084,24 @@ fn test_fd_map_entry_layout() -> KernelResult<()> {
 
 /// Test: Spawn a process with an fd map — handles are duped into child PCB.
 ///
-/// Requires VFS to be initialized (needs a real file handle to dup).
-/// Skips gracefully if VFS is not yet available — proc::self_test()
-/// runs before filesystem initialization during boot.
-fn test_spawn_with_fd_map(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+/// Requires VFS to be initialized (needs a real file handle to dup), so it
+/// runs from [`self_test_fs`] after the root mount rather than from
+/// [`self_test`], which precedes it.
+fn test_spawn_with_fd_map() -> KernelResult<()> {
     use crate::fs::handle;
 
     // "VFS not ready" is a fact about the boot stage, and the mount table
     // states it directly.  Deriving it from a failed `open` instead would
     // make *any* open bug — a broken CREATE, a permission regression, a
     // handle-table leak — silently switch this section off.
+    //
+    // The lookup stays, but it is an assertion now: this runs after the mount,
+    // so an unwritable root is a defect.  As a skip it fired on every boot.
     if !crate::fs::selftest::is_mounted_rw("/") {
-        skips.record(
-            "Spawn with fd_map",
-            "/ is not mounted read-write yet (running before filesystem init)",
+        serial_println!(
+            "[spawn]   FAIL: Spawn with fd_map runs after the root mount, but / is not mounted read-write"
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     // Create a file to get a real kernel handle.
@@ -32391,19 +32412,19 @@ fn test_spawn_pty_master_not_owned() -> KernelResult<()> {
 
 /// Test: take_initial_fds is one-shot — second call returns empty.
 ///
-/// Requires VFS to be initialized (needs a real file handle).
-/// Skips gracefully if VFS is not yet available.
-fn test_take_initial_fds_one_shot(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+/// Requires VFS to be initialized (needs a real file handle), so it runs from
+/// [`self_test_fs`] after the root mount.
+fn test_take_initial_fds_one_shot() -> KernelResult<()> {
     use crate::fs::handle;
 
     // See `test_spawn_with_fd_map`: ask the mount table whether the boot has
-    // reached filesystem init, rather than inferring it from a failed open.
+    // reached filesystem init, rather than inferring it from a failed open —
+    // and, running after the mount, treat a negative answer as a defect.
     if !crate::fs::selftest::is_mounted_rw("/") {
-        skips.record(
-            "take_initial_fds one-shot",
-            "/ is not mounted read-write yet (running before filesystem init)",
+        serial_println!(
+            "[spawn]   FAIL: take_initial_fds one-shot runs after the root mount, but / is not mounted read-write"
         );
-        return Ok(());
+        return Err(KernelError::InternalError);
     }
 
     let parent_handle = match handle::open(

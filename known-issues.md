@@ -100149,7 +100149,8 @@ asking, or the first userspace caller whose correctness depends on it.
 
 ## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
 
-**Status:** OPEN 2026-08-30
+**Status:** FIXED 2026-08-31 (the six instances). The *class* gate remains
+open — see "Then close the class" below.
 
 **In short:** Six self-test cases ask the mount table whether `/` is mounted
 read-write, find that it is not, record an honest SKIP, and return. They run
@@ -100164,8 +100165,8 @@ sense that nothing red is printed.
 |---|---|---|
 | `syscall` (dispatch.rs:991) | Native openat2 | `is_mounted_rw("/")` |
 | `syscall` (dispatch.rs:3861) | Dispatch FS roundtrip | `is_mounted_rw("/")` |
-| `syscall/linux` | mkdir/rmdir/unlink native-VFS round-trip | recorded skipped **twice** per boot |
-| `syscall/linux` | rename native-VFS round-trip | recorded skipped **twice** per boot |
+| `syscall/linux` (linux.rs:72597) | mkdir/rmdir/unlink native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
+| `syscall/linux` (linux.rs:72925) | rename native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
 | `spawn` (spawn.rs:32078) | Spawn with fd_map | `is_mounted_rw("/")` |
 | `spawn` (spawn.rs:32401) | take_initial_fds one-shot | `is_mounted_rw("/")` |
 
@@ -100196,7 +100197,46 @@ So the work is mechanical: move each of the six bodies behind a
 the pre-mount `self_test()` free of the case entirely — rather than leaving a
 skip behind that reports a condition which can no longer occur.
 
-**Then close the class, not just the instances.** Extend
+Four of the six were already standalone `fn`s and moved by relocating one
+call. The two in `syscall/linux` were **inline blocks inside `pub fn
+self_test()`**, which spans some 15,000 lines; they had to be lifted into
+functions of their own first. That was the larger half of the work and the
+reason they were listed separately above.
+
+**What was done (2026-08-31).** Three new post-mount entry points, all called
+from the `main.rs` block that already hosts `io_ring::self_test_fh`:
+
+| New entry point | Cases moved |
+|---|---|
+| `syscall::dispatch::self_test_fs` | Dispatch FS roundtrip, Native openat2 |
+| `proc::spawn::self_test_fs` | Spawn with fd_map, take_initial_fds one-shot |
+| `syscall::linux::self_test_fs` | `test_linux_mkdir_rmdir_unlink_roundtrip`, `test_linux_rename_roundtrip` |
+
+Three further changes fell out of the move and are worth naming, because each
+was a second way the same six cases could have gone unnoticed:
+
+- **The guards became assertions.** Each case still calls `is_mounted_rw("/")`,
+  but a `false` now prints FAIL and returns `InternalError` instead of
+  recording a SKIP. Before the mount, "root is not writable yet" is a fact
+  about the boot stage; after it, it is a defect, and answering a defect with a
+  SKIP is how these six came to spend their whole lives unrun.
+- **The `Skips` recorders were deleted**, not left idle. With no case in
+  `dispatch::self_test`, `spawn::self_test` or `linux::self_test` able to skip,
+  a recorder there could only ever report zero — machinery that can no longer
+  record anything is one more thing for a reader to mistake for coverage.
+- **Two swallowed-error sub-gates became hard failures.** Inside the two
+  `syscall/linux` bodies, `if Vfs::write_file(..).is_ok() { .. }` wrapped three
+  assertions in the mkdir case and the whole `RENAME_NOREPLACE`/EEXIST leg in
+  the rename case. A failing write dropped those assertions and the section
+  still printed OK — the same defect as the outer skip, one level down and with
+  no log line at all. Both now fail loudly.
+
+The calls are FATAL rather than WARNING, matching the halves of the same
+suites that still run at Steps 11 and 19 and halt the boot on failure.
+Demoting them would have moved the six cases from never running to running and
+not mattering.
+
+**Then close the class, not just the instances.** Still open. Extend
 `scripts/check-selftest-skips.py` (or the boot-history machinery in
 `bench/boot-history.jsonl`, which already has the data) to fail when a named
 skip fires on 100% of recorded boots. A skip that has never once *not* fired
@@ -100206,8 +100246,9 @@ is not a skip; it is a deletion with a log line.
 test design-decisions.md §648 relies on for native `dirfd == 0` coverage, and
 it is one of the six. Adding cases to a test that provably never runs is the
 precise self-deception §648's own entry criticises elsewhere — so §648's
-test half is blocked on this, and any future "it is covered by a self-test"
-claim about these six subsystems is worth checking against the log first.
+test half was blocked on this (it is now unblocked), and any future "it is
+covered by a self-test" claim about these six subsystems is worth checking
+against the log first.
 
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 

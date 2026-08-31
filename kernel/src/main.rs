@@ -1577,6 +1577,37 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = ipc::io_ring::self_test_fh() {
                 serial_println!("WARNING: io_ring file handle self-test failed: {:?}", e);
             }
+            // Dispatch, spawn and Linux-translation cases that need a mounted,
+            // writable root.
+            //
+            // These six used to live in `syscall::self_test()` (Step 11),
+            // `syscall::linux::self_test()` (Step 11) and `proc::self_test()`
+            // (Step 19), each guarded by a mount-table lookup.  The lookup was
+            // honest, but all three callers run before this point, so it was
+            // never once true: the six cases recorded a SKIP on every boot the
+            // project has ever taken and had never executed.  They follow
+            // `io_ring::self_test_fh` above, which is the same fix made earlier
+            // for the same reason.  See `known-issues.md`
+            // A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN.
+            // FATAL, not WARNING: these carry the same weight as the halves of
+            // the same suites that ran at Steps 11 and 19, which halt the boot
+            // on failure.  Demoting them here would mean the six cases went
+            // from never running to running and not mattering.
+            if let Err(e) = syscall::dispatch::self_test_fs() {
+                serial_println!("FATAL: Post-mount dispatch self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            if let Err(e) = proc::spawn::self_test_fs() {
+                serial_println!("FATAL: Post-mount spawn self-test failed: {}", e);
+                cpu::halt_loop();
+            }
+            if let Err(e) = syscall::linux::self_test_fs() {
+                serial_println!(
+                    "FATAL: Post-mount Linux-translation self-test failed: {}",
+                    e
+                );
+                cpu::halt_loop();
+            }
             // Buffer cache: hit/miss accounting, write-back, flush, read-ahead.
             //
             // Third of the calls `if fat_ok` was skipping.  Moving it needed

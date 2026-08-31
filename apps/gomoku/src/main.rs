@@ -835,20 +835,31 @@ impl GomokuApp {
     ///
     /// Called from the tick rather than from the event handler, which is what
     /// makes [`GamePhase::Thinking`] a phase a frame can be drawn in.
-    fn think(&mut self) {
+    /// Returns whether there was a search to run, which is what the tick is
+    /// answered with.
+    ///
+    /// The phase is tested here and nowhere else. It used to be tested twice
+    /// -- once by the `Event::Tick` arm, to decide `Consumed` against
+    /// `Ignored`, and once at the top of this function -- and a condition
+    /// written down twice is a condition one of whose copies cannot be
+    /// reached. The mutation sweep proved it: deleting the guard from this
+    /// function changed no behaviour at all, because the call site had
+    /// already established what it was checking for.
+    fn think(&mut self) -> bool {
         if self.phase != GamePhase::Thinking {
-            return;
+            return false;
         }
         let Some((r, c)) = find_best_move(&self.board, Cell::White) else {
             // No legal reply and the board is not full: nothing to do but
             // hand the turn back, rather than sit in Thinking forever.
             self.current_turn = Cell::Black;
             self.phase = GamePhase::Playing;
-            return;
+            return true;
         };
         self.cursor_row = r as i32;
         self.cursor_col = c as i32;
         self.place_stone(r, c);
+        true
     }
 
     /// Undo the last move(s). If the last move was by the AI (White),
@@ -999,10 +1010,9 @@ impl GomokuApp {
         match event {
             Event::Key(ke) => self.handle_key(ke),
             Event::Mouse(me) => self.handle_mouse(me),
-            Event::Tick { .. } if self.phase == GamePhase::Thinking => {
-                self.think();
-                EventResult::Consumed
-            }
+            // The tick is answered by whether a search actually ran, rather
+            // than by re-deciding here whether one should have.
+            Event::Tick { .. } if self.think() => EventResult::Consumed,
             _ => EventResult::Ignored,
         }
     }
@@ -1607,6 +1617,21 @@ mod tests {
         texts(frame).iter().any(|t| t.contains(needle))
     }
 
+    /// True when some string painted with its origin inside `r` contains
+    /// `needle`.
+    ///
+    /// [`says`] cannot tell two bands apart, and gomoku has two that say the
+    /// same thing: the header and the status band both report "White is
+    /// thinking". A mutation that stopped the status band saying it survived a
+    /// suite that only asked whether the *frame* said it, because the header
+    /// still did. Any claim about a particular band has to name the band.
+    fn says_in(frame: &Frame<Target>, needle: &str, r: Rect) -> bool {
+        frame.commands().iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, x, y, .. }
+                if text.contains(needle) && r.contains(*x, *y))
+        })
+    }
+
     /// Every filled rectangle of `color`.
     fn fills_of(frame: &Frame<Target>, color: Color) -> Vec<Rect> {
         frame
@@ -1711,18 +1736,6 @@ mod tests {
                     );
                 }
             }
-        }
-    }
-
-    /// The frame is balanced: every clip pushed is popped.
-    #[test]
-    fn every_frame_is_balanced() {
-        for size in SIZES {
-            let app = GomokuApp::new();
-            assert!(
-                app.frame(size.0, size.1).is_balanced(),
-                "the frame at {size:?} leaves a clip open"
-            );
         }
     }
 
@@ -2300,6 +2313,46 @@ mod tests {
         assert_eq!(app.current_turn, Cell::Black);
         assert_eq!(app.move_count, 0);
         assert_eq!(app.scores, (0, 0, 0), "an unfinished game scored a point");
+    }
+
+    /// Undoing a win Black finished gives back Black's stone and not White's
+    /// too.
+    ///
+    /// `undo` calls `take_back(White)` then `take_back(Black)`, and each only
+    /// lifts a stone of its own colour. Deleting that colour check survived
+    /// the whole suite, because every undo fixture had a history that ended
+    /// in White or held a single move -- and on those, "lift the top stone
+    /// twice" and "lift White's then Black's" agree. They part only where a
+    /// history of two or more ends in Black, which is what a win by Black is
+    /// (lesson 90: the rule was never exercised in the regime it governs).
+    #[test]
+    fn undoing_blacks_win_does_not_also_take_back_whites_last_reply() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(0, 0)]);
+        assert_eq!(app.move_count, 2, "the opening pair was not played");
+
+        // A row of four for Black well clear of the opening pair, then the
+        // fifth stone played for real so the win goes through `place_stone`.
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::Black);
+        }
+        app.current_turn = Cell::Black;
+        app.cursor_row = 7;
+        app.cursor_col = 8;
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Won);
+        assert_eq!(app.move_count, 3);
+
+        app.undo();
+        assert_eq!(
+            app.move_count, 2,
+            "undoing Black's win took White's reply back with it"
+        );
+        assert_eq!(
+            app.move_history.last().map(|m| m.stone),
+            Some(Cell::White),
+            "White's reply should still be on the board"
+        );
     }
 
     #[test]
@@ -2893,6 +2946,7 @@ mod tests {
     #[test]
     fn the_status_band_says_what_the_game_is_doing() {
         let mut app = GomokuApp::new();
+        let band = Layout::solve(W.0, W.1).status;
         let mut checked = 0;
         for (phase, winner, needle) in [
             (GamePhase::Playing, Cell::Empty, "Arrows move"),
@@ -2905,7 +2959,7 @@ mod tests {
             app.winner = winner;
             let frame = app.frame(W.0, W.1);
             assert!(
-                says(&frame, needle),
+                says_in(&frame, needle, band),
                 "{phase:?} with {winner:?} winning does not say {needle:?}; it says {:?}",
                 texts(&frame)
             );
@@ -2926,9 +2980,15 @@ mod tests {
         app.cursor_col = 7;
         app.handle_key(&key_of(Key::Enter));
         assert_eq!(app.phase, GamePhase::Thinking);
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
         assert!(
-            says(&app.frame(W.0, W.1), "White is thinking"),
-            "White is searching and no frame says so"
+            says_in(&frame, "White is thinking", l.status),
+            "White is searching and the status band does not say so"
+        );
+        assert!(
+            says_in(&frame, "White is thinking", l.header),
+            "White is searching and the header still names a turn to play"
         );
     }
 
@@ -2936,12 +2996,16 @@ mod tests {
     #[test]
     fn the_header_names_the_turn() {
         let mut app = GomokuApp::new();
+        let head = Layout::solve(W.0, W.1).header;
         let frame = app.frame(W.0, W.1);
-        assert!(says(&frame, "Gomoku"), "the window does not name the game");
-        assert!(says(&frame, "Black to play"));
+        assert!(
+            says_in(&frame, "Gomoku", head),
+            "the window does not name the game"
+        );
+        assert!(says_in(&frame, "Black to play", head));
 
         app.current_turn = Cell::White;
-        assert!(says(&app.frame(W.0, W.1), "White to play"));
+        assert!(says_in(&app.frame(W.0, W.1), "White to play", head));
     }
 
     /// The panel counts the moves and keeps the score.

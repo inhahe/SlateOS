@@ -126,8 +126,13 @@ def build(pad: str | None, profile: str) -> subprocess.CompletedProcess:
     cmd = ["cargo", "build", "-p", "kernel"]
     if profile == "release":
         cmd.append("--release")
+    # cargo emits UTF-8 regardless of the console code page.  `errors="replace"`
+    # alone stops the decode raising, but it decodes as cp1252 on Windows and
+    # so silently mangles any non-ASCII in a diagnostic; naming the codec is
+    # what makes the captured text the text cargo wrote.
     return subprocess.run(cmd, cwd=PROJECT_ROOT, env=env,
-                          capture_output=True, text=True, errors="replace",
+                          capture_output=True, text=True,
+                          encoding="utf-8", errors="replace",
                           check=False)
 
 

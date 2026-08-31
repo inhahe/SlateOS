@@ -100306,3 +100306,235 @@ test was written. The systematic check is cheap and does not need a full
 sweep: for each such test, find the rule's threshold, find the fixture's
 value, and confirm the fixture is on the far side. Where it is not, the test
 is green today for a reason unrelated to the rule it names.
+
+### Lesson 91: a needle the frame says twice cannot tell you which band said it (lane C, 2026-08-30)
+
+**In short:** `gomoku` draws the phrase "White is thinking" in two places --
+the header, beside the title, and the status band along the bottom. Its
+tests asked whether the *frame* contained that phrase. So when the mutation
+sweep broke the status band, collapsing its `Thinking` arm into the
+`Playing` one so the bottom of the window read "Arrows move, Enter places"
+while White was searching, both tests that name the status band went on
+passing. The header was still saying it, and the tests could not tell the
+two apart. Two tests, one of them written specifically to catch this fault,
+and the mutant survived.
+
+**The helper is the fault, not the test.** The tests read fine:
+
+```rust
+assert!(
+    says(&frame, needle),
+    "{phase:?} with {winner:?} winning does not say {needle:?}",
+);
+```
+
+and the test is called `the_status_band_says_what_the_game_is_doing`. The
+name is a claim about a band. The assertion is a claim about a frame. The
+gap between the two is invisible at the call site, because the gap lives in
+`says`:
+
+```rust
+fn says(frame: &Frame<Target>, needle: &str) -> bool {
+    texts(frame).iter().any(|t| t.contains(needle))
+}
+```
+
+That is a perfectly good helper for "the window tells the player X
+somewhere," which is a real thing to want to assert -- `says(&frame,
+"Moves: 0")` is exactly right, because only the panel ever prints that. It
+becomes wrong the moment the string it is given is one more than one part
+of the program prints, and nothing in the helper's name or signature warns
+you which case you are in.
+
+**Why the duplication is not a bug to remove.** The obvious reaction is
+that a program should not say the same thing twice. But it should, here: the
+header's turn indicator sits at the top where the player's eye is on the
+board, and the status band is the running instruction line. During a search
+both must be truthful, and the two are separately deletable -- which is
+precisely what makes each one worth its own test, and precisely what a
+frame-wide search cannot express. Deduplicating the *program* to make the
+*test* work is fixing the wrong artifact.
+
+**The fix is to name the band, and to name it from the layout:**
+
+```rust
+fn says_in(frame: &Frame<Target>, needle: &str, r: Rect) -> bool {
+    frame.commands().iter().any(|c| {
+        matches!(c, RenderCommand::Text { text, x, y, .. }
+            if text.contains(needle) && r.contains(*x, *y))
+    })
+}
+```
+
+with the rect taken from `Layout::solve(W.0, W.1).status`. The mutant now
+kills both tests. And the same call, pointed at `.header`, turns the
+weaker half of the pair into a second real claim: the frame after Black's
+move is now required to say "White is thinking" in *both* bands, which is
+two independent facts where there was one ambiguous one.
+
+**The tell.** This is not lesson 83 (a colour confusable with other paint)
+and not lesson 81 (a hit box mistaken for ink) -- it is text confusable with
+*the same text elsewhere in the same picture*, and it has its own question:
+
+- **For every whole-frame text assertion, grep the production code for the
+  needle.** If it appears in more than one drawing function, the assertion
+  cannot distinguish them and any test naming one of them is misnamed. This
+  is a mechanical check -- one grep per needle -- and it does not need a
+  sweep to run.
+- **Watch for needles that are prefixes of each other.** `says(&frame,
+  "White wins")` is satisfied by the status band's "White wins. Z to take it
+  back" *and* by the header's "White wins", so shortening a needle to make it
+  match both bands quietly converts a specific claim into a frame-wide one.
+- **When a test's name contains a noun the layout has a `Rect` for** --
+  band, header, panel, sidebar, toolbar, footer -- the assertion should
+  mention that `Rect`. If it does not, either the name is too specific or
+  the assertion is too broad, and the sweep will tell you which.
+
+**Where else to look -- done, and it is `scripts/check-frame-needles.py`.**
+The check above is mechanical, so it was written down rather than left as
+advice: for every bare `says(&frame, "X")` in a crate's test module the
+script reports which production functions paint a literal containing "X",
+and exits 1 when any needle has more than one painter. Run over the whole
+of `apps/`, only three crates carry the helper at all -- `gomoku`,
+`towers`, `wordsearch` -- and after the fix above none has an ambiguous
+needle. It is worth re-running as each further app is wired, since the
+helper is copied forward with the suite.
+
+**The script was wrong three times before it was right, which is the part
+worth remembering.** It was checked against the *pre-fix* `gomoku` source,
+which it must flag, and did not:
+
+1. It matched needles against whole function *bodies*. "A" is a substring
+   of nearly every function in the file, so the needle the check existed to
+   find was buried under two dozen spurious owners.
+2. It found needles with a regex. But `says(&frame, needle)` sits inside
+   `assert!(..., "message")` and its first argument is itself a call
+   (`&app.frame(W.0, W.1)`), so scanning forward for a quoted string
+   returned the *failure message*: it invented eleven needles for
+   `wordsearch` that no test ever passes. Arguments need a depth-tracking
+   scanner, not a pattern.
+3. It assumed the needle is the second argument. `wordsearch` declares
+   `says(a, size, needle)` -- it re-renders at a size rather than taking a
+   frame -- so the script read the window size as the needle and reported
+   every call unresolvable. The position is now read off the helper's own
+   declaration.
+
+The general point: **a checker that has only ever been run against code you
+have already fixed has had its pass path tested and its fail path not.**
+Keep a known-bad input -- here, one `git show` of the commit before the fix
+-- and require the tool to fail on it. All three faults were invisible
+against the repaired tree, where every version of the script printed a
+confident green.
+
+The script also now prints the needles it *cannot* resolve
+(`&format!("{k}:{what}")`, `a.category().label()`, a loop variable) rather
+than omitting them, because omitting them is how a partial check reads as a
+complete one -- and a loop variable is the exact shape `gomoku`'s surviving
+mutant hid behind.
+
+### Lesson 92: a condition written twice has one copy no test can reach (lane C, 2026-08-30)
+
+**In short:** `gomoku` asked "is White searching?" in two places -- once in
+the event handler, to decide whether a clock tick counted as handled, and
+once at the top of the function that clock tick calls. Deleting the *second*
+copy changed nothing whatsoever: the mutation sweep ran the whole 78-test
+suite against a `think()` with no guard at all and every test passed,
+because no caller could ever reach it with the guard false. A guard that
+cannot be reached is not defence in depth. It is code that looks tested and
+is not.
+
+**The two copies:**
+
+```rust
+Event::Tick { .. } if self.phase == GamePhase::Thinking => {
+    self.think();
+    EventResult::Consumed
+}
+```
+
+```rust
+fn think(&mut self) {
+    if self.phase != GamePhase::Thinking {
+        return;
+    }
+    ...
+```
+
+`think` is private and has exactly one call site. So the inner `if` is
+dead in the strict sense -- no input to the program makes it taken -- while
+looking exactly like the sort of defensive check a reviewer would ask for.
+Coverage tools report the line as covered, because it *runs*; it just never
+branches.
+
+**Deleting the duplicate is the wrong repair.** That was the first instinct
+and it is worth saying why it is wrong: the two copies are not redundant
+by accident, they are two *different* jobs that happen to share a
+predicate. The handler needs the answer to pick `Consumed` over `Ignored`;
+`think` needs it to know whether to run. Delete the inner one and the
+precondition becomes a comment; delete the outer one and the event result
+is wrong. Either way the predicate is still stated once for each job.
+
+**The repair is to make one copy the source of the other.** Have the
+function that owns the precondition report what it did, and let the caller
+answer from that rather than from a second evaluation of the same
+question:
+
+```rust
+fn think(&mut self) -> bool {
+    if self.phase != GamePhase::Thinking {
+        return false;
+    }
+    ...
+    true
+}
+```
+
+```rust
+// The tick is answered by whether a search actually ran, rather than by
+// re-deciding here whether one should have.
+Event::Tick { .. } if self.think() => EventResult::Consumed,
+```
+
+Now there is one guard, it is live, and the mutation that deletes it kills
+`a_tick_with_nothing_to_think_about_is_ignored`. Note also what the
+rewritten call site *stops* being able to do: the old form could return
+`Consumed` for a tick during which nothing happened, because it was
+reporting its own opinion rather than the outcome. Deriving the result from
+the work is strictly more truthful, not merely tidier.
+
+**The tell.** This one is findable by reading, unlike lessons 89 and 90:
+
+- **Grep the predicate.** If the same comparison against the same field
+  appears in a caller and in the callee, one of them is unreachable. Which
+  one depends on the call direction, but there is always exactly one.
+- **A private function with one call site should not re-check what the call
+  site checked.** For a `pub` function the guard is real -- the caller is
+  unknown. For a private one, the caller is right there and can be read.
+- **When a guard "cannot be tested," that is the finding, not an excuse.**
+  The reflex when a test for a defensive branch looks impossible to write is
+  to skip the test. The right reading is that the branch is unreachable and
+  the design has stated something twice.
+
+**Where else to look -- checked, and `gomoku` was the only one.** The
+pattern is generated by the `impl App` shape every windowed app shares:
+`on_event` matches on the event and must return `Consumed`/`Ignored`, which
+tempts a guard in the match arm, while the method it dispatches to carries
+its own precondition. Fourteen apps have a guarded event arm:
+
+```
+grep -n "^            Event::[A-Za-z]* {\?.*} if " apps/*/src/main.rs
+```
+
+Twelve of them are the same guard, `Event::Key(k) if k.pressed =>`, and in
+every one of the twelve the `handle_key` it dispatches to does *not* re-test
+`pressed` -- the predicate is stated once, at the arm. (Several pass
+`key.key` rather than the whole event, which makes the duplication
+impossible to write.) The remaining two guard on state the arm body handles
+inline, with no callee to duplicate it. So the fault was `gomoku`'s alone,
+and the check costs two greps.
+
+Worth keeping the check, though, for the reason the campaign exists: the
+twelve are twelve *because* the `pressed` guard is copied forward with the
+`impl App` block. The first app that moves it into `handle_key` without
+removing it from the arm reproduces this exactly -- and will pass its whole
+suite while doing so.

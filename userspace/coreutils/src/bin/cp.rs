@@ -1559,11 +1559,20 @@ impl Copied {
     /// convenience: the two must not be separable, because a source that was
     /// looked up and then not recorded would let a third operand link to a
     /// destination the second one never made.
-    fn remember(&mut self, id: FileId, target: &Path) -> Option<PathBuf> {
-        if let Some(earlier) = self.0.get(&id) {
+    ///
+    /// By reference, and so are the two below, because a caller that has to
+    /// [`Copied::forget`] a failed copy needs the same id afterwards. Taking it
+    /// by value costs nothing on a host with inode numbers — [`FileId`] is two
+    /// words there and `Copy` — but the portable stand-in is a `PathBuf`, which
+    /// is not, so the caller could not use the id again and the whole
+    /// `cfg(not(unix))` build stopped compiling. Nobody noticed for a while:
+    /// this crate's gate is the `x86_64-slateos` target, whose `target-family`
+    /// is `unix`.
+    fn remember(&mut self, id: &FileId, target: &Path) -> Option<PathBuf> {
+        if let Some(earlier) = self.0.get(id) {
             return Some(earlier.clone());
         }
-        self.0.insert(id, target.to_path_buf());
+        self.0.insert(id.to_owned(), target.to_path_buf());
         None
     }
 
@@ -1575,8 +1584,8 @@ impl Copied {
     /// only a directory *named on the command line* can be named twice;
     /// recording walked ones instead would make the second half of a `cp -r p d
     /// p` accuse the first half's entries of repeating themselves.
-    fn lookup(&self, id: FileId) -> Option<&Path> {
-        self.0.get(&id).map(PathBuf::as_path)
+    fn lookup(&self, id: &FileId) -> Option<&Path> {
+        self.0.get(id).map(PathBuf::as_path)
     }
 
     /// GNU's `forget_created`, called from its `un_backup` label
@@ -1587,8 +1596,8 @@ impl Copied {
     /// instead of the failure the first one actually had. Measured: GNU's
     /// `cp --preserve=links a b d` with `a` unreadable reports the *same*
     /// `cannot open … for reading` twice.
-    fn forget(&mut self, id: FileId) {
-        self.0.remove(&id);
+    fn forget(&mut self, id: &FileId) {
+        self.0.remove(id);
     }
 }
 
@@ -2216,7 +2225,7 @@ fn copy_one<O: Write, E: Write>(
     // insert.
     if metadata.is_dir()
         && let Some(id) = file_id(src_path, &metadata)
-        && let Some(earlier) = job.copied.remember(id, &target)
+        && let Some(earlier) = job.copied.remember(&id, &target)
     {
         if same_entry(&earlier, &target) {
             let _ = writeln!(
@@ -2707,7 +2716,7 @@ fn place_entity<O: Write, E: Write>(
         && (hard_links(metadata) > 1 || job.flags.should_dereference(command_line_arg))
         && let Some(id) = file_id(src_path, metadata)
     {
-        if let Some(earlier) = job.copied.remember(id, target) {
+        if let Some(earlier) = job.copied.remember(&id, target) {
             return if create_hard_link(&earlier, target, job) {
                 Placed::Linked
             } else {
@@ -2732,7 +2741,7 @@ fn place_entity<O: Write, E: Write>(
     // happened. The guard there is `earlier_file == nullptr`, which is this
     // `recorded.is_some()` — the linking path above never reaches here.
     if !ok {
-        if let Some(id) = recorded {
+        if let Some(id) = &recorded {
             job.copied.forget(id);
         }
         // And the half the label is named for. In upstream's order: forget
@@ -3537,7 +3546,7 @@ fn copy_entry<O: Write, E: Write>(
     // operand.
     if meta.is_dir()
         && let Some(id) = file_id(&from, &meta)
-        && let Some(earlier) = job.copied.lookup(id).map(Path::to_path_buf)
+        && let Some(earlier) = job.copied.lookup(&id).map(Path::to_path_buf)
     {
         // GNU's third arm, with `command_line_arg` false so that only `-L`
         // satisfies it: following symlinks was asked for, so two paths reaching

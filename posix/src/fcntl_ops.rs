@@ -87,8 +87,22 @@ pub struct Flock {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
     // Verify the fd exists.
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+
+    // `fcntl` is the one call that splits over an `O_PATH` descriptor rather
+    // than accepting or refusing it wholesale, because it is really a dozen
+    // calls.  The commands that operate on the *descriptor* — its close-on-exec
+    // flag, its number, its status word — work; the ones that reach through to
+    // the file do not.  Measured on Linux 6.6: `F_GETFD`, `F_SETFD`, `F_GETFL`
+    // (which reports exactly `O_PATH`), `F_DUPFD` and `F_DUPFD_CLOEXEC` all
+    // succeed, while `F_SETFL`, `F_GETLK`, `F_SETLK` and `F_SETLKW` are
+    // `EBADF`.
+    if matches!(cmd, F_SETFL | F_GETLK | F_SETLK | F_SETLKW)
+        && crate::file::reject_path_fd_entry(&entry)
+    {
         return -1;
     }
 

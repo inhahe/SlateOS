@@ -152,12 +152,19 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     // fcntl(F_GETFL) can return them.  Strip creation-only flags
     // (O_CREAT, O_EXCL, O_TRUNC, O_NOCTTY, O_DIRECTORY) that don't
     // survive past open().
+    //
+    // `O_PATH` is kept for two reasons.  `F_GETFL` reports it — measured on
+    // Linux 6.6, `fcntl(O_PATH fd, F_GETFL)` returns exactly `O_PATH` and
+    // nothing else, which is what this mask produces since `O_RDONLY` is 0.
+    // And it is what [`reject_path_fd_entry`] reads to give the descriptor its
+    // `EBADF` on every operation that would touch the file rather than name it.
     let stored_flags = flags
         & (fcntl::O_ACCMODE
             | fcntl::O_APPEND
             | fcntl::O_NONBLOCK
             | fcntl::O_SYNC
-            | fcntl::O_NOFOLLOW);
+            | fcntl::O_NOFOLLOW
+            | fcntl::O_PATH);
     let kernel_handle = ret as u64;
     if let Some(fd_num) =
         fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
@@ -308,6 +315,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -560,6 +570,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if buf.is_null() && count > 0 {
         errno::set_errno(errno::EFAULT);
@@ -759,6 +772,26 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
 /// or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
+    // The three checks below used to run in the opposite order — arguments
+    // first, descriptor last — which got two of the four orderings wrong.
+    // What was measured on Linux 6.6:
+    //
+    //   lseek(999closed, 0, badwhence)  -> EBADF   (not EINVAL: the fd wins)
+    //   lseek(pathfd,    0, badwhence)  -> EBADF
+    //   lseek(pipe,      0, badwhence)  -> EINVAL  (whence beats seekability)
+    //   lseek(pipe,      0, SEEK_SET)   -> ESPIPE
+    //   lseek(pipe,     -5, SEEK_DATA)  -> ESPIPE  (seekability beats offset)
+    //   lseek(file,      0, badwhence)  -> EINVAL
+    //
+    // Which fixes the order at: descriptor, then `whence`, then seekability,
+    // then the offset — each check strictly inside the previous one's success.
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
+
     // POSIX: EINVAL if whence is not a valid value.  We support the three
     // standard whence values plus the Linux sparse-file extensions
     // SEEK_DATA / SEEK_HOLE, which the kernel implements as dedicated
@@ -773,21 +806,24 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         return -1;
     }
 
-    // SEEK_DATA / SEEK_HOLE take an absolute starting offset; a negative
-    // value is meaningless (the kernel would treat the cast u64 as a huge
-    // positive position).  POSIX/Linux return EINVAL for a negative offset
-    // here, mirroring pread/pwrite.
-    if (whence == crate::fcntl::SEEK_DATA || whence == crate::fcntl::SEEK_HOLE) && offset < 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-
-    let Some(entry) = lookup_fd(fd) else {
-        return -1;
-    };
-
     match entry.kind {
         HandleKind::File => {
+            let seeking_sparse =
+                whence == crate::fcntl::SEEK_DATA || whence == crate::fcntl::SEEK_HOLE;
+
+            // SEEK_DATA / SEEK_HOLE take an absolute starting offset; a
+            // negative value is meaningless (the kernel would treat the cast
+            // u64 as a huge positive position, i.e. past EOF).  The error is
+            // ENXIO, not the EINVAL we used to return — measured identically
+            // on ext4 and tmpfs, `lseek(f, -5, SEEK_DATA)` is ENXIO, and it is
+            // the same error as `lseek(f, past_eof, SEEK_DATA)` precisely
+            // because that is how the kernels reach it (`offset < 0 || offset
+            // >= i_size` is one condition in shmem_file_llseek).
+            if seeking_sparse && offset < 0 {
+                errno::set_errno(errno::ENXIO);
+                return -1;
+            }
+
             let ret = if whence == crate::fcntl::SEEK_DATA {
                 syscall2(SYS_FS_SEEK_DATA, entry.handle, offset as u64)
             } else if whence == crate::fcntl::SEEK_HOLE {
@@ -795,7 +831,18 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
             } else {
                 syscall3(SYS_FS_SEEK, entry.handle, offset as u64, whence as u64)
             };
-            errno::translate(ret) as OffT
+            // Starting the search past EOF is ENXIO on Linux, but our kernel
+            // reports it as the generic `InvalidArgument` — `fs/handle.rs`'s
+            // `SeekFrom::Data`/`SeekFrom::Hole` arms are the only places those
+            // two syscalls can produce it, so the remap is exact rather than a
+            // guess about which EINVAL we are looking at.  It is done here
+            // rather than in `errno::translate` because `InvalidArgument` must
+            // stay EINVAL for every other caller.
+            let out = errno::translate(ret) as OffT;
+            if out < 0 && seeking_sparse && errno::get_errno() == errno::EINVAL {
+                errno::set_errno(errno::ENXIO);
+            }
+            out
         }
         HandleKind::Pipe
         | HandleKind::Console
@@ -842,6 +889,9 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -913,6 +963,9 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -1038,7 +1091,10 @@ pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
     // and the pointer.  The per-segment `read` below repeats this lookup, but
     // it would never run for a zero-segment call — which is exactly the case
     // that must still report EBADF.
-    if lookup_fd(fd).is_none() {
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
     match check_iovec(iov, iovcnt) {
@@ -1080,7 +1136,10 @@ pub extern "C" fn readv(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn writev(fd: Fd, iov: *const Iovec, iovcnt: i32) -> SsizeT {
     // `do_writev` mirrors `do_readv`: `fdget_pos` before `import_iovec`.
-    if lookup_fd(fd).is_none() {
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
     match check_iovec(iov, iovcnt) {
@@ -1136,6 +1195,9 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -1222,6 +1284,9 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -2201,6 +2266,9 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     match entry.kind {
         HandleKind::File => {
@@ -2237,6 +2305,9 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
     let Some(entry) = lookup_fd(fd) else {
         return -1;
     };
+    if reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     match entry.kind {
         HandleKind::File => {
@@ -2284,6 +2355,58 @@ fn lookup_fd(fd: Fd) -> Option<fdtable::FdEntry> {
         errno::set_errno(errno::EBADF);
     }
     entry
+}
+
+/// The `EBADF` an `O_PATH` descriptor owes to any operation on the *file*.
+///
+/// `O_PATH` opens a **name**, not a file: the descriptor is good for `fstat`,
+/// `fstatfs`, `close`, `dup`, `fchdir`, `F_GETFD`/`F_SETFD`/`F_DUPFD`, and for
+/// standing in as the `dirfd` of an `*at` call — and for nothing else. Every
+/// operation that would read, write or alter the object behind the name fails
+/// with `EBADF`. Verified against Linux 6.6 for `read`, `write`, `pread`,
+/// `readv`, `writev`, `lseek`, `fchmod`, `fchown`, `ftruncate`, `fsync`,
+/// `fdatasync`, `flock`, `ioctl`, `mmap`, `fallocate`, `posix_fadvise`,
+/// `sendfile`, `F_SETFL` and `F_GETLK`, and for the calls above *not*
+/// failing.
+///
+/// **Where the check goes: exactly where the closed-fd `EBADF` goes.** That is
+/// not an assumption, it is the measured rule. Everything that outranks
+/// `EBADF` for a *closed* descriptor also outranks this one, and nothing else
+/// does — `ftruncate(999, -1)` and `pread(999, buf, 4, -1)` are both `EINVAL`
+/// rather than `EBADF`, because the length and offset are validated before the
+/// descriptor is looked up at all, and correspondingly `ftruncate(path_fd, -1)`
+/// is `EINVAL` while `ftruncate(path_fd, 0)` is `EBADF`. Conversely
+/// `lseek(path_fd, 0, <nonsense whence>)` is `EBADF`, not `EINVAL`, because a
+/// closed fd wins there too. So: put this beside the `lookup_fd`, and the
+/// ordering follows for free.
+///
+/// See `design-decisions.md` §733 for why only the half a program can observe
+/// is implemented, and `known-issues.md` →
+/// `B-READLINKAT-CANNOT-READ-A-SYMLINK-FD-BECAUSE-O_PATH-IS-UNIMPLEMENTED`
+/// for the other half, which needs a kernel handle that has no open file
+/// description behind it.
+#[inline]
+pub(crate) fn is_path_fd_entry(entry: &fdtable::FdEntry) -> bool {
+    entry.status_flags & fcntl::O_PATH != 0
+}
+
+/// [`is_path_fd_entry`], plus the `EBADF` — the form nearly every caller wants.
+#[inline]
+pub(crate) fn reject_path_fd_entry(entry: &fdtable::FdEntry) -> bool {
+    if is_path_fd_entry(entry) {
+        errno::set_errno(errno::EBADF);
+        return true;
+    }
+    false
+}
+
+/// [`reject_path_fd_entry`] for a call site that has not looked the fd up.
+///
+/// Returns `false` for a descriptor that is not open, leaving that call's own
+/// `EBADF` to report it — this function's job is only the `O_PATH` case.
+#[inline]
+pub(crate) fn reject_path_fd(fd: Fd) -> bool {
+    fdtable::get_fd(fd).is_some_and(|e| reject_path_fd_entry(&e))
 }
 
 /// Resolve a C-string path relative to the current working directory.
@@ -3507,8 +3630,11 @@ pub extern "C" fn fchmod(fd: Fd, mode: ModeT) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
     #[cfg(target_os = "none")]
@@ -3600,11 +3726,16 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
     // Same no-op shortcut as chown(), after EBADF validation.
+    // The `O_PATH` rejection above outranks it: `fchown(path_fd, -1, -1)` is
+    // EBADF on Linux, not the silent success the shortcut would give.
     if owner == u32::MAX && group == u32::MAX {
         return 0;
     }
@@ -3754,6 +3885,34 @@ pub const POSIX_FADV_DONTNEED: i32 = 4;
 ///   leaves this unspecified).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn posix_fadvise(fd: Fd, _offset: OffT, len: OffT, advice: i32) -> i32 {
+    // The order of these four checks is measured on Linux 6.6, not guessed —
+    // it used to be exactly backwards here, validating the arguments before
+    // ever looking at `fd`, so a closed descriptor passed a bad `advice`
+    // reported EINVAL where Linux reports EBADF.  What was measured:
+    //
+    //   posix_fadvise(999closed, 0, -1, NORMAL)  -> EBADF   (not EINVAL)
+    //   posix_fadvise(pathfd,    0,  0, 999)     -> EBADF   (not EINVAL)
+    //   posix_fadvise(pipe,      0, -1, NORMAL)  -> ESPIPE  (not EINVAL)
+    //   posix_fadvise(pipe,      0,  0, 999)     -> ESPIPE  (not EINVAL)
+    //   posix_fadvise(file,      0, -1, NORMAL)  -> EINVAL
+    //   posix_fadvise(file,     -1,  0, NORMAL)  -> 0       (offset is unchecked)
+    //
+    // So: descriptor first, then what kind of file it is, and only then the
+    // arguments.  This is the same rule the rest of the file follows — the
+    // descriptor lookup outranks argument validation — and `posix_fadvise` is
+    // simply one of the two places that had it inverted.
+    let Some(entry) = fdtable::get_fd(fd) else {
+        return errno::EBADF;
+    };
+    // Not `reject_path_fd_entry`: this call reports through its return value
+    // and must leave errno alone.
+    if is_path_fd_entry(&entry) {
+        return errno::EBADF;
+    }
+    // ESPIPE for pipes (Linux extension; matches what real applications expect).
+    if matches!(entry.kind, fdtable::HandleKind::Pipe) {
+        return errno::ESPIPE;
+    }
     // EINVAL for negative len.
     if len < 0 {
         return errno::EINVAL;
@@ -3767,14 +3926,6 @@ pub extern "C" fn posix_fadvise(fd: Fd, _offset: OffT, len: OffT, advice: i32) -
         | POSIX_FADV_WILLNEED
         | POSIX_FADV_DONTNEED => {}
         _ => return errno::EINVAL,
-    }
-    // EBADF if the fd isn't open.
-    let Some(entry) = fdtable::get_fd(fd) else {
-        return errno::EBADF;
-    };
-    // ESPIPE for pipes (Linux extension; matches what real applications expect).
-    if matches!(entry.kind, fdtable::HandleKind::Pipe) {
-        return errno::ESPIPE;
     }
     // Advice is purely advisory — accept and ignore.
     0
@@ -3902,8 +4053,11 @@ pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
     // (1) Linux's ksys_fallocate looks up the fd before vfs_fallocate
     // touches any of the other arguments — an invalid fd wins over
     // bad offset/len or bad mode bits.
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
 
@@ -4489,8 +4643,11 @@ pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    if fdtable::get_fd(fd).is_none() {
+    let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if reject_path_fd_entry(&entry) {
         return -1;
     }
     if operation & !FLOCK_OP_MASK != 0 {
@@ -6815,23 +6972,49 @@ mod tests {
 
     #[test]
     fn test_posix_fadvise_bad_advice_returns_einval() {
-        // Unknown advice value → EINVAL.  Linux validates advice before
-        // touching the fd table; we do the same.  Use an invalid fd to
-        // demonstrate advice validation happens first (independent of fd state).
-        assert_eq!(posix_fadvise(-1, 0, 0, 99), errno::EINVAL);
-        assert_eq!(posix_fadvise(-1, 0, 0, -1), errno::EINVAL);
-        assert_eq!(posix_fadvise(-1, 0, 0, 6), errno::EINVAL);
+        // Unknown advice value → EINVAL, but only once the descriptor has
+        // survived: these tests used to pass `-1` for the fd and assert
+        // EINVAL, on the stated belief that "Linux validates advice before
+        // touching the fd table".  It does not — measured on 6.6,
+        // `posix_fadvise(999closed, 0, 0, 999)` is EBADF.  So the fd here is a
+        // real one and the closed-fd case is asserted separately below.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::File, 4325).unwrap();
+        assert_eq!(posix_fadvise(fd, 0, 0, 99), errno::EINVAL);
+        assert_eq!(posix_fadvise(fd, 0, 0, -1), errno::EINVAL);
+        assert_eq!(posix_fadvise(fd, 0, 0, 6), errno::EINVAL);
+        assert!(fdtable::close_fd(fd).is_some());
     }
 
     #[test]
     fn test_posix_fadvise_negative_len_returns_einval() {
-        // Negative len is the only length constraint (offset may be any value).
-        // Use an invalid fd to demonstrate len validation runs first.
-        assert_eq!(posix_fadvise(-1, 0, -1, POSIX_FADV_NORMAL), errno::EINVAL);
+        // Negative len is the only length constraint (offset may be any value:
+        // `posix_fadvise(f, -1, 0, NORMAL)` succeeds on Linux).
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::File, 4326).unwrap();
+        assert_eq!(posix_fadvise(fd, 0, -1, POSIX_FADV_NORMAL), errno::EINVAL);
         assert_eq!(
-            posix_fadvise(-1, 100, -100, POSIX_FADV_SEQUENTIAL),
+            posix_fadvise(fd, 100, -100, POSIX_FADV_SEQUENTIAL),
             errno::EINVAL
         );
+        assert_eq!(posix_fadvise(fd, -1, 0, POSIX_FADV_NORMAL), 0);
+        assert!(fdtable::close_fd(fd).is_some());
+    }
+
+    #[test]
+    fn test_posix_fadvise_descriptor_outranks_arguments() {
+        // The ordering the two tests above used to have backwards.  A closed
+        // descriptor is EBADF whatever else is wrong with the call, and a pipe
+        // is ESPIPE whatever else is wrong with the call — measured:
+        //
+        //   posix_fadvise(999closed, 0, -1, NORMAL) -> EBADF
+        //   posix_fadvise(pipe,      0, -1, NORMAL) -> ESPIPE
+        //   posix_fadvise(pipe,      0,  0, 999)    -> ESPIPE
+        assert_eq!(posix_fadvise(900, 0, -1, POSIX_FADV_NORMAL), errno::EBADF);
+        assert_eq!(posix_fadvise(900, 0, 0, 999), errno::EBADF);
+
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Pipe, 4327).unwrap();
+        assert_eq!(posix_fadvise(fd, 0, -1, POSIX_FADV_NORMAL), errno::ESPIPE);
+        assert_eq!(posix_fadvise(fd, 0, 0, 999), errno::ESPIPE);
+        assert!(fdtable::close_fd(fd).is_some());
     }
 
     #[test]
@@ -6868,11 +7051,14 @@ mod tests {
 
     #[test]
     fn test_fadvise64_delegates_to_posix_fadvise() {
-        // fadvise64 must validate the same way as posix_fadvise.
+        // fadvise64 must validate the same way as posix_fadvise — including
+        // the descriptor-before-arguments ordering, so a bad advice on a
+        // closed fd is EBADF here too.
         assert_eq!(fadvise64(-1, 0, 0, POSIX_FADV_NORMAL), errno::EBADF);
-        assert_eq!(fadvise64(-1, 0, 0, 99), errno::EINVAL);
+        assert_eq!(fadvise64(-1, 0, 0, 99), errno::EBADF);
         let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
         assert_eq!(fadvise64(fd, 0, 0, POSIX_FADV_NORMAL), 0);
+        assert_eq!(fadvise64(fd, 0, 0, 99), errno::EINVAL);
         let _ = close(fd);
     }
 
@@ -8193,21 +8379,73 @@ mod tests {
         let _ret = lseek(0, 0, crate::fcntl::SEEK_HOLE);
     }
 
+    // -- lseek error ordering (all four orderings measured on Linux 6.6) --
+    //
+    // These four checks nest, and the nesting is the whole point: each one is
+    // only reachable once the previous has passed.  Before 2026-08-30 `lseek`
+    // ran them in the opposite order and got two of them wrong, so every
+    // assertion below is one a mutation would break.
+
     #[test]
-    fn test_lseek_seek_data_negative_offset() {
-        // SEEK_DATA with a negative starting offset is EINVAL.
+    fn test_lseek_seek_data_negative_offset_is_enxio() {
+        // `lseek(f, -5, SEEK_DATA)` is ENXIO, not EINVAL — a negative start is
+        // "past EOF" as far as the kernels are concerned, and reports the same
+        // error a genuinely past-EOF start does.  Measured identically on ext4
+        // and tmpfs.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::File, 4321).unwrap();
         crate::errno::set_errno(0);
-        let result = lseek(0, -1, crate::fcntl::SEEK_DATA);
+        let result = lseek(fd, -1, crate::fcntl::SEEK_DATA);
         assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENXIO);
+        assert!(fdtable::close_fd(fd).is_some());
     }
 
     #[test]
-    fn test_lseek_seek_hole_negative_offset() {
+    fn test_lseek_seek_hole_negative_offset_is_enxio() {
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::File, 4322).unwrap();
         crate::errno::set_errno(0);
-        let result = lseek(0, -1, crate::fcntl::SEEK_HOLE);
+        let result = lseek(fd, -1, crate::fcntl::SEEK_HOLE);
         assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENXIO);
+        assert!(fdtable::close_fd(fd).is_some());
+    }
+
+    #[test]
+    fn test_lseek_bad_whence_on_closed_fd_is_ebadf() {
+        // The descriptor outranks `whence`: `lseek(999closed, 0, 12345)` is
+        // EBADF on Linux.  We used to validate `whence` first and answer
+        // EINVAL.
+        crate::errno::set_errno(0);
+        assert_eq!(lseek(999, 0, 12345), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_lseek_bad_whence_on_unseekable_fd_is_einval() {
+        // ...but `whence` outranks seekability: `lseek(pipe, 0, 12345)` is
+        // EINVAL, where `lseek(pipe, 0, SEEK_SET)` is ESPIPE.  Both directions
+        // are asserted, because a check placed on either side of the kind
+        // match satisfies one of them and breaks the other.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Pipe, 4323).unwrap();
+        crate::errno::set_errno(0);
+        assert_eq!(lseek(fd, 0, 12345), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        assert_eq!(lseek(fd, 0, crate::fcntl::SEEK_SET), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+        assert!(fdtable::close_fd(fd).is_some());
+    }
+
+    #[test]
+    fn test_lseek_negative_data_offset_on_unseekable_fd_is_espipe() {
+        // And seekability outranks the offset: `lseek(pipe, -5, SEEK_DATA)` is
+        // ESPIPE, not the ENXIO the same arguments give on a real file.  This
+        // is what keeps the offset check inside the `HandleKind::File` arm.
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Pipe, 4324).unwrap();
+        crate::errno::set_errno(0);
+        assert_eq!(lseek(fd, -5, crate::fcntl::SEEK_DATA), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
+        assert!(fdtable::close_fd(fd).is_some());
     }
 
     // -- truncate negative length --
@@ -14678,6 +14916,386 @@ mod tests {
                 }),
                 crate::errno::EBADF
             );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // `O_PATH` descriptors
+    // -----------------------------------------------------------------
+    //
+    // An `O_PATH` descriptor names a file without opening it. Before this
+    // module existed we stored the flag and then ignored it, so every
+    // file operation ran normally on a descriptor that Linux refuses —
+    // `read`, `write`, `mmap`, `ftruncate`, `flock` and the rest all
+    // succeeded where Linux answers EBADF. Ignoring the flag is the
+    // over-permissive direction, which is why it went unnoticed: nothing
+    // fails, things merely work that should not.
+    //
+    // **The rule, and why there is only one.** Linux does not scatter this
+    // check through twenty syscalls. `fdget()` — the generic "turn an fd
+    // number into a file" helper — masks `FMODE_PATH` and returns nothing,
+    // so the refusal is emitted at exactly the position of the closed-fd
+    // EBADF. `fdget_raw()`, used by the handful of calls that legitimately
+    // accept these descriptors (`fstat`, `fchdir`, `dup`, `fcntl`), does
+    // not mask it. That single mechanism is what lets us place the check
+    // beside each `lookup_fd` and get every ordering right for free rather
+    // than measuring twenty of them — and the orderings pinned at the
+    // bottom of this module are the evidence that it holds.
+    //
+    // A host build cannot `open(path, O_PATH)`: `open` issues a real
+    // syscall, which on the host returns `HOST_ENOSYS`. So the descriptors
+    // below are built directly with `alloc_fd_with_flags`, which is the
+    // same thing `open` would have stored.
+    mod o_path {
+        use super::*;
+        use crate::fcntl;
+
+        /// A descriptor carrying `O_PATH`, of a kind that would otherwise
+        /// accept every operation asserted against it.
+        fn path_fd() -> Fd {
+            fdtable::alloc_fd_with_flags(HandleKind::File, 0x5150, fcntl::O_PATH)
+                .expect("fd table full")
+        }
+
+        /// The same descriptor without the flag, to prove each assertion is
+        /// about `O_PATH` and not about the host build refusing everything.
+        fn plain_fd() -> Fd {
+            fdtable::alloc_fd_with_flags(HandleKind::File, 0x5150, fcntl::O_RDWR)
+                .expect("fd table full")
+        }
+
+        fn errno_of(f: impl FnOnce()) -> i32 {
+            crate::errno::set_errno(0);
+            f();
+            crate::errno::get_errno()
+        }
+
+        #[test]
+        fn every_file_operation_refuses_a_path_descriptor() {
+            let fd = path_fd();
+            let mut buf = [0u8; 8];
+            let iov = [Iovec {
+                iov_base: buf.as_mut_ptr(),
+                iov_len: 8,
+            }];
+
+            // Each of these is EBADF on Linux 6.6 for an `O_PATH` fd, and
+            // each reaches its `HandleKind` dispatch on a plain one.
+            assert_eq!(
+                errno_of(|| {
+                    read(fd, buf.as_mut_ptr(), 8);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    write(fd, buf.as_ptr(), 8);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    pread(fd, buf.as_mut_ptr(), 8, 0);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    pwrite(fd, buf.as_ptr(), 8, 0);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    readv(fd, iov.as_ptr(), 1);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    writev(fd, iov.as_ptr(), 1);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    preadv(fd, iov.as_ptr(), 1, 0);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    pwritev(fd, iov.as_ptr(), 1, 0);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    lseek(fd, 0, fcntl::SEEK_SET);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    ftruncate(fd, 0);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    fsync(fd);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    fdatasync(fd);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    fchmod(fd, 0o644);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_of(|| {
+                    fchown(fd, 0, 0);
+                }),
+                crate::errno::EBADF
+            );
+
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// The mutation guard for the block above: strip `O_PATH` and the
+        /// same calls stop answering EBADF. Without this, a check that
+        /// rejected *every* descriptor would pass the test above.
+        #[test]
+        fn a_plain_descriptor_is_not_refused() {
+            let fd = plain_fd();
+            let mut buf = [0u8; 8];
+            for e in [
+                errno_of(|| {
+                    read(fd, buf.as_mut_ptr(), 8);
+                }),
+                errno_of(|| {
+                    lseek(fd, 0, fcntl::SEEK_SET);
+                }),
+                errno_of(|| {
+                    ftruncate(fd, 0);
+                }),
+                errno_of(|| {
+                    fsync(fd);
+                }),
+            ] {
+                assert_ne!(
+                    e,
+                    crate::errno::EBADF,
+                    "an open, non-O_PATH descriptor must get past the fd check"
+                );
+            }
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// `posix_fadvise` reports through its return value, so it needs its
+        /// own assertion — and, critically, must not disturb errno while
+        /// refusing.
+        #[test]
+        fn posix_fadvise_returns_ebadf_without_touching_errno() {
+            let fd = path_fd();
+            crate::errno::set_errno(12345);
+            assert_eq!(
+                posix_fadvise(fd, 0, 0, POSIX_FADV_NORMAL),
+                crate::errno::EBADF
+            );
+            assert_eq!(crate::errno::get_errno(), 12345);
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// The calls Linux *allows* on an `O_PATH` descriptor, because they
+        /// ask about the descriptor rather than about the file behind it.
+        /// The host build cannot complete `fstat` (it needs a real syscall),
+        /// so what is asserted is that the failure is not ours.
+        #[test]
+        fn the_descriptor_itself_is_still_usable() {
+            let fd = path_fd();
+
+            assert_ne!(
+                errno_of(|| {
+                    let mut st = Stat::zeroed();
+                    fstat(fd, &raw mut st);
+                }),
+                crate::errno::EBADF,
+                "fstat uses fdget_raw on Linux and must accept an O_PATH fd"
+            );
+
+            // `F_GETFL` reports exactly `O_PATH` — measured on Linux 6.6,
+            // and it falls out here because `O_RDONLY` is 0.
+            assert_eq!(
+                crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_GETFL, 0),
+                fcntl::O_PATH
+            );
+            assert_eq!(crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_GETFD, 0), 0);
+            assert_eq!(
+                crate::fcntl_ops::fcntl(
+                    fd,
+                    crate::fcntl_ops::F_SETFD,
+                    i64::from(fdtable::FD_CLOEXEC),
+                ),
+                0
+            );
+
+            let dup_fd = crate::fcntl_ops::fcntl(fd, crate::fcntl_ops::F_DUPFD, 0);
+            assert!(dup_fd >= 0, "F_DUPFD must work on an O_PATH descriptor");
+            // The duplicate inherits the flag, so it is refused in turn.
+            assert_eq!(
+                errno_of(|| {
+                    fsync(dup_fd);
+                }),
+                crate::errno::EBADF
+            );
+            assert!(fdtable::close_fd(dup_fd).is_some());
+
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// `fcntl` is the one call that splits rather than accepting or
+        /// refusing wholesale, because it is really a dozen calls. The four
+        /// refused commands are the ones that act on the open file.
+        #[test]
+        fn fcntl_refuses_only_the_commands_that_touch_the_file() {
+            let fd = path_fd();
+            for cmd in [
+                crate::fcntl_ops::F_SETFL,
+                crate::fcntl_ops::F_GETLK,
+                crate::fcntl_ops::F_SETLK,
+                crate::fcntl_ops::F_SETLKW,
+            ] {
+                assert_eq!(
+                    errno_of(|| {
+                        crate::fcntl_ops::fcntl(fd, cmd, 0);
+                    }),
+                    crate::errno::EBADF,
+                    "fcntl cmd {cmd} must be EBADF on an O_PATH descriptor"
+                );
+            }
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// A file-backed `mmap` needs the file, which an `O_PATH` descriptor
+        /// does not have. `MAP_ANONYMOUS` ignores `fd` entirely, so it is
+        /// the mutation guard: it must still work with the same descriptor.
+        #[test]
+        fn mmap_refuses_a_file_backed_mapping_but_not_an_anonymous_one() {
+            let fd = path_fd();
+            assert_eq!(
+                errno_of(|| {
+                    crate::mman::mmap(
+                        core::ptr::null_mut(),
+                        4096,
+                        crate::mman::PROT_READ,
+                        crate::mman::MAP_PRIVATE,
+                        fd,
+                        0,
+                    );
+                }),
+                crate::errno::EBADF
+            );
+
+            // `MAP_ANONYMOUS` ignores `fd` entirely, so the same descriptor
+            // must get past the check. The host build cannot complete the
+            // mapping (there is no real `mmap` syscall behind it), so what is
+            // asserted is that whatever stops it is not our EBADF.
+            assert_ne!(
+                errno_of(|| {
+                    crate::mman::mmap(
+                        core::ptr::null_mut(),
+                        4096,
+                        crate::mman::PROT_READ | crate::mman::PROT_WRITE,
+                        crate::mman::MAP_PRIVATE | crate::mman::MAP_ANONYMOUS,
+                        fd,
+                        0,
+                    );
+                }),
+                crate::errno::EBADF,
+                "MAP_ANONYMOUS ignores fd, so an O_PATH fd must not be consulted"
+            );
+
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        /// `ioctl` on an `O_PATH` descriptor is EBADF ahead of the ENOTTY an
+        /// unrecognised request would otherwise get — measured with FIONREAD.
+        #[test]
+        fn ioctl_is_ebadf_ahead_of_enotty() {
+            let fd = path_fd();
+            assert_eq!(
+                errno_of(|| {
+                    crate::ioctl::ioctl(fd, 0xDEAD_BEEF, core::ptr::null_mut());
+                }),
+                crate::errno::EBADF
+            );
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        // -------------------------------------------------------------
+        // The orderings the single-rule claim rests on
+        // -------------------------------------------------------------
+        //
+        // If the `O_PATH` refusal really does sit where the closed-fd EBADF
+        // sits, then everything that outranks EBADF for a *closed*
+        // descriptor must also outrank it here, and nothing else may. These
+        // three were measured on Linux 6.6 in both forms — with a closed fd
+        // and with an `O_PATH` fd — and agreed in every case.
+
+        #[test]
+        fn argument_checks_that_outrank_a_closed_fd_also_outrank_this_one() {
+            let fd = path_fd();
+            let mut buf = [0u8; 8];
+
+            // `ftruncate(999closed, -1)` is EINVAL, so `ftruncate(pathfd, -1)`
+            // is EINVAL too — the negative length is checked first.
+            assert_eq!(
+                errno_of(|| {
+                    ftruncate(fd, -1);
+                }),
+                crate::errno::EINVAL
+            );
+
+            // Likewise `pread`'s negative offset (`ksys_pread64` checks
+            // `pos < 0` before `fdget`).
+            assert_eq!(
+                errno_of(|| {
+                    pread(fd, buf.as_mut_ptr(), 4, -1);
+                }),
+                crate::errno::EINVAL
+            );
+
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        #[test]
+        fn argument_checks_that_do_not_outrank_a_closed_fd_do_not_outrank_this_one() {
+            let fd = path_fd();
+
+            // `lseek(999closed, 0, <nonsense whence>)` is EBADF, not EINVAL,
+            // so the same call on an `O_PATH` fd is EBADF as well. This is
+            // the assertion that fails if the check is hoisted above the
+            // descriptor lookup, and the one that fails if `lseek` reverts
+            // to validating `whence` first.
+            assert_eq!(
+                errno_of(|| {
+                    lseek(fd, 0, 12345);
+                }),
+                crate::errno::EBADF
+            );
+
+            // Same shape for `posix_fadvise`, through its return value.
+            assert_eq!(posix_fadvise(fd, 0, -1, 999), crate::errno::EBADF);
+
+            assert!(fdtable::close_fd(fd).is_some());
         }
     }
 }

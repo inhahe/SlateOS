@@ -776,9 +776,12 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 // host-meaningful behaviour (e.g. `getpid`, `eventfd`, `timerfd_create`)
 // detect this sentinel via `errno::translate` and either fall back to
 // a host-friendly implementation or fail cleanly.  Tests that need to
-// exercise post-syscall validator logic on host use the dedicated
-// test-only fdtable helpers (see `fdtable::test_install_handle_kind`)
-// rather than calling the real wrappers.
+// exercise post-syscall validator logic on host install a fd table entry
+// directly — `fdtable::alloc_fd(HandleKind::…, handle)` and
+// `fdtable::close_fd` — rather than calling the real wrappers, since the
+// wrapper would only report `HOST_ENOSYS` and the validator would never run.
+// (This paragraph named a `fdtable::test_install_handle_kind` helper that has
+// never existed; `alloc_fd` is what the tests that do this actually use.)
 
 /// Sentinel returned by every `syscallN()` on host builds.  Equals
 /// `-(errno::ENOSYS as i64)`.  Pinned by `host_enosys_matches_errno_module`

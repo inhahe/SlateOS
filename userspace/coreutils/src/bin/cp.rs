@@ -147,7 +147,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::getopt::{self, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use coreutils::stdfd::{self, Stream};
 use std::collections::{HashMap, HashSet};
@@ -228,6 +228,15 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 /// different option.
 const ALIASES: &[(&str, &str)] = &[("path", "parents")];
 
+/// GNU `cp`'s `getopt_long` string, verbatim (`cp.c:992`).
+///
+/// The two colons are the part that cannot be left out. `-t` and `-S` take a
+/// value, so `cp -t d a` is a target directory and one source, not three
+/// operands, and `cp -S` is `option requires an argument -- 'S'` rather than a
+/// copy of nothing. A table that merely listed the letters would parse both of
+/// those into silently wrong operand lists.
+const SHORT_OPTIONS: &str = "abdfHilLnprst:uvxPRS:TZ";
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct CpFlags {
@@ -304,112 +313,36 @@ use one of these commands:
 /// Parse `cp`'s argv into `(flags, operands)`.
 ///
 /// Options and operands may be interleaved — `cp a -r b` is `cp -r a b` — which
-/// is `getopt_long`'s default permuting behaviour and what the previous
-/// hand-written parser did too.
+/// is `getopt_long`'s default permuting behaviour and what [`getopt::Parser`]
+/// does.
 ///
 /// # Errors
 ///
-/// An unknown option, a recognised option this implementation does not have, or
-/// a long option given a value it does not take.
+/// An unknown option, a recognised option this implementation does not have, a
+/// long option given a value it does not take, or an option missing a value it
+/// requires.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = CpFlags::default();
     let mut paths: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
 
-    for arg in args {
-        if only_operands {
-            paths.push(arg.clone());
-            continue;
-        }
-        let bytes = arg_bytes(arg);
-
-        if bytes == b"--" {
-            only_operands = true;
-        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is a file called `-`. `cp` has no standard-input
-            // operand for it to mean anything else.
-            paths.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes, &mut flags)? {
-                Some(request) => return Ok(request),
-                None => continue,
-            }
-        } else {
-            // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating
-            // `char`s would answer `invalid option -- 'é'` — an option nobody
-            // typed, and one that cannot be typed, since options are single
-            // bytes. It also would not survive an argument that is not UTF-8 at
-            // all, which is the whole point of this rewrite.
-            for &b in bytes.get(1..).unwrap_or_default() {
-                apply_short(b, &mut flags)?;
-            }
+    for item in CP.parse_aliased(args, SHORT_OPTIONS, LONG_OPTIONS, ALIASES) {
+        match item? {
+            Opt::Operand(name) => paths.push(name.clone()),
+            Opt::Short(b'r' | b'R', _) | Opt::Long("recursive", _) => flags.recursive = true,
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // Everything else in the two tables is an option GNU has and this
+            // one does not. Refused rather than ignored: see the module docs —
+            // every one of them, ignored, produces a destination that looks
+            // right and is not. The `Parser` has already turned a byte that is
+            // in *no* table into `invalid option`, so nothing that reaches here
+            // is a typo.
+            Opt::Long(other, _) => return Err(unimplemented_long(other)),
+            Opt::Short(other, _) => return Err(unimplemented_short(other)),
         }
     }
 
     Ok(Request::Run(flags, paths))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately, and
-/// `None` for one that only sets a flag.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, a value given to an
-/// option that takes none, or an option this implementation lacks.
-fn parse_long(
-    body: &[u8],
-    whole: &[u8],
-    flags: &mut CpFlags,
-) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| CP.unrecognized_option(whole))?;
-    let (name, takes) = CP.resolve_long_aliased(typed, whole, LONG_OPTIONS, ALIASES)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(CP.long_unwanted_argument(name));
-    }
-
-    match name {
-        "help" => Ok(Some(Request::Help)),
-        "version" => Ok(Some(Request::Version)),
-        "recursive" => {
-            flags.recursive = true;
-            Ok(None)
-        }
-        other => Err(unimplemented_long(other)),
-    }
-}
-
-/// Handle one short option byte.
-///
-/// # Errors
-///
-/// A byte that is no option of `cp`'s, or one this implementation lacks.
-fn apply_short(flag: u8, flags: &mut CpFlags) -> Result<(), getopt::Error> {
-    match flag {
-        b'r' | b'R' => flags.recursive = true,
-        // GNU `cp`'s remaining short options. Rejected rather than ignored: see
-        // the module docs — every one of these, ignored, produces a destination
-        // that looks right and is not.
-        b'a' | b'b' | b'd' | b'f' | b'H' | b'i' | b'l' | b'L' | b'n' | b'p' | b'P' | b's'
-        | b'S' | b't' | b'T' | b'u' | b'v' | b'x' | b'Z' => return Err(unimplemented_short(flag)),
-        other => return Err(CP.invalid_option(other)),
-    }
-    Ok(())
 }
 
 /// The diagnostic for an option that GNU `cp` has and this one does not.
@@ -426,17 +359,6 @@ fn unimplemented_short(flag: u8) -> getopt::Error {
 
 fn unimplemented_long(name: &str) -> getopt::Error {
     CP.usage_referring(format!("option '--{name}' is not implemented by this cp"))
-}
-
-#[cfg(unix)]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    a.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    a.to_string_lossy().into_owned().into_bytes()
 }
 
 // ---------------------------------------------------------------- copying ---

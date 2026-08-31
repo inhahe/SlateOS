@@ -9455,6 +9455,57 @@ pub fn sys_fs_fstatat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FS_FCHMODAT_PINNED` — change the permission bits of `name` within the
+/// directory a handle was opened on, refusing if the handle no longer denotes
+/// that directory.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: mode.  `arg4`: flags (`AT_SYMLINK_NOFOLLOW_PINNED`).
+///
+/// Requires `Rights::WRITE`, not `Rights::METADATA`. Reading metadata and
+/// changing a mode are not the same authority: a handle that may only *observe*
+/// a file must not be able to make it setuid. `SYS_FS_FSTATAT_PINNED` takes
+/// `METADATA` for the same reason in reverse.
+pub fn sys_fs_fchmodat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    // Unknown flag bits are refused rather than ignored, as in
+    // `sys_fs_unlinkat_pinned`: a caller that mistranslated a Linux `AT_*`
+    // constant should fail on its first call rather than silently get a
+    // different operation.
+    let flags = args.arg4;
+    if flags & !crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let no_follow = flags & crate::syscall::number::AT_SYMLINK_NOFOLLOW_PINNED != 0;
+
+    // Twelve bits, not nine, so setuid/setgid/sticky survive -- §639, where a
+    // nine-bit mask dropped the setuid bit with no error. The bits above the
+    // twelve are the file-type bits of a `mode_t`, which `chmod` has ignored
+    // since v7 and which Linux masks off here too, so masking rather than
+    // refusing is the compatible answer and the one lane B can translate to
+    // without a second mask of its own.
+    #[allow(clippy::cast_possible_truncation)]
+    let permissions = (args.arg3 as u16) & 0o7777;
+
+    let name = match read_user_path(args.arg1, args.arg2 as usize) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::set_permissions_at_pinned(&dir, name.as_bytes(), permissions, no_follow) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_GETDENTS_PINNED` — list the directory a handle was opened on,
 /// resolving the handle rather than its name.
 ///

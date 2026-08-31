@@ -3376,6 +3376,39 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// longer denotes the directory it was opened on, or a negative error code.
 pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
 
+/// Change the permission bits of `name` within the directory a handle was
+/// opened on, resolving *the handle* rather than its name.
+///
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
+/// `arg1`: name pointer.  `arg2`: name length.
+/// `arg3`: permission bits — twelve significant bits (`0o7777`), so setuid,
+/// setgid and sticky survive the trip (§639: masking to nine dropped setuid
+/// silently, which is the worst way for a permission request to fail).  Bits
+/// above the twelve are masked off rather than rejected, which is what `chmod`
+/// has always done with the file-type bits in a `mode_t` and what Linux does;
+/// a caller passing `S_IFREG | 0o755` gets `0o755`, not an error.
+///
+/// Note this differs from how `arg4` treats *unknown flag bits*, which are
+/// refused.  The asymmetry is deliberate: an unrecognised flag changes what the
+/// operation *does*, so guessing is dangerous, whereas the high bits of a mode
+/// have a settled meaning that `chmod` has ignored since v7.
+///
+/// `arg4`: flags — [`AT_SYMLINK_NOFOLLOW_PINNED`] puts the mode on the link
+/// inode itself rather than on its target.  Unknown bits are `InvalidArgument`.
+///
+/// `name` must be exactly one component: no `/`, and neither `.` nor `..`.
+///
+/// This is the highest-value member of the pinned family after `unlink`.
+/// `chmod -R` walking a tree it does not control is the classic
+/// privilege-escalation shape: swap a directory for a symlink mid-walk and the
+/// mode lands on whatever the link names. A path-based `fchmodat` re-derives
+/// the directory by name for every entry and cannot tell that it happened.
+///
+/// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
+/// directory it was opened on; otherwise a negative error code.
+pub const SYS_FS_FCHMODAT_PINNED: u64 = 665;
+
 /// Close an open file handle.
 ///
 /// `arg0`: file handle.

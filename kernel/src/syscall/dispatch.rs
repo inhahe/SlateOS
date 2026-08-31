@@ -40,7 +40,8 @@ use super::number::{
     SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE, SYS_EVENTFD_READ, SYS_EVENTFD_READ_TIMEOUT,
     SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_EVENTFD_WRITE_TIMEOUT, SYS_EXIT, SYS_FS_APPEND,
     SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE,
-    SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED, SYS_FS_FTRUNCATE,
+    SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED,
+    SYS_FS_FTRUNCATE,
     SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
     SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LIST_DIR,
     SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
@@ -551,6 +552,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_UNLINKAT_PINNED as usize] = Some(handlers::sys_fs_unlinkat_pinned);
     handlers[SYS_FS_FSTATAT_PINNED as usize] = Some(handlers::sys_fs_fstatat_pinned);
     handlers[SYS_FS_GETDENTS_PINNED as usize] = Some(handlers::sys_fs_getdents_pinned);
+    handlers[SYS_FS_FCHMODAT_PINNED as usize] = Some(handlers::sys_fs_fchmodat_pinned);
     handlers[SYS_FS_CLOSE as usize] = Some(handlers::sys_fs_close);
     handlers[SYS_FS_READ as usize] = Some(handlers::sys_fs_read);
     handlers[SYS_FS_WRITE as usize] = Some(handlers::sys_fs_write);

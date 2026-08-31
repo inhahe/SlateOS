@@ -59,6 +59,17 @@ const CHECK_HIGHLIGHT: Color = Color::rgba(243, 139, 168, 120);
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 660.0;
 
+/// The key hints printed at the foot of the panel.
+///
+/// Named, because the layout has to measure them to decide whether a panel is
+/// worth drawing at all, and a string measured in one place and drawn in
+/// another is a column sized for a line that is not the line it holds.
+const CONTROLS: [&str; 3] = ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"];
+
+/// The headings above the two lists of captured pieces. Bold, and the widest
+/// thing in the panel that is not a control.
+const CAPTURED_HEADINGS: [&str; 2] = ["Captured by White:", "Captured by Black:"];
+
 /// What the pointer can land on.
 ///
 /// The drawing pass records one of these for every square it draws and for the
@@ -131,10 +142,15 @@ impl Layout {
         // The panel is worth having only if it can hold its widest line. Below
         // that it is dropped and the board takes the whole width, rather than
         // squeezing the board to make room for a column too narrow to read.
-        let panel_w_min =
-            text::measure("Arrows/Enter: Navigate", label, FontWeightHint::Regular).max(
-                text::measure("Captured by White:", label, FontWeightHint::Bold),
-            ) + pad * 2.0;
+        let widest = |lines: &[&str], weight| {
+            lines
+                .iter()
+                .map(|s| text::measure(s, label, weight))
+                .fold(0.0f32, f32::max)
+        };
+        let panel_w_min = widest(&CONTROLS, FontWeightHint::Regular)
+            .max(widest(&CAPTURED_HEADINGS, FontWeightHint::Bold))
+            + pad * 2.0;
         let want_panel = (w * 0.28).clamp(panel_w_min, 260.0);
         let panel_w = if w - want_panel >= h * 0.45 && want_panel <= w * 0.4 {
             want_panel
@@ -201,9 +217,10 @@ impl Layout {
     /// the drawing pass records for it.
     ///
     /// Row 0 is White's back rank and belongs at the *bottom* of the window, so
-    /// the row is flipped on the way to the screen. That flip is the one part
-    /// of the mapping a reader cannot check by inspection, and the one part
-    /// [`Layout::square_at`] has to undo.
+    /// the row is flipped on the way to the screen. There is no inverse of this
+    /// function: a click is answered by the hit box the drawing pass recorded,
+    /// so the flip is written once and a board painted wrongly cannot be
+    /// clicked rightly.
     fn square_rect(&self, pos: Pos) -> Rect {
         // Row 0 is drawn at the bottom, so the screen row counts down.
         let screen_row = f32::from(7i8.saturating_sub(pos.row));
@@ -1866,14 +1883,13 @@ impl ChessApp {
 
         // Everything above the controls has to fit above them, and the
         // controls above the button.
-        let controls: [&str; 3] = ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"];
-        let controls_h = l.small * 1.5 * controls.len() as f32;
+        let controls_h = l.small * 1.5 * CONTROLS.len() as f32;
         let floor = (l.new_game.y - l.pad - controls_h).max(l.panel.y);
 
-        for (heading, pieces) in [
-            ("Captured by White:", &self.captured_black),
-            ("Captured by Black:", &self.captured_white),
-        ] {
+        for (heading, pieces) in CAPTURED_HEADINGS
+            .into_iter()
+            .zip([&self.captured_black, &self.captured_white])
+        {
             if y + line > floor {
                 break;
             }
@@ -1954,7 +1970,7 @@ impl ChessApp {
         }
 
         let mut cy = (l.new_game.y - l.pad - controls_h).max(l.panel.y);
-        for hint in controls {
+        for hint in CONTROLS {
             text_at(
                 f,
                 hint,
@@ -2121,6 +2137,7 @@ fn main() -> ExitCode {
 // rather than silently kept.
 #[cfg(test)]
 #[expect(
+    clippy::expect_used,
     clippy::indexing_slicing,
     clippy::unwrap_used,
     reason = "a panicking test is a failing test, which is the point"
@@ -3419,5 +3436,637 @@ mod tests {
         // White queen captures Black's h8 rook
         board.make_move_unchecked(Move::normal(Pos::new(0, 0), Pos::new(7, 7)));
         assert!(!board.castling.black_kingside);
+    }
+
+    // ── Window wiring: the layout follows the window ─────────────────
+    //
+    // Every test below reads the picture the program drew. None of them
+    // recomputes a coordinate from the layout, because a click aimed by
+    // arithmetic that copies the renderer's arithmetic passes for a board
+    // painted anywhere at all.
+
+    use guitk::event::Modifiers;
+    use guitk::probe::{
+        click_background, click_sized, is_visible_sized, press, press_with, rect_of_sized, release,
+    };
+
+    /// A window smaller than the default and a different shape, so that a
+    /// coordinate that only works at 900x660 is caught.
+    const SMALL: (f32, f32) = (640.0, 480.0);
+
+    /// A window too narrow to pay for the panel.
+    const NARROW: (f32, f32) = (420.0, 700.0);
+
+    fn ctrl_n() -> KeyEvent {
+        press_with(Key::N, Modifiers::ctrl())
+    }
+
+    /// Play White's move by clicking the two squares, then let the tick run
+    /// Black's reply.
+    fn play(app: &mut ChessApp, from: Pos, to: Pos, size: (f32, f32)) {
+        click_sized(
+            app,
+            Target::Square(from.row, from.col),
+            MouseButton::Left,
+            size,
+        );
+        click_sized(app, Target::Square(to.row, to.col), MouseButton::Left, size);
+        app.handle_event(&Event::Tick { elapsed_ms: 16 });
+    }
+
+    #[test]
+    fn every_square_is_clickable_at_every_window_size() {
+        // The board is solved from the window, so all sixty-four hit boxes
+        // have to exist in each of them -- not just in the one the constants
+        // used to describe.
+        for size in [ChessApp::SIZE, SMALL, NARROW, (1600.0, 900.0)] {
+            let app = ChessApp::new();
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    assert!(
+                        is_visible_sized(&app, Target::Square(row, col), size),
+                        "{row},{col} is not clickable at {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_stays_inside_the_window_it_was_given() {
+        for size in [ChessApp::SIZE, SMALL, NARROW, (300.0, 300.0)] {
+            let app = ChessApp::new();
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let r = rect_of_sized(&app, Target::Square(row, col), size)
+                        .expect("every square is drawn");
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= size.0 + 0.01
+                            && r.bottom() <= size.1 + 0.01,
+                        "square {row},{col} at {r:?} leaves the {size:?} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_squares_do_not_overlap_each_other() {
+        // Sixty-four boxes that overlap would still all be "visible", and a
+        // click landing in the overlap would reach whichever was recorded last
+        // rather than the one under the pointer.
+        let app = ChessApp::new();
+        let all: Vec<Rect> = (0..8i8)
+            .flat_map(|row| (0..8i8).map(move |col| (row, col)))
+            .map(|(row, col)| rect_of_sized(&app, Target::Square(row, col), SMALL).expect("drawn"))
+            .collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert!(
+                    a.intersect(*b).is_none_or(|o| o.w <= 0.01 || o.h <= 0.01),
+                    "{a:?} and {b:?} overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_is_drawn_at_the_bottom_of_the_window() {
+        // The one part of the mapping that cannot be checked by inspection:
+        // row 0 is White's back rank and belongs at the *bottom*. A board
+        // drawn upside down is a board a player cannot use, and it would pass
+        // every "is it clickable" test above.
+        let app = ChessApp::new();
+        let white_king = rect_of_sized(&app, Target::Square(0, 4), SMALL).expect("drawn");
+        let black_king = rect_of_sized(&app, Target::Square(7, 4), SMALL).expect("drawn");
+        assert!(
+            white_king.y > black_king.y,
+            "White's back rank at {white_king:?} should be below Black's at {black_king:?}"
+        );
+    }
+
+    #[test]
+    fn files_run_left_to_right() {
+        let app = ChessApp::new();
+        let a_file = rect_of_sized(&app, Target::Square(0, 0), SMALL).expect("drawn");
+        let h_file = rect_of_sized(&app, Target::Square(0, 7), SMALL).expect("drawn");
+        assert!(
+            a_file.x < h_file.x,
+            "the a-file at {a_file:?} should be left of the h-file at {h_file:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_square_selects_the_piece_standing_on_it() {
+        let mut app = ChessApp::new();
+        let outcome = click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+    }
+
+    #[test]
+    fn a_click_reaches_the_square_it_landed_on_in_a_resized_window() {
+        // The click path and the drawing path share one mapping now. The old
+        // program computed the square from `BOARD_OFFSET_X` in the hit test and
+        // again in the renderer, so in any window that was not 900x660 both
+        // were wrong together and the test still passed.
+        let mut app = ChessApp::new();
+        let r = rect_of_sized(&app, Target::Square(1, 3), NARROW).expect("drawn");
+        let (x, y) = r.centre();
+        app.click_at(x, y, MouseButton::Left, NARROW);
+        assert_eq!(app.selected, Some(Pos::new(1, 3)));
+    }
+
+    #[test]
+    fn a_click_outside_the_board_reaches_nothing() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        assert!(app.selected.is_some());
+        // The background is not the board: the selection survives, and the
+        // window is not asked to repaint a picture that has not changed.
+        assert_eq!(click_background(&mut app), EventResult::Ignored);
+        assert!(app.selected.is_some());
+    }
+
+    #[test]
+    fn the_new_game_button_is_drawn_and_restarts_the_game() {
+        let mut app = ChessApp::new();
+        play(&mut app, Pos::new(1, 4), Pos::new(3, 4), ChessApp::SIZE);
+        assert!(!app.move_history.is_empty());
+
+        let outcome = click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert!(app.move_history.is_empty());
+        assert_eq!(app.board.squares, Board::new().squares);
+        assert_eq!(app.board.side_to_move, Side::White);
+    }
+
+    #[test]
+    fn a_new_game_started_by_the_button_is_not_still_thinking() {
+        // `new_game` rebuilds from `ChessApp::new` rather than clearing fields
+        // by hand, so a field added later cannot survive the reset. `thinking`
+        // is the one that would have: a game restarted while Black owed a reply
+        // would refuse every click for ever.
+        let mut app = ChessApp::new();
+        click_sized(
+            &mut app,
+            Target::Square(1, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        click_sized(
+            &mut app,
+            Target::Square(3, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        assert!(app.thinking);
+        click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE);
+        assert!(!app.thinking);
+        assert_eq!(
+            click_sized(
+                &mut app,
+                Target::Square(1, 4),
+                MouseButton::Left,
+                ChessApp::SIZE
+            ),
+            EventResult::Consumed
+        );
+    }
+
+    #[test]
+    fn a_restart_keeps_the_window_size() {
+        // The size describes the window, not the game, so it is the one thing
+        // the reset carries over. Losing it would read the next click against a
+        // 900x660 picture that is not the one on screen.
+        let mut app = ChessApp::new();
+        app.resize(SMALL.0, SMALL.1);
+        app.new_game();
+        assert_eq!(app.size, SMALL);
+    }
+
+    #[test]
+    fn the_panel_is_dropped_rather_than_drawn_too_narrow_to_read() {
+        let app = ChessApp::new();
+        assert!(is_visible_sized(&app, Target::NewGame, ChessApp::SIZE));
+        // A window that cannot pay for the panel has no button either, because
+        // the button lives in it.
+        assert!(!is_visible_sized(&app, Target::NewGame, NARROW));
+        // And the board still gets every square.
+        assert!(is_visible_sized(&app, Target::Square(4, 4), NARROW));
+    }
+
+    #[test]
+    fn the_panel_is_wide_enough_for_the_lines_it_holds() {
+        // The layout measures the widest line to decide whether a panel is
+        // worth drawing. Measuring a string that is not the one drawn is a
+        // column sized for text it does not contain, which is how
+        // "Arrows/Enter: Navigate" came to be measured for a panel that draws
+        // "Arrows/Enter: Move".
+        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+        for line in CONTROLS {
+            let w = text::measure(line, l.label, FontWeightHint::Regular);
+            assert!(w <= l.panel.w - l.pad * 2.0 + 0.01, "{line:?} does not fit");
+        }
+        for line in CAPTURED_HEADINGS {
+            let w = text::measure(line, l.label, FontWeightHint::Bold);
+            assert!(w <= l.panel.w - l.pad * 2.0 + 0.01, "{line:?} does not fit");
+        }
+    }
+
+    #[test]
+    fn the_board_and_the_panel_do_not_overlap() {
+        for size in [ChessApp::SIZE, SMALL, (1600.0, 900.0)] {
+            let l = Layout::solve(size.0, size.1);
+            if l.panel.w <= 0.0 {
+                continue;
+            }
+            assert!(
+                l.board
+                    .intersect(l.panel)
+                    .is_none_or(|o| o.w <= 0.01 || o.h <= 0.01),
+                "board {:?} overlaps panel {:?} at {size:?}",
+                l.board,
+                l.panel
+            );
+        }
+    }
+
+    // ── Window wiring: the keyboard ──────────────────────────────────
+
+    #[test]
+    fn the_cursor_walks_the_board_in_the_direction_the_key_names() {
+        // Up is toward rank 8, which is *up the window*, so the assertion is
+        // made against the ink rather than against the row number: an Up that
+        // decremented the row would still be "moving up" by the row number's
+        // own account.
+        let mut app = ChessApp::new();
+        let start = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        app.key_at(&press(Key::Up), SMALL);
+        let up = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        assert!(up.y < start.y, "Up moved from {start:?} to {up:?}");
+
+        app.key_at(&press(Key::Right), SMALL);
+        let right = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        assert!(right.x > up.x, "Right moved from {up:?} to {right:?}");
+
+        app.key_at(&press(Key::Down), SMALL);
+        app.key_at(&press(Key::Left), SMALL);
+        assert_eq!(app.cursor, Pos::new(0, 0), "four steps should return");
+    }
+
+    #[test]
+    fn a_cursor_against_the_edge_does_not_claim_the_key() {
+        // Saying a key was consumed asks the compositor to repaint, and a
+        // repaint of an identical picture is work done for nothing.
+        let mut app = ChessApp::new();
+        assert_eq!(app.key_at(&press(Key::Left), SMALL), EventResult::Ignored);
+        assert_eq!(app.key_at(&press(Key::Down), SMALL), EventResult::Ignored);
+        assert_eq!(app.cursor, Pos::new(0, 0));
+        assert_eq!(app.key_at(&press(Key::Right), SMALL), EventResult::Consumed);
+    }
+
+    #[test]
+    fn a_key_release_moves_nothing() {
+        let mut app = ChessApp::new();
+        assert_eq!(
+            app.key_at(&release(Key::Right), SMALL),
+            EventResult::Ignored
+        );
+        assert_eq!(app.cursor, Pos::new(0, 0));
+    }
+
+    #[test]
+    fn enter_plays_the_square_the_cursor_is_on() {
+        let mut app = ChessApp::new();
+        // Walk to e2 and select it, then to e4 and play it.
+        for _ in 0..4 {
+            app.key_at(&press(Key::Right), SMALL);
+        }
+        app.key_at(&press(Key::Up), SMALL);
+        assert_eq!(app.cursor, Pos::new(1, 4));
+        assert_eq!(app.key_at(&press(Key::Enter), SMALL), EventResult::Consumed);
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+
+        app.key_at(&press(Key::Up), SMALL);
+        app.key_at(&press(Key::Up), SMALL);
+        assert_eq!(app.key_at(&press(Key::Space), SMALL), EventResult::Consumed);
+        assert_eq!(app.move_history.len(), 1);
+        assert!(app.board.get(Pos::new(3, 4)).is_some());
+    }
+
+    #[test]
+    fn escape_drops_a_selection_and_claims_nothing_when_there_is_none() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(0, 1), MouseButton::Left, SMALL);
+        assert!(app.selected.is_some());
+        assert_eq!(
+            app.key_at(&press(Key::Escape), SMALL),
+            EventResult::Consumed
+        );
+        assert!(app.selected.is_none());
+        assert_eq!(app.key_at(&press(Key::Escape), SMALL), EventResult::Ignored);
+    }
+
+    #[test]
+    fn ctrl_n_starts_a_new_game_and_a_bare_n_does_not() {
+        let mut app = ChessApp::new();
+        play(&mut app, Pos::new(1, 4), Pos::new(3, 4), SMALL);
+        assert!(!app.move_history.is_empty());
+
+        assert_eq!(app.key_at(&press(Key::N), SMALL), EventResult::Ignored);
+        assert!(!app.move_history.is_empty(), "a bare N is not a command");
+
+        assert_eq!(app.key_at(&ctrl_n(), SMALL), EventResult::Consumed);
+        assert!(app.move_history.is_empty());
+        assert_eq!(app.game_result, GameResult::Ongoing);
+    }
+
+    // ── Window wiring: the search runs on the tick ───────────────────
+
+    #[test]
+    fn the_click_that_plays_a_move_does_not_also_run_the_search() {
+        // An alpha-beta search to AI_DEPTH inside the click handler is a
+        // window that stops answering for as long as it takes. The click hands
+        // the turn over; the tick does the thinking.
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert_eq!(app.board.side_to_move, Side::Black);
+        assert!(app.thinking);
+        assert_eq!(app.move_history.len(), 1);
+    }
+
+    #[test]
+    fn a_tick_with_nothing_to_think_about_is_not_consumed() {
+        // Every tick would otherwise ask for a repaint sixteen times a second
+        // for a picture that has not changed.
+        let mut app = ChessApp::new();
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored,
+            "the reply has been played; the next tick has nothing to do"
+        );
+    }
+
+    #[test]
+    fn the_board_is_not_the_players_to_touch_while_black_owes_a_reply() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert!(app.thinking);
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 0), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        assert!(app.selected.is_none());
+    }
+
+    #[test]
+    fn the_status_line_says_black_is_thinking_while_it_is() {
+        // The status is what tells a player that the refused clicks above are
+        // a wait rather than a hang.
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert!(
+            frame_text(&app, SMALL).contains(&"Black is thinking".to_string()),
+            "the window does not say the search is running"
+        );
+    }
+
+    #[test]
+    fn a_finished_game_refuses_the_board_but_not_the_button() {
+        // A ladder mate, played through the click path: the h7 rook cuts the
+        // seventh rank, and the second rook comes to g8. Black is mated with
+        // Black to move, so `thinking` must be false and the board dead.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 4, Side::White, PieceKind::King);
+        place(&mut app.board, 7, 0, Side::Black, PieceKind::King);
+        place(&mut app.board, 6, 7, Side::White, PieceKind::Rook);
+        place(&mut app.board, 0, 6, Side::White, PieceKind::Rook);
+        app.update_game_state();
+        click_sized(&mut app, Target::Square(0, 6), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(7, 6), MouseButton::Left, SMALL);
+        assert_eq!(app.game_result, GameResult::WhiteWins);
+        assert!(!app.thinking, "a finished game owes no reply");
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            click_sized(&mut app, Target::Square(0, 4), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        // The button is the way out, and it is still there.
+        assert_eq!(
+            click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(app.game_result, GameResult::Ongoing);
+    }
+
+    // ── Window wiring: what the panel prints ─────────────────────────
+
+    /// Every string the frame drew, in the order it drew them.
+    fn frame_text(app: &ChessApp, size: (f32, f32)) -> Vec<String> {
+        app.draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_move_list_stops_at_the_foot_of_the_panel() {
+        // It used to grow downward without a bound and paint off the bottom of
+        // the window after about thirty moves. The rows drawn are counted from
+        // the room there is, so a long game prints fewer rows, not more ink.
+        let mut app = ChessApp::new();
+        app.move_history = (0..200).map(|n| format!("m{n}")).collect();
+        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+        for cmd in app.draw(ChessApp::SIZE).commands() {
+            if let RenderCommand::Text { y, font_size, .. } = cmd {
+                assert!(
+                    y + font_size <= l.window.h + 0.01,
+                    "text at {y} runs past the bottom of the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_move_list_shows_the_moves_just_played_not_the_first_ones() {
+        // A player watching a long game wants the move that was just made.
+        let mut app = ChessApp::new();
+        app.move_history = (0..200).map(|n| format!("m{n}")).collect();
+        let drawn = frame_text(&app, ChessApp::SIZE);
+        assert!(
+            drawn.iter().any(|s| s.contains("m199")),
+            "the last move is not on screen: {drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|s| s.starts_with("1. ")),
+            "the list is showing the opening instead"
+        );
+    }
+
+    #[test]
+    fn a_capture_is_listed_under_the_side_that_took_it() {
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 4, Side::White, PieceKind::King);
+        place(&mut app.board, 7, 4, Side::Black, PieceKind::King);
+        place(&mut app.board, 3, 3, Side::White, PieceKind::Queen);
+        place(&mut app.board, 5, 5, Side::Black, PieceKind::Rook);
+        app.update_game_state();
+        click_sized(
+            &mut app,
+            Target::Square(3, 3),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        click_sized(
+            &mut app,
+            Target::Square(5, 5),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        assert_eq!(app.captured_black.len(), 1);
+
+        let drawn = frame_text(&app, ChessApp::SIZE);
+        let heading = drawn
+            .iter()
+            .position(|s| s == "Captured by White:")
+            .expect("the heading is printed");
+        let glyph = Piece::new(Side::Black, PieceKind::Rook).unicode();
+        assert_eq!(
+            drawn.get(heading + 1).map(String::as_str),
+            Some(glyph),
+            "the rook White took is not under White's heading: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_rank_and_file_labels_name_the_ranks_and_files_they_sit_beside() {
+        // Five sites used to write `b'a' + col` for themselves. They are one
+        // function now, and this is the test that the labels still line up with
+        // the squares -- the labels are matched to squares by ink, not by index.
+        let app = ChessApp::new();
+        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+        let f = app.draw(ChessApp::SIZE);
+        let text: Vec<(&str, f32, f32)> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } => Some((text.as_str(), *x, *y)),
+                _ => None,
+            })
+            .collect();
+
+        for rank in 0..8i8 {
+            let want = Pos::new(rank, 0).rank_char().expect("on the board");
+            let r = l.square_rect(Pos::new(rank, 0));
+            let found = text.iter().any(|(s, x, y)| {
+                s.chars().eq([want]) && *x < l.board.x + l.margin && (*y - r.y).abs() < r.h
+            });
+            assert!(found, "rank {want} is not labelled beside its own row");
+        }
+        for file in 0..8i8 {
+            let want = Pos::new(0, file).file_char().expect("on the board");
+            let r = l.square_rect(Pos::new(0, file));
+            let found = text.iter().any(|(s, x, y)| {
+                s.chars().eq([want]) && *y > r.bottom() - 0.01 && (*x - r.x).abs() < r.w
+            });
+            assert!(found, "file {want} is not labelled under its own column");
+        }
+    }
+
+    #[test]
+    fn the_labels_are_dropped_rather_than_drawn_over_the_board() {
+        // In a window too small to spare a margin the labels have nowhere to
+        // go, and a label drawn anyway lands on the a-file.
+        let app = ChessApp::new();
+        let tiny = (44.0, 44.0);
+        let l = Layout::solve(tiny.0, tiny.1);
+        assert!(l.margin < l.label, "this window can still afford labels");
+        let drawn = frame_text(&app, tiny);
+        assert!(
+            !drawn.iter().any(|s| s == "a" || s == "1"),
+            "labels were drawn with no room for them: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_window_is_titled_and_sized_for_the_compositor() {
+        let app = ChessApp::new();
+        assert_eq!(app.title(), "Chess");
+        assert_eq!(app.app_id(), "chess");
+        assert_eq!(
+            app.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        // Without a tick interval the game would enter `thinking` after
+        // White's first move and stay there for ever.
+        assert!(app.tick_interval().is_some());
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window() {
+        let mut app = ChessApp::new();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn a_render_teaches_the_click_handler_the_size_it_drew_at() {
+        // The click is read against the last picture drawn. If `render` did not
+        // record its size, a resized window would be clicked at the old one.
+        let mut app = ChessApp::new();
+        app.render(SMALL.0, SMALL.1);
+        assert_eq!(app.size, SMALL);
+        let r = rect_of_sized(&app, Target::Square(1, 3), SMALL).expect("drawn");
+        let (x, y) = r.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(app.selected, Some(Pos::new(1, 3)));
+    }
+
+    #[test]
+    fn a_right_click_is_not_a_move() {
+        let mut app = ChessApp::new();
+        let r = rect_of_sized(&app, Target::Square(1, 4), SMALL).expect("drawn");
+        let (x, y) = r.centre();
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Right, SMALL),
+            EventResult::Ignored
+        );
+        assert!(app.selected.is_none());
     }
 }

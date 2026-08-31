@@ -1467,6 +1467,9 @@ fn copy_one<O: Write, E: Write>(
 /// Make the copy, now that the destination path is settled and every refusal
 /// has been made. Split out of [`copy_one`] so that it has one place to record
 /// what it created rather than one per kind of source.
+///
+/// The only thing this adds to [`place_entity`] is the one refusal that can
+/// arise for an operand and cannot arise inside a walk.
 fn place_source<O: Write, E: Write>(
     src: &OsString,
     src_path: &Path,
@@ -1475,11 +1478,47 @@ fn place_source<O: Write, E: Write>(
     dest_exists: bool,
     job: &mut Job<'_, O, E>,
 ) -> bool {
+    // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
+    // they have just written, for ever. Not in [`place_entity`], because a
+    // directory reached by walking is by construction not an ancestor of the
+    // destination — the walk that reached it would not have terminated.
+    if metadata.is_dir() && is_inside(target, src_path) {
+        let _ = writeln!(
+            job.err,
+            "cp: cannot copy a directory, {}, into itself, {}",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+        return false;
+    }
+
+    place_entity(src_path, metadata, target, dest_exists, job)
+}
+
+/// Copy one source of a known kind onto a settled destination path: the symlink,
+/// the directory and the regular file, and nothing else.
+///
+/// The single place all three kinds are dispatched, reached identically by an
+/// operand (through [`place_source`]) and by an entry found inside a tree
+/// (through [`copy_entry`]). GNU funnels both through one `copy_internal`, and
+/// the reason to match that is not tidiness: everything that happens *after* the
+/// bytes are written — `-p` and each `--preserve=` attribute — happens for all
+/// three kinds, so a second copy of this dispatch is a second place to forget
+/// one of them. The two callers had already drifted once, when the symlink arm's
+/// unlink of an existing destination reached an operand and not a walked entry,
+/// and `cp -r` over a tree it had copied before answered `cannot create symbolic
+/// link …: File exists`.
+fn place_entity<O: Write, E: Write>(
+    src_path: &Path,
+    metadata: &fs::Metadata,
+    target: &Path,
+    dest_exists: bool,
+    job: &mut Job<'_, O, E>,
+) -> bool {
     if metadata.file_type().is_symlink() {
-        // Reachable exactly when the stat in [`copy_one`] did not follow — `-P`,
-        // or `-r` with none of `-P`/`-H`/`-L` given. Not under `-H`: that
-        // follows an operand, so a link named on the command line never gets
-        // here, only one found inside a tree does (in [`copy_entry`]).
+        // Reachable for an operand exactly when the stat in [`copy_one`] did not
+        // follow — `-P`, or `-r` with none of `-P`/`-H`/`-L` given — and never
+        // under `-H`, which follows an operand and not a walked entry.
         //
         // An existing destination is removed first. `symlinkat` has no
         // "replace", and refusing instead would leave `cp -r` unable to update
@@ -1529,23 +1568,11 @@ fn place_source<O: Write, E: Write>(
         };
     }
 
-    if !metadata.is_dir() {
-        return copy_regular_file(src_path, metadata, target, dest_exists, job);
+    if metadata.is_dir() {
+        return copy_tree(src_path, permission_bits(metadata), target, job);
     }
 
-    // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
-    // they have just written, for ever.
-    if is_inside(target, src_path) {
-        let _ = writeln!(
-            job.err,
-            "cp: cannot copy a directory, {}, into itself, {}",
-            quoteaf_os(src),
-            quoteaf_os(target)
-        );
-        return false;
-    }
-
-    copy_tree(src_path, permission_bits(metadata), target, job)
+    copy_regular_file(src_path, metadata, target, dest_exists, job)
 }
 
 /// Would copying `src` to `dst` write over `src` itself?
@@ -2074,44 +2101,11 @@ fn copy_entry<O: Write, E: Write>(
         return false;
     }
 
-    if meta.file_type().is_symlink() {
-        // The recursive twin of the announcement in [`place_source`]: GNU
-        // reaches this through the same `copy_internal`, so a link found inside
-        // a tree is named exactly as a link named on the command line is —
-        // including the unlink of an existing destination, which `symlinkat`
-        // has no "replace" for. Without it a second `cp -r` over a tree
-        // holding a symlink reported `cannot create symbolic link …: File
-        // exists` where GNU refreshed the link.
-        if dest_state.exists() {
-            if let Err(e) = fs::remove_file(&to)
-                && e.kind() != io::ErrorKind::NotFound
-            {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(&to));
-                return false;
-            }
-            if job.flags.verbose {
-                let _ = writeln!(job.out, "removed {}", quoteaf_os(&to));
-            }
-        }
-        announce(job, &from, &to);
-        return match clone_symlink(&from, &to) {
-            Ok(()) => true,
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(
-                    job.err,
-                    "cp: cannot create symbolic link {}: {why}",
-                    quoteaf_os(&to)
-                );
-                false
-            }
-        };
-    }
-    if meta.is_dir() {
-        return copy_tree(&from, permission_bits(&meta), &to, job);
-    }
-    copy_regular_file(&from, &meta, &to, dest_state.exists(), job)
+    // The same dispatch an operand goes through, and literally the same code:
+    // GNU reaches both through one `copy_internal`, so a link found inside a
+    // tree is named exactly as a link named on the command line is, and every
+    // attribute `-p` restores is restored in both. See [`place_entity`].
+    place_entity(&from, &meta, &to, dest_state.exists(), job)
 }
 
 /// Create `dest` as a directory with mode `mode`, before the umask is applied.

@@ -102013,3 +102013,61 @@ This is adjacent to lesson 90 but distinct from it. There the fixture never
 enters the regime the rule governs; here the fixture is in exactly the right
 regime, and the assertion is satisfied by evidence from somewhere else in the
 picture.
+
+### Lesson 97: a layout invariant sampled at a handful of window sizes is not tested; the sizes that break it are exactly the ones nobody would list (lane C, 2026-08-31)
+
+**In short:** every wired app carries a `SIZES` array -- half a dozen window
+sizes a test loops over -- and the layout claims loop over it: the panes stack,
+the widgets stay inside their panes, nothing runs off an edge. `hearts` had six
+such sizes and 84 tests. Its mutation sweep then broke four separate layout
+guards and *none* of the four was caught, because a layout rule is a property
+of `Layout::solve` at **every** size, and the sizes that violate one are the
+awkward ones -- which is precisely why they are not in a hand-written list of
+plausible windows.
+
+**The four guards, and the size that reaches each:**
+
+| Guard removed | Reaches it | What the six sampled sizes saw |
+|---|---|---|
+| `card_w` capped at `MAX_CARD_W` | 1200x900 | nothing: the card is capped only when the window is *both* wide and tall, and a bigger card still passes every containment claim |
+| `hand_h` pays for the footer first | 400x57 | nothing: the guard binds only when `free_h < 25.6`, a window about 57 pixels tall |
+| the fourth button is dropped when it will not fit | 60 wide | nothing: four buttons need about 110 pixels and the narrowest sampled window was 360 |
+| a seat's label is clamped onto the felt | 20 wide | nothing: algebra says the clamp binds only when `pad > 2w/11`, hence only below about 22 pixels of width |
+
+Every one of those numbers came from *solving the guard's own condition*, not
+from guessing. That is the tell: if you can write down the inequality under
+which a clamp binds, you can write down a window that satisfies it, and if no
+size in `SIZES` satisfies it then the clamp is untested no matter how many
+assertions loop over `SIZES`.
+
+**The repair is to sweep, not to sample.** A claim about `Layout::solve` costs
+microseconds per size, so there is no reason to check six:
+
+```rust
+const GRID_W: [f32; 7] = [0.0, 20.0, 60.0, 120.0, 360.0, 900.0, 1400.0];
+const GRID_H: [f32; 6] = [0.0, 57.0, 120.0, 280.0, 620.0, 900.0];
+```
+
+Forty-two sizes, chosen so that each degenerate regime is represented: zero,
+smaller than one widget, smaller than the row of widgets, ordinary, and larger
+than anything the layout wants. All four mutations are caught now, and the
+grid's doc comment names which size exists for which fault, so nobody deletes
+`57.0` for looking arbitrary.
+
+**One of the four was a real fault, not a coverage gap.** At 20 pixels wide the
+clamp that keeps a seat label on the felt puts the label on top of the very
+card it names -- the clamp cannot satisfy both constraints, and silently chose
+the wrong one. The fix is the answer the scoreboard and the footer in the same
+program already gave: a thing that cannot be drawn properly is **left out**,
+not squeezed. Sweeping the grid is what turned an unreachable-looking defensive
+clamp into a visible bug.
+
+**Where else to look.** Every app in the wiring campaign with a `SIZES`
+constant -- which is all of them. Two questions per layout guard: *under what
+inequality does this clamp/`min`/`max`/`break` actually bind*, and *is there a
+size in the list that satisfies it?* A guard whose condition no sampled size
+reaches is in the same position as lesson 94's unreachable branch: it looks
+like defensive code, it is never executed by the suite, and nobody finds out
+which way it fails until a user resizes a window. Prefer a swept grid for any
+claim that is a pure function of the window; keep `SIZES` for claims that need
+a *game* as well as a window, where building the fixture is the expensive part.

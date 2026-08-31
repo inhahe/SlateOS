@@ -5,6 +5,9 @@ edition = "2024"
 
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# Needed because `main` was `let _app = CrosswordApp::new();` -- the app built its
+# whole state and dropped it, having never asked the compositor for a window.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

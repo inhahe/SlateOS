@@ -4937,4 +4937,624 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------------
+    // What the pointer reaches
+    // -----------------------------------------------------------------------
+
+    use guitk::event::Modifiers;
+    use guitk::probe::{press, press_with, rect_of_sized};
+
+    /// The state that a click, a key or a tick is allowed to change.
+    ///
+    /// Comparing this before and after is how "nothing happened" is asserted
+    /// without naming every field that could have happened.
+    fn snapshot(app: &AutomatorApp) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{:?}|{}|{}|{}|{}|{}|{:?}",
+            app.recording_state,
+            app.playback_state,
+            app.active_tab,
+            app.selected_action_idx,
+            app.selected_macro_id.unwrap_or(0),
+            app.library.count(),
+            app.sidebar_scroll,
+            app.action_scroll,
+            app.show_help,
+            app.library
+                .list()
+                .iter()
+                .map(|m| (m.name.clone(), m.actions.len(), m.speed, m.repeat_mode))
+                .collect::<Vec<_>>()
+        )
+    }
+
+    #[test]
+    fn every_control_that_is_painted_can_be_clicked() {
+        // Nothing at all was clickable before: `main` never opened a window,
+        // and the drawing code recorded no hit boxes because there was nowhere
+        // for a click to come from. Every painted control now carries one.
+        let app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let frame = app.frame(w, h);
+        let targets: Vec<Target> = frame.hits().iter().map(|(t, _)| *t).collect();
+        for tab in [ActiveTab::Editor, ActiveTab::Script] {
+            assert!(
+                targets.contains(&Target::Tab(tab)),
+                "no hit box for {tab:?}"
+            );
+        }
+        for speed in PlaybackSpeed::all() {
+            assert!(
+                targets.contains(&Target::Speed(*speed)),
+                "no hit box for {speed:?}"
+            );
+        }
+        for mode in [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever] {
+            assert!(
+                targets.contains(&Target::Repeat(mode)),
+                "no hit box for {mode:?}"
+            );
+        }
+        assert!(
+            targets.contains(&Target::Macro(0)),
+            "no hit box for the first macro"
+        );
+        assert!(
+            targets.contains(&Target::Action(0)),
+            "no hit box for the first action"
+        );
+    }
+
+    #[test]
+    fn a_click_lands_on_what_was_drawn_in_that_window_not_the_last_one() {
+        // The frame a click is tested against is the frame this window is
+        // showing. A renderer that remembers the size it last drew at answers
+        // a click at the wrong place the moment the window is resized.
+        let mut app = demo_app();
+        let small = (420.0_f32, 320.0_f32);
+        let rect = rect_of_sized(&app, Target::Button(Button::Record), small)
+            .expect("Record is painted in a 420x320 window");
+        let (cx, cy) = rect.centre();
+        let out = app.click_at(cx, cy, MouseButton::Left, small);
+        assert_eq!(out, EventResult::Consumed);
+        assert!(
+            app.recording_state.is_recording(),
+            "the click did not reach Record"
+        );
+    }
+
+    #[test]
+    fn a_click_reaches_the_control_whose_ink_is_under_it() {
+        // A click at a control's own centre reaches that control, or something
+        // painted over it -- the help card is drawn last and covers the
+        // picture on purpose. What it must never reach is something painted
+        // *under* it, which is what a hit box recorded before the ink it
+        // belongs to, or recorded at a rectangle nobody painted, produces.
+        for (name, app) in states() {
+            for size in [AutomatorApp::SIZE, (520.0, 400.0), (1400.0, 1100.0)] {
+                let frame = app.draw(size);
+                let hits = frame.hits();
+                for (i, (target, rect)) in hits.iter().enumerate() {
+                    let (cx, cy) = rect.centre();
+                    let hit = frame.hit_test(cx, cy);
+                    let reached = hits
+                        .iter()
+                        .rposition(|(t, r)| Some(*t) == hit && r.contains(cx, cy));
+                    assert!(
+                        reached.is_some_and(|j| j >= i),
+                        "{name}: a click on {target:?} at {size:?} reached {hit:?},                          which was painted under it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_card_swallows_the_click_that_dismisses_it() {
+        // A click meant for the card must not also be a click on whatever the
+        // card is covering.
+        let mut app = helping_app();
+        let size = AutomatorApp::SIZE;
+        let card = rect_of_sized(&app, Target::Help, size).expect("the card is painted");
+        // Every point of the card answers with the card, and at least one of
+        // them is over a control -- otherwise a card that swallowed nothing
+        // would pass this test.
+        let under = demo_app().draw(size);
+        let over = app.draw(size);
+        let mut beneath = None;
+        for i in 1..10 {
+            for j in 1..10 {
+                let cx = usize_f32(i).mul_add(card.w / 10.0, card.x);
+                let cy = usize_f32(j).mul_add(card.h / 10.0, card.y);
+                assert_eq!(
+                    over.hit_test(cx, cy),
+                    Some(Target::Help),
+                    "the card does not answer a click at ({cx}, {cy})"
+                );
+                beneath = beneath.or_else(|| under.hit_test(cx, cy));
+            }
+        }
+        let beneath = beneath.expect("the card is over nothing, so this proves nothing");
+        let (cx, cy) = card.centre();
+        let before = snapshot(&app);
+        assert_eq!(
+            app.click_at(cx, cy, MouseButton::Left, size),
+            EventResult::Consumed
+        );
+        assert!(!app.show_help, "the click did not dismiss the card");
+        app.show_help = true;
+        assert_eq!(
+            snapshot(&app),
+            before,
+            "the click went through the card to {beneath:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_on_nothing_changes_nothing() {
+        // The old program answered no clicks at all. The new one must answer
+        // no click that landed on nothing, which is not the same as answering
+        // it with whatever was recorded last.
+        let mut app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let before = snapshot(&app);
+        // The very top-left of the header, which carries the title and no
+        // target at all.
+        assert_eq!(
+            app.frame(w, h).hit_test(1.0, 1.0),
+            None,
+            "the title is a target"
+        );
+        assert_eq!(
+            app.click_at(1.0, 1.0, MouseButton::Left, (w, h)),
+            EventResult::Ignored
+        );
+        assert_eq!(snapshot(&app), before, "a click on nothing changed the app");
+    }
+
+    #[test]
+    fn every_button_does_what_its_key_does() {
+        // A button and its key are one implementation, so this holds by
+        // construction -- and this test is what makes the construction hold.
+        // Every command in the old program was reachable from exactly one of
+        // the two, and eleven of the fourteen from neither.
+        for button in Button::all() {
+            let mut clicked = demo_app();
+            let mut keyed = demo_app();
+            keyed.size = AutomatorApp::SIZE;
+            clicked.press(*button);
+            let out = keyed.handle_key(&press(button.key()));
+            assert_eq!(out, EventResult::Consumed, "{button:?}'s key was ignored");
+            assert_eq!(
+                snapshot(&clicked),
+                snapshot(&keyed),
+                "{button:?} and {:?} do different things",
+                button.key()
+            );
+        }
+    }
+
+    #[test]
+    fn every_button_names_the_key_that_does_the_same_thing() {
+        // The face is the only place a user is told which key a button is, so
+        // a face that names the wrong key is a lie the program tells.
+        for button in Button::all() {
+            let face = faced(*button);
+            assert!(
+                face.contains(button.key_label()),
+                "{button:?}'s face {face:?} does not name {:?}",
+                button.key_label()
+            );
+            assert!(
+                face.contains(button.action_label()),
+                "{button:?}'s face {face:?} does not say what it does"
+            );
+        }
+    }
+
+    #[test]
+    fn no_two_buttons_share_a_key() {
+        for a in Button::all() {
+            for b in Button::all() {
+                assert!(
+                    a == b || a.key() != b.key(),
+                    "{a:?} and {b:?} both answer {:?}",
+                    a.key()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_with_a_modifier_is_left_to_the_window() {
+        // Ctrl+N is the compositor's new window, not Automator's new macro.
+        let mut app = demo_app();
+        app.size = AutomatorApp::SIZE;
+        let before = snapshot(&app);
+        for button in Button::all() {
+            for mods in [
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::default()
+                },
+            ] {
+                let out = app.handle_key(&press_with(button.key(), mods));
+                assert_eq!(
+                    out,
+                    EventResult::Ignored,
+                    "{:?} with {mods:?}",
+                    button.key()
+                );
+            }
+        }
+        assert_eq!(snapshot(&app), before, "a modified key changed the app");
+    }
+
+    #[test]
+    fn a_key_release_is_not_a_key_press() {
+        // Handling both runs every binding twice, which for the help card
+        // means it opens and shuts before a frame is ever drawn.
+        let mut app = demo_app();
+        app.size = AutomatorApp::SIZE;
+        let before = snapshot(&app);
+        for button in Button::all() {
+            let mut release = press(button.key());
+            release.pressed = false;
+            assert_eq!(app.handle_key(&release), EventResult::Ignored);
+        }
+        assert_eq!(snapshot(&app), before, "a key release changed the app");
+    }
+
+    // -----------------------------------------------------------------------
+    // The clock, the scroll and the selection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_app_asks_for_a_clock_and_a_running_macro_advances_on_it() {
+        // `tick_playback` was called from the tests and from nowhere else: a
+        // macro started playing and then sat there, because nothing in the
+        // program ever advanced it. The window now ticks, and the tick is what
+        // moves the playback on.
+        assert_eq!(
+            AutomatorApp::tick_interval(&demo_app()),
+            Some(std::time::Duration::from_millis(TICK_MS)),
+            "the app never asks for a clock"
+        );
+        let mut app = demo_app();
+        app.press(Button::Play);
+        let PlaybackState::Playing { action_idx, .. } = app.playback_state else {
+            panic!("Play did not start playback");
+        };
+        assert_eq!(action_idx, 0);
+        let mut moved = false;
+        for _ in 0..2000 {
+            app.tick(TICK_MS);
+            if let PlaybackState::Playing { action_idx: i, .. } = app.playback_state
+                && i > 0
+            {
+                moved = true;
+                break;
+            }
+            if !app.playback_state.is_playing() {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved, "a playing macro never advanced on the clock");
+    }
+
+    #[test]
+    fn a_tick_asks_for_a_repaint_only_while_something_is_moving() {
+        // Answering every tick with a repaint is a program that redraws sixty
+        // times a second for ever, on a desktop that is not doing anything.
+        let mut idle = demo_app();
+        assert!(!idle.tick(TICK_MS), "an idle Automator asked for a repaint");
+        let mut playing = demo_app();
+        playing.press(Button::Play);
+        assert!(
+            playing.tick(TICK_MS),
+            "a playing macro asked for no repaint"
+        );
+        let mut recording = demo_app();
+        recording.press(Button::Record);
+        assert!(
+            recording.tick(TICK_MS),
+            "a recording Automator asked for no repaint -- the indicator pulses"
+        );
+    }
+
+    #[test]
+    fn a_close_request_closes_the_window() {
+        let mut app = demo_app();
+        assert_eq!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit,
+            "the window would not close"
+        );
+    }
+
+    #[test]
+    fn the_window_opens_at_the_size_the_layout_was_designed_for() {
+        let app = demo_app();
+        assert_eq!(
+            AutomatorApp::initial_size(&app),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        assert_eq!(AutomatorApp::SIZE, (WINDOW_WIDTH, WINDOW_HEIGHT));
+        // The window it opens at must be one that affords both side panels,
+        // or the program opens looking like the narrow fallback.
+        let l = Layout::solve(WINDOW_WIDTH, WINDOW_HEIGHT);
+        assert!(
+            !l.sidebar.is_empty(),
+            "the library is missing at the opening size"
+        );
+        assert!(
+            !l.props.is_empty(),
+            "the read-out is missing at the opening size"
+        );
+    }
+
+    #[test]
+    fn the_picture_is_drawn_at_the_size_it_is_given_not_the_size_it_remembers() {
+        // A renderer that draws at a remembered size paints a picture for the
+        // wrong window, and every hit box in it is in the wrong place.
+        let mut app = demo_app();
+        app.render(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let tree = app.render(430.0, 260.0);
+        // The first thing every frame paints is the window itself, so the
+        // picture's own extent is right there in the command list.
+        let Some(RenderCommand::FillRect { width, height, .. }) = tree.commands.first() else {
+            panic!("the frame does not begin by painting the window");
+        };
+        assert!(
+            (width - 430.0).abs() < 0.01 && (height - 260.0).abs() < 0.01,
+            "drew a {width}x{height} picture for a 430x260 window"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_library_scrolls_the_library() {
+        // `sidebar_scroll` was written once in `new()` and never again: a
+        // library with more macros than fit was permanently truncated at
+        // whatever the window could show.
+        let mut app = demo_app();
+        for i in 0..40 {
+            app.new_macro(&format!("Macro {i}"));
+        }
+        let (w, h) = AutomatorApp::SIZE;
+        app.size = (w, h);
+        let l = Layout::solve(w, h);
+        let (x, y) = l.sidebar.centre();
+        let before = app.sidebar_scroll;
+        let out = app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_eq!(out, EventResult::Consumed);
+        assert!(
+            app.sidebar_scroll > before,
+            "the wheel did not scroll the library"
+        );
+    }
+
+    #[test]
+    fn a_wheel_over_the_action_list_scrolls_the_action_list() {
+        let mut app = demo_app();
+        for i in 0..60 {
+            app.add_action(MacroAction::Delay { ms: i }, 0);
+        }
+        let (w, h) = AutomatorApp::SIZE;
+        app.size = (w, h);
+        let l = Layout::solve(w, h);
+        let (x, y) = l.list.centre();
+        let before = app.action_scroll;
+        let out = app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_eq!(out, EventResult::Consumed);
+        assert!(
+            app.action_scroll > before,
+            "the wheel did not scroll the action list"
+        );
+    }
+
+    #[test]
+    fn a_scroll_offset_never_points_past_the_end_of_the_list() {
+        // Deleting a macro under a scrolled library, or a macro with fewer
+        // actions being selected under a scrolled list, leaves an offset
+        // pointing at rows that no longer exist.
+        let mut app = demo_app();
+        for i in 0..40 {
+            app.new_macro(&format!("Macro {i}"));
+        }
+        app.scroll_sidebar(30);
+        app.scroll_actions(30);
+        for _ in 0..45 {
+            app.press(Button::DeleteMacro);
+        }
+        assert!(
+            app.sidebar_scroll < app.library.count().max(1),
+            "the library offset is past the end: {} of {}",
+            app.sidebar_scroll,
+            app.library.count()
+        );
+        let actions = app
+            .selected_macro_id
+            .and_then(|id| app.library.get(id))
+            .map_or(0, |m| m.actions.len());
+        assert!(
+            app.action_scroll < actions.max(1),
+            "the action offset is past the end: {} of {actions}",
+            app.action_scroll
+        );
+    }
+
+    #[test]
+    fn the_scrolled_list_shows_the_rows_the_offset_names() {
+        // The offset is only a claim about what is on screen. This is the test
+        // that the drawing pass believes it.
+        let mut app = demo_app();
+        for i in 0..60 {
+            app.add_action(MacroAction::Delay { ms: i }, 0);
+        }
+        let (w, h) = AutomatorApp::SIZE;
+        let first = app.frame(w, h).hits().iter().find_map(|(t, _)| match t {
+            Target::Action(i) => Some(*i),
+            _ => None,
+        });
+        assert_eq!(first, Some(0), "an unscrolled list does not start at row 0");
+        app.scroll_actions(12);
+        let scrolled = app.frame(w, h).hits().iter().find_map(|(t, _)| match t {
+            Target::Action(i) => Some(*i),
+            _ => None,
+        });
+        assert_eq!(
+            scrolled,
+            Some(app.action_scroll),
+            "the list does not start where the offset says"
+        );
+    }
+
+    #[test]
+    fn the_arrow_keys_move_the_selection_and_the_selection_stays_on_screen() {
+        // A selection scrolled out of the list is a selection the user cannot
+        // see: the offset must follow it.
+        let mut app = demo_app();
+        for i in 0..60 {
+            app.add_action(MacroAction::Delay { ms: i }, 0);
+        }
+        app.size = AutomatorApp::SIZE;
+        app.select_action(0);
+        for _ in 0..40 {
+            assert_eq!(app.handle_key(&press(Key::Down)), EventResult::Consumed);
+        }
+        let selected = app.selected_action_idx.expect("something is selected");
+        assert_eq!(selected, 40);
+        assert!(
+            app.action_scroll <= selected,
+            "the selection at {selected} is above the first visible row {}",
+            app.action_scroll
+        );
+        for _ in 0..40 {
+            assert_eq!(app.handle_key(&press(Key::Up)), EventResult::Consumed);
+        }
+        assert_eq!(app.selected_action_idx, Some(0));
+        assert_eq!(
+            app.action_scroll, 0,
+            "the list did not follow the selection back"
+        );
+    }
+
+    #[test]
+    fn the_selection_never_names_a_row_that_does_not_exist() {
+        let mut app = demo_app();
+        app.size = AutomatorApp::SIZE;
+        for _ in 0..30 {
+            app.handle_key(&press(Key::Down));
+            app.press(Button::DeleteAction);
+            let n = app
+                .selected_macro_id
+                .and_then(|id| app.library.get(id))
+                .map_or(0, |m| m.actions.len());
+            if let Some(i) = app.selected_action_idx {
+                assert!(i < n, "the selection is row {i} of {n}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_wheel_over_nothing_scrolls_nothing() {
+        let mut app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        app.size = (w, h);
+        let l = Layout::solve(w, h);
+        let before = snapshot(&app);
+        let (x, y) = l.header.centre();
+        let out = app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy: -3.0 },
+        }));
+        assert_eq!(out, EventResult::Ignored);
+        assert_eq!(snapshot(&app), before);
+    }
+
+    #[test]
+    fn clicking_a_tab_shows_that_tab() {
+        // `active_tab` was assigned in exactly one place in the whole program:
+        // a test. There was no way to reach the script editor at all.
+        let mut app = demo_app();
+        let size = AutomatorApp::SIZE;
+        assert_eq!(app.active_tab, ActiveTab::Editor);
+        let rect = rect_of_sized(&app, Target::Tab(ActiveTab::Script), size)
+            .expect("the Script tab is painted");
+        let (cx, cy) = rect.centre();
+        assert_eq!(
+            app.click_at(cx, cy, MouseButton::Left, size),
+            EventResult::Consumed
+        );
+        assert_eq!(app.active_tab, ActiveTab::Script);
+        // And the body really is a different drawing pass.
+        assert!(
+            app.frame(size.0, size.1)
+                .hits()
+                .iter()
+                .all(|(t, _)| !matches!(t, Target::Action(_))),
+            "the action rows are still listed under the script tab"
+        );
+    }
+
+    #[test]
+    fn clicking_a_speed_or_a_repeat_pad_sets_it() {
+        let size = AutomatorApp::SIZE;
+        for speed in PlaybackSpeed::all() {
+            let mut app = demo_app();
+            let rect =
+                rect_of_sized(&app, Target::Speed(*speed), size).expect("the pad is painted");
+            let (cx, cy) = rect.centre();
+            app.click_at(cx, cy, MouseButton::Left, size);
+            let mac = app
+                .selected_macro_id
+                .and_then(|id| app.library.get(id))
+                .expect("a macro is selected");
+            assert_eq!(mac.speed, *speed, "the pad did not set the speed");
+        }
+        for mode in [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever] {
+            let mut app = demo_app();
+            let rect = rect_of_sized(&app, Target::Repeat(mode), size).expect("the pad is painted");
+            let (cx, cy) = rect.centre();
+            app.click_at(cx, cy, MouseButton::Left, size);
+            let mac = app
+                .selected_macro_id
+                .and_then(|id| app.library.get(id))
+                .expect("a macro is selected");
+            assert_eq!(mac.repeat_mode, mode, "the pad did not set the repeat mode");
+        }
+    }
+
+    #[test]
+    fn clicking_a_macro_selects_that_macro() {
+        let mut app = demo_app();
+        let size = AutomatorApp::SIZE;
+        let rect = rect_of_sized(&app, Target::Macro(1), size).expect("the second macro is drawn");
+        let (cx, cy) = rect.centre();
+        app.click_at(cx, cy, MouseButton::Left, size);
+        let picked = app.library.list().get(1).map(|m| m.id);
+        assert_eq!(
+            app.selected_macro_id, picked,
+            "the click chose another macro"
+        );
+    }
 }

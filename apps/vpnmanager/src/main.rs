@@ -6838,9 +6838,25 @@ mod tests {
             app.scroll_offset > 0.0,
             "the view has to follow the selection off the bottom"
         );
+        // "One the user can see", so the glyphs are what has to be found. The
+        // row's hit box is pushed by a separate call from the row's drawing,
+        // and a box on its own is no evidence that anything was painted in it
+        // (lesson 81).
+        let row = rect_of(&app, Target::Profile(last)).expect("the selected row has no hit box");
+        let name = app
+            .profiles
+            .iter()
+            .find(|p| p.id == last)
+            .expect("the selected profile")
+            .name
+            .clone();
         assert!(
-            rect_of(&app, Target::Profile(last)).is_some(),
-            "the selected row must be one the user can see"
+            render_app(&app).commands.into_iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { ref text, x, y, .. }
+                    if *text == name && row.contains(x, y)
+            )),
+            "the selected row's box at {row:?} holds no {name:?}"
         );
     }
 

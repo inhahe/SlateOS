@@ -1793,10 +1793,44 @@ mod tests {
         let mut g = windowed(120.0, 90.0);
         let l = g.layout(120.0, 90.0);
         assert!(l.board.w > 0.0);
-        assert!(
-            probe::rect_of_sized(&g, Target::Cell(4), (120.0, 90.0)).is_some(),
-            "the centre square must be clickable even at 120x90"
-        );
+        // "Playable" is two claims, and a hit box only carries one of them
+        // (lesson 81): the box is the whole cell including its gap, while the
+        // square you can see is that box inset and pushed by a different
+        // statement. So ask separately that every square was *painted* — by a
+        // fill lying inside its own box, which is containment the way round
+        // the window's full-bleed background cannot satisfy (lesson 83) — and
+        // that the centre one takes a click.
+        let f = g.frame(120.0, 90.0);
+        let fills: Vec<Rect> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        for i in 0..9 {
+            let box_ = f
+                .rect_of(|t| *t == Target::Cell(i))
+                .unwrap_or_else(|| panic!("square {i} is not clickable at 120x90"));
+            assert!(
+                fills.iter().any(|r| {
+                    r.w > 0.0
+                        && r.h > 0.0
+                        && r.x >= box_.x - 0.01
+                        && r.y >= box_.y - 0.01
+                        && r.right() <= box_.right() + 0.01
+                        && r.bottom() <= box_.bottom() + 0.01
+                }),
+                "square {i} is clickable at 120x90 but nothing was drawn in it"
+            );
+        }
         probe::click_sized(&mut g, Target::Cell(4), MouseButton::Left, (120.0, 90.0));
         assert_eq!(g.cell(4), Some(Mark::X));
     }

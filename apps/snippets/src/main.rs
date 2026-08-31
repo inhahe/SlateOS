@@ -4459,10 +4459,26 @@ mod tests {
     #[test]
     fn every_control_the_toolbar_draws_can_be_clicked() {
         let a = app();
-        for target in [Target::New, Target::Export, Target::Stats, Target::Search] {
+        // "the toolbar draws" is half the claim, and a hit box is no evidence
+        // for it: a control squeezed to nothing by a narrow toolbar would keep
+        // its box and lose its label. Each control is named by the text it
+        // paints, so ask for that text inside the box the click uses.
+        let frame = a.frame(W.0, W.1);
+        for (target, label) in [
+            (Target::New, "+ New"),
+            (Target::Export, "Export"),
+            (Target::Stats, "Stats"),
+            (Target::Search, SEARCH_PLACEHOLDER),
+        ] {
+            let r = rect_of(&a, target)
+                .unwrap_or_else(|| panic!("{target:?} is drawn with no hit box"));
             assert!(
-                rect_of(&a, target).is_some(),
-                "{target:?} is drawn with no hit box"
+                frame.commands().iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, x, y, .. }
+                        if text.as_str() == label && r.contains(*x, *y)
+                )),
+                "{target:?} takes clicks but never draws {label:?}"
             );
         }
     }
@@ -4562,6 +4578,22 @@ mod tests {
         let a = app_with(&["alpha", "beta", "gamma"]);
         let l = a.layout();
         let body = a.list_body(&l);
+        // Where the *title* is, not merely where the layout says the box
+        // should be. The rest of this suite reads a row's presence off
+        // `rect_of`, which is only evidence that the user can see the row
+        // because this test ties the box to the glyphs inside it (lesson 81);
+        // without it, a list that recorded boxes and drew nothing would pass
+        // every scrolling test in the file.
+        let drawn: Vec<(String, f32, f32)> = a
+            .frame(W.0, W.1)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } => Some((text, x, y)),
+                _ => None,
+            })
+            .collect();
         for (row, title) in ["alpha", "beta", "gamma"].iter().enumerate() {
             let r = rect_of(&a, Target::Row(id_of(&a, title))).unwrap();
             let expected_y = body.y + f32_from_usize(row) * l.list_row;
@@ -4569,6 +4601,14 @@ mod tests {
                 (r.y - expected_y).abs() < 0.01,
                 "{title} is row {row} but its box is at y={} not {expected_y}",
                 r.y
+            );
+            assert!(
+                drawn
+                    .iter()
+                    .any(|(t, x, y)| t == title && r.contains(*x, *y)),
+                "{title}'s row box at {r:?} holds no such title; the frame drew \
+                 {:?}",
+                drawn.iter().map(|(t, ..)| t).collect::<Vec<_>>()
             );
         }
     }
@@ -4808,15 +4848,56 @@ mod tests {
     #[test]
     fn a_twisty_is_drawn_only_where_there_is_something_to_open() {
         let a = app();
+        // The arrow and its hit box are pushed by the same branch, so asking
+        // only whether the box is there says nothing about whether anything
+        // was painted in it: the drawing could be deleted outright and the
+        // folder would still answer a click on empty space. Ask the frame for
+        // the glyph as well, and require it to land inside the box.
+        let glyphs: Vec<(String, f32, f32)> = a
+            .frame(W.0, W.1)
+            .into_tree()
+            .commands
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. }
+                    if text == TWISTY_OPEN || text == TWISTY_SHUT =>
+                {
+                    Some((text, x, y))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut expected = 0;
         for folder in &a.folders {
-            let has = rect_of(&a, Target::Twisty(folder.id)).is_some();
+            let box_of = rect_of(&a, Target::Twisty(folder.id));
             assert_eq!(
-                has,
+                box_of.is_some(),
                 a.has_children(folder.id),
                 "folder {} has a twisty it cannot use",
                 folder.name
             );
+            let Some(r) = box_of else { continue };
+            expected += 1;
+            let want = if folder.expanded {
+                TWISTY_OPEN
+            } else {
+                TWISTY_SHUT
+            };
+            assert!(
+                glyphs
+                    .iter()
+                    .any(|(t, x, y)| t == want && r.contains(*x, *y)),
+                "folder {}'s twisty box at {r:?} holds no {want:?}; the frame \
+                 drew {glyphs:?}",
+                folder.name
+            );
         }
+        assert_eq!(
+            glyphs.len(),
+            expected,
+            "the tree draws {} twisties for {expected} openable folders",
+            glyphs.len()
+        );
     }
 
     #[test]

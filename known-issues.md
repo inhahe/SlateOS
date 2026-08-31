@@ -100087,3 +100087,361 @@ inviting a check-then-use of its own.
 **Not built** because no caller has asked, and an ABI invented for a
 hypothetical question is one more thing to keep in step. **Trigger:** lane B
 asking, or the first userspace caller whose correctness depends on it.
+
+### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
+
+**In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only
+visibility assertions". Counted rather than recalled, there are **55** of them
+across **20** apps. The number matters because a backlog of seven is something
+you fix in passing and a backlog of 55 is a task that has to be scheduled, and
+because "seven" was a guess written from memory while the lesson was fresh --
+exactly the kind of unmeasured number this campaign keeps finding inside the
+production code it audits.
+
+    grep -rn 'rect_of\(_sized\)\?(.*)\.is_some()' apps/*/src/main.rs
+
+| app | sites | | app | sites |
+|---|---|---|---|---|
+| snippets | 8 | | taskscheduler | 2 |
+| pdfviewer | 6 | | mahjong | 2 |
+| netmanager | 6 | | credmanager | 2 |
+| sokoban | 5 | | charmap | 2 |
+| vpnmanager | 4 | | calculator | 2 |
+| diskanalyzer | 4 | | breakout | 2 |
+| stickynotes | 3 | | worldclock, tictactoe, nim, memory, defrag, checkers, calendar | 1 each |
+
+**Not all 55 are faults, and the audit is per-site.** The form is only wrong
+when the test's *claim* is that something is visible. Where the claim is that
+something is **clickable** -- and especially where it is paired with an
+`is_none()` for a target that should have been dropped, as in `apps/calculator`'s
+scrolled-away history row or `apps/charmap`'s "the Copy button goes but the grid
+stays" -- a recorded box is exactly the right evidence and no paint assertion is
+owed. `apps/mahjong`'s two sites are of a third kind: each sits on the line
+after a `text_saying(&f, ...)` that has already established the paint, so the
+`is_some()` is a separate and legitimate claim about the hit box. Read the test
+name before touching the assertion; the fix for a genuine one is Lesson 83's
+containment-the-other-way (a paint command that *fits inside* the box), not a
+point-containment check, which the background fill makes vacuous.
+
+### Lesson 86: a two-window comparison cannot separate two formulas that both scale with the window (lane C, 2026-08-30)
+
+**In short:** the standard test for "this measurement is derived from the window
+rather than hard-coded" is to draw the app at two sizes and require the
+measurement to differ. That test is only as good as the *difference* between
+the right formula and the wrong one. If the wrong formula also grows with the
+window — or worse, if it produces the very same answer at both sizes tried —
+the comparison passes and proves nothing. Mahjong's sweep produced five of
+these in one run.
+
+**The three shapes it takes.**
+
+1. **The wrong formula grows too, for a different reason.**
+   `the_legend_column_widens_with_the_font_it_is_drawn_at` compared a 1400x420
+   window with a 1400x1400 one. The column is `widest + font + pad * 3`, and
+   between those two heights the *padding* grows from 6.3 to 14 — so the column
+   widened by the padding alone, and a mutant that measured the legend's text at
+   a fixed 12pt was invisible. The fix is to hold the confounder still and say
+   so in the test: both windows are now past the padding's ceiling, and the
+   fixture asserts `short.pad == tall.pad` before it compares widths.
+
+2. **The two sizes chosen straddle nothing.** `the_small_font_never_outgrows_
+   the_font_above_it` swept a fixture whose tallest window is 1000 pixels.
+   `status` stops climbing at 783 and `small` only reaches `status`'s ceiling at
+   1058, so a ceiling written as a constant instead of as `status` is wrong only
+   *above* 1058 — the fixture stopped 58 pixels short of where the bug lives. A
+   growth test needs a size on each side of every plateau in the function.
+
+3. **The quantity under test is scale-invariant, so no pair of sizes can
+   differ.** The arrow-key search divides every tile offset by the tile width,
+   and the test for it pressed the same keys in a 700x500 window and a 1900x1300
+   one and required the same tile. That comparison *can never fail*: every
+   distance in the search is a ratio of two lengths that scale together, so the
+   winner is the same tile at any size whether the unit is a tile or a pixel.
+   What the unit actually changes is the direction *threshold* — a tenth of a
+   tile, which a layer's stagger does not clear, versus a tenth of a pixel,
+   which every stagger clears. The test that catches it is not about size at
+   all: it is a two-tile board where the only candidate to the right is one
+   layer down in the same column, and the arrow must find nothing.
+
+**The tell.** Any test of the form "draw at size A, draw at size B, assert the
+numbers differ". Before trusting it, write down what the mutant computes at A
+and at B. If those two numbers also differ, the test is satisfied by the mutant.
+If they are *equal to the real ones*, the quantity is scale-invariant and the
+whole approach is wrong — find the observable the parameter actually controls.
+
+### Lesson 87: a bound that restates a clamp's own range is satisfied by every constant inside it (lane C, 2026-08-30)
+
+**In short:** if the code says `x.clamp(1.0, 4.0)` and the test says
+`assert!((1.0..=4.0).contains(&x))`, the test has restated the code. It cannot
+fail on `let x = 2.0;`, which is the exact bug — a hard-coded size — that the
+derivation was written to remove.
+
+Mahjong's cursor border is `(tile_w * 0.05).clamp(1.0, 4.0)`, and its test
+asserted the value lay between one and four pixels and was less than half a
+tile. Both are true of a flat `2.0` at every window the app is drawn at, so the
+old fixed border — which vanished on a large window and swallowed the tile on a
+small one — passed the test written to catch it. The bounds are worth keeping;
+what had to be added is a *comparison* the constant cannot satisfy: the border
+at 1600x1000 must be strictly thicker than at 360x700.
+
+**The tell.** Read the assertion and the expression side by side. If the
+assertion's constants are the expression's constants, the test is a tautology.
+This is Lesson 85's one-sidedness with both sides present and still saying
+nothing, and it generalises past `clamp`: a `.min(c)` invites `assert!(x <= c)`,
+a `.max(c)` invites `assert!(x >= c)`, and neither is evidence of derivation.
+
+### Lesson 88: a mutant can survive by being equivalent, and the table has to say which (lane C, 2026-08-30)
+
+**In short:** a surviving mutation means one of two very different things —
+either the tests missed a real change in behaviour, or the "change" was not one.
+An equivalent mutant is not a coverage hole and cannot be fixed by writing a
+test; chasing it as though it were wastes the sweep's most valuable signal.
+Eight of mahjong's 25 first-run survivors were equivalent, and the honest fix is
+to record *why* in the row and mutate something that can actually break.
+
+**The kinds seen so far.**
+
+| Kind | Example |
+|---|---|
+| The mutant computes the same number | `small = (h*0.017).clamp(7.0, 18.0)` where the real ceiling is `status`, whose own ceiling is 18.0 |
+| The guard can never bind | `.max(0.0)` on a ratio whose inputs `inset` already guarantees non-negative; `.max(header.bottom())` on a height already capped at `h - header_h` |
+| The term is zero | deleting `- min_y` when the topmost tile is layer 0 row 0 |
+| One side already implies the other | `remaining() == 0` widened to `&& find_hint().is_none()`: an empty board has no hint |
+| The change is a relabelling | `seed.wrapping_add(1)` permutes the seeds without merging any two, so one seed still gives one game |
+| Both branches return the same thing | `_ => return EventResult::Ignored` rewritten as `_ => false`, which reaches the same `Ignored` two lines later |
+| The comparison is always true | `let moved = self.cursor.tile_idx != Some(bi)` where the search has already skipped that tile |
+| **Arithmetic accident** | deleting the `tile_w <= 0.0` guard: a zero unit makes every delta `0.0 / 0.0`, and NaN fails every comparison the direction test makes, so the search falls through to the same answer |
+
+**What to do with each.** If the mutant is equivalent because the *program* has
+dead code, delete the dead code — three of mahjong's did, and the removals are
+the real value of the finding. If it is equivalent because the *mutation* was
+badly chosen, pick a different one that expresses the same fault: mutate the
+answer the guard gives rather than deleting the guard, subtract the other axis's
+minimum rather than one that is zero, ignore the seed rather than shifting it.
+The one thing not to do is leave the row in place and go looking for a test —
+there is no test, because there is no difference.
+
+**The last row deserves care.** The NaN case is the reason to keep a guard whose
+deletion changes nothing: correctness that rests on `0.0 / 0.0` producing a
+value that fails every comparison is correctness by accident, and the next edit
+to the arithmetic takes it away silently.
+
+### Lesson 81 audit closed: 15 of the 55 sites were faults, 40 were the right assertion (lane C, 2026-08-30)
+
+**In short:** the previous addendum counted 55 `rect_of(...).is_some()` sites
+across 20 apps and said the audit had to be per-site because the form is only
+wrong when the test's claim is about *visibility*. Every site has now been read.
+**Fifteen** were genuine — a test that said "drawn", "still there", "on screen"
+or "appeared" while proving only that a click would land somewhere — and have
+been given a paint assertion. **Forty** were already correct: they claim
+*clickability*, and for that claim a recorded box is the evidence, not a proxy
+for it.
+
+**The fifteen that were fixed**, and the word in each that gave it away:
+
+| app | test | the word that made it a visibility claim |
+|---|---|---|
+| checkers | the board's squares are reachable | "reachable" over a drawn board |
+| memory | a face-down card is still a card | "still a card" |
+| nim | every heap offers a row to click | "offers" |
+| tictactoe | an empty cell is clickable | the empty cell draws nothing else |
+| stickynotes | a note is where its own text is | "is where" |
+| snippets | a twisty is drawn only where there is something to open | "is drawn" |
+| snippets | a row is where its own title is drawn | "is drawn" |
+| snippets | every control the toolbar draws can be clicked | "the toolbar draws" |
+| sokoban | the menu scrolls the cursor into view | "into view" |
+| vpnmanager | the selected row must be one the user can see | "can see" |
+| charmap | the End key scrolls the last character onto the screen | "onto the screen" |
+| netmanager | the switch moved but Apply never appeared | "appeared" |
+| netmanager | add profile is reachable when there are no profiles yet | the fault was *nothing drawn* |
+| breakout | the buttons offer every action the keys do | "has no button" |
+| worldclock | a narrow window drops the UTC readout before a button | "every button is still there" |
+
+**Three patterns account for all 40 that were right.**
+
+1. **Paired with an `is_none()`.** The pair is the whole test: the target is
+   dropped in one state and recorded in the other. Both halves are about the
+   hit box, and a paint assertion on the `is_some()` half would be testing a
+   different thing than the `is_none()` half denies. `pdfviewer`'s six sites,
+   `netmanager`'s DNS up/down buttons, `taskscheduler`'s selection-gated
+   toolbar, `credmanager`'s buttons left of the fold, `sokoban`'s menu-versus-
+   warehouse buttons and `vpnmanager`'s reconnect are all this.
+2. **The test name says "clickable", "reachable" or "records".**
+   `diskanalyzer`'s `every_control_is_still_reachable_in_a_narrow_window` and
+   `sokoban`'s `a_button_the_screen_does_not_show_is_not_clickable` name the hit
+   box outright. Strengthening those would not sharpen the claim, it would
+   replace it.
+3. **A companion test already proves the paint.** `snippets`' four scroll-window
+   sites lean on `a_row_is_where_its_own_title_is_drawn`, which — now that it is
+   one of the fifteen — establishes that a row's box is where its title lands.
+   Once that is proved once, the scroll tests may ask about the box alone.
+   `mahjong`'s two sites sit directly after a `text_saying(...)` in the same
+   test, which is the same argument in one file.
+
+**The general shape, for the next audit of this kind.** A grep gives sites, not
+faults; the fault rate here was 27%. The discriminator is a single question
+asked of the test's *name and message*, not of its body: does it promise the
+user can **see** this, or that a click **reaches** it? Fixing the 40 would have
+been worse than leaving them — a clickability test with a paint assertion bolted
+on fails for the wrong reason and teaches the next reader that the two claims
+are one.
+
+### Lesson 89: an assertion behind an `if` about the code under test can retire without failing (lane C, 2026-08-30)
+
+**In short:** a test that computes something from the production code, then only
+asserts when that something looks a certain way, stops testing the moment the
+code stops looking that way -- and it stops silently, because a test that
+asserts nothing passes. This is Lesson 84's shape (the expectation computed with
+the function under test) moved from the *value* to the *decision to check it*.
+
+typingtutor's `a_body_too_short_for_a_row_shows_none` was written to hold the
+one interesting case in `Layout::rows_visible`: a body with no room for even one
+row must answer zero, not one, because a row drawn in a body that cannot hold it
+is a row drawn over the footer. It read:
+
+```rust
+let l = Layout::solve(620.0, 40.0);
+if l.body.h < l.row {
+    assert_eq!(l.rows_visible(), 0, ...);
+}
+```
+
+At 40 px the layout gives up all three bands of chrome and hands the body 34 px
+against a 20.8 px row, so `l.body.h < l.row` is false and the body has room for
+a row after all. The `if` never held. The test ran, passed, and asserted nothing
+whatsoever -- against the real code, and against the mutant that returns
+`.max(1)`, which is precisely the bug it names in its own doc comment.
+
+**Why it is easy to write.** The `if` looks like defensive care: "only check
+this when the case actually arises." But the case is decided by the same
+function being tested, at a size the test chose without checking. The author
+believed 40 px was too short; nothing in the test held that belief to account.
+
+**The fix is one line, and it is not deleting the `if`.** State the precondition
+as an assertion:
+
+```rust
+let l = Layout::solve(620.0, 20.0);
+assert!(l.body.h < l.row, "this test needs a body too short for a row: ...");
+assert_eq!(l.rows_visible(), 0, ...);
+```
+
+Now the test fails two ways: if the answer is wrong, and if the situation it was
+written for has stopped existing. The second failure is the valuable one -- it
+says "your test has drifted off its case," which is information no green run can
+carry.
+
+**The tell.** Any `if`, `let ... else { return }`, `filter`, or `continue` in a
+test body whose condition mentions the code under test. Each is a silent exit.
+Ask of every one: what makes it certain this branch is taken? If the answer is
+"the layout works out that way," assert it. If the answer is genuinely "some of
+these are not applicable" -- a loop over sizes where a control does not fit at
+the smallest -- then count the ones that *were* checked and assert the count is
+non-zero, which is the same discipline at the level of the loop.
+
+### Lesson 90: a test can run every assertion and still prove nothing, if its fixture never enters the regime the rule governs (lane C, 2026-08-30)
+
+**In short:** lesson 89 was about an assertion that never ran. This is the
+same damage from the opposite direction: an assertion that runs, on data
+where the right answer and the wrong answer are the same. `typingtutor`'s
+typing panel is supposed to scroll to follow the cursor. Its test typed a
+lesson into the panel, checked after *every single keystroke* that the
+cursor was still drawn, and passed -- and when the mutation sweep deleted
+the scrolling outright, replacing it with "always show the top of the
+text," the test went on passing. The lesson it typed was 51 characters and
+the panel held about two hundred. The text fit whole, so the panel never
+had to scroll, so showing the top of it *was the correct behaviour* on the
+only fixture the test ever built.
+
+**The test was not weak.** It is worth being clear about this, because the
+instinct on reading "a mutant survived" is to look for a sloppy assertion.
+There wasn't one:
+
+```rust
+let frame = app.frame(size.0, size.1);
+let highlight = frame.commands().iter().any(|c| {
+    matches!(c, RenderCommand::FillRect { color, .. }
+        if *color == hex(COL_SURFACE1))
+});
+assert!(
+    highlight,
+    "after {n} characters the cursor's highlight is not drawn -- \
+     the panel is not following the typist"
+);
+```
+
+`COL_SURFACE1` appears in exactly one place in the whole program -- the box
+drawn under the character being typed -- so the assertion is not confusable
+with other paint (lesson 83's hazard, and it was avoided). It runs on every
+iteration of a loop over every character in the lesson. It reads the
+commands the renderer would actually emit. The fixture even *tried* to be
+adversarial: it picked the longest lesson in the list rather than the first.
+
+That is the trap. "The longest lesson" sounds like the hard case, and it is
+the hard case *among the lessons* -- but the quantity that matters is not
+which lesson is longest, it is whether any of them is longer than the
+panel. None is. The fixture selection reasoned about the wrong axis, and
+reasoning about the wrong axis feels exactly like reasoning about the right
+one.
+
+**The arithmetic nobody did.** At 300x300: `font` is 9, the panel's type is
+`(font * 1.25).max(8.0)` = 11.25, a line is about 17 px, and the panel is
+roughly 90 px tall -- five lines. The panel is `body.w` = 285 px wide and a
+mono glyph at 11.25 px advances about 6.75 px, so a line holds about 42
+characters. Five lines is about 210 characters. The longest shipped lesson
+is 51. The panel could have held four of them stacked.
+
+**Why mutation testing is the only thing that finds this.** Every other
+signal says the test is fine. It is green, it asserts something specific and
+true, its name describes a real rule, and reading it top to bottom raises no
+question. Coverage tools call the scrolling line covered, because it *is*
+executed -- it runs, computes `cursor_line.saturating_sub(lines_visible - 1)`,
+and correctly returns 0 every time. Only replacing the line with `0usize` and
+watching nothing go red distinguishes "this test checks the rule" from "this
+test agrees with the rule by accident."
+
+**The fix is two lines, and the second is the one that lasts.** Give the test
+a fixture that overflows -- here, a lesson of its own rather than one of the
+shipped ones -- and then *assert that it overflows*, in terms of what the
+program actually did:
+
+```rust
+assert!(
+    drawn < total,
+    "the panel shows all {total} characters at once, so it never has \
+     to scroll and this test cannot tell whether it would"
+);
+```
+
+`drawn` is counted from the glyph commands in the frame, not computed from
+the layout. That matters: a precondition derived from the code under test is
+lesson 84's fault, and would go on being satisfied by a layout that had
+stopped meaning what the test assumed. Counting the ink is a statement about
+the picture.
+
+**The tell, which is different from lesson 89's.** Lesson 89's tell is
+syntactic -- look for a branch. This one is not visible in the test at all;
+it lives in the relationship between the fixture's size and the rule's
+threshold. The questions that surface it:
+
+- **For any rule of the form "X follows/scrolls/wraps/clamps when Y exceeds
+  Z"** -- does the fixture make Y exceed Z? Not "is the fixture large," but
+  large *relative to the specific threshold the rule turns on*. Write the
+  comparison down; if you cannot write it down, you do not know.
+- **When a fixture is chosen by a superlative** (`max_by_key`, "the longest",
+  "the biggest board", "the deepest tree"), ask what it is the superlative
+  *of*. The maximum of a set that is entirely below the threshold is still
+  below the threshold. `typingtutor` picked the longest of fourteen lessons
+  that were all too short.
+- **When a rule has a "nothing to do" answer** -- scroll offset 0, no wrap,
+  no clamp, no elision -- that answer is what a deleted rule also returns.
+  A test that only ever observes the no-op answer cannot see the deletion.
+  Ask: does this fixture produce a *non-trivial* answer?
+
+**Where else to look.** Every windowed app in `apps/` has tests of this
+family -- panels that scroll, lists that clamp, text that elides, grids that
+wrap -- and the fixture is usually one hardcoded window size chosen when the
+test was written. The systematic check is cheap and does not need a full
+sweep: for each such test, find the rule's threshold, find the fixture's
+value, and confirm the fixture is on the far side. Where it is not, the test
+is green today for a reason unrelated to the rule it names.

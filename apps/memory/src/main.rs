@@ -1960,10 +1960,40 @@ mod tests {
         let mut app = windowed(24.0, 24.0);
         app.apply(Action::SetSize(2));
         let f = app.frame(24.0, 24.0);
+        // A hit box is not a card (lesson 81): the box is `cell` and the body
+        // is `cell` inset by the gutter, pushed by a separate statement, so
+        // asking only `rect_of(...).is_some()` here would still say yes with
+        // the fill deleted. Ask instead for a fill that fits *inside* the box
+        // — containment the other way round (lesson 83), so the window's own
+        // background, which covers every point, cannot answer for the card.
+        let fills: Vec<Rect> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
         for card in 0..app.cards().len() {
+            let box_ = f
+                .rect_of(|t| *t == Target::Card(card))
+                .unwrap_or_else(|| panic!("card {card} vanished at 24x24"));
             assert!(
-                f.rect_of(|t| *t == Target::Card(card)).is_some(),
-                "card {card} vanished at 24x24"
+                fills.iter().any(|r| {
+                    r.w > 0.0
+                        && r.h > 0.0
+                        && r.x >= box_.x - 0.01
+                        && r.y >= box_.y - 0.01
+                        && r.right() <= box_.right() + 0.01
+                        && r.bottom() <= box_.bottom() + 0.01
+                }),
+                "card {card} has a hit box at 24x24 but nothing was painted in it"
             );
         }
     }

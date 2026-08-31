@@ -3211,7 +3211,29 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::End));
         let last = app.grid_chars.len().saturating_sub(1);
         assert_eq!(app.selected_char, last);
-        assert!(probe::rect_of(&app, Target::Cell(last)).is_some());
+        // "Onto the screen", so it is the drawing that has to say so. The
+        // cell's hit box is pushed before the cell is painted and by a
+        // different call, so on its own it is no evidence that the character
+        // reached a screen (lesson 81). Its codepoint is written under it in
+        // hex, which is the one string unique to this cell.
+        let cell = probe::rect_of(&app, Target::Cell(last)).expect("the last cell has no hit box");
+        let cp = app
+            .grid_chars
+            .get(last)
+            .copied()
+            .expect("the last character");
+        let stamp = format!("{cp:04X}");
+        assert!(
+            app.draw(<CharMapApp as probe::Probe>::SIZE)
+                .commands()
+                .iter()
+                .any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, x, y, .. }
+                        if *text == stamp && cell.contains(*x, *y)
+                )),
+            "the last cell's box at {cell:?} holds no {stamp:?}"
+        );
     }
 
     /// A narrow window drops panels rather than squeezing them to unreadable

@@ -4341,6 +4341,19 @@ mod tests {
     /// bare names because that is what the tests below already say.
     use guitk::probe::{click, press, rect_of, type_str, typing};
 
+    /// True when `body` is painted with its origin inside `r`. A hit box says
+    /// a click lands somewhere; this says the user can see what they are
+    /// aiming at (`known-issues.md` lesson 81).
+    fn text_inside(frame: &Frame, body: &str, r: Rect) -> bool {
+        frame.commands().iter().any(|c| {
+            matches!(
+                c,
+                RenderCommand::Text { text, x, y, .. }
+                    if text.as_str() == body && r.contains(*x, *y)
+            )
+        })
+    }
+
     #[test]
     fn clicking_a_sidebar_row_selects_that_interface() {
         let mut app = NetManagerApp::new();
@@ -4803,7 +4816,18 @@ mod tests {
             "the switch moved but Apply never appeared, so the change could \
              not be committed"
         );
-        assert!(rect_of(&app, Target::ApplyIp).is_some());
+        // "Appeared" is a claim about paint, and a hit box is not paint: the
+        // button records its box and draws its label in one call, but only a
+        // check for the label proves the user has something to aim at.
+        let apply = rect_of(&app, Target::ApplyIp).expect("Apply has no hit box");
+        assert!(
+            text_inside(
+                &render_frame(&app, WINDOW_WIDTH, WINDOW_HEIGHT),
+                "Apply",
+                apply
+            ),
+            "Apply takes clicks but is never drawn"
+        );
     }
 
     #[test]
@@ -4880,7 +4904,18 @@ mod tests {
         app.selected_profile = None;
         app.set_tab(DetailTab::Profiles);
 
-        assert!(rect_of(&app, Target::ProfileAdd).is_some());
+        // The fault was that nothing was *drawn*, so the evidence has to be
+        // the drawing: a hit box would have come back even from a branch that
+        // recorded the target and returned before painting the button.
+        let add = rect_of(&app, Target::ProfileAdd).expect("Add Profile has no hit box");
+        assert!(
+            text_inside(
+                &render_frame(&app, WINDOW_WIDTH, WINDOW_HEIGHT),
+                "Add Profile",
+                add
+            ),
+            "Add Profile is clickable but invisible on an empty list"
+        );
         click(&mut app, Target::ProfileAdd);
         assert_eq!(app.profiles.len(), 1);
     }

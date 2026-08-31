@@ -2133,11 +2133,42 @@ mod tests {
         for app in boards() {
             let n = app.heaps().len();
             let f = app.frame(24.0, 24.0);
+            // A hit box is not a token (lesson 81): the box is the whole slot
+            // and the token is that slot inset, painted by a separate
+            // statement, so `is_some()` alone would still say yes with the
+            // fill deleted. Ask for a fill that fits *inside* the box —
+            // containment this way round (lesson 83) cannot be satisfied by
+            // the window's own background, which covers every point.
+            let fills: Vec<Rect> = f
+                .commands()
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some(Rect::new(*x, *y, *width, *height)),
+                    _ => None,
+                })
+                .collect();
             for (i, &size) in app.heaps().iter().enumerate() {
                 for j in 0..size {
+                    let box_ = f
+                        .rect_of(|t| *t == Target::Token(i, size - j))
+                        .unwrap_or_else(|| panic!("heap {i} token {j} of {n} vanished at 24x24"));
                     assert!(
-                        f.rect_of(|t| *t == Target::Token(i, size - j)).is_some(),
-                        "heap {i} token {j} of {n} vanished at 24x24"
+                        fills.iter().any(|r| {
+                            r.w > 0.0
+                                && r.h > 0.0
+                                && r.x >= box_.x - 0.01
+                                && r.y >= box_.y - 0.01
+                                && r.right() <= box_.right() + 0.01
+                                && r.bottom() <= box_.bottom() + 0.01
+                        }),
+                        "heap {i} token {j} of {n} has a hit box at 24x24 \
+                         but nothing was painted in it"
                     );
                 }
             }

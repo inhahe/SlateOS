@@ -55182,3 +55182,51 @@ all four rows (`--help --frobnicate` -> help/0; `--frobnicate --help` ->
 unrecognized/64; `-c --help` -> help/0; `--file --help` -> `--help` is the
 archive name, then no-mode/2), which falls out of returning a `Request` from
 inside the parse loop. Shape differential vs GNU: 19 cases, 0 differences.
+
+## Lane C: the Lesson 81 audit, triaged (2026-08-30)
+
+known-issues.md's "Lesson 81 addendum" counts 55 `rect_of(..).is_some()` sites
+across 20 apps and says the form is only a fault where the test's *claim* is
+that something is visible. Here is that triage, done by reading the enclosing
+test's name. Each line is `app:line test_name`.
+
+**Owed a paint assertion (the test says "draws" / "shown" / "into view" and
+checks only that a box was recorded).** The fix is Lesson 83's containment the
+other way -- a paint command that *fits inside* the box -- never a
+point-containment check, which the opening background fill makes vacuous:
+
+    checkers:1960     every_square_is_drawn_at_every_window_size
+    memory:1965       a_board_the_size_of_a_postage_stamp_still_draws_every_card
+    nim:2139          a_board_the_size_of_a_postage_stamp_still_draws_every_token
+    tictactoe:1797    a_tiny_window_still_draws_a_playable_board
+    stickynotes:4572  test_tiny_window_still_draws_its_controls
+    defrag:4696       the_window_draws_what_it_is_given_rather_than_what_it_remembers
+    snippets:4812     a_twisty_is_drawn_only_where_there_is_something_to_open
+    snippets:5135     walking_the_list_scrolls_the_row_into_view
+    snippets:5147     walking_the_list_scrolls_the_row_into_view
+    snippets:5175     walking_past_the_end_brings_the_end_back_on_screen
+    snippets:5576     the_wheel_stops_where_the_last_row_is_at_the_bottom
+    sokoban:4300      the_menu_scrolls_the_cursor_into_view
+    sokoban:4305      the_menu_scrolls_the_cursor_into_view
+    sokoban:4489      the_overlay_appears_only_once_the_level_is_solved
+    charmap:3214      the_end_key_scrolls_the_last_character_onto_the_screen
+    vpnmanager:6842   arrowing_past_the_bottom_row_scrolls_it_into_view
+    vpnmanager:7310   a_window_smaller_than_the_layout_allows_still_draws_and_still_clicks
+    netmanager:4932   the_run_button_appears_only_while_there_is_nothing_to_show
+    calculator:2567   a_scrolled_history_clicks_the_row_the_user_can_see
+    pdfviewer:5861    the_search_button_opens_the_bar_focused
+
+**Correct as they stand -- the claim is reachability, and a recorded box is
+exactly the right evidence for it.** Most are paired with an `is_none()` for a
+target that should have been dropped, which is the shape that makes the pair
+meaningful; do not "fix" these:
+
+    credmanager:7598-7599, calendar:4428, pdfviewer:5510, vpnmanager:6045,
+    taskscheduler:5122+5128, sokoban:3877+3882, breakout:2884+2915,
+    snippets:4464+4941+4993, diskanalyzer:4476-4483, stickynotes:4885+5228,
+    netmanager:4594+4787+4788+4806+4883, charmap:3229, calculator:2488,
+    worldclock:2710, pdfviewer:5381+5481+5638+5670, mahjong:3262+3319
+
+`stickynotes:4572` is worth a second look for its name alone: `test_` is a
+prefix from a suite written before this campaign's naming convention, and it is
+the only one left in the tree.

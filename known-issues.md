@@ -101194,3 +101194,91 @@ value of the flag is reachable at *every* return site, and the cheapest way to
 find out is to mutate each arm and see whether anything notices. More
 generally: when a mutation survives, the finding is never "the sweep row was
 bad" until you have established that the branch is reachable at all.
+
+### Lesson 95: a scrolling list whose limit counts one kind of row and whose drawing emits another cannot reach its end (lane C, 2026-08-31)
+
+**In short:** `crossword`'s clue panel scrolls by rows. Its scroll limit was
+`clues.len() - rows_that_fit`, and its drawing pass emitted, among the clues,
+two direction headings -- "Across" and "Down" -- that the limit had never
+counted. So the list was two rows longer than anything scrolled for, and at
+the bottom of the scroll the last clue of every puzzle was pushed off the
+panel with no scroll position left that would bring it back. A player could
+see nine of ten clues and had no way to reach the tenth.
+
+**The code:**
+
+```rust
+fn max_scroll(&self) -> usize {
+    self.clues.len().saturating_sub(self.layout().clue_rows_visible())
+}
+
+fn draw_panel(&self, ..) {
+    let first = self.clue_scroll.min(self.max_scroll());
+    // a heading before the loop ...
+    if let Some(clue) = self.clues.get(first) { text_at(.., clue.direction.label(), ..); }
+    y += row_h;
+    for (i, clue) in self.clues.iter().enumerate().skip(first).take(visible) {
+        if heading != Some(clue.direction) {
+            // ... and a second copy of it inside, spending a row nobody budgeted
+            text_at(f, l.panel.x, y, clue.direction.label(), ..);
+            y += row_h;
+        }
+        ...
+    }
+}
+```
+
+Two separate faults, both of the same family. The heading-drawing code exists
+**twice** -- once before the loop for the sticky heading and once inside it for
+the transition -- which is lesson 92 (a rule written twice), and the copy
+inside the loop is the one that spends an uncounted row. And the *unit* of the
+scroll differs between the two functions that have to agree about it: one
+counts clues, the other draws rows.
+
+**Why nothing caught it for the length of the wiring turn.** The default
+window, 860x580, has a panel tall enough for all ten clues plus both headings,
+so `max_scroll()` is zero and the panel is never scrolled at all. Every
+scrolling test written against `Crossword::SIZE` therefore passed against a
+program whose wheel did nothing, because there was nothing for the wheel to do
+-- lesson 90 exactly, four tests at once. The bug only appeared once the tests
+were pointed at a deliberately short window (`SHORT = (900.0, 200.0)`) with a
+guard test, `the_short_window_really_is_too_short_for_the_clue_list`, asserting
+the fixture is in the regime the rule governs.
+
+**The repair is to make the drawn row the unit of the arithmetic.** A
+`PanelRow` enum -- `Heading(Direction)` or `Clue(usize)` -- and one
+`panel_rows()` that produces the whole list in draw order. `max_scroll` counts
+that list; `draw_panel` iterates it and does no heading bookkeeping of its own;
+`show_clue` converts a clue index to a row index before scrolling. The
+pre-loop copy is gone, so there is one place a heading is drawn and it is a row
+like any other.
+
+Two tests hold it: `a_heading_is_a_row_of_the_list_it_heads` (the model) and
+`the_panel_draws_every_row_it_has_room_for_and_no_more` (the drawing agrees
+with the model at every scroll position). `every_clue_can_be_scrolled_onto_the_panel`
+is the one that found it.
+
+**A visible consequence worth keeping.** Once headings scroll, the heading that
+says which half of the list a row belongs to is frequently not on the screen
+with it -- and 7 Across and 7 Down are both "7". The row label carries the
+direction now: `7A.`, `7D.`. A scrolling list whose group headings can leave
+the viewport needs its rows to be self-identifying, or the sticky-heading
+machinery that was the original (duplicated) intent has to be done properly.
+Carrying it in the label is the cheaper half and does not need a second copy of
+anything.
+
+**Where else to look.** Any pair of the form "a `max_scroll`/`page_count`
+computed from a collection's length" and "a drawing loop that emits rows the
+collection does not contain." Grep for `.len().saturating_sub(visible)` and
+then read the drawing pass for anything that advances `y` outside the per-item
+step: separators, group headings, sticky rows, spacers, "load more" rows,
+wrapped items that take two lines. The question to ask is *what is the unit of
+`clue_scroll`* -- and if the answer is "an item" in one function and "a row" in
+another, the list has an unreachable end. The cheap structural fix is always
+the same: materialise the row list, and let both functions read it.
+
+More generally, this is a third instance of the same shape as lessons 91 and
+93: a quantity computed by one piece of code and consumed by another, where the
+two disagree not about the *value* but about the *unit*. A frame that says a
+needle twice, a box measured with one string and filled with another, a list
+counted in items and drawn in rows.

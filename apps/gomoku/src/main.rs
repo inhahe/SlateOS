@@ -746,11 +746,6 @@ impl GomokuApp {
         self.height = height.max(1.0);
     }
 
-    /// The layout of the window as it stands.
-    fn layout(&self) -> Layout {
-        Layout::solve(self.width, self.height)
-    }
-
     /// One frame: the boxes and the paint come out of the same pass, so a
     /// stone cannot be drawn in one place and clicked in another.
     fn frame(&self, width: f32, height: f32) -> Frame<Target> {
@@ -1513,3 +1508,1735 @@ fn main() -> ExitCode {
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
+
+// -- Tests -----------------------------------------------------------
+
+#[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "a test that panics on bad data is a test that failed, which is the point"
+)]
+mod tests {
+    use super::*;
+    use guitk::probe;
+
+    // =======================================================================
+    // Scaffolding
+    // =======================================================================
+
+    /// The window every test that does not say otherwise is read against.
+    const W: (f32, f32) = GomokuApp::SIZE;
+
+    /// The sizes a claim about the layout has to hold at.
+    ///
+    /// A narrow one, a short one, a tall one and a very large one. Two sizes
+    /// cannot separate a formula that scales from one that is merely
+    /// proportional to the one number both happen to share (lesson 86).
+    const SIZES: [(f32, f32); 6] = [
+        (320.0, 240.0),
+        (400.0, 900.0),
+        (640.0, 560.0),
+        (900.0, 400.0),
+        (1280.0, 800.0),
+        (1920.0, 1080.0),
+    ];
+
+    fn key_of(key: Key) -> KeyEvent {
+        probe::press(key)
+    }
+
+    /// Put a stone on the board without going through the game, so that a
+    /// position can be built without the opponent answering it.
+    fn place_raw(board: &mut Board, row: usize, col: usize, stone: Cell) {
+        assert!(
+            board.set(row, col, stone),
+            "({row}, {col}) is off the board"
+        );
+    }
+
+    /// An app whose board is `stones`, with nothing else touched.
+    fn app_with(stones: &[(usize, usize, Cell)]) -> GomokuApp {
+        let mut app = GomokuApp::new();
+        for &(r, c, stone) in stones {
+            place_raw(&mut app.board, r, c, stone);
+        }
+        app
+    }
+
+    /// Play `n` stones for Black by hand, letting White answer each one.
+    ///
+    /// The reply arrives on a tick rather than inside the placement, which is
+    /// the whole point of [`GamePhase::Thinking`], so the tick is sent here
+    /// exactly as the window would send it.
+    fn play_moves(app: &mut GomokuApp, moves: &[(i32, i32)]) {
+        for &(r, c) in moves {
+            app.cursor_row = r;
+            app.cursor_col = c;
+            app.handle_key(&key_of(Key::Enter));
+            app.handle_event(&Event::Tick { elapsed_ms: 60 });
+        }
+    }
+
+    /// True when `body` is painted with its origin inside `r`.
+    ///
+    /// A hit box says a click lands somewhere; this says the user can see what
+    /// they are aiming at (lesson 81).
+    fn text_inside(frame: &Frame<Target>, body: &str, r: Rect) -> bool {
+        frame.commands().iter().any(|c| {
+            matches!(c, RenderCommand::Text { text, x, y, .. }
+                if text.as_str() == body && r.contains(*x, *y))
+        })
+    }
+
+    /// Every string the frame paints.
+    fn texts(frame: &Frame<Target>) -> Vec<String> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// True when some painted string contains `needle`.
+    fn says(frame: &Frame<Target>, needle: &str) -> bool {
+        texts(frame).iter().any(|t| t.contains(needle))
+    }
+
+    /// Every filled rectangle of `color`.
+    fn fills_of(frame: &Frame<Target>, color: Color) -> Vec<Rect> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: got,
+                    ..
+                } if *got == color => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every stroked rectangle of `color`.
+    fn strokes_of(frame: &Frame<Target>, color: Color) -> Vec<Rect> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: got,
+                    ..
+                } if *got == color => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // =======================================================================
+    // The window
+    // =======================================================================
+
+    /// The frame is painted to the edges of whatever window it is given, not
+    /// to the edges of the one the program was written for.
+    ///
+    /// `render` took no width and no height at all: it drew a background of
+    /// `PANEL_X + 220.0` by a constant height into every window there was.
+    #[test]
+    fn the_background_covers_the_window_at_every_size() {
+        for size in SIZES {
+            let app = GomokuApp::new();
+            let frame = app.frame(size.0, size.1);
+            assert!(
+                frame.commands().iter().any(|c| matches!(c,
+                    RenderCommand::FillRect { x, y, width, height, .. }
+                        if *x == 0.0 && *y == 0.0
+                            && (*width - size.0).abs() < 0.01
+                            && (*height - size.1).abs() < 0.01)),
+                "no background covering {size:?}"
+            );
+        }
+    }
+
+    /// Nothing the app draws is placed outside the window it was given.
+    ///
+    /// Unclipped, deliberately: `Frame::hit` drops a box that is empty after
+    /// clipping, so testing hit boxes here would be asking a question whose
+    /// answer the clip already guaranteed (lesson 80). This walks the paint.
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        for size in SIZES {
+            let mut app = app_with(&[
+                (7, 7, Cell::Black),
+                (7, 8, Cell::White),
+                (0, 0, Cell::Black),
+                (LAST_INDEX as usize, LAST_INDEX as usize, Cell::White),
+            ]);
+            app.last_move = Some((7, 8));
+            app.move_history.push(MoveRecord {
+                row: 7,
+                col: 7,
+                stone: Cell::Black,
+            });
+            for phase in [
+                GamePhase::Playing,
+                GamePhase::Thinking,
+                GamePhase::Won,
+                GamePhase::Draw,
+            ] {
+                app.phase = phase;
+                for cmd in app.frame(size.0, size.1).commands() {
+                    let (x, y) = match cmd {
+                        RenderCommand::FillRect { x, y, .. }
+                        | RenderCommand::Text { x, y, .. }
+                        | RenderCommand::StrokeRect { x, y, .. } => (*x, *y),
+                        RenderCommand::Line { x1, y1, .. } => (*x1, *y1),
+                        _ => continue,
+                    };
+                    assert!(
+                        x >= -1.5 && y >= -1.5 && x <= size.0 && y <= size.1,
+                        "{phase:?} draws at ({x}, {y}), outside a {size:?} window"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The frame is balanced: every clip pushed is popped.
+    #[test]
+    fn every_frame_is_balanced() {
+        for size in SIZES {
+            let app = GomokuApp::new();
+            assert!(
+                app.frame(size.0, size.1).is_balanced(),
+                "the frame at {size:?} leaves a clip open"
+            );
+        }
+    }
+
+    // =======================================================================
+    // The layout
+    // =======================================================================
+
+    /// The bands stack down the window without overlapping each other.
+    #[test]
+    fn the_bands_stack_without_overlapping() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            assert!(l.header.y >= -0.01, "the header starts above the window");
+            assert!(
+                l.board.y >= l.header.bottom() - 0.01,
+                "the board at {:?} runs into the header at {:?} ({size:?})",
+                l.board,
+                l.header
+            );
+            assert!(
+                l.board.bottom() <= l.status.y + 0.01,
+                "the board at {:?} runs into the status band at {:?} ({size:?})",
+                l.board,
+                l.status
+            );
+            assert!(
+                l.panel.is_empty() || l.panel.x >= l.board.right() - 0.01,
+                "the panel at {:?} sits on the board at {:?} ({size:?})",
+                l.panel,
+                l.board
+            );
+            assert!(
+                l.status.bottom() <= size.1 + 0.01,
+                "the status band runs off the bottom at {size:?}"
+            );
+        }
+    }
+
+    /// The board is square, whatever shape the window is.
+    ///
+    /// A 15x15 grid drawn at 36 px per cell into a 400 px-tall window put its
+    /// bottom five rows below the window, which is what a fixed `CELL_SIZE`
+    /// does to a shape it was not written for.
+    #[test]
+    fn the_board_is_square_and_fits_the_window() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            assert!(
+                (l.board.w - l.board.h).abs() < 0.01,
+                "the board is {}x{} at {size:?}",
+                l.board.w,
+                l.board.h
+            );
+            assert!(l.board.w > 0.0, "no board at all at {size:?}");
+            assert!(
+                l.board.right() <= size.0 + 0.01 && l.board.bottom() <= size.1 + 0.01,
+                "the board {:?} leaves a {size:?} window",
+                l.board
+            );
+        }
+    }
+
+    /// A bigger window gets a bigger board, and both dimensions can be the one
+    /// that makes it bigger.
+    ///
+    /// Two windows cannot tell a formula that scales from one that is merely
+    /// proportional to the single number they share (lesson 86). The board is
+    /// square, so only the smaller of the two free dimensions can bind: each
+    /// pair below therefore grows the dimension that is actually binding, and
+    /// the pairs bind on opposite axes. Growing 600x500 to 1400x500 would
+    /// prove nothing -- the height still binds and the board is right to stay
+    /// the size it was.
+    #[test]
+    fn the_board_grows_with_the_window() {
+        let (short, tall) = (Layout::solve(900.0, 400.0), Layout::solve(900.0, 600.0));
+        assert!(
+            tall.board.h > short.board.h * 1.2,
+            "a window 200 px taller drew a {} px board where 400 px drew {}",
+            tall.board.h,
+            short.board.h
+        );
+
+        let (narrow, wide) = (Layout::solve(400.0, 900.0), Layout::solve(500.0, 900.0));
+        assert!(
+            wide.board.w > narrow.board.w * 1.1,
+            "a window 100 px wider drew a {} px board where 400 px drew {}",
+            wide.board.w,
+            narrow.board.w
+        );
+
+        // And the cell grew with the board rather than the grid gaining rows.
+        assert!(tall.cell > short.cell && wide.cell > narrow.cell);
+    }
+
+    /// Every intersection is inside the board, and consecutive ones are one
+    /// cell apart.
+    #[test]
+    fn the_grid_is_evenly_spaced_inside_the_board() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            for row in 0..BOARD_SIZE as i32 {
+                for col in 0..BOARD_SIZE as i32 {
+                    let (x, y) = l.intersection(row, col);
+                    assert!(
+                        x >= l.board.x - 0.01
+                            && x <= l.board.right() + 0.01
+                            && y >= l.board.y - 0.01
+                            && y <= l.board.bottom() + 0.01,
+                        "({row}, {col}) is at ({x}, {y}), outside the board {:?} at {size:?}",
+                        l.board
+                    );
+                    if col > 0 {
+                        let (px, _) = l.intersection(row, col - 1);
+                        assert!(
+                            (x - px - l.cell).abs() < 0.01,
+                            "column {col} is not one cell from {} at {size:?}",
+                            col - 1
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The outermost lines are inset by the margin the labels live in, so the
+    /// grid does not run to the very edge of the wood.
+    #[test]
+    fn the_grid_is_inset_from_the_edge_of_the_board() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            let (x0, y0) = l.intersection(0, 0);
+            let (x1, y1) = l.intersection(LAST_INDEX, LAST_INDEX);
+            assert!(
+                x0 > l.board.x && y0 > l.board.y,
+                "the first line is on the edge of the board at {size:?}"
+            );
+            assert!(
+                x1 < l.board.right() && y1 < l.board.bottom(),
+                "the last line is on the edge of the board at {size:?}"
+            );
+            assert!(
+                (x0 - l.board.x - (l.board.right() - x1)).abs() < 0.01,
+                "the margins are not equal at {size:?}"
+            );
+        }
+    }
+
+    /// No two stones can touch, whatever the window.
+    ///
+    /// Half a cell is exactly where two stones on neighbouring intersections
+    /// meet, so the radius has to be under it.
+    #[test]
+    fn stones_on_neighbouring_points_do_not_overlap() {
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            let a = l.stone_rect(7, 7);
+            let b = l.stone_rect(7, 8);
+            let c = l.stone_rect(8, 7);
+            assert!(
+                a.right() < b.x,
+                "stones on the same row overlap at {size:?}: {a:?} and {b:?}"
+            );
+            assert!(
+                a.bottom() < c.y,
+                "stones in the same column overlap at {size:?}"
+            );
+            assert!(
+                a.w > l.cell * 0.5,
+                "a stone is smaller than half a cell at {size:?}, which is a \
+                 board of dots rather than of stones"
+            );
+        }
+    }
+
+    /// The panel is dropped whole rather than drawn too narrow to read.
+    ///
+    /// Both halves are asserted, because a rule that only ever fires one way
+    /// is indistinguishable from a constant (lesson 90): a window with room
+    /// for the column keeps it, and one without loses it entirely rather than
+    /// squeezing the board to make space for an illegible strip.
+    #[test]
+    fn a_window_with_no_room_for_the_panel_drops_it_whole() {
+        let wide = Layout::solve(1000.0, 600.0);
+        assert!(
+            !wide.panel.is_empty(),
+            "a 1000x600 window has room for the panel and did not get one"
+        );
+        assert!(
+            wide.panel.w >= wide.font * 6.0,
+            "the panel is narrower than its own text at 1000x600"
+        );
+
+        let narrow = Layout::solve(400.0, 900.0);
+        assert!(
+            narrow.panel.is_empty(),
+            "a 400x900 window kept a {} px panel beside a board that needs \
+             the width",
+            narrow.panel.w
+        );
+        assert!(
+            narrow.board.w > wide.board.w * 0.5,
+            "dropping the panel did not give the width to the board"
+        );
+    }
+
+    /// A window with the panel dropped draws no panel, rather than drawing one
+    /// of zero width somewhere.
+    #[test]
+    fn a_dropped_panel_is_not_painted() {
+        let app = GomokuApp::new();
+        let frame = app.frame(400.0, 900.0);
+        assert!(
+            !says(&frame, "Scores"),
+            "the panel was dropped from the layout and drawn anyway"
+        );
+        assert!(
+            probe::rect_of_sized(&app, Target::NewGame, (400.0, 900.0)).is_none(),
+            "a button in a panel that is not there is still clickable"
+        );
+    }
+
+    /// The coordinate labels are drawn when there is room for them and dropped
+    /// when there is not, rather than printed over the outermost stones.
+    #[test]
+    fn the_coordinate_labels_are_dropped_when_they_do_not_fit() {
+        let app = GomokuApp::new();
+        let roomy = app.frame(W.0, W.1);
+        assert!(
+            says(&roomy, "A") && says(&roomy, "15"),
+            "a 900x640 window has room for the coordinates and drew none"
+        );
+
+        let l = Layout::solve(60.0, 60.0);
+        assert!(
+            l.origin.1 - l.board.y < l.label * 1.1,
+            "60x60 was chosen because its margin is too small for a label, \
+             and it is not: margin {} against label {}",
+            l.origin.1 - l.board.y,
+            l.label
+        );
+        let cramped = app.frame(60.0, 60.0);
+        assert!(
+            !says(&cramped, "15"),
+            "the labels were drawn into a margin too small to hold them"
+        );
+    }
+
+    /// A label is centred on the line it names rather than nudged by a
+    /// constant.
+    #[test]
+    fn a_coordinate_label_is_centred_on_its_line() {
+        let app = GomokuApp::new();
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
+        let mut checked = 0;
+        for (i, letter) in ["A", "H", "O"].iter().enumerate() {
+            let col = [0, 7, 14][i];
+            let (x, _) = l.intersection(0, col);
+            let half = text::measure(letter, l.label, FontWeightHint::Regular) / 2.0;
+            assert!(
+                frame.commands().iter().any(|c| matches!(c,
+                    RenderCommand::Text { text, x: tx, .. }
+                        if text == letter && (*tx + half - x).abs() < 0.6)),
+                "the label {letter} is not centred on column {col}"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+    }
+
+    // =======================================================================
+    // Placing a stone, and the reply that arrives on a tick
+    // =======================================================================
+
+    #[test]
+    fn a_fresh_game_is_blacks_to_play() {
+        let app = GomokuApp::new();
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.current_turn, Cell::Black);
+        assert_eq!(app.move_count, 0);
+        assert_eq!(app.winner, Cell::Empty);
+        assert!(app.win_line.is_none());
+        assert!(app.last_move.is_none());
+        assert_eq!(app.cursor_row, BOARD_SIZE as i32 / 2);
+        assert_eq!(app.cursor_col, BOARD_SIZE as i32 / 2);
+    }
+
+    #[test]
+    fn a_stone_lands_where_the_cursor_is() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 4;
+        app.cursor_col = 9;
+        assert!(app.try_place_stone());
+        assert_eq!(app.board.get(4, 9), Some(Cell::Black));
+        assert_eq!(app.move_count, 1);
+        assert_eq!(app.last_move, Some((4, 9)));
+    }
+
+    #[test]
+    fn a_stone_cannot_be_placed_on_a_stone() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 4;
+        app.cursor_col = 9;
+        assert!(app.try_place_stone());
+        // Back to Black's turn without letting White answer, so that the
+        // refusal is about the occupied point and not about the turn.
+        app.phase = GamePhase::Playing;
+        app.current_turn = Cell::Black;
+        assert!(!app.try_place_stone(), "a second stone landed on the first");
+        assert_eq!(app.move_count, 1);
+    }
+
+    #[test]
+    fn nothing_can_be_placed_after_the_game_is_over() {
+        let mut app = GomokuApp::new();
+        app.phase = GamePhase::Won;
+        app.winner = Cell::Black;
+        app.cursor_row = 2;
+        app.cursor_col = 2;
+        assert!(!app.try_place_stone());
+        assert_eq!(app.board.get(2, 2), Some(Cell::Empty));
+    }
+
+    /// Black's stone leaves the game *waiting* for White rather than already
+    /// answered by White.
+    ///
+    /// This is the whole reason [`GamePhase::Thinking`] exists. The search
+    /// used to run inside `place_stone`, which runs inside the event handler,
+    /// so it finished before the handler returned: there was no moment at
+    /// which the game was Black-has-moved-and-White-has-not, and so no frame
+    /// in which "White is thinking" could be drawn.
+    #[test]
+    fn blacks_move_leaves_white_thinking_rather_than_answered() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        app.handle_key(&key_of(Key::Enter));
+        assert_eq!(app.phase, GamePhase::Thinking);
+        assert_eq!(app.current_turn, Cell::White);
+        assert_eq!(app.move_count, 1, "White replied inside the event handler");
+    }
+
+    /// And the reply arrives on the next tick.
+    #[test]
+    fn the_tick_is_what_makes_white_move() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        app.handle_key(&key_of(Key::Enter));
+        assert_eq!(app.move_count, 1);
+        app.handle_event(&Event::Tick { elapsed_ms: 60 });
+        assert_eq!(app.move_count, 2, "the tick did not run White's search");
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.current_turn, Cell::Black);
+        assert_eq!(
+            app.move_history.last().map(|m| m.stone),
+            Some(Cell::White),
+            "the second stone was not White's"
+        );
+    }
+
+    /// A tick when nobody is thinking changes nothing and asks for no repaint.
+    #[test]
+    fn a_tick_with_nothing_to_think_about_is_ignored() {
+        let mut app = GomokuApp::new();
+        let before = app.move_count;
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 60 }),
+            EventResult::Ignored
+        );
+        assert_eq!(app.move_count, before);
+    }
+
+    /// White replies to a real threat rather than playing anywhere legal.
+    ///
+    /// Four Black stones in a row with both ends open: any reply that is not
+    /// one of the two ends loses on Black's next move.
+    #[test]
+    fn white_blocks_a_four_it_is_about_to_lose_to() {
+        let mut app = GomokuApp::new();
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::Black);
+        }
+        place_raw(&mut app.board, 2, 2, Cell::White);
+        app.current_turn = Cell::White;
+        app.phase = GamePhase::Thinking;
+        app.think();
+        let played = app.last_move.expect("White played");
+        assert!(
+            played == (7, 3) || played == (7, 8),
+            "White played {played:?} and let Black's open four become five"
+        );
+    }
+
+    /// And it takes a win in front of it rather than blocking.
+    #[test]
+    fn white_takes_a_five_when_it_has_one() {
+        let mut app = GomokuApp::new();
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::White);
+        }
+        for c in 4..8 {
+            place_raw(&mut app.board, 9, c, Cell::Black);
+        }
+        app.current_turn = Cell::White;
+        app.phase = GamePhase::Thinking;
+        app.think();
+        assert_eq!(app.phase, GamePhase::Won, "White did not take its five");
+        assert_eq!(app.winner, Cell::White);
+    }
+
+    /// A full board with no five is a draw, and the draw is credited once.
+    #[test]
+    fn a_board_that_fills_without_a_five_is_a_draw() {
+        let mut app = GomokuApp::new();
+        for r in 0..BOARD_SIZE {
+            for c in 0..BOARD_SIZE {
+                if (r, c) == (0, 0) {
+                    continue;
+                }
+                let stone = if (r / 2 + c / 3) % 2 == 0 {
+                    Cell::Black
+                } else {
+                    Cell::White
+                };
+                place_raw(&mut app.board, r, c, stone);
+            }
+        }
+        app.cursor_row = 0;
+        app.cursor_col = 0;
+        app.current_turn = if app.board.get(0, 1) == Some(Cell::Black) {
+            Cell::Black
+        } else {
+            Cell::White
+        };
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Draw, "a full board was not a draw");
+        assert_eq!(app.scores.2, 1);
+    }
+
+    // =======================================================================
+    // Scores
+    // =======================================================================
+
+    /// A win is credited to the colour that made it, whichever colour that is.
+    ///
+    /// Both halves matter: White's credit used to be written a second time in
+    /// `ai_move`, hard-coded to `scores.1` rather than matched on the stone,
+    /// so the two copies agreed only for as long as nobody changed one.
+    #[test]
+    fn a_win_is_credited_to_the_colour_that_won() {
+        let mut checked = 0;
+        for stone in [Cell::Black, Cell::White] {
+            let mut app = GomokuApp::new();
+            for c in 4..8 {
+                place_raw(&mut app.board, 7, c, stone);
+            }
+            app.current_turn = stone;
+            app.cursor_row = 7;
+            app.cursor_col = 8;
+            assert!(app.try_place_stone());
+            assert_eq!(app.phase, GamePhase::Won);
+            assert_eq!(app.winner, stone);
+            let (b, w, d) = app.scores;
+            match stone {
+                Cell::Black => assert_eq!((b, w, d), (1, 0, 0)),
+                Cell::White => assert_eq!((b, w, d), (0, 1, 0)),
+                Cell::Empty => panic!("no such game"),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, 2, "only one colour's score was checked");
+    }
+
+    #[test]
+    fn a_new_game_clears_the_board_and_keeps_the_scores() {
+        let mut app = GomokuApp::new();
+        app.scores = (3, 2, 1);
+        app.cursor_row = 1;
+        app.cursor_col = 1;
+        assert!(app.try_place_stone());
+        app.new_game();
+        assert_eq!(app.board.stone_count(), 0);
+        assert_eq!(app.move_count, 0);
+        assert!(app.move_history.is_empty());
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.current_turn, Cell::Black);
+        assert!(app.last_move.is_none());
+        assert!(app.win_line.is_none());
+        assert_eq!(app.scores, (3, 2, 1), "a new game reset the scoreboard");
+    }
+
+    // =======================================================================
+    // Undo
+    // =======================================================================
+
+    /// Z gives the board back to the player: White's reply and Black's move,
+    /// so the position that comes back is one Black can play from.
+    #[test]
+    fn undo_takes_back_the_pair_not_just_the_reply() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7)]);
+        assert_eq!(app.move_count, 2);
+        app.undo();
+        assert_eq!(app.move_count, 0, "undo left White's reply on the board");
+        assert_eq!(app.board.stone_count(), 0);
+        assert_eq!(app.current_turn, Cell::Black);
+        assert!(app.last_move.is_none());
+    }
+
+    #[test]
+    fn undo_on_an_empty_board_does_nothing() {
+        let mut app = GomokuApp::new();
+        app.undo();
+        assert_eq!(app.move_count, 0);
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.scores, (0, 0, 0));
+    }
+
+    /// Undoing a won game takes the credit back with the stone.
+    ///
+    /// Otherwise Z after a win is a way to add a point to the scoreboard for
+    /// every time it is pressed.
+    #[test]
+    fn undoing_a_win_takes_back_the_point_it_scored() {
+        let mut checked = 0;
+        for stone in [Cell::Black, Cell::White] {
+            let mut app = GomokuApp::new();
+            for c in 4..8 {
+                place_raw(&mut app.board, 7, c, stone);
+            }
+            app.current_turn = stone;
+            app.cursor_row = 7;
+            app.cursor_col = 8;
+            assert!(app.try_place_stone());
+            assert_ne!(app.scores, (0, 0, 0), "the win scored nothing to undo");
+            app.undo();
+            assert_eq!(app.scores, (0, 0, 0), "{stone:?}'s point survived the undo");
+            assert_eq!(app.phase, GamePhase::Playing);
+            assert_eq!(app.winner, Cell::Empty);
+            assert!(app.win_line.is_none(), "the win line outlived the win");
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
+    }
+
+    /// Undoing a draw takes back the draw's point too.
+    #[test]
+    fn undoing_a_draw_takes_back_the_point_it_scored() {
+        let mut app = GomokuApp::new();
+        app.phase = GamePhase::Draw;
+        app.winner = Cell::Empty;
+        app.scores = (0, 0, 1);
+        app.move_history.push(MoveRecord {
+            row: 0,
+            col: 0,
+            stone: Cell::Black,
+        });
+        app.move_count = 1;
+        place_raw(&mut app.board, 0, 0, Cell::Black);
+        app.undo();
+        assert_eq!(app.scores, (0, 0, 0), "the draw's point survived the undo");
+    }
+
+    /// Undo during White's search cancels it rather than scoring anything.
+    #[test]
+    fn undo_while_white_is_thinking_gives_the_move_back() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        app.handle_key(&key_of(Key::Enter));
+        assert_eq!(app.phase, GamePhase::Thinking);
+        app.undo();
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.current_turn, Cell::Black);
+        assert_eq!(app.move_count, 0);
+        assert_eq!(app.scores, (0, 0, 0), "an unfinished game scored a point");
+    }
+
+    #[test]
+    fn undo_can_be_pressed_back_to_the_opening_board() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7), (5, 5), (9, 9)]);
+        assert!(app.move_count >= 6, "the game did not get going");
+        for _ in 0..4 {
+            app.undo();
+        }
+        assert_eq!(app.move_count, 0);
+        assert_eq!(app.board.stone_count(), 0);
+        assert!(app.move_history.is_empty());
+    }
+
+    // =======================================================================
+    // The keyboard
+    // =======================================================================
+
+    /// A key does its work once per press.
+    ///
+    /// It did it twice: no arm read `pressed`, so the release that follows
+    /// every press ran the same arm again. On a 15x15 board that made every
+    /// other row and column unreachable by arrow key, dealt two games per N
+    /// and took back two pairs of stones per Z.
+    #[test]
+    fn a_key_acts_on_the_press_and_not_again_on_the_release() {
+        let mut app = GomokuApp::new();
+        let start = app.cursor_row;
+        assert_eq!(
+            app.handle_key(&probe::press(Key::Up)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.cursor_row, start - 1, "one press did not move one row");
+        assert_eq!(
+            app.handle_key(&probe::release(Key::Up)),
+            EventResult::Ignored,
+            "the release was acted on"
+        );
+        assert_eq!(app.cursor_row, start - 1, "the release moved the cursor");
+    }
+
+    /// Every intersection is reachable from the keyboard.
+    ///
+    /// The direct statement of the damage the double-fire did: stepping two
+    /// at a time from the centre, the cursor can only ever land on rows and
+    /// columns of the same parity as the one it started on.
+    #[test]
+    fn the_arrows_can_reach_every_intersection() {
+        for (row, col) in [(0, 0), (0, LAST_INDEX), (LAST_INDEX, 0), (6, 7), (7, 6)] {
+            let mut app = GomokuApp::new();
+            for _ in 0..BOARD_SIZE {
+                if app.cursor_row > row {
+                    app.handle_key(&probe::press(Key::Up));
+                }
+                if app.cursor_row < row {
+                    app.handle_key(&probe::press(Key::Down));
+                }
+                if app.cursor_col > col {
+                    app.handle_key(&probe::press(Key::Left));
+                }
+                if app.cursor_col < col {
+                    app.handle_key(&probe::press(Key::Right));
+                }
+            }
+            assert_eq!(
+                (app.cursor_row, app.cursor_col),
+                (row, col),
+                "the arrows cannot reach ({row}, {col})"
+            );
+        }
+    }
+
+    #[test]
+    fn the_cursor_stops_at_the_edges() {
+        let mut app = GomokuApp::new();
+        for _ in 0..BOARD_SIZE * 2 {
+            app.handle_key(&probe::press(Key::Up));
+            app.handle_key(&probe::press(Key::Left));
+        }
+        assert_eq!((app.cursor_row, app.cursor_col), (0, 0));
+        for _ in 0..BOARD_SIZE * 2 {
+            app.handle_key(&probe::press(Key::Down));
+            app.handle_key(&probe::press(Key::Right));
+        }
+        assert_eq!(
+            (app.cursor_row, app.cursor_col),
+            (LAST_INDEX, LAST_INDEX),
+            "the cursor walked off the board"
+        );
+    }
+
+    /// An arrow at the edge that cannot move asks for no repaint.
+    #[test]
+    fn a_key_that_changes_nothing_is_ignored() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 0;
+        assert_eq!(
+            app.handle_key(&probe::press(Key::Up)),
+            EventResult::Ignored,
+            "an arrow that could not move still asked for a repaint"
+        );
+        assert_eq!(
+            app.handle_key(&probe::press(Key::Q)),
+            EventResult::Ignored,
+            "a key the game does not use asked for a repaint"
+        );
+    }
+
+    #[test]
+    fn space_places_a_stone_as_enter_does() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 3;
+        app.cursor_col = 3;
+        assert_eq!(
+            app.handle_key(&probe::press(Key::Space)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.board.get(3, 3), Some(Cell::Black));
+    }
+
+    #[test]
+    fn n_deals_one_new_game_and_z_takes_back_one_pair() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7), (6, 6)]);
+        let before = app.move_count;
+        assert!(before >= 4);
+        app.handle_key(&probe::press(Key::Z));
+        assert_eq!(app.move_count, before - 2, "Z took back the wrong number");
+        app.scores = (1, 1, 0);
+        app.handle_key(&probe::press(Key::N));
+        assert_eq!(app.move_count, 0);
+        assert_eq!(app.scores, (1, 1, 0));
+    }
+
+    // =======================================================================
+    // The pointer
+    // =======================================================================
+
+    /// A click on an intersection puts a stone on that intersection, in a
+    /// window of any size.
+    ///
+    /// This is the fault the whole rewrite turns on. `render` drew from
+    /// `CELL_SIZE` and two offset constants and `handle_mouse` resolved the
+    /// click through `intersection_near`, a free function of the same three:
+    /// the arithmetic agreed with itself in every window, and with the picture
+    /// in exactly one.
+    #[test]
+    fn a_click_lands_on_the_intersection_it_was_aimed_at() {
+        for size in SIZES {
+            for (row, col) in [(0, 0), (7, 7), (LAST_INDEX as usize, LAST_INDEX as usize)] {
+                let mut app = GomokuApp::new();
+                let outcome =
+                    probe::click_sized(&mut app, Target::Point(row, col), MouseButton::Left, size);
+                assert_eq!(outcome, EventResult::Consumed);
+                assert_eq!(
+                    app.board.get(row as i32, col as i32),
+                    Some(Cell::Black),
+                    "a click aimed at ({row}, {col}) in a {size:?} window put \
+                     the stone somewhere else"
+                );
+                assert_eq!(app.last_move, Some((row, col)));
+            }
+        }
+    }
+
+    /// The hit box of an intersection is centred on the intersection it names.
+    ///
+    /// The click above could pass while every box was one place to the left,
+    /// because it aims by name. This measures the box against the geometry the
+    /// grid lines are drawn from.
+    #[test]
+    fn every_intersection_is_clickable_where_it_is_drawn() {
+        for size in SIZES {
+            let app = GomokuApp::new();
+            let l = Layout::solve(size.0, size.1);
+            let mut checked = 0;
+            for row in 0..BOARD_SIZE {
+                for col in 0..BOARD_SIZE {
+                    let r = probe::rect_of_sized(&app, Target::Point(row, col), size)
+                        .unwrap_or_else(|| panic!("({row}, {col}) is not clickable at {size:?}"));
+                    let (x, y) = l.intersection(row as i32, col as i32);
+                    let c = r.centre();
+                    assert!(
+                        (c.0 - x).abs() < 0.01 && (c.1 - y).abs() < 0.01,
+                        "({row}, {col}) is drawn at ({x}, {y}) and clicked at {c:?} \
+                         in a {size:?} window"
+                    );
+                    checked += 1;
+                }
+            }
+            assert_eq!(checked, BOARD_SIZE * BOARD_SIZE);
+        }
+    }
+
+    /// A click on an occupied point moves the cursor there and places nothing.
+    #[test]
+    fn a_click_on_a_stone_does_not_place_another() {
+        let mut app = app_with(&[(4, 4, Cell::White)]);
+        probe::click(&mut app, Target::Point(4, 4));
+        assert_eq!(app.board.get(4, 4), Some(Cell::White));
+        assert_eq!(app.move_count, 0);
+        assert_eq!((app.cursor_row, app.cursor_col), (4, 4));
+    }
+
+    /// A click on the board while White is thinking is refused.
+    #[test]
+    fn a_click_during_whites_search_is_refused() {
+        let mut app = GomokuApp::new();
+        app.phase = GamePhase::Thinking;
+        app.current_turn = Cell::White;
+        let outcome = probe::click(&mut app, Target::Point(3, 3));
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.board.get(3, 3), Some(Cell::Empty));
+    }
+
+    /// A click on the wood between the lines does nothing.
+    ///
+    /// Dropping a stone half a cell from where the player aimed is worse than
+    /// a click that does nothing, so the boxes deliberately do not tile.
+    #[test]
+    fn a_click_between_the_lines_places_nothing() {
+        let mut app = GomokuApp::new();
+        let l = Layout::solve(W.0, W.1);
+        let (x0, y0) = l.intersection(7, 7);
+        let (x, y) = (x0 + l.cell / 2.0, y0 + l.cell / 2.0);
+        let outcome = app.click_at(x, y, MouseButton::Left, W);
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.move_count, 0, "a click on the wood placed a stone");
+    }
+
+    /// New game and undo answer the pointer.
+    ///
+    /// `handle_mouse` returned early unless it was Black's turn in a live
+    /// game, so after a win -- the one moment a player most wants to start
+    /// again -- the button did nothing at all and the keyboard was the only
+    /// way out.
+    #[test]
+    fn the_buttons_answer_the_pointer_after_the_game_is_over() {
+        let mut app = GomokuApp::new();
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::Black);
+        }
+        app.cursor_row = 7;
+        app.cursor_col = 8;
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Won);
+
+        let outcome = probe::click(&mut app, Target::NewGame);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert_eq!(app.phase, GamePhase::Playing, "New game did not start one");
+        assert_eq!(app.board.stone_count(), 0);
+        assert_eq!(
+            app.scores.0, 1,
+            "the button that starts a game cleared the score"
+        );
+    }
+
+    #[test]
+    fn the_undo_button_takes_back_a_move() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7)]);
+        assert_eq!(app.move_count, 2);
+        let outcome = probe::click(&mut app, Target::Undo);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert_eq!(app.move_count, 0);
+    }
+
+    /// With nothing to undo the button is drawn but not clickable, so a click
+    /// on it is not silently swallowed.
+    #[test]
+    fn undo_is_not_clickable_with_nothing_to_undo() {
+        let app = GomokuApp::new();
+        assert!(
+            probe::rect_of(&app, Target::NewGame).is_some(),
+            "New game is not clickable on a fresh board"
+        );
+        assert!(
+            probe::rect_of(&app, Target::Undo).is_none(),
+            "Undo is clickable with an empty move history"
+        );
+
+        let mut played = GomokuApp::new();
+        play_moves(&mut played, &[(7, 7)]);
+        assert!(
+            probe::rect_of(&played, Target::Undo).is_some(),
+            "Undo is still not clickable after a move has been made"
+        );
+    }
+
+    /// Both buttons are drawn where they are clickable, and inside the panel.
+    #[test]
+    fn each_button_is_labelled_where_it_is_clickable() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7)]);
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
+        let mut checked = 0;
+        for (target, label) in [
+            (Target::NewGame, "New game (N)"),
+            (Target::Undo, "Undo (Z)"),
+        ] {
+            let r = probe::rect_of(&app, target).expect("a button");
+            assert!(
+                r.x >= l.panel.x - 0.01 && r.right() <= l.panel.right() + 0.01,
+                "{label} at {r:?} leaves the panel {:?}",
+                l.panel
+            );
+            assert!(
+                text_inside(&frame, label, r),
+                "{label} is clickable at {r:?} and its text is drawn elsewhere"
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 2);
+    }
+
+    /// A click on nothing in particular is ignored rather than treated as a
+    /// move.
+    #[test]
+    fn a_click_on_the_background_does_nothing() {
+        let mut app = GomokuApp::new();
+        let (x, y) = probe::bare_point(&app, W).expect("a point that hits nothing");
+        let outcome = app.click_at(x, y, MouseButton::Left, W);
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.move_count, 0);
+    }
+
+    /// A click is read against the window the last frame was drawn at.
+    ///
+    /// The app is rendered small and then clicked at the coordinates that are
+    /// right for the small window; if the click were read against the size the
+    /// app was born with, it would land on a different intersection.
+    #[test]
+    fn a_click_is_read_against_the_window_that_was_drawn() {
+        let small = (420.0, 380.0);
+        let mut app = GomokuApp::new();
+        app.render(small.0, small.1);
+        let l = Layout::solve(small.0, small.1);
+        let (x, y) = l.intersection(2, 11);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.board.get(2, 11),
+            Some(Cell::Black),
+            "the click was read against a window that is not the one on screen"
+        );
+    }
+
+    /// Only the left button plays.
+    #[test]
+    fn the_right_button_does_not_place_a_stone() {
+        let mut app = GomokuApp::new();
+        let outcome = probe::click_with(&mut app, Target::Point(5, 5), MouseButton::Right);
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.move_count, 0);
+    }
+
+    /// Nothing scrolls, and saying so is not the same as forgetting to handle
+    /// it: a scroll over the board leaves the game exactly as it was.
+    ///
+    /// [`probe::scroll_at_point`] is deliberately not used here -- it panics
+    /// on a `None`, because a program that has a wheel must not answer one by
+    /// accident. This is the other case: a program with no wheel at all, whose
+    /// `None` is the correct and only answer.
+    #[test]
+    fn a_scroll_changes_nothing() {
+        let mut app = GomokuApp::new();
+        let l = Layout::solve(W.0, W.1);
+        let (x, y) = l.intersection(7, 7);
+        assert!(
+            app.scroll_at(x, y, -3.0, W).is_none(),
+            "the wheel was answered by a game that has nothing to scroll"
+        );
+        assert_eq!(app.move_count, 0);
+        assert_eq!((app.cursor_row, app.cursor_col), (7, 7));
+    }
+
+    // =======================================================================
+    // The paint
+    // =======================================================================
+
+    /// True when some fill of `color` is centred on ({x}, {y}).
+    fn fill_centred_on(frame: &Frame<Target>, color: Color, x: f32, y: f32) -> bool {
+        fills_of(frame, color).iter().any(|r| {
+            let c = r.centre();
+            (c.0 - x).abs() < 0.01 && (c.1 - y).abs() < 0.01
+        })
+    }
+
+    /// Each stone is painted in its own colour, on its own intersection.
+    ///
+    /// Centred on [`Layout::intersection`] rather than compared to
+    /// [`Layout::stone_rect`], so that a stone drawn a whole cell away from
+    /// the line it sits on cannot pass by agreeing with the same wrong sum
+    /// twice (lesson 84).
+    #[test]
+    fn every_stone_is_painted_on_the_point_it_sits_on() {
+        let black = [(0, 0), (7, 7), (LAST_INDEX as usize, 3)];
+        let white = [(1, 2), (8, 8)];
+        let mut stones: Vec<(usize, usize, Cell)> =
+            black.iter().map(|&(r, c)| (r, c, Cell::Black)).collect();
+        stones.extend(white.iter().map(|&(r, c)| (r, c, Cell::White)));
+        let app = app_with(&stones);
+        for size in SIZES {
+            let l = Layout::solve(size.0, size.1);
+            let frame = app.frame(size.0, size.1);
+            for (points, color, name) in [
+                (&black[..], BLACK_STONE, "black"),
+                (&white[..], WHITE_STONE, "white"),
+            ] {
+                for &(row, col) in points {
+                    let (x, y) = l.intersection(row as i32, col as i32);
+                    assert!(
+                        fill_centred_on(&frame, color, x, y),
+                        "the {name} stone on ({row}, {col}) is not painted at \
+                         ({x}, {y}) in a {size:?} window"
+                    );
+                }
+                assert_eq!(
+                    fills_of(&frame, color).len(),
+                    points.len(),
+                    "{} {name} stones are on the board and {} were painted at {size:?}",
+                    points.len(),
+                    fills_of(&frame, color).len()
+                );
+            }
+        }
+    }
+
+    /// An empty intersection is a hit box and nothing else.
+    ///
+    /// The box is recorded on all 225 points, because an empty one is where
+    /// the next stone goes; the paint must not follow it.
+    #[test]
+    fn an_empty_intersection_is_clickable_but_not_painted() {
+        let app = GomokuApp::new();
+        let frame = app.frame(W.0, W.1);
+        assert!(
+            probe::rect_of(&app, Target::Point(7, 7)).is_some(),
+            "an empty point on an empty board is not clickable"
+        );
+        assert!(
+            fills_of(&frame, BLACK_STONE).is_empty() && fills_of(&frame, WHITE_STONE).is_empty(),
+            "the opening board is empty and stones were painted on it"
+        );
+    }
+
+    /// A stone is drawn with an edge, so a black stone is not a hole in the
+    /// wood and a white one is not a hole in the light.
+    #[test]
+    fn a_stone_is_drawn_with_an_edge() {
+        let app = app_with(&[(3, 3, Cell::Black), (4, 4, Cell::White)]);
+        let frame = app.frame(W.0, W.1);
+        let l = Layout::solve(W.0, W.1);
+        for (row, col, color) in [(3, 3, BLACK_STONE_BORDER), (4, 4, WHITE_STONE_BORDER)] {
+            let want = l.stone_rect(row, col);
+            assert!(
+                strokes_of(&frame, color)
+                    .iter()
+                    .any(|r| (r.x - want.x).abs() < 0.01 && (r.y - want.y).abs() < 0.01),
+                "the stone on ({row}, {col}) has no edge"
+            );
+        }
+    }
+
+    /// The last stone played is marked, and no other one is.
+    ///
+    /// Both halves matter: a marker on every stone would satisfy "the last
+    /// move is marked" while telling the player nothing (lesson 90).
+    #[test]
+    fn only_the_last_stone_played_is_marked() {
+        let mut app = GomokuApp::new();
+        play_moves(&mut app, &[(7, 7), (3, 4)]);
+        let last = app.last_move.expect("a last move");
+        assert_eq!(app.board.stone_count(), 4, "two pairs were not played");
+
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
+        let marks = fills_of(&frame, LAST_MOVE_MARKER);
+        assert_eq!(
+            marks.len(),
+            1,
+            "four stones are on the board and {} of them are marked as last",
+            marks.len()
+        );
+        let (x, y) = l.intersection(last.0 as i32, last.1 as i32);
+        let c = marks[0].centre();
+        assert!(
+            (c.0 - x).abs() < 0.01 && (c.1 - y).abs() < 0.01,
+            "the last move is {last:?} and the marker is at {c:?}, not ({x}, {y})"
+        );
+    }
+
+    /// An opening board has nothing to mark.
+    #[test]
+    fn an_empty_board_marks_no_last_move() {
+        let app = GomokuApp::new();
+        assert!(fills_of(&app.frame(W.0, W.1), LAST_MOVE_MARKER).is_empty());
+    }
+
+    /// The five stones that won are marked, and only those five.
+    #[test]
+    fn the_win_is_marked_on_the_five_stones_that_made_it() {
+        let mut app = GomokuApp::new();
+        for c in 4..8 {
+            place_raw(&mut app.board, 7, c, Cell::Black);
+        }
+        let before = app.frame(W.0, W.1);
+        assert!(
+            fills_of(&before, WIN_HIGHLIGHT).is_empty(),
+            "four in a row is not a win and was highlighted as one"
+        );
+
+        app.cursor_row = 7;
+        app.cursor_col = 8;
+        assert!(app.try_place_stone());
+        assert_eq!(app.phase, GamePhase::Won);
+
+        let l = Layout::solve(W.0, W.1);
+        let frame = app.frame(W.0, W.1);
+        let marks = fills_of(&frame, WIN_HIGHLIGHT);
+        assert_eq!(marks.len(), WIN_COUNT, "the win line is not five stones");
+        for col in 4..9 {
+            let (x, y) = l.intersection(7, col);
+            assert!(
+                fill_centred_on(&frame, WIN_HIGHLIGHT, x, y),
+                "(7, {col}) won the game and is not marked"
+            );
+        }
+    }
+
+    /// The cursor is drawn where the cursor is, and follows the arrows.
+    #[test]
+    fn the_cursor_is_drawn_where_the_arrows_left_it() {
+        let mut app = GomokuApp::new();
+        let l = Layout::solve(W.0, W.1);
+        for _ in 0..3 {
+            app.handle_key(&key_of(Key::Right));
+        }
+        app.handle_key(&key_of(Key::Up));
+        assert_eq!((app.cursor_row, app.cursor_col), (6, 10));
+
+        let frame = app.frame(W.0, W.1);
+        let want = l.stone_rect(6, 10);
+        assert!(
+            strokes_of(&frame, CURSOR_COLOR)
+                .iter()
+                .any(|r| (r.x - want.x).abs() < 0.01 && (r.y - want.y).abs() < 0.01),
+            "the cursor is on (6, 10) and is drawn somewhere else"
+        );
+    }
+
+    /// The cursor is drawn only while there is a move to make with it.
+    ///
+    /// A cursor on a finished game, or one shown while White is searching,
+    /// invites a key that will be refused.
+    #[test]
+    fn the_cursor_is_hidden_when_there_is_no_move_to_make() {
+        let mut app = GomokuApp::new();
+        let mut checked = 0;
+        for (phase, turn, want) in [
+            (GamePhase::Playing, Cell::Black, true),
+            (GamePhase::Playing, Cell::White, false),
+            (GamePhase::Thinking, Cell::White, false),
+            (GamePhase::Won, Cell::Black, false),
+            (GamePhase::Draw, Cell::Black, false),
+        ] {
+            app.phase = phase;
+            app.current_turn = turn;
+            let drawn = !strokes_of(&app.frame(W.0, W.1), CURSOR_COLOR).is_empty();
+            assert_eq!(
+                drawn,
+                want,
+                "the cursor is {} in {phase:?} with {turn:?} to play",
+                if drawn { "drawn" } else { "hidden" }
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 5);
+    }
+
+    /// The status band says what the game is doing, in every phase.
+    ///
+    /// `GamePhase::Thinking` is the one that could not be drawn before the
+    /// rewrite: the search ran inside the placement, so the frame that would
+    /// have said so was never painted.
+    #[test]
+    fn the_status_band_says_what_the_game_is_doing() {
+        let mut app = GomokuApp::new();
+        let mut checked = 0;
+        for (phase, winner, needle) in [
+            (GamePhase::Playing, Cell::Empty, "Arrows move"),
+            (GamePhase::Thinking, Cell::Empty, "White is thinking"),
+            (GamePhase::Won, Cell::Black, "Black wins!"),
+            (GamePhase::Won, Cell::White, "White wins."),
+            (GamePhase::Draw, Cell::Empty, "A draw"),
+        ] {
+            app.phase = phase;
+            app.winner = winner;
+            let frame = app.frame(W.0, W.1);
+            assert!(
+                says(&frame, needle),
+                "{phase:?} with {winner:?} winning does not say {needle:?}; it says {:?}",
+                texts(&frame)
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 5);
+    }
+
+    /// A real game reaches a frame that says White is thinking.
+    ///
+    /// The test above sets the phase by hand, which cannot tell a message
+    /// that is reachable from one that is dead (lesson 90). This plays a move
+    /// and looks at the frame that follows it, before any tick.
+    #[test]
+    fn the_frame_after_blacks_move_says_white_is_thinking() {
+        let mut app = GomokuApp::new();
+        app.cursor_row = 7;
+        app.cursor_col = 7;
+        app.handle_key(&key_of(Key::Enter));
+        assert_eq!(app.phase, GamePhase::Thinking);
+        assert!(
+            says(&app.frame(W.0, W.1), "White is thinking"),
+            "White is searching and no frame says so"
+        );
+    }
+
+    /// The header names the game and whose turn it is.
+    #[test]
+    fn the_header_names_the_turn() {
+        let mut app = GomokuApp::new();
+        let frame = app.frame(W.0, W.1);
+        assert!(says(&frame, "Gomoku"), "the window does not name the game");
+        assert!(says(&frame, "Black to play"));
+
+        app.current_turn = Cell::White;
+        assert!(says(&app.frame(W.0, W.1), "White to play"));
+    }
+
+    /// The panel counts the moves and keeps the score.
+    #[test]
+    fn the_panel_counts_the_moves_and_the_scores() {
+        let mut app = GomokuApp::new();
+        assert!(says(&app.frame(W.0, W.1), "Moves: 0"));
+
+        play_moves(&mut app, &[(7, 7)]);
+        assert!(
+            says(&app.frame(W.0, W.1), "Moves: 2"),
+            "a pair was played and the panel did not count it"
+        );
+
+        app.scores = (3, 2, 1);
+        let frame = app.frame(W.0, W.1);
+        assert!(says(&frame, "Black: 3"), "{:?}", texts(&frame));
+        assert!(says(&frame, "White: 2"));
+        assert!(says(&frame, "Draws: 1"));
+    }
+
+    // =======================================================================
+    // The window the OS opens
+    // =======================================================================
+
+    /// The app names itself for the title bar and the taskbar.
+    #[test]
+    fn the_window_names_itself() {
+        let app = GomokuApp::new();
+        assert_eq!(app.title(), "Gomoku");
+        assert_eq!(app.app_id(), "gomoku");
+        assert_eq!(
+            app.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+    }
+
+    /// The app asks to be ticked, which is the only thing that makes White
+    /// move.
+    ///
+    /// `tick_interval` returning `None` would leave the game in
+    /// [`GamePhase::Thinking`] for ever after Black's first stone, with the
+    /// board frozen and the status band honestly reporting a search that
+    /// nothing would ever run.
+    #[test]
+    fn the_app_asks_for_the_tick_that_makes_white_move() {
+        let app = GomokuApp::new();
+        let interval = app.tick_interval().expect("a tick interval");
+        assert!(
+            interval <= Duration::from_millis(250) && interval > Duration::ZERO,
+            "White thinks on a {interval:?} clock, which is not a pace a \
+             player would sit through"
+        );
+    }
+
+    /// Rendering remembers the size, so the next click is read against the
+    /// window that is actually on screen.
+    #[test]
+    fn rendering_remembers_the_size_the_click_will_be_read_against() {
+        let mut app = GomokuApp::new();
+        let _ = app.render(500.0, 700.0);
+        assert_eq!(
+            (app.width, app.height),
+            (500.0, 700.0),
+            "the app was drawn at 500x700 and remembers a different window"
+        );
+    }
+
+    /// A window of no size at all is laid out for something rather than
+    /// dividing by it.
+    #[test]
+    fn a_window_with_no_size_does_not_divide_by_zero() {
+        let mut app = GomokuApp::new();
+        let _ = app.render(0.0, 0.0);
+        assert!(app.width > 0.0 && app.height > 0.0);
+        let l = Layout::solve(app.width, app.height);
+        assert!(
+            l.cell.is_finite(),
+            "a zero-sized window gave a {} px cell",
+            l.cell
+        );
+    }
+
+    /// A close request is answered by closing, and every other event by
+    /// whether it changed the picture.
+    #[test]
+    fn the_window_is_told_when_to_repaint_and_when_to_close() {
+        let mut app = GomokuApp::new();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(
+            app.on_event(&Event::Key(key_of(Key::Right))),
+            Response::Redraw,
+            "the cursor moved and the window was not asked to repaint"
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::release(Key::Right))),
+            Response::Idle,
+            "a key release changed nothing and asked for a repaint"
+        );
+    }
+
+    /// The tree handed to the compositor is the frame that was measured.
+    ///
+    /// `render` returns a [`RenderTree`], and a frame converted to one must
+    /// keep its paint: a window that hit-tests against commands it never
+    /// handed over would be back where the rewrite started.
+    #[test]
+    fn the_tree_the_window_gets_is_the_frame_that_was_drawn() {
+        let mut app = app_with(&[(7, 7, Cell::Black)]);
+        let commands = app.frame(W.0, W.1).commands().len();
+        let tree = app.render(W.0, W.1);
+        assert_eq!(
+            tree.commands.len(),
+            commands,
+            "the frame has {commands} commands and the window was handed {}",
+            tree.commands.len()
+        );
+    }
+
+    // =======================================================================
+    // The board and the rules
+    // =======================================================================
+
+    #[test]
+    fn a_new_board_is_empty() {
+        let board = Board::new();
+        assert_eq!(board.stone_count(), 0);
+        assert!(!board.is_full());
+        for r in 0..BOARD_SIZE {
+            for c in 0..BOARD_SIZE {
+                assert!(board.is_empty(r, c), "({r}, {c}) is not empty");
+            }
+        }
+    }
+
+    /// `get` answers `None` off the board rather than panicking or wrapping.
+    ///
+    /// The search walks lines until they leave the board, so "off the board"
+    /// is an answer it needs and not an error it avoids.
+    #[test]
+    fn reading_off_the_board_says_so() {
+        let board = Board::new();
+        assert_eq!(board.get(0, 0), Some(Cell::Empty));
+        assert_eq!(board.get(LAST_INDEX, LAST_INDEX), Some(Cell::Empty));
+        for (r, c) in [
+            (-1, 0),
+            (0, -1),
+            (BOARD_SIZE as i32, 0),
+            (0, BOARD_SIZE as i32),
+            (i32::MIN, i32::MIN),
+            (i32::MAX, i32::MAX),
+        ] {
+            assert_eq!(board.get(r, c), None, "({r}, {c}) answered as on-board");
+        }
+    }
+
+    #[test]
+    fn writing_off_the_board_is_refused_rather_than_done_somewhere_else() {
+        let mut board = Board::new();
+        assert!(board.set(0, 0, Cell::Black));
+        assert!(!board.set(BOARD_SIZE, 0, Cell::White));
+        assert!(!board.set(0, BOARD_SIZE, Cell::White));
+        assert_eq!(board.stone_count(), 1, "a refused write still landed");
+    }
+
+    #[test]
+    fn an_intersection_off_the_board_is_not_empty() {
+        let board = Board::new();
+        assert!(board.is_empty(0, 0));
+        assert!(
+            !board.is_empty(BOARD_SIZE, 0),
+            "a point that is not on the board was offered as a place to play"
+        );
+    }
+
+    #[test]
+    fn a_full_board_is_a_draw_and_a_nearly_full_one_is_not() {
+        let mut board = Board::new();
+        for r in 0..BOARD_SIZE {
+            for c in 0..BOARD_SIZE {
+                // Alternate in a pattern with no five in a row, so that
+                // "full" is the only thing being tested here.
+                let stone = if (r / 2 + c / 3) % 2 == 0 {
+                    Cell::Black
+                } else {
+                    Cell::White
+                };
+                place_raw(&mut board, r, c, stone);
+            }
+        }
+        assert!(board.is_full());
+        board.set(7, 7, Cell::Empty);
+        assert!(!board.is_full(), "224 of 225 stones counted as full");
+        assert_eq!(board.stone_count(), BOARD_SIZE * BOARD_SIZE - 1);
+    }
+
+    #[test]
+    fn a_colour_has_an_opponent_and_an_empty_point_does_not() {
+        assert_eq!(Cell::Black.opponent(), Cell::White);
+        assert_eq!(Cell::White.opponent(), Cell::Black);
+        assert_eq!(Cell::Empty.opponent(), Cell::Empty);
+    }
+
+    /// Five in a row wins in every direction, and four does not.
+    ///
+    /// One test over all four directions and both colours, counting the cases
+    /// it checked, rather than eight tests each of which could quietly stop
+    /// running.
+    #[test]
+    fn five_in_a_row_wins_in_every_direction() {
+        let mut checked = 0;
+        for &(dr, dc) in &DIRECTIONS {
+            for stone in [Cell::Black, Cell::White] {
+                // A start far enough from every edge that five fit in either
+                // sense of the direction.
+                let (r0, c0) = (5i32, 5i32);
+                let mut four = Board::new();
+                for i in 0..4 {
+                    place_raw(
+                        &mut four,
+                        (r0 + dr * i) as usize,
+                        (c0 + dc * i) as usize,
+                        stone,
+                    );
+                }
+                assert!(
+                    four.check_winner(stone).is_none(),
+                    "four in a row at {dr},{dc} for {stone:?} was called a win"
+                );
+
+                let mut five = four.clone();
+                place_raw(
+                    &mut five,
+                    (r0 + dr * 4) as usize,
+                    (c0 + dc * 4) as usize,
+                    stone,
+                );
+                let win = five
+                    .check_winner(stone)
+                    .unwrap_or_else(|| panic!("five in a row at {dr},{dc} did not win"));
+                assert_eq!(win.positions.len(), WIN_COUNT);
+                assert!(
+                    five.check_winner(stone.opponent()).is_none(),
+                    "{stone:?}'s five won the game for the other colour"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 8, "not every direction and colour was checked");
+    }
+
+    /// A run of five that leaves the board does not win.
+    ///
+    /// The line walker stops at the edge rather than wrapping onto the far
+    /// side, which is the fault a flat array indexed by `row * 15 + col`
+    /// invites and which this board's `get` is bounds-checked to avoid.
+    #[test]
+    fn a_run_does_not_wrap_around_the_edge() {
+        let mut board = Board::new();
+        // The last three of row 3 and the first two of row 4: contiguous in a
+        // flat array, five apart in nothing on a real board.
+        for c in 12..BOARD_SIZE {
+            place_raw(&mut board, 3, c, Cell::Black);
+        }
+        for c in 0..2 {
+            place_raw(&mut board, 4, c, Cell::Black);
+        }
+        assert!(
+            board.check_winner(Cell::Black).is_none(),
+            "a run that crossed the right edge onto the next row was a win"
+        );
+    }
+
+    #[test]
+    fn a_win_names_the_five_stones_that_made_it() {
+        let mut board = Board::new();
+        for c in 3..8 {
+            place_raw(&mut board, 6, c, Cell::White);
+        }
+        let win = board.check_winner(Cell::White).expect("five in a row");
+        assert_eq!(
+            win.positions,
+            vec![(6, 3), (6, 4), (6, 5), (6, 6), (6, 7)],
+            "the win line does not name the stones that won"
+        );
+    }
+
+    #[test]
+    fn a_mixed_line_of_five_wins_for_nobody() {
+        let mut board = Board::new();
+        for c in 3..7 {
+            place_raw(&mut board, 6, c, Cell::Black);
+        }
+        place_raw(&mut board, 6, 7, Cell::White);
+        assert!(board.check_winner(Cell::Black).is_none());
+        assert!(board.check_winner(Cell::White).is_none());
+    }
+}

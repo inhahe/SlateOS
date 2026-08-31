@@ -946,10 +946,19 @@ fn expand_vars_bytes(bytes: &[u8]) -> Vec<u8> {
                 }
                 if let Some(expr_bytes) = bytes.get(start..i) {
                     if let Ok(expr) = core::str::from_utf8(expr_bytes) {
-                        // Expand variables within the expression first.
-                        let expanded_expr = expand_vars(expr);
-                        let val = eval_arithmetic(&expanded_expr);
-                        result.extend_from_slice(alloc::format!("{}", val).as_bytes());
+                        // `eval_arith_stmt` does its own variable expansion and
+                        // also handles `$((i = i + 1))`, which this site
+                        // previously evaluated but never assigned.
+                        match eval_arith_stmt(expr) {
+                            Ok(val) => {
+                                result.extend_from_slice(alloc::format!("{}", val).as_bytes());
+                            }
+                            // Substitute nothing: an expression that could not
+                            // be evaluated has no value, and putting `0` in the
+                            // command line is how `rm -rf /tmp/x$((n))` became
+                            // `rm -rf /tmp/x0`.
+                            Err(e) => report_arith("$((", &e, 1),
+                        }
                     }
                 }
                 // Skip past `))`.
@@ -1828,7 +1837,21 @@ fn expand_substring(val: &str, spec: &str, result: &mut String) {
     // one that is merely unreachable.
     let char_len = i64::try_from(val.chars().count()).unwrap_or(i64::MAX);
 
-    let raw_offset = eval_arithmetic(offset_expr);
+    // An unevaluable offset used to be `0`, i.e. "from the beginning" — so
+    // `${path:$n}` with a mistyped `n` expanded to the *whole* string rather
+    // than to a suffix of it, which is the one wrong answer that still looks
+    // like a plausible path.
+    // Prefixed with the offending expression rather than with a command name,
+    // matching the `substring expression < 0` diagnostic below: there is no
+    // command here to name -- `${x:$n}` is an expansion, and the expression is
+    // the only part of it the operator can look at and correct.
+    let raw_offset = match eval_arithmetic(offset_expr) {
+        Ok(v) => v,
+        Err(e) => {
+            report_arith(offset_expr.trim(), &e, 1);
+            return;
+        }
+    };
     let start = if raw_offset < 0 {
         raw_offset.saturating_add(char_len)
     } else {
@@ -1843,7 +1866,13 @@ fn expand_substring(val: &str, spec: &str, result: &mut String) {
     let end = match length_expr {
         None => char_len,
         Some(expr) => {
-            let raw_len = eval_arithmetic(expr);
+            let raw_len = match eval_arithmetic(expr) {
+                Ok(v) => v,
+                Err(e) => {
+                    report_arith(expr.trim(), &e, 1);
+                    return;
+                }
+            };
             if raw_len < 0 {
                 let end = raw_len.saturating_add(char_len);
                 // `start` is non-negative here, so this one comparison covers
@@ -3175,9 +3204,14 @@ fn execute_for_loop(variable: &str, words_raw: &str, body: &[String]) {
 fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
     const MAX_ITERATIONS: u32 = 10_000;
 
-    // Execute init expression.
+    // Execute init expression. A loop whose initialiser could not be evaluated
+    // must not run: `for ((i=1O; i<10; i=i+1))` used to set `i` to 0 and then
+    // iterate ten times over a variable the operator never successfully set.
     if !init.is_empty() {
-        eval_cfor_expr(init);
+        if let Err(e) = eval_arith_stmt(init) {
+            report_arith("for", &e, 1);
+            return;
+        }
     }
 
     LOOP_BREAK.store(false, core::sync::atomic::Ordering::Relaxed);
@@ -3197,9 +3231,17 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
         // Evaluate condition — if empty, treat as infinite (true).
         if !cond.is_empty() {
             let cond_expanded = expand_vars(cond);
-            let val = eval_arithmetic(&cond_expanded);
-            if val == 0 {
-                break;
+            // An unevaluable condition used to come back `0`, which reads as
+            // "the loop finished" — the one outcome indistinguishable from
+            // success, and the reason a mistyped bound produced a loop body
+            // that never ran and no diagnostic at all.
+            match eval_arithmetic(&cond_expanded) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) => {
+                    report_arith("for", &e, 1);
+                    break;
+                }
             }
         }
 
@@ -3223,9 +3265,13 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
             break;
         }
 
-        // Execute step expression.
+        // Execute step expression. Refusing here rather than continuing is what
+        // stops a bad step from spinning to the 10,000-iteration limit.
         if !step.is_empty() {
-            eval_cfor_expr(step);
+            if let Err(e) = eval_arith_stmt(step) {
+                report_arith("for", &e, 1);
+                break;
+            }
         }
     }
 
@@ -3233,11 +3279,24 @@ fn execute_cfor_loop(init: &str, cond: &str, step: &str, body: &[String]) {
     LOOP_CONTINUE.store(false, core::sync::atomic::Ordering::Relaxed);
 }
 
-/// Evaluate a C-style for loop expression.
+/// Evaluate an arithmetic *statement* — an assignment or a bare expression.
 ///
-/// Supports simple assignment (`VAR=EXPR`) and bare arithmetic.
-/// The arithmetic evaluator handles variable references.
-fn eval_cfor_expr(expr: &str) {
+/// Supports simple assignment (`VAR=EXPR`) and bare arithmetic, and returns the
+/// value in both cases: for `VAR=EXPR` that is the value assigned, which is what
+/// bash uses for the exit status of `(( x = 5 ))`.
+///
+/// **Returning the value is what lets `((…))` stop evaluating twice.** That
+/// caller used to run this for the assignment's side effect and then call
+/// `eval_arithmetic` on the *same* string again to get a status — which worked
+/// only because the tokenizer silently dropped the `=`, leaving two numbers
+/// whose first happened to be the value just assigned. Now that a stray `=` is
+/// an error and trailing operands are refused, that accident would have become a
+/// spurious diagnostic; evaluating once is both the fix and the simpler code.
+///
+/// Named for what it does rather than for the one caller it used to have: the
+/// `$((…))` expansion routes through it now too, so `$((i = i + 1))` assigns
+/// instead of merely printing.
+fn eval_arith_stmt(expr: &str) -> Result<i64, ArithError> {
     let expanded = expand_vars(expr);
     let trimmed = expanded.trim();
 
@@ -3258,16 +3317,16 @@ fn eval_cfor_expr(expr: &str) {
                 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
                 && !name.starts_with(|c: char| c.is_ascii_digit())
             {
-                let val = eval_arithmetic(rhs);
+                let val = eval_arithmetic(rhs)?;
                 env_set(name, &alloc::format!("{}", val));
-                return;
+                return Ok(val);
             }
         }
     }
 
-    // Bare expression — just evaluate for side effects (none in our model,
-    // but future ++ operator support could use this).
-    eval_arithmetic(trimmed);
+    // Bare expression — evaluate for its value (and, once `++` exists, for its
+    // side effects).
+    eval_arithmetic(trimmed)
 }
 
 /// Split a string into words, respecting single and double quotes.
@@ -6367,10 +6426,12 @@ fn execute_single_inner(line: &str) -> Handled {
             .unwrap_or("")
             .trim();
         if !inner.is_empty() {
-            // Check for assignment: VAR = EXPR.
-            eval_cfor_expr(inner);
-            let val = eval_arithmetic(inner);
-            set_exit(if val == 0 { 1 } else { 0 });
+            // One evaluation, not two: `eval_arith_stmt` performs any
+            // assignment *and* yields the value the status is derived from.
+            match eval_arith_stmt(inner) {
+                Ok(val) => set_exit(if val == 0 { 1 } else { 0 }),
+                Err(e) => report_arith("((", &e, 1),
+            }
         }
         return Handled::Here;
     }
@@ -21440,6 +21501,204 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         assert_output_lacks("and no sample was filed", &out, b"Load average updated");
     }
 
+    serial_println!(
+        "  kshell::self_test 110: a mistyped *word* is refused too -- a Wi-Fi \
+         security type, an uninstall option and a policy effect are no longer \
+         guessed, and neither are the numbers that flash a port, aim a window \
+         rule or file a fragmentation reading"
+    );
+    {
+        // Rung 110 -- batch 43a of the design-decisions.md §600 burn-down: the
+        // last of the two-site functions (18 of them, 36 sites), leaving only
+        // the expression evaluator's four. Seven of the defects fixed in this
+        // batch had *no `.parse()` at all* and so were invisible to
+        // `scripts/check-option-refusal.py`: they are `match` arms on a word,
+        // ending `_ => SomeDefault`, where the absent-operand default and the
+        // misspelled-word case shared one arm. They were found by reading
+        // around flagged sites, not by the gate -- which is the concrete
+        // reason the ledger's total is a floor and not a measurement, on top
+        // of the two historical under-counts its header already records.
+        //
+        // The cases below are one per consequence, not one per command:
+        //
+        //   * `wifiscan discover` is the sharpest word-default in the tree:
+        //     the guessed field is the *security* of the network, so a typo
+        //     for `wep` filed an unprotected access point as WPA2-PSK and the
+        //     listing showed it as protected. A scan whose purpose is to find
+        //     open networks answered that there were none.
+        //   * `progmgr uninstall` guessed `full`, which is the option that
+        //     deletes the user's files. Every other guess in this family costs
+        //     a re-run.
+        //   * `policyengine add` guessed `Allow` for an effect it could not
+        //     read -- a security policy that fails open, and reports success.
+        //   * `windowrules action` guessed 0 for a parameter whose meaning the
+        //     *action* decides: 0 is a screen corner for `position` and full
+        //     transparency for `opacity`. The rule then fires later, when
+        //     nobody is watching the shell.
+        //   * `telnetd kick` is batch 42's sentinel shape again: `usize::MAX`
+        //     was picked as an index that "cannot exist", and it reached the
+        //     operator as a sentence about session #18446744073709551615.
+
+        // A word, not a number: the old `_ => Wpa2Psk` arm.
+        let out = capture_command("wifiscan discover zzrungssid aa:bb:cc:dd:ee:ff wep2 5 36");
+        assert_output_contains(
+            "a misspelled security type is named, not filed as WPA2",
+            &out,
+            b"is not a security type",
+        );
+        assert_eq!(last_exit(), 1, "`wifiscan discover ... wep2 ...` errors");
+        assert_output_lacks("and no network was recorded", &out, b"Network #");
+
+        // The guess that deletes files.
+        let out = capture_command("progmgr uninstall zzrungpkg keepfilez");
+        assert_output_contains(
+            "a misspelled uninstall option does not fall back to `full'",
+            &out,
+            b"is not an uninstall option",
+        );
+        assert_eq!(last_exit(), 1, "`progmgr uninstall ... keepfilez` errors");
+        assert_output_lacks("and nothing was uninstalled", &out, b"Uninstalled '");
+
+        // The guess that fails open.
+        let out = capture_command("policyengine add zzrungrule security app open /tmp allo");
+        assert_output_contains(
+            "a misspelled effect is not silently Allow",
+            &out,
+            b"is not a policy effect",
+        );
+        assert_eq!(last_exit(), 1, "`policyengine add ... allo` errors");
+        assert_output_lacks("and no rule was added", &out, b"Added rule #");
+
+        // A number whose meaning the preceding word decides.
+        let out = capture_command("windowrules action 1 opacity 8O");
+        assert_output_contains(
+            "an unreadable action parameter is not guessed as 0",
+            &out,
+            b"`8O' is not a first action parameter",
+        );
+        assert_eq!(last_exit(), 1, "`windowrules action 1 opacity 8O` errors");
+        assert_output_lacks("and no action was attached", &out, b"added to rule");
+
+        // The sentinel that got printed at the operator.
+        let out = capture_command("telnetd kick 1O");
+        assert_output_contains(
+            "an unreadable session number is named",
+            &out,
+            b"`1O' is not a session number",
+        );
+        assert_eq!(last_exit(), 1, "`telnetd kick 1O` errors");
+        // The old output was `Session #18446744073709551615 not found or
+        // inactive`. Asserting the *sentence* is absent rather than the
+        // sentinel digits is the stronger of the two: it proves the refusal
+        // happened before `disconnect_session` was consulted at all, whereas
+        // the digits would only prove that one particular sentinel is gone.
+        assert_output_lacks(
+            "and no sentence is printed about a session that cannot exist",
+            &out,
+            b"not found or inactive",
+        );
+    }
+
+    serial_println!(
+        "  kshell::self_test 111: the expression evaluator has an error channel -- \
+         a word that is not a number, a division by zero, an unclosed paren and a \
+         stray operator are refused instead of all four answering `0'"
+    );
+    {
+        // Rung 111 -- batch 43b of the design-decisions.md §600 burn-down, and
+        // the first rung this shell has ever had for `expr`, `let`, `test`,
+        // `$((...))` or C-style `for`. That absence is why the defect survived
+        // so long: `eval_arithmetic` returned a bare `i64`, so *every* way of
+        // failing produced `0` and returned it as an answer, and no test could
+        // have told the difference because there was nothing to observe.
+        //
+        // The four cases below are deliberately the four that used to be
+        // indistinguishable from a real result. `expr 1/0` is the sharpest --
+        // `0` is a number the operator has no way to question, and it is
+        // exactly what a *correct* division would give for a zero numerator.
+
+        // `test`: the guess made `[ "$n" -eq 0 ]` true for every non-numeric
+        // value of `$n`, so an unset or misspelled variable took the zero
+        // branch and reported success. Status 2 (not 1) is what separates
+        // "malformed" from "false"; asserting it is the point of the rung.
+        let out = capture_command("test 1O -eq 5");
+        assert_output_contains(
+            "a non-numeric operand of -eq is named, not read as 0",
+            &out,
+            b"`1O' is not a number",
+        );
+        assert_eq!(last_exit(), 2, "a malformed `test' exits 2, not 1");
+
+        // Division by zero. `expr` follows GNU and exits 2 here.
+        let out = capture_command("expr 1 / 0");
+        assert_output_contains("division by zero is refused", &out, b"division by zero");
+        assert_eq!(last_exit(), 2, "`expr 1 / 0` errors");
+
+        // That the guessed `0` is not merely unprinted but never *stored* is
+        // the sharper claim, and it is checkable where the printed value is
+        // not: `cmd_expr` emits its result through a bare `{}`, which
+        // `scripts/check-selftest-wording.py` rightly refuses to let a rung
+        // assert against -- a needle wholly inside a format hole is anchored to
+        // no literal and so could be claimed of any output at all. Exit status
+        // and a follow-up `test -v` carry the same proof with nothing to
+        // exempt. `let` is the form that matters here anyway: its guess used to
+        // *overwrite* the variable, so a mistyped `$x` destroyed whatever the
+        // operator had accumulated in `n`.
+        capture_command("unset zzrungn");
+        capture_command("let zzrungn = 1 / 0");
+        assert_eq!(last_exit(), 1, "`let zzrungn = 1 / 0` errors");
+        capture_command("test -v zzrungn");
+        assert_eq!(
+            last_exit(),
+            1,
+            "and the refusal left `zzrungn' unset, not 0"
+        );
+
+        // An unclosed paren used to be treated as though it had been closed,
+        // so `expr 2*(3+4` answered `14` -- the shell supplying the paren the
+        // operator forgot and presenting the result as complete.
+        let out = capture_command("expr 2 * (3 + 4");
+        assert_output_contains("an unclosed paren is refused", &out, b"missing `)'");
+        assert_eq!(last_exit(), 2, "`expr 2 * (3 + 4` errors");
+
+        // A character outside the arithmetic language used to be skipped, so
+        // `2 $ 3` evaluated to `2`: a typo silently deleted an operator and the
+        // shell answered an expression nobody wrote.
+        let out = capture_command("let 6 & 3");
+        assert_output_contains(
+            "an unsupported operator is named rather than skipped",
+            &out,
+            b"is not an arithmetic operator",
+        );
+        assert_eq!(last_exit(), 1, "`let 6 & 3` errors");
+
+        // A variable holding something unreadable. bash answers 0 here; dash
+        // refuses, and dash is right -- see `tokenize_arith`. The refusal names
+        // the variable as well as the value, because `$((zzrungvar))` shows the
+        // operator a word they never typed.
+        capture_command("export zzrungvar=abc");
+        let out = capture_command("expr zzrungvar + 1");
+        assert_output_contains(
+            "the variable is named alongside its unreadable value",
+            &out,
+            b"(the value of `zzrungvar')",
+        );
+        assert_eq!(last_exit(), 2, "`expr zzrungvar + 1` errors");
+
+        // The evaluator still evaluates. A rung that only proves refusals would
+        // pass just as well against an evaluator that refused *everything*,
+        // which is the failure mode a burn-down batch is most likely to
+        // introduce -- and the `((...))` form states the claim as a status
+        // rather than as printed text, so it needs no needle. Asserting both
+        // arms is what makes it a test of the arithmetic rather than of the
+        // parser: an evaluator that answered `1` to every comparison would pass
+        // the first line and fail the second.
+        capture_command("((2 * (3 + 4) == 14))");
+        assert_eq!(last_exit(), 0, "a well-formed expression still evaluates");
+        capture_command("((2 * (3 + 4) == 13))");
+        assert_eq!(last_exit(), 1, "and a false comparison is still false");
+    }
+
     serial_println!("  kshell::self_test PASSED");
     Ok(())
 }
@@ -22183,14 +22442,34 @@ fn cmd_strings(args: &str) {
     let mut min_len: usize = 4;
     let mut path_arg = "";
 
+    // Both spellings of `-n` guessed 4 for a word they could not read, and 4
+    // is also the value the flag exists to change -- so `strings -n 1O f` and
+    // `strings -n1O f` did exactly what plain `strings f` does, and the
+    // operator's evidence for "there are no long strings in this binary" was a
+    // scan they never actually ran.  A separated `-n` with nothing after it
+    // was silent in the same way; GNU strings answers that with `option
+    // requires an argument -- 'n'`, and so does this now.  `strings` has no
+    // subcommand, so these are callers of `refuse_operand`'s collapsed prefix.
     let mut words = args.split_whitespace();
     while let Some(w) = words.next() {
         if w == "-n" {
-            if let Some(n_str) = words.next() {
-                min_len = n_str.parse::<usize>().unwrap_or(4);
-            }
+            let Some(n_str) = words.next() else {
+                refuse_operand(
+                    "strings",
+                    "",
+                    format_args!("-n needs a minimum length after it"),
+                );
+                return;
+            };
+            let Some(n) = readable_num::<usize>(n_str, "strings", "", "minimum length") else {
+                return;
+            };
+            min_len = n;
         } else if let Some(n_str) = w.strip_prefix("-n") {
-            min_len = n_str.parse::<usize>().unwrap_or(4);
+            let Some(n) = readable_num::<usize>(n_str, "strings", "", "minimum length") else {
+                return;
+            };
+            min_len = n;
         } else {
             path_arg = w;
         }
@@ -28611,8 +28890,31 @@ fn cmd_reclaim(args: &str) {
                 set_exit(1);
                 return;
             }
-            let hi = parts[1].parse::<u64>().unwrap_or(90);
-            let lo = parts[2].parse::<u64>().unwrap_or(80);
+            // The guessed values were 90 and 80 -- the very pair the usage line
+            // offers as its example -- so `reclaim watermark 9O 8O` cleared the
+            // `lo < hi` guard and printed "Watermarks set: high=90% low=80%".
+            // Every visible sign said it worked, including the numbers echoed
+            // back, and the operator's memory of what they typed is the only
+            // thing that could have caught it.
+            let Some(hi) =
+                required_num::<u64>(&parts, 1, "reclaim", "watermark", "high watermark percent")
+            else {
+                return;
+            };
+            let Some(lo) =
+                required_num::<u64>(&parts, 2, "reclaim", "watermark", "low watermark percent")
+            else {
+                return;
+            };
+            // Both are percentages of memory in use. Nothing rejected 900
+            // before, and a high watermark above 100 is not a wrong threshold
+            // but an unreachable one: reclamation would simply never run again,
+            // silently, with `reclaim status` still reporting it enabled.
+            if hi > 100 || lo > 100 {
+                shell_println!("reclaim: watermark: watermarks are percentages, so at most 100");
+                set_exit(1);
+                return;
+            }
             if lo >= hi {
                 shell_println!("Error: LOW must be < HIGH");
                 set_exit(1);
@@ -32402,8 +32704,20 @@ fn cmd_prefetch(args: &str) {
                 return;
             }
             let path = resolve_path(parts[1]);
-            let offset: u64 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-            let len: u64 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+            // `prefetch load big.img 1OO000 4096` warmed the cache from offset
+            // 0 instead of the offset asked for, and then reported the byte
+            // count it did fetch -- so the command looks like it worked and the
+            // measurement afterwards is of the wrong region of the file. A
+            // prefetch is only ever run to observe its effect, which makes a
+            // silently relocated one worse than a failed one.
+            let Some(offset) = optional_num::<u64>(&parts, 2, "prefetch", sub, "byte offset", 0)
+            else {
+                return;
+            };
+            let Some(len) = optional_num::<u64>(&parts, 3, "prefetch", sub, "length in bytes", 0)
+            else {
+                return;
+            };
             match prefetch::prefetch(&path, offset, len) {
                 Ok(r) => shell_println!(
                     "Prefetched {} bytes from {}",
@@ -44810,10 +45124,16 @@ fn cmd_progmgr(args: &str) {
                     shell_println!("Usage: progmgr register <app_id> <name> <install_dir> [size]");
                     set_exit(1);
                 } else {
-                    let size = parts
-                        .get(4)
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    // The recorded install size is what every later disk-usage
+                    // view of this app reports, so a guessed 0 makes the app
+                    // invisible to exactly the question the registry exists to
+                    // answer. `sub` is not in scope inside these `fn case`
+                    // helpers, so the subcommand is named literally.
+                    let Some(size) =
+                        optional_num::<u64>(parts, 4, "progmgr", "register", "size in bytes", 0)
+                    else {
+                        return;
+                    };
                     match progmgr::register(parts[1], parts[2], "1.0.0", parts[3], size) {
                         Ok(()) => shell_println!("Registered '{}'", parts[1]),
                         Err(e) => {
@@ -44834,11 +45154,32 @@ fn cmd_progmgr(args: &str) {
                     );
                     set_exit(1);
                 } else {
+                    // Not a ledger site -- there is no `.parse()` here -- but the
+                    // same defect with the worst consequence in the shell: the
+                    // `_` arm meant `progmgr uninstall myapp keepfilez` did a
+                    // **Full** uninstall, deleting the files the operator had
+                    // just asked to keep. Every other guess in this campaign
+                    // reports a wrong number; this one destroys data, and
+                    // nothing about "Uninstalled 'myapp'" says which of the four
+                    // things it did. `full` keeps its place as the default for
+                    // an *absent* word, spelled as its own arm so the default
+                    // and the typo stop sharing one branch.
                     let opt = match parts.get(2).copied().unwrap_or("full") {
+                        "full" => progmgr::UninstallOption::Full,
                         "keepfiles" | "keep-files" => progmgr::UninstallOption::KeepFiles,
                         "keepsettings" | "keep-settings" => progmgr::UninstallOption::KeepSettings,
                         "keepall" | "keep-all" => progmgr::UninstallOption::KeepAll,
-                        _ => progmgr::UninstallOption::Full,
+                        other => {
+                            refuse_operand(
+                                "progmgr",
+                                "uninstall",
+                                format_args!(
+                                    "`{}' is not an uninstall option (full, keepfiles, keepsettings, keepall)",
+                                    other
+                                ),
+                            );
+                            return;
+                        }
                     };
                     match progmgr::uninstall(parts[1], opt) {
                         Ok(()) => shell_println!("Uninstalled '{}'", parts[1]),
@@ -45136,15 +45477,36 @@ fn cmd_progmgr(args: &str) {
                     );
                     set_exit(1);
                 } else {
+                    // The mirror image of `uninstall`'s guess: a mistyped scope
+                    // captured *more* than was asked for rather than less. Not
+                    // destructive, but it makes the snapshot a different object
+                    // from the one the operator believes they took, which they
+                    // find out when they restore it.
                     let scope = match parts.get(3).copied().unwrap_or("full") {
+                        "full" => progmgr::SnapshotScope::Full,
                         "settings" => progmgr::SnapshotScope::SettingsOnly,
                         "data" => progmgr::SnapshotScope::DataOnly,
-                        _ => progmgr::SnapshotScope::Full,
+                        other => {
+                            refuse_operand(
+                                "progmgr",
+                                "snap",
+                                format_args!(
+                                    "`{}' is not a snapshot scope (full, settings, data)",
+                                    other
+                                ),
+                            );
+                            return;
+                        }
                     };
-                    let parent = parts
-                        .get(4)
-                        .and_then(|s| s.parse::<u64>().ok())
-                        .unwrap_or(0);
+                    // Parent 0 is the "no parent" sentinel, so an unreadable
+                    // parent id did not build a wrong chain -- it silently made
+                    // the snapshot a root, detaching the history the operator
+                    // was trying to extend.
+                    let Some(parent) =
+                        optional_num::<u64>(parts, 4, "progmgr", "snap", "parent snapshot id", 0)
+                    else {
+                        return;
+                    };
                     match progmgr::create_snapshot(parts[1], parts[2], scope, parent) {
                         Ok(id) => shell_println!("Created snapshot {} for '{}'", id, parts[1]),
                         Err(e) => {
@@ -56995,14 +57357,18 @@ fn cmd_printmgr(args: &str) {
         "print" => {
             // lp print <document> [pages] [copies]
             if let Some(doc) = parts.get(1) {
-                let pages = parts
-                    .get(2)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(1);
-                let copies = parts
-                    .get(3)
-                    .and_then(|s| s.parse::<u32>().ok())
-                    .unwrap_or(1);
+                // The one arm in this batch whose guess consumes a physical
+                // resource: `lp print report.pdf 12 1O` printed one copy rather
+                // than ten, and the confirmation line echoed "1 copies" -- the
+                // number the shell invented, not the one that was typed. The
+                // operator's recourse is to walk to the printer and count.
+                let Some(pages) = optional_num::<u32>(&parts, 2, "lp", sub, "page count", 1) else {
+                    return;
+                };
+                let Some(copies) = optional_num::<u32>(&parts, 3, "lp", sub, "copy count", 1)
+                else {
+                    return;
+                };
                 if let Some(def) = printmgr::default_printer() {
                     match printmgr::submit_job(def.id, doc, pages, copies, 0) {
                         Ok(job_id) => shell_println!(
@@ -66241,22 +66607,41 @@ fn cmd_svcstart(args: &str) {
                 let sock_type_str = parts.get(2).copied().unwrap_or("tcp");
                 let port_or_path = parts.get(3).copied().unwrap_or("0");
                 if let Ok(svc_id) = svc_id_str.parse::<u32>() {
+                    // Port 0 is this module's *no port* value -- the `sockets`
+                    // listing renders it as `-`.  So `svcstart addsock 3 tcp
+                    // 8O80` did not bind the wrong port, it registered a TCP
+                    // activation with no port at all and answered "Socket
+                    // activation entry N registered".  The service then never
+                    // woke on a connection, and the only trace was a dash in a
+                    // column where the operator remembered typing a number.
+                    // design-decisions.md §600's "binds a resource" axis.
                     let (socket_type, port, path) = match sock_type_str {
-                        "tcp" => (
-                            SocketType::Tcp,
-                            port_or_path.parse::<u16>().unwrap_or(0),
-                            String::new(),
-                        ),
-                        "udp" => (
-                            SocketType::Udp,
-                            port_or_path.parse::<u16>().unwrap_or(0),
-                            String::new(),
-                        ),
+                        "tcp" => {
+                            let Some(port) =
+                                readable_num::<u16>(port_or_path, "svcstart", sub, "port number")
+                            else {
+                                return;
+                            };
+                            (SocketType::Tcp, port, String::new())
+                        }
+                        "udp" => {
+                            let Some(port) =
+                                readable_num::<u16>(port_or_path, "svcstart", sub, "port number")
+                            else {
+                                return;
+                            };
+                            (SocketType::Udp, port, String::new())
+                        }
                         "unix" => (SocketType::Unix, 0u16, String::from(port_or_path)),
                         "ipc" => (SocketType::IpcChannel, 0u16, String::from(port_or_path)),
-                        _ => {
-                            shell_println!("Unknown socket type: {}", sock_type_str);
-                            set_exit(1);
+                        other => {
+                            refuse_operand(
+                                "svcstart",
+                                sub,
+                                format_args!(
+                                    "`{other}' is not a socket type (tcp, udp, unix, ipc)"
+                                ),
+                            );
                             return;
                         }
                     };
@@ -67626,11 +68011,26 @@ fn cmd_vmguest(args: &str) {
                 shell_println!("Usage: vmguest resize <width> <height>");
                 set_exit(1);
             } else {
-                let w: u32 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
-                let h: u32 = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Another guard that worked by luck -- 0 is both the guess and
+                // the one value rejected below, so `vmguest resize 192O 1080`
+                // reached "Invalid dimensions" without anyone deciding it
+                // should.  Name the word instead: the operator who typed a
+                // letter O into a resolution needs to be told *which* of the
+                // two numbers the shell could not read.
+                let Some(w) = required_num::<u32>(&parts, 1, "vmguest", sub, "width in pixels")
+                else {
+                    return;
+                };
+                let Some(h) = required_num::<u32>(&parts, 2, "vmguest", sub, "height in pixels")
+                else {
+                    return;
+                };
                 if w == 0 || h == 0 {
-                    shell_println!("Invalid dimensions");
-                    set_exit(1);
+                    refuse_operand(
+                        "vmguest",
+                        sub,
+                        format_args!("a display is at least 1x1, so 0 is not a dimension"),
+                    );
                 } else {
                     let (ew, eh) = vmguest::request_display_resize(w, h);
                     shell_println!("Requested: {}x{}, effective: {}x{}", w, h, ew, eh);
@@ -69059,10 +69459,23 @@ fn cmd_telnetd(args: &str) {
             if port_str.is_empty() {
                 shell_println!("Listening port: {}", telnet::stats().port);
             } else {
-                let port: u16 = port_str.parse().unwrap_or(0);
+                // A guard that worked by luck: 0 was both the guess and the
+                // one value the check below rejects, so `telnetd port 8O80`
+                // did reach "Invalid port" -- but only because the sentinel
+                // happened to collide with the invalid case.  Nothing said
+                // which word was unreadable, and the identical line in a
+                // command whose guess landed on a *valid* number would have
+                // gone through silently.  design-decisions.md §600.
+                let Some(port) = readable_num::<u16>(port_str, "telnetd", sub, "port number")
+                else {
+                    return;
+                };
                 if port == 0 {
-                    shell_println!("Invalid port");
-                    set_exit(1);
+                    refuse_operand(
+                        "telnetd",
+                        sub,
+                        format_args!("port 0 is not a listening port"),
+                    );
                 } else {
                     telnet::set_port(port);
                     shell_println!("Port set to {} (restart server to apply)", port);
@@ -69104,7 +69517,15 @@ fn cmd_telnetd(args: &str) {
                 set_exit(1);
                 return;
             }
-            let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+            // The sentinel was chosen as a number that "cannot exist", which
+            // is exactly what made it reach the operator: `telnetd kick 1O`
+            // printed `Session #18446744073709551615 not found or inactive`,
+            // a sentence about a session nobody asked about.  The operator's
+            // question was "why is #10 still connected", and the answer given
+            // was about #18446744073709551615.  design-decisions.md §600.
+            let Some(idx) = readable_num::<usize>(idx_str, "telnetd", sub, "session number") else {
+                return;
+            };
             if telnet::disconnect_session(idx) {
                 shell_println!("Disconnected session #{}", idx);
             } else {
@@ -75594,18 +76015,29 @@ fn cmd_netthrottle(args: &str) {
         }
         "add" | "rule" => {
             let app = parts.get(1).copied().unwrap_or("");
-            let down = parts
-                .get(2)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
-            let up = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(0);
             if app.is_empty() {
                 shell_println!("Usage: nthrottle add <app> [max_down_bps] [max_up_bps]");
                 set_exit(1);
             } else {
+                // Both rates defaulted to 0, and 0 is this module's *unlimited*
+                // sentinel -- so `nthrottle add zoom 1OOOOOO` did not throttle
+                // zoom to a wrong rate, it left zoom unthrottled and said
+                // "Added rule N", which is the one outcome the operator would
+                // not think to re-check. Same shape as `cgroup io-limit` in
+                // batch 42: the guess does not set a wrong cap, it removes the
+                // cap. The app name is checked first so that a bare
+                // `nthrottle add` still gets the synopsis rather than a
+                // complaint about a rate it never typed.
+                let Some(down) =
+                    optional_num::<u64>(&parts, 2, "nthrottle", sub, "download limit in bps", 0)
+                else {
+                    return;
+                };
+                let Some(up) =
+                    optional_num::<u64>(&parts, 3, "nthrottle", sub, "upload limit in bps", 0)
+                else {
+                    return;
+                };
                 match netthrottle::add_rule(app, down, up, netthrottle::QosPriority::Normal) {
                     Ok(id) => shell_println!("Added rule {} for '{}'", id, app),
                     Err(e) => {
@@ -78553,10 +78985,15 @@ fn cmd_volumeosd(args: &str) {
             }
         }
         "volume" | "vol" => {
-            let level = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            // "Echoed back as confirmation" at its most convincing: 50 is a
+            // plausible reading, and the command's whole output is the number
+            // it just made up -- `volumeosd volume 8O` drew the bar at 50% and
+            // printed `OSD 4 - Volume 50%`, which is a receipt for a setting
+            // nobody chose.  Both this arm and `brightness` below did it.
+            let Some(level) = optional_num::<u32>(&parts, 1, "volumeosd", sub, "level percent", 50)
+            else {
+                return;
+            };
             let muted = parts.get(2).copied() == Some("mute");
             match volumeosd::show_volume(level, muted) {
                 Ok(id) => shell_println!(
@@ -78572,10 +79009,10 @@ fn cmd_volumeosd(args: &str) {
             }
         }
         "bright" | "brightness" => {
-            let level = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            let Some(level) = optional_num::<u32>(&parts, 1, "volumeosd", sub, "level percent", 50)
+            else {
+                return;
+            };
             match volumeosd::show_brightness(level) {
                 Ok(id) => shell_println!("OSD {} — Brightness {}%", id, level),
                 Err(e) => {
@@ -85288,30 +85725,68 @@ fn cmd_windowrules(args: &str) {
             }
         }
         "action" => {
-            let id = parts.get(1).and_then(|s| s.parse::<u32>().ok());
-            let action = parts.get(2).and_then(|s| parse_rule_action(s));
-            let p1 = parts
-                .get(3)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            let p2 = parts
-                .get(4)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(0);
-            if let (Some(id), Some(act)) = (id, action) {
-                match windowrules::add_action(id, act, p1, p2) {
-                    Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
-                    Err(e) => {
-                        shell_println!("Error: {:?}", e);
-                        set_exit(1);
-                    }
-                }
-            } else {
+            // Absence and unreadability were answered identically here: a
+            // missing operand and a mistyped one both landed in the same
+            // `else`, which reprints the syntax.  That tells an operator who
+            // got the syntax right -- `windowrules action 1O position 10 20`
+            // -- to go and re-read it.  Below, absence keeps the usage block
+            // (it is the right answer to "what do I type?") and a word that
+            // cannot be read is named instead.
+            let Some(id_word) = parts.get(1).copied() else {
                 shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
                 shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
                 shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
                 shell_println!("           skippager, pinall, center");
                 set_exit(1);
+                return;
+            };
+            let Some(id) = readable_num::<u32>(id_word, "windowrules", sub, "rule id") else {
+                return;
+            };
+            let Some(action_word) = parts.get(2).copied() else {
+                shell_println!("Usage: windowrules action <rule_id> <action> [p1] [p2]");
+                shell_println!("  Actions: position, size, workspace, ontop, onbottom, opacity,");
+                shell_println!("           nodecor, maximized, minimized, fullscreen, skiptask,");
+                shell_println!("           skippager, pinall, center");
+                set_exit(1);
+                return;
+            };
+            let Some(act) = parse_rule_action(action_word) else {
+                refuse_operand(
+                    "windowrules",
+                    sub,
+                    format_args!(
+                        "`{action_word}' is not an action (position, size, workspace, ontop, \
+                         onbottom, opacity, nodecor, maximized, minimized, fullscreen, skiptask, \
+                         skippager, pinall, center)"
+                    ),
+                );
+                return;
+            };
+            // p1/p2 mean whatever the action says they mean -- x/y for
+            // `position`, width/height for `size`, a percentage for
+            // `opacity`.  Guessing 0 therefore did not misplace a window by a
+            // little: `windowrules action 3 position 10O 200` filed a rule
+            // that snaps the window to the screen corner, `... opacity 8O`
+            // filed one that makes it invisible, and both answered "Action
+            // Position added to rule 3." as though nothing had gone wrong.
+            // The rule then fires later, when nobody is watching the shell.
+            let Some(p1) =
+                optional_num::<i32>(&parts, 3, "windowrules", sub, "first action parameter", 0)
+            else {
+                return;
+            };
+            let Some(p2) =
+                optional_num::<i32>(&parts, 4, "windowrules", sub, "second action parameter", 0)
+            else {
+                return;
+            };
+            match windowrules::add_action(id, act, p1, p2) {
+                Ok(()) => shell_println!("Action {} added to rule {}.", act.label(), id),
+                Err(e) => {
+                    shell_println!("Error: {:?}", e);
+                    set_exit(1);
+                }
             }
         }
         "enable" => {
@@ -89433,12 +89908,20 @@ fn cmd_policyengine(args: &str) {
                 set_exit(1);
                 return;
             }
-            let cat = parse_policy_category(parts[2]);
-            let effect = parse_policy_effect(parts[6]);
-            let priority = parts
-                .get(7)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(50);
+            let Some(cat) = parse_policy_category(parts[2], sub) else {
+                return;
+            };
+            let Some(effect) = parse_policy_effect(parts[6], sub) else {
+                return;
+            };
+            // Priority decides which rule wins when two match, so a guessed 50
+            // does not make the rule inert -- it silently reorders the policy
+            // set around it, and the rule that loses is the one nobody looks at.
+            let Some(priority) =
+                optional_num::<u32>(&parts, 7, "policyengine", sub, "rule priority", 50)
+            else {
+                return;
+            };
             match policyengine::add_rule(
                 parts[1], cat, parts[3], parts[4], parts[5], effect, priority,
             ) {
@@ -89501,10 +89984,15 @@ fn cmd_policyengine(args: &str) {
             }
         }
         "audit" => {
-            let max = parts
-                .get(1)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(10);
+            // A limit that truncates evidence, and this is the audit log: an
+            // operator who asks for 100 entries and mistypes the count is shown
+            // ten, with no sign that the other ninety were not printed because
+            // the number was rejected rather than because they do not exist.
+            let Some(max) =
+                optional_num::<usize>(&parts, 1, "policyengine", sub, "entry count", 10)
+            else {
+                return;
+            };
             let log = policyengine::get_audit_log(max);
             if log.is_empty() {
                 shell_println!("No audit entries");
@@ -89538,7 +90026,9 @@ fn cmd_policyengine(args: &str) {
         }
         "default" => {
             if let Some(v) = parts.get(1) {
-                let effect = parse_policy_effect(v);
+                let Some(effect) = parse_policy_effect(v, sub) else {
+                    return;
+                };
                 match policyengine::set_default(effect) {
                     Ok(()) => shell_println!("Default effect: {}", effect.label()),
                     Err(e) => {
@@ -89584,9 +90074,16 @@ fn cmd_policyengine(args: &str) {
     }
 }
 
-fn parse_policy_category(s: &str) -> crate::fs::policyengine::PolicyCategory {
+/// Read a policy category, or refuse the word.
+///
+/// `None` means the word was not a category and the caller has already printed
+/// why. Every caller passes a *mandatory* operand, so there is no "absent" case
+/// for a default to serve: the old `_ => System` arm existed only to swallow
+/// words this shell does not know, and it filed the rule under the widest
+/// category there is.
+fn parse_policy_category(s: &str, sub: &str) -> Option<crate::fs::policyengine::PolicyCategory> {
     use crate::fs::policyengine::PolicyCategory;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "security" | "sec" => PolicyCategory::Security,
         "privacy" | "priv" => PolicyCategory::Privacy,
         "network" | "net" => PolicyCategory::Network,
@@ -89594,19 +90091,52 @@ fn parse_policy_category(s: &str) -> crate::fs::policyengine::PolicyCategory {
         "hardware" | "hw" => PolicyCategory::Hardware,
         "storage" | "stor" => PolicyCategory::Storage,
         "system" | "sys" => PolicyCategory::System,
-        _ => PolicyCategory::System,
-    }
+        _ => {
+            refuse_operand(
+                "policyengine",
+                sub,
+                format_args!(
+                    "`{}' is not a policy category (security, privacy, network, application, hardware, storage, system)",
+                    s
+                ),
+            );
+            return None;
+        }
+    })
 }
 
-fn parse_policy_effect(s: &str) -> crate::fs::policyengine::Effect {
+/// Read a policy effect, or refuse the word.
+///
+/// This one was the worst guess in the shell. The old `_ => Effect::Allow` arm
+/// meant `policyengine add r1 sec alice read /etc/shadow denyy` -- one letter
+/// off `deny` -- installed an **Allow** rule, and `policyengine default denyy`
+/// set the engine-wide fallback for every request matching no rule to Allow.
+/// A mistyped word did not merely record a wrong value, it inverted a security
+/// decision to permit, which is the one direction a fallback must never take.
+///
+/// Choosing `Deny` as a fail-safe default instead would have been worse, not
+/// better: it would still act on a word nobody typed, and a policy engine that
+/// quietly denies is a machine that mysteriously stops working. The only sound
+/// answer to an unreadable effect is to install no rule at all.
+fn parse_policy_effect(s: &str, sub: &str) -> Option<crate::fs::policyengine::Effect> {
     use crate::fs::policyengine::Effect;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "allow" => Effect::Allow,
         "deny" | "block" => Effect::Deny,
         "audit" | "log" => Effect::Audit,
         "allowaudit" | "allow+audit" => Effect::AllowWithAudit,
-        _ => Effect::Allow,
-    }
+        _ => {
+            refuse_operand(
+                "policyengine",
+                sub,
+                format_args!(
+                    "`{}' is not a policy effect (allow, deny, audit, allowaudit)",
+                    s
+                ),
+            );
+            return None;
+        }
+    })
 }
 
 /// `fontpreview` / `fprev` — font preview and comparison.
@@ -89859,13 +90389,25 @@ fn cmd_wifiscan(args: &str) {
                 set_exit(1);
                 return;
             }
-            let security = parse_wifi_security(parts[3]);
-            let band = parse_wifi_band(parts[4]);
-            let channel = parts[5].parse::<u8>().unwrap_or(1);
-            let signal = parts
-                .get(6)
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(-60);
+            let Some(security) = parse_wifi_security(parts[3], sub) else {
+                return;
+            };
+            let Some(band) = parse_wifi_band(parts[4], sub) else {
+                return;
+            };
+            // Channel 1 exists on 2.4 GHz and nowhere else, so a mistyped
+            // channel did not merely record the wrong number -- on a 5 GHz
+            // network it recorded a channel that band does not have, and the
+            // listing printed `ch1` beside `5GHz` as though that were a fact.
+            let Some(channel) = readable_num::<u8>(parts[5], "wifiscan", sub, "channel number")
+            else {
+                return;
+            };
+            let Some(signal) =
+                optional_num::<i32>(&parts, 6, "wifiscan", sub, "signal strength in dBm", -60)
+            else {
+                return;
+            };
             match wifiscan::discover(parts[1], parts[2], security, band, channel, signal) {
                 Ok(id) => shell_println!(
                     "Network #{}: {} ({} {} ch{} {}dBm)",
@@ -89993,9 +90535,18 @@ fn cmd_wifiscan(args: &str) {
     }
 }
 
-fn parse_wifi_security(s: &str) -> crate::fs::wifiscan::SecurityType {
+/// Read a Wi-Fi security type, or refuse and return `None`.
+///
+/// The old fallback was `_ => Wpa2Psk`, which is design-decisions.md §600's
+/// guessed value wearing a `match` instead of a `.parse()` -- and the worst
+/// possible instance of it, because the guessed field is the *security* of
+/// the network.  `wifiscan discover Cafe aa:.. wep2 5 36` (a typo for `wep`)
+/// filed an unencrypted-in-practice access point as WPA2-PSK, and the listing
+/// then showed it as protected.  Every other guess in this family costs an
+/// operator a re-run; this one costs them the reason they were scanning.
+fn parse_wifi_security(s: &str, sub: &str) -> Option<crate::fs::wifiscan::SecurityType> {
     use crate::fs::wifiscan::SecurityType;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "open" | "none" => SecurityType::Open,
         "wep" => SecurityType::Wep,
         "wpa" | "wpapsk" => SecurityType::WpaPsk,
@@ -90003,18 +90554,40 @@ fn parse_wifi_security(s: &str) -> crate::fs::wifiscan::SecurityType {
         "wpa3" | "wpa3psk" | "sae" => SecurityType::Wpa3Psk,
         "wpa2e" | "wpa2enterprise" => SecurityType::Wpa2Enterprise,
         "wpa3e" | "wpa3enterprise" => SecurityType::Wpa3Enterprise,
-        _ => SecurityType::Wpa2Psk,
-    }
+        other => {
+            refuse_operand(
+                "wifiscan",
+                sub,
+                format_args!(
+                    "`{other}' is not a security type (open, wep, wpa, wpa2, wpa3, wpa2e, wpa3e)"
+                ),
+            );
+            return None;
+        }
+    })
 }
 
-fn parse_wifi_band(s: &str) -> crate::fs::wifiscan::Band {
+/// Read a Wi-Fi band, or refuse and return `None`.
+///
+/// Same shape as `parse_wifi_security` above: the fallback was `_ =>
+/// Band5Ghz`, so a network discovered on a mistyped band was filed on 5 GHz
+/// and the channel number recorded next to it no longer belonged to the band
+/// it was listed under.
+fn parse_wifi_band(s: &str, sub: &str) -> Option<crate::fs::wifiscan::Band> {
     use crate::fs::wifiscan::Band;
-    match s.to_lowercase().as_str() {
+    Some(match s.to_lowercase().as_str() {
         "2.4" | "2g" | "24" | "24ghz" => Band::Band24Ghz,
         "5" | "5g" | "5ghz" => Band::Band5Ghz,
         "6" | "6g" | "6ghz" | "6e" => Band::Band6Ghz,
-        _ => Band::Band5Ghz,
-    }
+        other => {
+            refuse_operand(
+                "wifiscan",
+                sub,
+                format_args!("`{other}' is not a band (2.4, 5, 6)"),
+            );
+            return None;
+        }
+    })
 }
 
 /// `splitview` / `split` — multi-pane window management.
@@ -98126,8 +98699,14 @@ fn cmd_tracemon(args: &str) {
             }
         }
         "read" => {
-            let n_str = parts.get(1).copied().unwrap_or("20");
-            let n = n_str.parse::<usize>().unwrap_or(20);
+            // "Limits that truncate evidence": `tracemon read 5O` read 20
+            // events, printed `Trace events (20):`, and left the operator to
+            // conclude the ring buffer holds twenty -- the count in the header
+            // is the guess, not the buffer.
+            let Some(n) = optional_num::<usize>(&parts, 1, "tracemon", sub, "event count", 20)
+            else {
+                return;
+            };
             tracemon::init_defaults();
             let events = tracemon::read_buffer(n);
             shell_println!("Trace events ({}):", events.len());
@@ -98164,7 +98743,14 @@ fn cmd_tracemon(args: &str) {
                     }
                 }
             } else {
-                let pid = pid_str.parse::<u32>().unwrap_or(0);
+                // PID 0 is the idle task, which emits nothing -- so `tracemon
+                // filter 12O4` did not filter to the wrong process, it filtered
+                // to a process that never appears, printed "Filtering to PID 0"
+                // as confirmation, and every subsequent `read` came back empty.
+                // An empty trace reads as "the tracepoint never fired".
+                let Some(pid) = readable_num::<u32>(pid_str, "tracemon", sub, "process id") else {
+                    return;
+                };
                 match tracemon::set_filter_pid(Some(pid)) {
                     Ok(()) => shell_println!("Filtering to PID {}", pid),
                     Err(e) => {
@@ -101204,12 +101790,20 @@ fn cmd_writeback(args: &str) {
         }
         "dirty" => {
             let dev = parts.get(1).copied().unwrap_or("sda");
-            let pages = parts
-                .get(2)
-                .copied()
-                .unwrap_or("100")
-                .parse::<u64>()
-                .unwrap_or(100);
+            // A double guess: the absent operand became the *string* "100",
+            // which was then parsed, and an unreadable word became the
+            // *number* 100 -- two spellings of the same default on one
+            // expression, so a reader checking "what happens if it is
+            // missing" found an answer that also silently covered "what
+            // happens if it is wrong".  `optional_num` separates them: the
+            // default applies only to absence.  This is also a measurement
+            // being filed -- `record_dirty` writes the number into the
+            // device's statistics, where it is indistinguishable from a
+            // reading the kernel took itself.
+            let Some(pages) = optional_num::<u64>(&parts, 2, "writeback", sub, "page count", 100)
+            else {
+                return;
+            };
             match writeback::record_dirty(dev, pages) {
                 Ok(()) => shell_println!("Recorded {} dirty pages on {}", pages, dev),
                 Err(e) => {
@@ -101230,7 +101824,14 @@ fn cmd_writeback(args: &str) {
         }
         "threshold" => {
             if let Some(pct) = parts.get(1) {
-                let v = pct.parse::<u32>().unwrap_or(20);
+                // `writeback threshold 4O` set the threshold to 20% and
+                // confirmed "Dirty threshold set to 20%" -- a tuning knob
+                // moved to a value the operator did not choose, on a machine
+                // they were tuning precisely because the default was wrong.
+                let Some(v) = readable_num::<u32>(pct, "writeback", sub, "threshold percent")
+                else {
+                    return;
+                };
                 match writeback::set_threshold(v) {
                     Ok(()) => shell_println!("Dirty threshold set to {}%", v),
                     Err(e) => {
@@ -103960,11 +104561,26 @@ fn cmd_pmcstat(args: &str) {
             shell_println!("pmcstat: initialized");
         }
         "sample" => {
-            let cpu = parts
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // All three operands were guessed, and each guess lands somewhere
+            // different: the cpu attributes the sample to the wrong core, the
+            // event files it under the wrong counter, and the value is the
+            // reading itself. A performance counter reading is the "filed as a
+            // measurement" shape at its purest -- once `record_sample` accepts
+            // it, nothing downstream can tell an invented number from a
+            // measured one, and every later `pmcstat stats` is wrong by that
+            // much with no trace of why.
+            let Some(cpu) = optional_num::<u32>(&parts, 1, "pmcstat", sub, "cpu number", 0) else {
+                return;
+            };
+            // The `_` arm used to be reached by two different things: the
+            // operand being *absent* (legitimately "cycles") and the operand
+            // being a word this shell does not know. `pmcstat sample 0 insn
+            // 500` -- one letter short of `insns` -- was filed as cycles, and
+            // the success line then printed "cycles=500" back, so the output
+            // confirmed the guess. Spelling "cycles" out as its own arm is what
+            // lets the default stay and the typo be refused.
             let event = match parts.get(2).copied().unwrap_or("cycles") {
+                "cycles" => pmcstat::PmcEvent::Cycles,
                 "insns" | "instructions" => pmcstat::PmcEvent::Instructions,
                 "cache-miss" | "cmiss" => pmcstat::PmcEvent::CacheMisses,
                 "cache-ref" | "cref" => pmcstat::PmcEvent::CacheReferences,
@@ -103972,12 +104588,23 @@ fn cmd_pmcstat(args: &str) {
                 "br-insn" | "binsn" => pmcstat::PmcEvent::BranchInstructions,
                 "bus" => pmcstat::PmcEvent::BusCycles,
                 "stall" => pmcstat::PmcEvent::StalledCyclesFrontend,
-                _ => pmcstat::PmcEvent::Cycles,
+                other => {
+                    refuse_operand(
+                        "pmcstat",
+                        sub,
+                        format_args!(
+                            "`{}' is not a counter event (cycles, insns, cache-miss, cache-ref, br-miss, br-insn, bus, stall)",
+                            other
+                        ),
+                    );
+                    return;
+                }
             };
-            let value = parts
-                .get(3)
-                .and_then(|s| s.parse::<u64>().ok())
-                .unwrap_or(1000);
+            let Some(value) =
+                optional_num::<u64>(&parts, 3, "pmcstat", sub, "counter reading", 1000)
+            else {
+                return;
+            };
             match pmcstat::record_sample(cpu, event, value) {
                 Ok(()) => shell_println!("pmcstat: cpu={} {}={}", cpu, event.label(), value),
                 Err(e) => {
@@ -107361,14 +107988,22 @@ fn cmd_vmfrag(args: &str) {
         }
         "update" => {
             let name = parts.get(1).copied().unwrap_or("");
-            let order = parts
-                .get(2)
-                .and_then(|s| s.parse::<usize>().ok())
-                .unwrap_or(0);
-            let index = parts
-                .get(3)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0);
+            // "A measurement being filed": index 0 is *no fragmentation*, so
+            // `vmfrag update dma32 3 85O` recorded a perfectly-compact zone
+            // and confirmed it back as `index=0.0`.  The stored reading was
+            // not wrong by a little -- it was invented, and it then sat in the
+            // table looking exactly like a real one.  A missing operand filed
+            // the same fiction, so both are required rather than defaulted:
+            // there is no sensible default for a number being *reported*.
+            let Some(order) = required_num::<usize>(&parts, 2, "vmfrag", sub, "allocation order")
+            else {
+                return;
+            };
+            let Some(index) =
+                required_num::<u32>(&parts, 3, "vmfrag", sub, "fragmentation index in tenths")
+            else {
+                return;
+            };
             match vmfrag::update_index(name, order, index) {
                 Ok(()) => shell_println!(
                     "vmfrag: {} order {} index={}.{}",
@@ -122091,21 +122726,33 @@ fn cmd_source(args: &str) {
 fn cmd_seq(args: &str) {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
+    // Both arms below take the same kind of word, and until now they disagreed
+    // about what to do with an unreadable one: `seq 1O` refused, while
+    // `seq 1 1O` guessed 1 and printed a single line -- design-decisions.md
+    // §600's "strict and guessing inside one function", twelve lines apart.
+    // A pipeline written as `for i in $(seq 1 $n)` then ran once instead of n
+    // times with nothing on stderr to say why.
+    //
+    // The one-argument arm also used to answer a mistyped *number* by
+    // reprinting the *syntax*, which tells an operator who got the syntax right
+    // to go and re-read it. GNU seq names the word instead -- `seq: invalid
+    // floating point argument: '1O'` -- and so does this now, in the family's
+    // wording, since kshell's seq is integer-only. `seq` has no subcommand, so
+    // this is the third caller of `refuse_operand`'s collapsed prefix.
     let (start, end) = match parts.len() {
         1 => {
-            let n = match parts[0].parse::<i64>() {
-                Ok(v) => v,
-                Err(_) => {
-                    shell_println!("Usage: seq N [M]");
-                    set_exit(1);
-                    return;
-                }
+            let Some(n) = readable_num::<i64>(parts[0], "seq", "", "number") else {
+                return;
             };
             (1i64, n)
         }
         2 => {
-            let a = parts[0].parse::<i64>().unwrap_or(1);
-            let b = parts[1].parse::<i64>().unwrap_or(1);
+            let Some(a) = readable_num::<i64>(parts[0], "seq", "", "number") else {
+                return;
+            };
+            let Some(b) = readable_num::<i64>(parts[1], "seq", "", "number") else {
+                return;
+            };
             (a, b)
         }
         _ => {
@@ -124312,7 +124959,8 @@ fn cmd_sleep(args: &str) {
 ///   Integer tests: N -eq N, N -ne N, N -lt N, N -le N, N -gt N, N -ge N
 ///   Logical:       ! EXPR (negation)
 ///
-/// Sets exit status: 0 (true) or 1 (false).
+/// Sets exit status: 0 (true), 1 (false), or 2 (the expression was malformed —
+/// see [`report_arith`] for why that must not collapse into 1).
 fn cmd_test(args: &str) {
     // Strip trailing `]` if invoked as `[`.
     let args = if args.ends_with(']') {
@@ -124329,22 +124977,30 @@ fn cmd_test(args: &str) {
         return;
     }
 
-    let result = eval_test(args);
-    set_exit(if result { 0 } else { 1 });
+    match eval_test(args) {
+        Ok(result) => set_exit(if result { 0 } else { 1 }),
+        Err(e) => report_arith("test", &e, 2),
+    }
 }
 
 /// Evaluate a test expression, returning true or false.
-fn eval_test(args: &str) -> bool {
+///
+/// Returns `Err` only for an integer comparison whose operand is not an
+/// integer; every other malformed shape is false, as POSIX requires.
+fn eval_test(args: &str) -> Result<bool, ArithError> {
     let parts: Vec<&str> = args.split_whitespace().collect();
 
     if parts.is_empty() {
-        return false;
+        return Ok(false);
     }
 
     // Negation: `! EXPR`
     if parts[0] == "!" {
         let rest = parts.get(1..).unwrap_or(&[]).join(" ");
-        return !eval_test(&rest);
+        // `?` rather than negating through the error: `! [ x -eq 1 ]` is
+        // malformed whichever side of the `!` it sits on, and "not malformed"
+        // is not a truth value.
+        return Ok(!eval_test(&rest)?);
     }
 
     // Unary file/string tests.
@@ -124356,68 +125012,68 @@ fn eval_test(args: &str) -> bool {
             "-e" => {
                 // File exists.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path).is_ok();
+                return Ok(crate::fs::Vfs::stat(&path).is_ok());
             }
             "-f" => {
                 // Is regular file.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::File)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-d" => {
                 // Is directory.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::Directory)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-s" => {
                 // File exists and is non-empty.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::stat(&path)
+                return Ok(crate::fs::Vfs::stat(&path)
                     .map(|m| m.size > 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-L" | "-h" => {
                 // Is symbolic link.
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::lstat(&path)
+                return Ok(crate::fs::Vfs::lstat(&path)
                     .map(|m| m.entry_type == crate::fs::EntryType::Symlink)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-r" => {
                 // File is readable (exists with read permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o400 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-w" => {
                 // File is writable (exists with write permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o200 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-x" => {
                 // File is executable (exists with execute permission).
                 let path = resolve_path(operand);
-                return crate::fs::Vfs::metadata(&path)
+                return Ok(crate::fs::Vfs::metadata(&path)
                     .map(|m| m.permissions & 0o100 != 0)
-                    .unwrap_or(false);
+                    .unwrap_or(false));
             }
             "-v" => {
                 // Variable is set (non-empty).
-                return env_get(operand).is_some_and(|v| !v.is_empty()) || is_array(operand);
+                return Ok(env_get(operand).is_some_and(|v| !v.is_empty()) || is_array(operand));
             }
             "-z" => {
                 // String is empty.
-                return operand.is_empty();
+                return Ok(operand.is_empty());
             }
             "-n" => {
                 // String is non-empty.
-                return !operand.is_empty();
+                return Ok(!operand.is_empty());
             }
             _ => {}
         }
@@ -124430,14 +125086,24 @@ fn eval_test(args: &str) -> bool {
         let right = parts[2];
 
         match op {
-            "=" | "==" => return left == right,
-            "!=" => return left != right,
-            "<" => return left < right, // Lexicographic string comparison.
-            ">" => return left > right,
+            "=" | "==" => return Ok(left == right),
+            "!=" => return Ok(left != right),
+            "<" => return Ok(left < right), // Lexicographic string comparison.
+            ">" => return Ok(left > right),
             "-eq" | "-ne" | "-lt" | "-le" | "-gt" | "-ge" => {
-                let l = left.parse::<i64>().unwrap_or(0);
-                let r = right.parse::<i64>().unwrap_or(0);
-                return match op {
+                // Both words used to become `0` when unreadable, which made
+                // `[ "$n" -eq 0 ]` *true* for every non-numeric `$n` — an unset
+                // or misspelled variable taking the zero branch and reporting
+                // success. bash and dash both refuse, with status 2.
+                let l = left.parse::<i64>().map_err(|_| ArithError::NotNumeric {
+                    word: String::from(left),
+                    from_var: None,
+                })?;
+                let r = right.parse::<i64>().map_err(|_| ArithError::NotNumeric {
+                    word: String::from(right),
+                    from_var: None,
+                })?;
+                return Ok(match op {
                     "-eq" => l == r,
                     "-ne" => l != r,
                     "-lt" => l < r,
@@ -124445,7 +125111,7 @@ fn eval_test(args: &str) -> bool {
                     "-gt" => l > r,
                     "-ge" => l >= r,
                     _ => false,
-                };
+                });
             }
             _ => {}
         }
@@ -124453,11 +125119,11 @@ fn eval_test(args: &str) -> bool {
 
     // Single argument: true if non-empty string.
     if parts.len() == 1 {
-        return !parts[0].is_empty();
+        return Ok(!parts[0].is_empty());
     }
 
     // Unrecognized expression — treat as false.
-    false
+    Ok(false)
 }
 
 /// Evaluate and print an arithmetic expression.
@@ -124471,24 +125137,126 @@ fn cmd_expr(args: &str) {
         set_exit(1);
         return;
     }
-    let result = eval_arithmetic(args);
-    shell_println!("{}", result);
+    // GNU `expr` exits 2 on a malformed expression, distinct from the 1 it uses
+    // for "the value is null or zero" — the same split as `test`, and for the
+    // same reason: `expr` is normally read through `$(…)`, where a printed `0`
+    // and a real `0` are indistinguishable unless the status separates them.
+    match eval_arithmetic(args) {
+        Ok(result) => shell_println!("{}", result),
+        Err(e) => report_arith("expr", &e, 2),
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Arithmetic evaluation for $((...))
 // ---------------------------------------------------------------------------
 
+/// Why an arithmetic expression could not be evaluated.
+///
+/// The evaluator used to have no error channel at all: every one of these cases
+/// produced `0` and returned it as if it were an answer, which is
+/// design-decisions.md §600's prohibited shape sitting under the shell's entire
+/// expression language rather than under one option. `expr 1O + 1` printed `1`,
+/// `expr 1/0` printed `0`, and `x=abc; echo $((x * 100))` printed `0` — three
+/// different failures wearing the same face as a real result, and none of them
+/// distinguishable by a script, because the exit status was `0` too.
+///
+/// Every variant carries the word it could not read, because the operator's next
+/// question is always *which* one — an expression has several operands and the
+/// diagnostic that does not name one sends them to re-read the whole line.
+enum ArithError {
+    /// A word that must be a number is not one.
+    ///
+    /// `from_var` names the variable when the word came from an expansion
+    /// rather than from the command line: `$((x))` shows the operator a word
+    /// they never typed, so `` `abc' is not a number `` alone would leave them
+    /// hunting for an `abc` that appears nowhere in the expression.
+    NotNumeric {
+        /// The unreadable word itself.
+        word: String,
+        /// The variable it was the value of, if it came from one.
+        from_var: Option<String>,
+    },
+    /// A numeric literal too large for `i64`.
+    Overflow(String),
+    /// `/ 0` or `% 0`.
+    DivideByZero,
+    /// A character that is not part of the arithmetic language.
+    BadChar(char),
+    /// A number or `(` was expected and something else (or nothing) was there.
+    ExpectedValue,
+    /// A `(` with no matching `)`.
+    UnclosedParen,
+    /// A complete expression, then more tokens.
+    TrailingTokens,
+}
+
+/// Print one arithmetic refusal and set the exit status.
+///
+/// Separate from [`refuse_operand`] for one reason only: the status differs.
+/// `test` must exit **2**, because bash and dash both reserve `1` for "the
+/// condition was false" — a script that writes `if [ "$n" -gt 5 ]` has to be
+/// able to tell *no* from *you handed me a word*, and collapsing them is how a
+/// typo in `$n` becomes a silently-skipped branch. `expr` exits 2 for the same
+/// reason GNU `expr` does. The `$((…))`, `((…))` and `let` forms exit 1, which
+/// is what bash gives them.
+///
+/// Every message literal lives here rather than in a `Display` impl or a
+/// `message() -> String`, deliberately: `scripts/check-selftest-wording.py`
+/// verifies a rung's assertions against the literals it can reach by walking
+/// calls within this file, and a free function called straight from
+/// `cmd_test`/`cmd_expr`/`cmd_let` is reachable to that walk where a trait
+/// method on an enum is not. Keeping the strings here buys the rung its
+/// coverage instead of buying an entry in the checker's `ALLOWED` table.
+fn report_arith(cmd: &str, err: &ArithError, status: u8) {
+    match err {
+        ArithError::NotNumeric { word, from_var } => match from_var {
+            Some(name) => shell_println!(
+                "{}: `{}' is not a number (the value of `{}')",
+                cmd,
+                word,
+                name
+            ),
+            None => shell_println!("{}: `{}' is not a number", cmd, word),
+        },
+        ArithError::Overflow(word) => {
+            shell_println!("{}: `{}' does not fit in a 64-bit integer", cmd, word);
+        }
+        ArithError::DivideByZero => shell_println!("{}: division by zero", cmd),
+        ArithError::BadChar(c) => {
+            shell_println!("{}: `{}' is not an arithmetic operator", cmd, c);
+        }
+        ArithError::ExpectedValue => shell_println!("{}: expected a number", cmd),
+        ArithError::UnclosedParen => shell_println!("{}: missing `)'", cmd),
+        ArithError::TrailingTokens => shell_println!("{}: unexpected trailing operand", cmd),
+    }
+    set_exit(status);
+}
+
 /// Evaluate a simple arithmetic expression.
 ///
 /// Supports: integer literals, `+`, `-`, `*`, `/`, `%`, unary `-`,
 /// parentheses `(...)`, and whitespace.
 ///
-/// All arithmetic is done in i64.  Division by zero returns 0.
-fn eval_arithmetic(expr: &str) -> i64 {
-    let tokens = tokenize_arith(expr);
+/// All arithmetic is done in i64.  Every way of failing to produce a number is
+/// reported as an [`ArithError`] rather than as `0`; see that type for why the
+/// old `0` was worse than no answer at all.
+fn eval_arithmetic(expr: &str) -> Result<i64, ArithError> {
+    let tokens = tokenize_arith(expr)?;
+    // An *empty* expression is not a malformed one: bash and dash both make
+    // `$(( ))` zero, and `${x::3}` reaches here with an empty offset, where `0`
+    // is the correct offset rather than a guess at one.
+    if tokens.is_empty() {
+        return Ok(0);
+    }
     let mut pos = 0;
-    parse_expr(&tokens, &mut pos)
+    let val = parse_expr(&tokens, &mut pos)?;
+    // `1 2` and `2=3` parse a complete expression and then find more. Returning
+    // the prefix's value would be the guess this batch exists to remove.
+    if pos != tokens.len() {
+        return Err(ArithError::TrailingTokens);
+    }
+    Ok(val)
 }
 
 /// Arithmetic token.
@@ -124526,7 +125294,15 @@ enum ArithToken {
 ///
 /// Supports: numbers, +, -, *, /, %, (, ), <, <=, >, >=, ==, !=, &&, ||, !
 /// Also recognizes bare variable names (resolved to their integer value).
-fn tokenize_arith(s: &str) -> Vec<ArithToken> {
+///
+/// An unset variable is `0` — that is not a guess but the documented rule in
+/// every shell, and `$((count + 1))` on a fresh variable has to mean `1`. A
+/// variable that is *set to something unreadable* is a different matter and is
+/// refused: bash answers `x=abc; echo $((x))` with `0`, dash with
+/// `Illegal number: abc`, and dash is right for this shell — bash's `0` is
+/// precisely the invented value §600 prohibits, and it is the one that turns a
+/// misspelled configuration value into a plausible-looking measurement.
+fn tokenize_arith(s: &str) -> Result<Vec<ArithToken>, ArithError> {
     let bytes = s.as_bytes();
     let len = bytes.len();
     let mut tokens = Vec::new();
@@ -124589,9 +125365,11 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::Eq);
                     i = i.saturating_add(2);
                 } else {
-                    // Lone `=` in arithmetic context — skip (assignment handled
-                    // separately in eval_cfor_expr).
-                    i = i.saturating_add(1);
+                    // Assignment is split off by `eval_arith_stmt` before the
+                    // tokenizer ever sees it, so a `=` that reaches here is in
+                    // a position where no assignment is possible — `2=3`, or
+                    // `let "1 = 2"`. Skipping it made `2=3` evaluate to `2`.
+                    return Err(ArithError::BadChar('='));
                 }
             }
             b'!' => {
@@ -124608,7 +125386,10 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::And);
                     i = i.saturating_add(2);
                 } else {
-                    i = i.saturating_add(1); // Skip lone &.
+                    // Bitwise `&` is not implemented. Skipping it made `6 & 3`
+                    // evaluate to `6`, which is not merely unsupported but
+                    // *wrong* — bash answers `2` — and looks like a result.
+                    return Err(ArithError::BadChar('&'));
                 }
             }
             b'|' => {
@@ -124616,7 +125397,9 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                     tokens.push(ArithToken::Or);
                     i = i.saturating_add(2);
                 } else {
-                    i = i.saturating_add(1); // Skip lone |.
+                    // As for lone `&`: bitwise `|` is unimplemented, and
+                    // skipping it made `6 | 3` answer `6` where bash says `7`.
+                    return Err(ArithError::BadChar('|'));
                 }
             }
             b'0'..=b'9' => {
@@ -124624,12 +125407,18 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                 while i < len && bytes[i].is_ascii_digit() {
                     i = i.saturating_add(1);
                 }
-                if let Some(num_bytes) = bytes.get(start..i) {
-                    if let Ok(num_str) = core::str::from_utf8(num_bytes) {
-                        let val = num_str.parse::<i64>().unwrap_or(0);
-                        tokens.push(ArithToken::Num(val));
-                    }
-                }
+                // A literal too big for `i64` used to become `0` — the largest
+                // number the operator can write turning into the smallest.
+                // Neither reference shell produces `0` here and the two do not
+                // agree with each other (bash wraps to 7766279631452241919,
+                // dash saturates to i64::MAX), which is the clearest possible
+                // sign that there is no right answer to substitute.
+                let num_bytes = bytes.get(start..i).unwrap_or(&[]);
+                let num_str = core::str::from_utf8(num_bytes).unwrap_or("");
+                let val = num_str
+                    .parse::<i64>()
+                    .map_err(|_| ArithError::Overflow(String::from(num_str)))?;
+                tokens.push(ArithToken::Num(val));
             }
             c if c.is_ascii_alphabetic() || c == b'_' => {
                 // Variable name — resolve to integer value.
@@ -124637,167 +125426,195 @@ fn tokenize_arith(s: &str) -> Vec<ArithToken> {
                 while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
                     i = i.saturating_add(1);
                 }
-                if let Some(name_bytes) = bytes.get(start..i) {
-                    if let Ok(name) = core::str::from_utf8(name_bytes) {
-                        let val = env_get(name)
-                            .and_then(|v| v.parse::<i64>().ok())
-                            .unwrap_or(0);
-                        tokens.push(ArithToken::Num(val));
-                    }
-                }
+                let name_bytes = bytes.get(start..i).unwrap_or(&[]);
+                let name = core::str::from_utf8(name_bytes).unwrap_or("");
+                let val = match env_get(name) {
+                    // Unset, or set to nothing, is zero in every shell.
+                    None => 0,
+                    Some(raw) if raw.trim().is_empty() => 0,
+                    Some(raw) => raw
+                        .trim()
+                        .parse::<i64>()
+                        .map_err(|_| ArithError::NotNumeric {
+                            word: raw.trim().into(),
+                            from_var: Some(String::from(name)),
+                        })?,
+                };
+                tokens.push(ArithToken::Num(val));
             }
             _ => {
-                // Unknown character — skip.
-                i = i.saturating_add(1);
+                // Silently skipping the character meant `2 $ 3` evaluated to
+                // `2` and `1 @@ 2` to `1`: a typo removed an operator and the
+                // shell answered with an expression the operator did not write.
+                let c = s
+                    .get(i..)
+                    .and_then(|rest| rest.chars().next())
+                    .unwrap_or('?');
+                return Err(ArithError::BadChar(c));
             }
         }
     }
 
-    tokens
+    Ok(tokens)
 }
 
 /// Parse a logical OR expression: and_expr ('||' and_expr)*
-fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_and_expr(tokens, pos);
+fn parse_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_and_expr(tokens, pos)?;
     while let Some(ArithToken::Or) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let rhs = parse_and_expr(tokens, pos);
-        val = if val != 0 || rhs != 0 { 1 } else { 0 };
+        let rhs = parse_and_expr(tokens, pos)?;
+        val = i64::from(val != 0 || rhs != 0);
     }
-    val
+    Ok(val)
 }
 
 /// Parse a logical AND expression: cmp_expr ('&&' cmp_expr)*
-fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_cmp_expr(tokens, pos);
+fn parse_and_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_cmp_expr(tokens, pos)?;
     while let Some(ArithToken::And) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let rhs = parse_cmp_expr(tokens, pos);
-        val = if val != 0 && rhs != 0 { 1 } else { 0 };
+        let rhs = parse_cmp_expr(tokens, pos)?;
+        val = i64::from(val != 0 && rhs != 0);
     }
-    val
+    Ok(val)
 }
 
 /// Parse a comparison expression: add_expr (('<' | '<=' | '>' | '>=' | '==' | '!=') add_expr)*
-fn parse_cmp_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_add_expr(tokens, pos);
+fn parse_cmp_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_add_expr(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Lt) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val < rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val < rhs);
             }
             Some(ArithToken::Le) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val <= rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val <= rhs);
             }
             Some(ArithToken::Gt) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val > rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val > rhs);
             }
             Some(ArithToken::Ge) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val >= rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val >= rhs);
             }
             Some(ArithToken::Eq) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val == rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val == rhs);
             }
             Some(ArithToken::Ne) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_add_expr(tokens, pos);
-                val = if val != rhs { 1 } else { 0 };
+                let rhs = parse_add_expr(tokens, pos)?;
+                val = i64::from(val != rhs);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse an additive expression: term (('+' | '-') term)*
-fn parse_add_expr(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_term(tokens, pos);
+fn parse_add_expr(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_term(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Plus) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_add(parse_term(tokens, pos));
+                val = val.wrapping_add(parse_term(tokens, pos)?);
             }
             Some(ArithToken::Minus) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_sub(parse_term(tokens, pos));
+                val = val.wrapping_sub(parse_term(tokens, pos)?);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse a multiplicative expression: unary (('*' | '/' | '%') unary)*
-fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> i64 {
-    let mut val = parse_unary(tokens, pos);
+fn parse_term(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
+    let mut val = parse_unary(tokens, pos)?;
     loop {
         match tokens.get(*pos) {
             Some(ArithToken::Star) => {
                 *pos = pos.saturating_add(1);
-                val = val.wrapping_mul(parse_unary(tokens, pos));
+                val = val.wrapping_mul(parse_unary(tokens, pos)?);
             }
             Some(ArithToken::Slash) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_unary(tokens, pos);
-                val = if rhs == 0 { 0 } else { val.wrapping_div(rhs) };
+                let rhs = parse_unary(tokens, pos)?;
+                // `x / 0` answered `0`, which is a number the operator has no
+                // way to distinguish from a real quotient -- and `0` is exactly
+                // what a divisor that was itself mistakenly zero would produce
+                // for a numerator of zero, so the wrong answer looks right in
+                // the one case most likely to arise. bash and dash both refuse.
+                if rhs == 0 {
+                    return Err(ArithError::DivideByZero);
+                }
+                val = val.wrapping_div(rhs);
             }
             Some(ArithToken::Percent) => {
                 *pos = pos.saturating_add(1);
-                let rhs = parse_unary(tokens, pos);
-                val = if rhs == 0 { 0 } else { val.wrapping_rem(rhs) };
+                let rhs = parse_unary(tokens, pos)?;
+                if rhs == 0 {
+                    return Err(ArithError::DivideByZero);
+                }
+                val = val.wrapping_rem(rhs);
             }
             _ => break,
         }
     }
-    val
+    Ok(val)
 }
 
 /// Parse a unary expression: '-' unary | '!' unary | atom
-fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+fn parse_unary(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
     if let Some(ArithToken::Minus) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        return parse_unary(tokens, pos).wrapping_neg();
+        return Ok(parse_unary(tokens, pos)?.wrapping_neg());
     }
     if let Some(ArithToken::Not) = tokens.get(*pos) {
         *pos = pos.saturating_add(1);
-        let val = parse_unary(tokens, pos);
-        return if val == 0 { 1 } else { 0 };
+        let val = parse_unary(tokens, pos)?;
+        return Ok(i64::from(val == 0));
     }
     parse_atom(tokens, pos)
 }
 
 /// Parse an atom: number | '(' expr ')'
-fn parse_atom(tokens: &[ArithToken], pos: &mut usize) -> i64 {
+fn parse_atom(tokens: &[ArithToken], pos: &mut usize) -> Result<i64, ArithError> {
     match tokens.get(*pos) {
         Some(ArithToken::Num(n)) => {
             let val = *n;
             *pos = pos.saturating_add(1);
-            val
+            Ok(val)
         }
         Some(ArithToken::LParen) => {
             *pos = pos.saturating_add(1);
-            let val = parse_expr(tokens, pos);
-            // Consume matching ')'.
+            let val = parse_expr(tokens, pos)?;
+            // An unclosed `(` used to be consumed as if it had been closed, so
+            // `expr (1+2` printed `3` and `expr 2*(3+4` printed `14` -- the
+            // shell inventing the paren the operator forgot and answering as
+            // though the expression were complete.
             if let Some(ArithToken::RParen) = tokens.get(*pos) {
                 *pos = pos.saturating_add(1);
+            } else {
+                return Err(ArithError::UnclosedParen);
             }
-            val
+            Ok(val)
         }
-        _ => {
-            // Unexpected token — return 0.
-            0
-        }
+        // `1 +` and `expr '*' 3` land here. The old `0` made the first answer
+        // `1` and the second `0`.
+        _ => Err(ArithError::ExpectedValue),
     }
 }
 
@@ -125158,16 +125975,25 @@ fn cmd_let(args: &str) {
             && left.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             && !left.starts_with(|c: char| c.is_ascii_digit())
         {
-            let val = eval_arithmetic(right);
-            env_set(left, &alloc::format!("{}", val));
-            set_exit(if val == 0 { 1 } else { 0 });
+            // Refusing leaves the variable at its previous value rather than
+            // overwriting it with the old `0`: `let "n = $x + 1"` with an
+            // unreadable `$x` used to *destroy* whatever `n` held.
+            match eval_arithmetic(right) {
+                Ok(val) => {
+                    env_set(left, &alloc::format!("{}", val));
+                    set_exit(if val == 0 { 1 } else { 0 });
+                }
+                Err(e) => report_arith("let", &e, 1),
+            }
             return;
         }
     }
 
     // No assignment — just evaluate.
-    let val = eval_arithmetic(expr);
-    set_exit(if val == 0 { 1 } else { 0 });
+    match eval_arithmetic(expr) {
+        Ok(val) => set_exit(if val == 0 { 1 } else { 0 }),
+        Err(e) => report_arith("let", &e, 1),
+    }
 }
 
 /// `trap 'COMMAND' SIGNAL` — set a handler for a shell event.

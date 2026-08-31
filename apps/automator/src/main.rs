@@ -2150,6 +2150,21 @@ impl AutomatorApp {
         );
 
         let macros = self.library.list();
+        // An empty library must say it is empty. A blank panel under a heading
+        // reading "Macros (0)" is indistinguishable from a panel that failed
+        // to draw, and it does not tell the user that New is what to press.
+        if macros.is_empty() {
+            centred(
+                f,
+                body.x + l.pad,
+                (body.w - l.pad * 2.0).max(0.0),
+                body.y + (body.h - l.small) / 2.0,
+                "No macros yet -- press New",
+                OVERLAY0,
+                l.small,
+                FontWeightHint::Regular,
+            );
+        }
         let first = self.sidebar_scroll.min(macros.len());
         for (slot, (i, mac)) in macros.iter().enumerate().skip(first).enumerate() {
             let row_y = l.row.mul_add(usize_f32(slot), body.y);
@@ -5555,6 +5570,219 @@ mod tests {
         assert_eq!(
             app.selected_macro_id, picked,
             "the click chose another macro"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // What the picture says
+    // -----------------------------------------------------------------------
+
+    /// Every string the frame draws, at the size the window opens at.
+    fn said(app: &AutomatorApp, w: f32, h: f32) -> Vec<String> {
+        app.frame(w, h)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every string the frame draws inside `area`.
+    fn said_in(app: &AutomatorApp, w: f32, h: f32, area: Rect) -> Vec<String> {
+        app.frame(w, h)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } if area.contains(*x, *y) => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_read_out_says_what_the_selected_macro_is() {
+        let app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let l = Layout::solve(w, h);
+        let text = said_in(&app, w, h, l.props);
+        let mac = app
+            .selected_macro_id
+            .and_then(|id| app.library.get(id))
+            .expect("a macro is selected");
+        for wanted in [
+            "Properties".to_string(),
+            "Name".to_string(),
+            mac.name.clone(),
+            "Actions".to_string(),
+            mac.action_count().to_string(),
+            "Speed".to_string(),
+            "Repeat".to_string(),
+            "Trigger".to_string(),
+        ] {
+            assert!(
+                text.contains(&wanted),
+                "the read-out does not say {wanted:?}; it says {text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_read_out_says_what_the_selected_action_is() {
+        // The panel reports on the action the list has selected. Reporting on
+        // the macro alone leaves the list's own selection saying nothing.
+        let mut app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let l = Layout::solve(w, h);
+        app.select_action(2);
+        let with = said_in(&app, w, h, l.props);
+        assert!(
+            with.contains(&"Delay".to_string()),
+            "the read-out does not name the selected action's delay: {with:?}"
+        );
+        app.selected_action_idx = None;
+        let without = said_in(&app, w, h, l.props);
+        assert!(
+            without.contains(&"(none selected)".to_string()),
+            "the read-out does not say that nothing is selected: {without:?}"
+        );
+    }
+
+    #[test]
+    fn the_header_says_when_it_is_recording_and_when_it_is_playing() {
+        let (w, h) = AutomatorApp::SIZE;
+        let l = Layout::solve(w, h);
+        assert!(
+            !said_in(&demo_app(), w, h, l.header).contains(&"REC".to_string()),
+            "an idle Automator says it is recording"
+        );
+        assert!(
+            said_in(&recording_app(), w, h, l.header).contains(&"REC".to_string()),
+            "a recording Automator does not say so"
+        );
+        let playing = said_in(&playing_app(), w, h, l.header);
+        assert!(
+            playing.iter().any(|t| t.contains("PLAYING")),
+            "a playing Automator does not say so: {playing:?}"
+        );
+    }
+
+    #[test]
+    fn the_status_bar_says_what_is_recording_and_what_is_playing() {
+        let (w, h) = AutomatorApp::SIZE;
+        let l = Layout::solve(w, h);
+        for (name, app) in states() {
+            let bar = said_in(&app, w, h, l.status);
+            assert!(
+                bar.iter().any(|t| t.contains("Rec: ")),
+                "{name}: the status bar does not report the recorder: {bar:?}"
+            );
+            assert!(
+                bar.iter().any(|t| t.contains("Play: ")),
+                "{name}: the status bar does not report the player: {bar:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_card_lists_every_button_and_the_key_it_shares() {
+        // A help card that lists some of the buttons is worse than none: it
+        // tells the user the list is complete.
+        let app = helping_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let text = said(&app, w, h);
+        for button in Button::all() {
+            assert!(
+                text.iter().any(|t| t == button.action_label()),
+                "the card does not list {button:?}"
+            );
+            assert!(
+                text.iter().any(|t| t == button.key_label()),
+                "the card does not give {button:?}'s key"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_card_stays_inside_the_window_that_holds_it() {
+        for (w, h) in sizes() {
+            let card = rect_of_sized(&helping_app(), Target::Help, (w, h));
+            let Some(card) = card else { continue };
+            assert!(
+                inside(Rect::new(0.0, 0.0, w, h), card),
+                "the card is {}x{} in a {w}x{h} window",
+                card.w,
+                card.h
+            );
+        }
+    }
+
+    #[test]
+    fn the_sidebar_names_every_macro_it_has_room_for() {
+        let app = demo_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let l = Layout::solve(w, h);
+        let text = said_in(&app, w, h, l.sidebar);
+        for mac in app.library.list() {
+            assert!(
+                text.iter().any(|t| t == &mac.name),
+                "the library does not name {:?}: {text:?}",
+                mac.name
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_library_says_so_rather_than_showing_nothing() {
+        let app = empty_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let text = said(&app, w, h);
+        assert!(
+            text.iter().any(|t| t.contains("No macros")),
+            "an empty library shows a blank panel: {text:?}"
+        );
+        assert!(
+            text.iter().any(|t| t.contains("Select a macro")),
+            "an empty editor shows a blank panel: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_script_that_does_not_parse_says_where_it_went_wrong() {
+        let app = error_app();
+        let (w, h) = AutomatorApp::SIZE;
+        let text = said(&app, w, h);
+        let err = app.script_error.as_ref().expect("the script did not parse");
+        assert!(
+            text.iter().any(|t| t == err),
+            "the error is not on screen: {text:?}"
+        );
+    }
+
+    #[test]
+    fn a_panel_that_has_no_room_is_left_out_rather_than_squeezed() {
+        // A panel drawn into a rectangle it does not fit is a panel painted
+        // over its neighbour. The layout drops it instead, and the drawing
+        // pass must respect that: nothing at all is painted in a dropped
+        // panel's place.
+        let app = demo_app();
+        let narrow = (200.0_f32, 700.0_f32);
+        let l = Layout::solve(narrow.0, narrow.1);
+        assert!(l.props.is_empty(), "the read-out survived a 200px window");
+        let text = said(&app, narrow.0, narrow.1);
+        assert!(
+            !text.iter().any(|t| t == "Properties"),
+            "the dropped read-out was drawn anyway: {text:?}"
+        );
+        assert!(
+            !app.frame(narrow.0, narrow.1)
+                .hits()
+                .iter()
+                .any(|(t, _)| matches!(t, Target::Speed(_) | Target::Repeat(_))),
+            "the dropped read-out's pads are still clickable"
         );
     }
 }

@@ -102567,9 +102567,13 @@ property of the design.
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
 
-## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A)
+## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A) — FIXED 2026-08-31
 
-**Status:** OPEN 2026-08-31
+**Status:** FIXED 2026-08-31, same day as found. The note is now data: each
+gated call site declares the serial line that proves it ran, the checker
+verifies the declaration is printable, every boot records which of them
+appeared, and a gate fails the build on one that has never appeared. See
+"What was done" at the end of this entry.
 
 `scripts/check-self-tests-wired.py` ends every run with a NOTE:
 
@@ -102619,18 +102623,59 @@ self-tests silently stop running** and nothing says so. The code comment at
 exclusive raw-NIC claim, §64) — which makes it a correct decision with no
 tripwire, not an accident.
 
-**Proper fix.** Do the correlation in the harness rather than in the reader's
-head. The wiring gate runs *pre*-build so it has no serial log at that point;
-the natural home is a post-boot check beside `check-boot-skips.py`, which
-already reads the serial log for exactly this kind of question. Have
-`check-self-tests-wired.py` emit its gated-site list as machine-readable output
-(it already computes it for `--list-gated`), and have the post-boot step assert
-each gated site produced *some* output in the log. Keying that on a per-site
-declared marker — not on the function's name — is the whole point, since the
-name-to-output mismatch above is the failure mode.
+**What was done.** Three commits, one per stage of the pipeline.
 
-**Until then, the netstack pair is the one to watch**, because its guard is a
-flag someone will eventually flip on purpose.
+1. **The declaration and its enforcement** (`395b7fc6a`). Each of the six gated
+   sites in `main.rs` carries a `// RAN-IF: "<literal>"` comment naming the
+   serial line that proves it ran. `check-self-tests-wired.py` requires one at
+   every gated site and — the part that matters — verifies the literal actually
+   occurs in the file that *defines* that suite. A marker that matches nothing
+   is worse than no marker: a missing one fails loudly here and now, whereas a
+   typo'd one passes this gate and then reports its suite as never-run on every
+   boot forever, which is an accusation against working code and therefore the
+   failure most likely to be believed and acted on. `--emit-markers` writes the
+   set as JSON. 34 tests in `scripts/test-check-self-tests-wired.py`.
+
+   Keyed by *literal*, not by site, so the `acpi` `if`/`else` pair maps to one
+   marker: seeing the line proves an arm ran without saying which, which is
+   exactly as much as the log can prove. Keying by site would report the losing
+   arm as never-seen on code that is correct by construction — the false alarm
+   this entry's own table warns about.
+
+2. **The recording** (`21fdf4527`). `boot-history.py` gains `--gated-markers`
+   and writes `gated_ran: {literal: bool}` per boot; `boot-test.sh` passes the
+   file only when *this run* regenerated it. Two details are load-bearing: the
+   field is **omitted**, never emptied, when the markers cannot be read (`{}`
+   is an all-clear and must not be forgeable by a plumbing failure), and the
+   match is a plain substring test rather than a regex, because every real
+   marker contains `[` and four contain `(`/`)` — read as a pattern they would
+   match nothing and report all five suites as never-run. 100 tests in
+   `scripts/test-boot-history.py`.
+
+3. **The gate** (`9ea7293c6`). `scripts/check-gated-selftests.py` fails the
+   build on a marker absent from 100% of the boots that recorded it, N ≥ 10,
+   mirroring `check-boot-skips.py`'s evidence discipline and allowlist rules.
+   27 tests.
+
+**Deliberate deviation from the fix proposed above:** this is a pre-build gate
+over `bench/boot-history.jsonl`, not the post-boot single-log check the OPEN
+text suggested. A gated site legitimately not running on *one* boot is not a
+defect — that is what "gated" means — so a post-boot check would either fail on
+correct code or assert nothing. Only *never* running is the defect, and "never"
+is a question about history, which is where `check-boot-skips.py` already lives.
+
+Two things the gate refuses to do, each a false accusation avoided: it measures
+each marker only against the boots that recorded *it* (the window as denominator
+would make a marker declared today read as never-run out of 25 — failing loudest
+at the moment someone does the right thing), and it excludes markers the newest
+boot no longer declares (an accusation whose only remedy is allowlisting a line
+that is not in the tree).
+
+**The netstack pair is now watched rather than merely noted.** Its guard is
+`!net.userspace`, a flag that defaults off and that someone will eventually flip
+on purpose; the day it flips, those two suites stop running and `gated_ran`
+starts recording `false` for them. Ten boots later the build fails and says so.
+That is the tripwire the original entry observed was missing.
 
 ## A-THE-LOAD-CANARY-COUNTED-ITS-OWN-STARTUP-AS-LOAD (lane A) — FIXED 2026-08-31
 

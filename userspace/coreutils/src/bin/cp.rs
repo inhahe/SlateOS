@@ -2252,9 +2252,24 @@ fn place_entity<O: Write, E: Write>(
     //   attention to link counts. Measured: `cp -v --preserve=links a b o/b d`
     //   with `a` and `b` hard-linked prints `removed 'd/b'` before the third
     //   operand's arrow line, and `d/a` keeps the bytes of `a`.
+    //
+    // Both reasons sit inside GNU's `else if (! S_ISDIR (dst_sb.st_mode) && …)`
+    // (`copy.c:2539`), and so do these. A directory is never unlinked to clear
+    // the way: `unlink` cannot remove one in the first place, so trying would
+    // turn `cp -T --preserve=links a existing_dir` into `cannot remove
+    // 'existing_dir': Is a directory` — an errno-shaped complaint about the
+    // wrong thing entirely, where GNU reaches its own `cannot overwrite
+    // directory %s with non-directory` and leaves the directory standing. Note
+    // that on ext4 *every* directory trips the link-count half of the test:
+    // `.` and the entry in its parent are two links before anything else
+    // points at it.
+    let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
     let dest_multiply_linked =
         job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
-    if dest_exists && (metadata.file_type().is_symlink() || dest_multiply_linked) {
+    if dest_exists
+        && !dest_is_dir
+        && (metadata.file_type().is_symlink() || dest_multiply_linked)
+    {
         if !remove_before_writing(target, job) {
             return Placed::Failed;
         }
@@ -7236,6 +7251,51 @@ mod tests {
         assert_eq!(mtime_of(&t), then, "the time is the source's");
         assert_eq!(mode_of(&t), 0o741 & !0o022, "and the mode is a new file's");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A directory destination is never unlinked to clear the way, whichever
+    /// of the two reasons asked for the way to be cleared. GNU puts both
+    /// inside `else if (! S_ISDIR (dst_sb.st_mode) && …)` (`copy.c:2539`), and
+    /// the link-count reason needs that guard on every system: a directory on
+    /// ext4 has two links before anything else points at it, so
+    /// `--preserve=links` would otherwise try to `unlink` every existing
+    /// directory destination it was handed.
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_destination_is_not_unlinked_to_clear_the_way() {
+        let links_t = CpFlags {
+            no_target_directory: true,
+            preserve: Preserve {
+                links: true,
+                ..Preserve::NONE
+            },
+            require_preserve: true,
+            ..OFF
+        };
+        let symlink_t = CpFlags {
+            no_target_directory: true,
+            dereference: Deref::Never,
+            ..OFF
+        };
+        let dir = scratch("d_keep");
+        let a = dir.join("a");
+        fs::write(&a, b"x").unwrap();
+        let l = dir.join("l");
+        std::os::unix::fs::symlink("a", &l).unwrap();
+
+        for (what, flags) in [(&a, links_t), (&l, symlink_t)] {
+            let d = dir.join("d");
+            fs::create_dir(&d).unwrap();
+            let (ok, err) = cp(&flags, &[what, &d]);
+            assert!(!ok, "{}: {err}", what.display());
+            assert!(
+                err.contains("cannot overwrite directory"),
+                "the refusal is about the kinds, not about `unlink`: {err:?}"
+            );
+            assert!(d.is_dir(), "and the directory is still there");
+            fs::remove_dir(&d).unwrap();
+        }
         let _ = fs::remove_dir_all(&dir);
     }
 

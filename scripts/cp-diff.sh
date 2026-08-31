@@ -657,7 +657,69 @@ TREE='mktree; d=$(printf "na\377me"); mkdir "$d"; printf x > "$d/x"'
 run_case -r "$(printf 'na\377me')" dst
 
 # =============================================================================
-# 13. Options GNU has and this cp has not
+# 13. Where the destination comes from: -t and -T
+# =============================================================================
+# Every case above lets the *last operand* decide, and decide by being a
+# directory or not. These two options take that decision away from it in
+# opposite directions -- `-t` names the directory itself and leaves every
+# operand a source, `-T` says the destination is a name and must never be
+# copied into -- so between them they change the arity of the command, which
+# error is reported, and where the bytes land. All three are observable, and
+# the cases below are grouped by which.
+
+# Arity. `-t` needs one operand where the default needs two, and under `-T` a
+# third operand is not a misplaced source but an operand with nowhere to go.
+run_case -t dir file.txt
+run_case -t dir file.txt tree/a.txt
+run_case -t dir
+run_case -T file.txt new.txt
+run_case -T file.txt
+run_case -T
+run_case -T file.txt tree/a.txt dir
+
+# Spelling. `-tdir` is the one that can only parse through a table saying the
+# letter takes a value; the trailing `--` and the interleaved form pin that the
+# value is taken from the option and not from the operand stream.
+run_case -tdir file.txt
+run_case --target-directory=dir file.txt
+run_case file.txt -t dir
+run_case -t dir -- file.txt
+run_case -T -- file.txt new.txt
+run_case -t dir/ file.txt
+
+# Which complaint. A second `-t` is refused before its value is even looked at,
+# and so is the combination -- the directory named there does not exist and is
+# still not what gets reported.
+run_case -t dir -t dir file.txt
+run_case -t dir -t tree file.txt
+run_case -t nosuch -T file.txt
+run_case -T -t nosuch file.txt
+
+# The target directory itself, and the ways it can fail to be one. The wording
+# is `target directory`, not the bare `target` the last operand gets.
+run_case -t nosuch file.txt
+run_case -t file.txt tree/a.txt
+run_case -t tree/link file.txt
+run_case -t '' file.txt
+
+# Where the bytes land. Without `-T` each of these copies *into* the
+# destination; with it, onto it.
+run_case -T file.txt dir
+run_case -T tree dir
+run_case -r -T tree dir
+run_case -r -T tree newdir
+run_case -r -T tree tree
+run_case -r -T tree/sub dir
+
+# The pair guards count sources, and under `-t` every operand is one -- so two
+# operands are two sources here where they would be one source and a
+# destination without it.
+run_case -t dir file.txt ./file.txt
+run_case -t dir file.txt tree/a.txt tree/sub/b.txt
+run_case -t tree file.txt tree/a.txt
+
+# =============================================================================
+# 14. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -687,7 +749,6 @@ missing -n file.txt tree/a.txt
 missing --no-clobber file.txt tree/a.txt
 missing --no-dereference tree/link dst
 missing --no-preserve=mode file.txt new.txt
-missing --no-target-directory file.txt new.txt
 missing --one-file-system -r tree dst
 missing -p file.txt new.txt
 missing --preserve file.txt new.txt
@@ -703,9 +764,6 @@ missing --sparse=auto file.txt new.txt
 missing -S .bak -b file.txt tree/a.txt
 missing --suffix=.bak -b file.txt tree/a.txt
 missing --strip-trailing-slashes tree/ dst
-missing -t dir file.txt
-missing --target-directory=dir file.txt
-missing -T file.txt new.txt
 missing -u file.txt tree/a.txt
 missing --update file.txt tree/a.txt
 missing -v file.txt new.txt
@@ -715,7 +773,7 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 14. --help and --version
+# 15. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

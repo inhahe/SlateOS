@@ -134,10 +134,11 @@
 //!
 //! # Options this implementation does not have
 //!
-//! Everything except `-r`/`-R`/`--recursive`. They are recognised and rejected
-//! with a message saying they are not implemented, rather than ignored, and they
-//! are listed in [`LONG_OPTIONS`] anyway because the table is what decides
-//! whether an abbreviation is ambiguous.
+//! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory` and
+//! `-T`/`--no-target-directory`. The rest are recognised and rejected with a
+//! message saying they are not implemented, rather than ignored, and they are
+//! listed in [`LONG_OPTIONS`] anyway because the table is what decides whether
+//! an abbreviation is ambiguous.
 //!
 //! Ignoring them would be worse than refusing in almost every case: `-n` asks
 //! for an existing file to be left alone, `-p` asks for ownership and timestamps
@@ -241,6 +242,14 @@ const SHORT_OPTIONS: &str = "abdfHilLnprst:uvxPRS:TZ";
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct CpFlags {
     recursive: bool,
+    /// `-t DIR` / `--target-directory=DIR`: the destination, named by the
+    /// option instead of by the last operand, so that every operand is a
+    /// source. What `xargs cp -t dir` exists for.
+    target_directory: Option<OsString>,
+    /// `-T` / `--no-target-directory`: the destination is a name to create or
+    /// replace, never a directory to copy *into*. `cp -T a d` overwrites `d`
+    /// rather than writing `d/a` — or refuses to, when `d` is a directory.
+    no_target_directory: bool,
 }
 
 /// What the command line asked for.
@@ -297,6 +306,10 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
   -r, -R, --recursive   copy directories recursively.  Symbolic links are
                           copied as symbolic links, not followed.
+  -t, --target-directory=DIRECTORY
+                        copy all SOURCE arguments into DIRECTORY
+  -T, --no-target-directory
+                        treat DEST as a normal file
       --help            display this help and exit
       --version         output version information and exit
 
@@ -329,6 +342,27 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
         match item? {
             Opt::Operand(name) => paths.push(name.clone()),
             Opt::Short(b'r' | b'R', _) | Opt::Long("recursive", _) => flags.recursive = true,
+            Opt::Short(b't', value) | Opt::Long("target-directory", value) => {
+                // A second `-t` is refused even when it names the same
+                // directory as the first — GNU compares nothing, it just asks
+                // whether one was already given. Measured: `cp -t d -t d a`
+                // fails. And it is a plain diagnostic, with no "Try 'cp
+                // --help'" after it, because GNU raises it with `error
+                // (EXIT_FAILURE, …)` rather than through `usage`.
+                if flags.target_directory.is_some() {
+                    return Err(CP.usage("multiple target directories specified".into()));
+                }
+                // Unreachable: `t:` in [`SHORT_OPTIONS`] and `Takes::Required`
+                // in [`LONG_OPTIONS`] both make the parser supply a value or
+                // fail before this point.
+                let Some(dir) = value else {
+                    return Err(CP.short_missing_argument(b't'));
+                };
+                flags.target_directory = Some(dir);
+            }
+            Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
+                flags.no_target_directory = true;
+            }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // Everything else in the two tables is an option GNU has and this
@@ -371,51 +405,99 @@ fn unimplemented_long(name: &str) -> getopt::Error {
 /// asserted on in tests. The old file had no test of this path at all, which is
 /// how bugs 1–3 and 6 in the module docs survived.
 fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool {
-    // Zero and one operand are distinct diagnostics, as in GNU. "missing
-    // operand" alone left the user to work out *which*.
-    let Some((dest, sources)) = paths.split_last() else {
-        let _ = writeln!(
-            err,
-            "cp: {}",
-            CP.usage_referring("missing file operand".into())
-        );
-        return false;
-    };
-    if sources.is_empty() {
-        let _ = writeln!(
-            err,
-            "cp: {}",
-            CP.usage_referring(format!(
+    // GNU's `n_files <= !target_directory`. With `-t` the destination came from
+    // the option, so one operand is enough; without it the last operand *is* the
+    // destination and two are needed. Zero and one are distinct diagnostics —
+    // "missing operand" alone left the user to work out which.
+    let least = usize::from(flags.target_directory.is_none());
+    if paths.len() <= least {
+        let message = match paths.first() {
+            None => "missing file operand".to_string(),
+            Some(first) => format!(
                 "missing destination file operand after {}",
-                quoteaf_os(dest)
-            ))
-        );
+                quoteaf_os(first)
+            ),
+        };
+        let _ = writeln!(err, "cp: {}", CP.usage_referring(message));
         return false;
     }
 
+    // Both `-T` checks come before `-t`'s directory is even looked at, which is
+    // GNU's order and is observable: `cp -t nosuch -T a b` reports the
+    // combination rather than the missing directory.
+    if flags.no_target_directory {
+        if flags.target_directory.is_some() {
+            let _ = writeln!(
+                err,
+                "cp: cannot combine --target-directory (-t) and --no-target-directory (-T)"
+            );
+            return false;
+        }
+        // `-T` is "the destination is one name", so a third operand is not a
+        // source that went to the wrong place — it is an operand with nowhere
+        // to go at all.
+        if let Some(extra) = paths.get(2) {
+            let _ = writeln!(
+                err,
+                "cp: {}",
+                CP.usage_referring(format!("extra operand {}", quoteaf_os(extra)))
+            );
+            return false;
+        }
+    }
+
+    let (sources, dest, dest_is_dir) = match &flags.target_directory {
+        // Every operand is a source. The directory is checked once, here, and
+        // the failure names it as a *target directory* — a different sentence
+        // from the one below, because the user named it as one.
+        Some(dir) => {
+            if let Some(e) = dest_directory_error(Path::new(dir)) {
+                let why = strerror(&e);
+                let _ = writeln!(err, "cp: target directory {}: {why}", quoteaf_os(dir));
+                return false;
+            }
+            (paths, dir, true)
+        }
+        None => {
+            // Unreachable: the operand count was checked above.
+            let Some((dest, sources)) = paths.split_last() else {
+                return false;
+            };
+            if flags.no_target_directory {
+                // `-T` asks for the destination to be treated as a name and
+                // never as a directory to copy *into*, so it is not stat'd for
+                // that question at all and `cp -T a d` goes on to report that a
+                // directory cannot be overwritten with a non-directory.
+                (sources, dest, false)
+            } else {
+                // The destination is followed, which is right here: `cp a
+                // link-to-dir/` puts `a` inside the directory.
+                let not_a_dir = dest_directory_error(Path::new(dest));
+
+                // GNU reports *why* the last operand is not a directory, and
+                // the two reasons read differently: `cp a b nosuch` says "No
+                // such file or directory" while `cp a b afile` says "Not a
+                // directory". One fixed sentence for both loses the distinction
+                // that tells a user whether they mistyped the name or forgot to
+                // make the directory.
+                if sources.len() > 1
+                    && let Some(e) = not_a_dir
+                {
+                    let why = strerror(&e);
+                    let _ = writeln!(err, "cp: target {}: {why}", quoteaf_os(dest));
+                    return false;
+                }
+                (sources, dest, not_a_dir.is_none())
+            }
+        }
+    };
     let dest_path = Path::new(dest);
-    // The destination is followed, which is right here: `cp a link-to-dir/`
-    // puts `a` inside the directory, as GNU does without `-T`.
-    let not_a_dir = dest_directory_error(dest_path);
-    let dest_is_dir = not_a_dir.is_none();
 
-    // GNU reports *why* the last operand is not a directory, and the two
-    // reasons read differently: `cp a b nosuch` says "No such file or
-    // directory" while `cp a b afile` says "Not a directory". One fixed
-    // sentence for both loses the distinction that tells a user whether they
-    // mistyped the name or forgot to make the directory.
-    if sources.len() > 1
-        && let Some(e) = not_a_dir
-    {
-        let why = strerror(&e);
-        let _ = writeln!(err, "cp: target {}: {why}", quoteaf_os(dest));
-        return false;
-    }
-
-    // Both "named twice" problems need two operands to exist at all, so GNU
+    // Both "named twice" problems need two sources to exist at all, so GNU
     // builds the tables only in that case and this follows it — not to save the
     // allocation, but because the tables also decide whether a *repeat* is
-    // possible, and with one source it never is.
+    // possible, and with one source it never is. Counted after `-t` has been
+    // resolved, as GNU counts it: `cp -t d a a` is two sources and does warn.
     let mut seen = (sources.len() > 1).then(Seen::default);
 
     let mut ok = true;
@@ -1717,8 +1799,11 @@ mod tests {
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
         for flag in [
-            "-a", "-b", "-d", "-f", "-H", "-i", "-l", "-L", "-n", "-p", "-P", "-s", "-S", "-t",
-            "-T", "-u", "-v", "-x", "-Z",
+            // `-S` is here with a value attached: it takes a required one, so
+            // bare `-S` would swallow the operand after it and this would be an
+            // arity test rather than a rejection test.
+            "-a", "-b", "-d", "-f", "-H", "-i", "-l", "-L", "-n", "-p", "-P", "-s", "-S.bak", "-u",
+            "-v", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -1768,6 +1853,51 @@ mod tests {
     fn value_on_an_option_that_takes_none() {
         let e = fail(&["--recursive=yes", "a", "b"]);
         assert!(e.sentence.contains("doesn't allow"), "{:?}", e.sentence);
+    }
+
+    // ------------------------------------------- where the destination is --
+
+    /// All three spellings of `-t`, and the fact that its value never lands in
+    /// the operand list. `-td` is the one that could only work through a table
+    /// that says the letter takes a value.
+    #[test]
+    fn a_target_directory_is_taken_out_of_the_operands() {
+        for spelling in [
+            &["-t", "d", "a", "b"][..],
+            &["-td", "a", "b"][..],
+            &["--target-directory=d", "a", "b"][..],
+            &["a", "b", "-t", "d"][..],
+        ] {
+            let (f, p) = run_parse(spelling);
+            assert_eq!(f.target_directory, Some(OsString::from("d")));
+            assert_eq!(p, ["a", "b"], "{spelling:?}");
+        }
+    }
+
+    /// GNU compares nothing here — it asks only whether one was already given —
+    /// so naming the same directory twice fails just as two different ones do.
+    #[test]
+    fn a_second_target_directory_is_refused() {
+        for spelling in [
+            &["-t", "d", "-t", "d", "a"][..],
+            &["-t", "d", "-t", "e", "a"][..],
+        ] {
+            let e = fail(spelling);
+            assert_eq!(e.sentence, "multiple target directories specified");
+            // `error (EXIT_FAILURE, …)` upstream, not `usage`, so there is no
+            // "Try 'cp --help'" after it.
+            assert_eq!(e.referral, None, "{spelling:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_target_directory_value_is_a_getopt_error() {
+        let e = fail(&["-t"]);
+        assert!(
+            e.sentence.contains("option requires an argument"),
+            "{:?}",
+            e.sentence
+        );
     }
 
     // --------------------------------------------------- non-UTF-8 argv --
@@ -1895,8 +2025,23 @@ mod tests {
         dir
     }
 
-    const PLAIN: CpFlags = CpFlags { recursive: false };
-    const RECURSIVE: CpFlags = CpFlags { recursive: true };
+    const PLAIN: CpFlags = CpFlags {
+        recursive: false,
+        target_directory: None,
+        no_target_directory: false,
+    };
+    const RECURSIVE: CpFlags = CpFlags {
+        recursive: true,
+        target_directory: None,
+        no_target_directory: false,
+    };
+    /// `-T`, which the two above never set. Named for what it does rather than
+    /// for the letter: the destination is a name, not a directory to fill.
+    const AS_NAME: CpFlags = CpFlags {
+        recursive: false,
+        target_directory: None,
+        no_target_directory: true,
+    };
 
     /// `copy_all` plus whatever it wrote to its error sink.
     fn cp(flags: &CpFlags, paths: &[&Path]) -> (bool, String) {
@@ -2108,6 +2253,164 @@ mod tests {
         assert!(ok, "a repeat is not an error: {e}");
         assert!(e.contains("specified more than once"), "{e}");
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------- where the destination is --
+
+    /// `-t` with the destination named by the option, and — the part that has
+    /// no equivalent without it — a *single* operand still going inside the
+    /// directory rather than being taken for the destination.
+    #[test]
+    fn a_target_directory_takes_every_operand_as_a_source() {
+        let dir = scratch("t_dest");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let a = dir.join("a");
+        fs::write(&a, b"A").unwrap();
+
+        let flags = CpFlags {
+            target_directory: Some(dest.clone().into_os_string()),
+            ..PLAIN
+        };
+        let (ok, e) = cp(&flags, &[&a]);
+        assert!(ok, "{e}");
+        assert_eq!(e, "");
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The wording is `target directory`, not the bare `target` the last
+    /// operand gets: the user named this one as a directory, so the diagnostic
+    /// says which claim failed.
+    #[test]
+    fn a_target_directory_that_is_not_one_says_so() {
+        let dir = scratch("t_notdir");
+        let plain = dir.join("plain");
+        fs::write(&plain, b"x").unwrap();
+        let a = dir.join("a");
+        fs::write(&a, b"A").unwrap();
+
+        let flags = CpFlags {
+            target_directory: Some(plain.clone().into_os_string()),
+            ..PLAIN
+        };
+        let (ok, e) = cp(&flags, &[&a]);
+        assert!(!ok);
+        assert!(e.starts_with("cp: target directory "), "{e}");
+        assert!(e.contains("Not a directory"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Checked before `-t`'s directory is looked at, which is GNU's order and
+    /// is visible: the directory here does not exist, and the combination is
+    /// still what gets reported.
+    #[test]
+    fn the_two_destination_options_cannot_be_combined() {
+        let flags = CpFlags {
+            target_directory: Some(OsString::from("nosuch")),
+            no_target_directory: true,
+            recursive: false,
+        };
+        let (ok, e) = cp(&flags, &[Path::new("a"), Path::new("b")]);
+        assert!(!ok);
+        assert_eq!(
+            e,
+            "cp: cannot combine --target-directory (-t) and --no-target-directory (-T)\n"
+        );
+    }
+
+    /// Without `-T` this would be `cp a b dir` and put both inside `dir`. With
+    /// it the destination is one name, so the third operand has nowhere to go.
+    #[test]
+    fn a_third_operand_has_nowhere_to_go_under_no_target_directory() {
+        let (ok, e) = cp(&AS_NAME, &[Path::new("a"), Path::new("b"), Path::new("c")]);
+        assert!(!ok);
+        assert!(e.starts_with("cp: extra operand "), "{e}");
+        assert!(e.contains("'c'"), "{e}");
+    }
+
+    /// The whole point of `-T`: a destination that *is* a directory is not
+    /// somewhere to copy into, so the copy is refused rather than silently
+    /// landing one level down.
+    #[test]
+    fn no_target_directory_will_not_copy_into_a_directory() {
+        let dir = scratch("cap_T");
+        let a = dir.join("a");
+        fs::write(&a, b"A").unwrap();
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+
+        let (ok, e) = cp(&AS_NAME, &[&a, &d]);
+        assert!(!ok);
+        assert!(e.contains("cannot overwrite directory"), "{e}");
+        assert!(!d.join("a").exists(), "nothing went inside it");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// And the same destination without `-T`, so the test above is pinning the
+    /// flag rather than a refusal that was there anyway.
+    #[test]
+    fn without_it_the_same_destination_is_copied_into() {
+        let dir = scratch("no_cap_T");
+        let a = dir.join("a");
+        fs::write(&a, b"A").unwrap();
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+
+        let (ok, e) = cp(&PLAIN, &[&a, &d]);
+        assert!(ok, "{e}");
+        assert_eq!(fs::read(d.join("a")).unwrap(), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `cp -rT src dst` is how a tree is copied *onto* another rather than
+    /// inside it — the one thing plain `cp -r` cannot express once `dst`
+    /// exists.
+    #[test]
+    fn recursive_no_target_directory_copies_a_tree_onto_the_destination() {
+        let dir = scratch("rT");
+        let src = dir.join("src");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("x"), b"X").unwrap();
+        let dst = dir.join("dst");
+        fs::create_dir(&dst).unwrap();
+        fs::write(dst.join("keep"), b"K").unwrap();
+
+        let flags = CpFlags {
+            recursive: true,
+            ..AS_NAME
+        };
+        let (ok, e) = cp(&flags, &[&src, &dst]);
+        assert!(ok, "{e}");
+        assert_eq!(fs::read(dst.join("x")).unwrap(), b"X");
+        assert!(!dst.join("src").exists(), "not one level down");
+        assert_eq!(
+            fs::read(dst.join("keep")).unwrap(),
+            b"K",
+            "a merge, not a replacement"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The repeat tables count *sources*, and under `-t` every operand is one —
+    /// so two operands is two sources even though there are only two words.
+    #[test]
+    fn a_target_directory_still_notices_a_source_named_twice() {
+        let dir = scratch("t_twice");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let f = dir.join("f");
+        fs::write(&f, b"body").unwrap();
+        let dotted = dir.join(".").join("f");
+
+        let flags = CpFlags {
+            target_directory: Some(dest.clone().into_os_string()),
+            ..PLAIN
+        };
+        let (ok, e) = cp(&flags, &[&f, &dotted]);
+        assert!(ok, "{e}");
+        assert!(e.contains("specified more than once"), "{e}");
         let _ = fs::remove_dir_all(&dir);
     }
 

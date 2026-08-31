@@ -86,21 +86,14 @@ pub fn rdtsc() -> u64 {
 /// complete before reading the counter).
 #[inline]
 pub fn serialize() {
-    // SAFETY: cpuid is a serializing instruction, always available on x86_64.
-    // LLVM reserves rbx, so we save/restore it via xchg with a temp register
-    // (the standard Rust inline-asm pattern for cpuid).
-    unsafe {
-        core::arch::asm!(
-            "xchg rbx, {tmp}",
-            "cpuid",
-            "xchg rbx, {tmp}",
-            tmp = out(reg) _,
-            inout("eax") 0u32 => _,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, preserves_flags),
-        );
-    }
+    // cpuid is a serializing instruction, always available on x86_64.
+    //
+    // The result is discarded, but `__cpuid`'s inner `asm!` is not `pure`, so
+    // LLVM cannot elide the call — which is the whole point here, since an
+    // elided `cpuid` would leave the following `rdtsc` unserialized and the
+    // measurement silently wrong.  See design-decisions.md sec 652 for why no
+    // CPUID in this tree is hand-rolled any more.
+    let _ = core::arch::x86_64::__cpuid(0);
 }
 
 /// Read TSC with serialization (for precise micro-benchmarks).

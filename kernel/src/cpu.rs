@@ -13,6 +13,23 @@
 // Subsystem API surface; not every helper has an in-tree caller yet.
 #![allow(dead_code)]
 
+// Every CPUID call in this file goes through `core`'s intrinsics rather than a
+// hand-rolled `asm!` block.  This is not a style preference — see
+// design-decisions.md sec 652.  The hand-rolled form used here until
+// 2026-08-31 was
+//
+//     "push rbx", "cpuid", "mov {out:e}, ebx", "pop rbx", out = out(reg) ebx
+//
+// which is *silently wrong whenever the register allocator picks `rbx` for the
+// output operand*: `mov ebx, ebx` is a no-op and the following `pop rbx` then
+// overwrites the CPUID result with the pre-call value.  Five of the twenty
+// sites in the shipped kernel had allocated exactly that way, which is why the
+// kernel believed it had no SMEP and no SMAP on a QEMU CPU that offers both.
+// The allocation is not stable under unrelated edits, so the sites that worked
+// worked by luck.  `__cpuid`/`__cpuid_count` use the `xchg` idiom, which is
+// correct for *either* allocation, and expose no operand to mis-allocate.
+use core::arch::x86_64::{__cpuid, __cpuid_count};
+
 /// Halt the CPU until the next interrupt arrives.
 ///
 /// This is the standard idle instruction — it puts the CPU into a
@@ -123,21 +140,15 @@ pub fn read_cr2() -> u64 {
 /// Used by [`crate::alternatives::apply`] after patching `.text`.
 #[inline]
 pub fn serialize() {
-    // SAFETY: `cpuid` has no memory effects and cannot fault; leaf 0 is
-    // implemented on every x86_64 CPU.  We discard all results and want only the
-    // serializing side effect.  RBX is saved and restored around the instruction
-    // because LLVM reserves it and will not allow it as an operand.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "cpuid",
-            "pop rbx",
-            inout("eax") 0u32 => _,
-            out("ecx") _,
-            out("edx") _,
-            options(preserves_flags),
-        );
-    }
+    // Leaf 0 is implemented on every x86_64 CPU.  We discard all results and
+    // want only the serializing side effect.
+    //
+    // The result is discarded but the call is *not* removable: `__cpuid`'s inner
+    // `asm!` does not carry `options(pure)`, so LLVM must treat it as having
+    // unknown effects and cannot elide it.  That is the property this function
+    // depends on — an elided `cpuid` would silently stop serializing and leave
+    // `alternatives::apply` executing stale prefetched bytes.
+    let _ = __cpuid(0);
 }
 
 /// Read the current value of the RFLAGS register.
@@ -405,54 +416,16 @@ pub fn cache_line_size() -> u16 {
 
 /// CPUID leaf 4 (Intel Deterministic Cache Parameters).
 fn cpuid_leaf4(subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: Caller verified max_leaf >= 4.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 4",
-            "mov ecx, {sub:e}",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            sub = in(reg) subleaf,
-            ebx_out = out(reg) ebx,
-            out("eax") eax,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    // Caller verified max_leaf >= 4.
+    let r = __cpuid_count(4, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// CPUID leaf 0x8000001D (AMD extended cache topology).
 fn cpuid_ext_1d(subleaf: u32) -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: Caller verified max_ext_leaf >= 0x8000001D.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x8000001D",
-            "mov ecx, {sub:e}",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            sub = in(reg) subleaf,
-            ebx_out = out(reg) ebx,
-            out("eax") eax,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    // Caller verified max_ext_leaf >= 0x8000001D.
+    let r = __cpuid_count(0x8000_001D, subleaf);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// Log detected cache topology to serial.
@@ -1210,147 +1183,50 @@ pub fn log_features() {
 
 /// CPUID leaf 0: maximum supported standard leaf number.
 fn cpuid_max_leaf() -> u32 {
-    let eax: u32;
-    // SAFETY: CPUID leaf 0 is always valid on x86_64.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "xor eax, eax",
-            "cpuid",
-            "pop rbx",
-            out("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // CPUID leaf 0 is always valid on x86_64.
+    __cpuid(0).eax
 }
 
 /// CPUID leaf 1: returns (ECX, EDX) feature flags.
 fn cpuid_leaf1() -> (u32, u32) {
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: CPUID leaf 1 is always valid on x86_64.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            out("eax") _,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (ecx, edx)
+    // CPUID leaf 1 is always valid on x86_64.
+    let r = __cpuid(1);
+    (r.ecx, r.edx)
 }
 
 /// CPUID leaf 7, subleaf 0: returns (EBX, ECX) structured extended features.
 fn cpuid_leaf7_sub0() -> (u32, u32, u32) {
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: Caller verified max_leaf >= 7.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 7",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            out("eax") _,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (ebx, ecx, edx)
+    // Caller verified max_leaf >= 7.
+    let r = __cpuid_count(7, 0);
+    (r.ebx, r.ecx, r.edx)
 }
 
 /// CPUID extended leaf 0x80000000: maximum supported extended leaf.
 fn cpuid_max_extended_leaf() -> u32 {
-    let eax: u32;
-    // SAFETY: Extended CPUID leaf 0x80000000 is always valid on x86_64.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x80000000",
-            "cpuid",
-            "pop rbx",
-            out("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // Extended CPUID leaf 0x80000000 is always valid on x86_64.
+    __cpuid(0x8000_0000).eax
 }
 
 /// CPUID extended leaf 0x80000001: returns EDX extended features.
 fn cpuid_extended_leaf1_edx() -> u32 {
-    let edx: u32;
-    // SAFETY: Caller verified max_ext_leaf >= 0x80000001.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x80000001",
-            "cpuid",
-            "pop rbx",
-            out("eax") _,
-            out("ecx") _,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    edx
+    // Caller verified max_ext_leaf >= 0x80000001.
+    __cpuid(0x8000_0001).edx
 }
 
 /// CPUID leaf 0x80000008: AMD extended features (EBX).
 ///
 /// Contains speculation control bits for AMD CPUs.
 fn cpuid_extended_leaf8_ebx() -> u32 {
-    let ebx: u32;
-    // SAFETY: Caller verified max_ext_leaf >= 0x80000008.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x80000008",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            out("eax") _,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    ebx
+    // Caller verified max_ext_leaf >= 0x80000008.
+    __cpuid(0x8000_0008).ebx
 }
 
 /// CPUID leaf 0x0A: Architectural Performance Monitoring info.
 ///
 /// Returns EAX which encodes version, counter count, and bit width.
 fn cpuid_leaf_a_eax() -> u32 {
-    let eax: u32;
-    // SAFETY: Caller verified max_leaf >= 0x0A.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x0A",
-            "cpuid",
-            "pop rbx",
-            out("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // Caller verified max_leaf >= 0x0A.
+    __cpuid(0x0A).eax
 }
 
 /// CPUID leaf 0xD, subleaf 0: XSAVE area information.
@@ -1361,27 +1237,9 @@ fn cpuid_leaf_a_eax() -> u32 {
 /// - ECX: max XSAVE area size for all supported features
 /// - EDX: XCR0 supported bits (high 32)
 fn cpuid_leaf_d_sub0() -> (u32, u32, u32, u32) {
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: Caller verified xsave is supported and max_leaf >= 0xD.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0xD",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            out("eax") eax,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
-    (eax, ebx, ecx, edx)
+    // Caller verified xsave is supported and max_leaf >= 0xD.
+    let r = __cpuid_count(0x0D, 0);
+    (r.eax, r.ebx, r.ecx, r.edx)
 }
 
 /// CPUID leaf 0xD, subleaf 1: XSAVE feature flags.
@@ -1392,22 +1250,8 @@ fn cpuid_leaf_d_sub0() -> (u32, u32, u32, u32) {
 /// - Bit 2: XGETBV with ECX=1 support
 /// - Bit 3: XSAVES/XRSTORS available (supervisor state)
 fn cpuid_leaf_d_sub1_eax() -> u32 {
-    let eax: u32;
-    // SAFETY: Caller verified xsave is supported and max_leaf >= 0xD.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0xD",
-            "mov ecx, 1",
-            "cpuid",
-            "pop rbx",
-            out("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
-    eax
+    // Caller verified xsave is supported and max_leaf >= 0xD.
+    __cpuid_count(0x0D, 1).eax
 }
 
 // ---------------------------------------------------------------------------
@@ -1419,29 +1263,13 @@ fn cpuid_leaf_d_sub1_eax() -> u32 {
 /// Returns the vendor ID like "GenuineIntel" or "AuthenticAMD".
 #[must_use]
 pub fn vendor_string() -> [u8; 12] {
-    let ebx: u32;
-    let ecx: u32;
-    let edx: u32;
-    // SAFETY: CPUID leaf 0 is always valid on x86_64.
+    // CPUID leaf 0 is always valid on x86_64.
     // EBX:EDX:ECX contain the 12-byte vendor string.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "xor eax, eax",
-            "cpuid",
-            "mov {ebx_out:e}, ebx",
-            "pop rbx",
-            ebx_out = out(reg) ebx,
-            out("eax") _,
-            out("ecx") ecx,
-            out("edx") edx,
-            options(nomem, nostack),
-        );
-    }
+    let r = __cpuid(0);
     let mut result = [0u8; 12];
-    result[0..4].copy_from_slice(&ebx.to_le_bytes());
-    result[4..8].copy_from_slice(&edx.to_le_bytes());
-    result[8..12].copy_from_slice(&ecx.to_le_bytes());
+    result[0..4].copy_from_slice(&r.ebx.to_le_bytes());
+    result[4..8].copy_from_slice(&r.edx.to_le_bytes());
+    result[8..12].copy_from_slice(&r.ecx.to_le_bytes());
     result
 }
 
@@ -1463,31 +1291,13 @@ pub fn brand_string() -> [u8; 48] {
         .iter()
         .enumerate()
     {
-        let eax: u32;
-        let ebx: u32;
-        let ecx: u32;
-        let edx: u32;
-        // SAFETY: We verified max_ext >= 0x80000004.
-        unsafe {
-            core::arch::asm!(
-                "push rbx",
-                "mov eax, {leaf:e}",
-                "cpuid",
-                "mov {ebx_out:e}, ebx",
-                "pop rbx",
-                leaf = in(reg) *leaf,
-                ebx_out = out(reg) ebx,
-                out("eax") eax,
-                out("ecx") ecx,
-                out("edx") edx,
-                options(nomem, nostack),
-            );
-        }
+        // We verified max_ext >= 0x80000004.
+        let r = __cpuid(*leaf);
         let base = i * 16;
-        result[base..base + 4].copy_from_slice(&eax.to_le_bytes());
-        result[base + 4..base + 8].copy_from_slice(&ebx.to_le_bytes());
-        result[base + 8..base + 12].copy_from_slice(&ecx.to_le_bytes());
-        result[base + 12..base + 16].copy_from_slice(&edx.to_le_bytes());
+        result[base..base + 4].copy_from_slice(&r.eax.to_le_bytes());
+        result[base + 4..base + 8].copy_from_slice(&r.ebx.to_le_bytes());
+        result[base + 8..base + 12].copy_from_slice(&r.ecx.to_le_bytes());
+        result[base + 12..base + 16].copy_from_slice(&r.edx.to_le_bytes());
     }
     result
 }
@@ -1497,20 +1307,8 @@ pub fn brand_string() -> [u8; 48] {
 /// Returns (family, model, stepping) with extended model/family applied.
 #[must_use]
 pub fn cpu_family_model_stepping() -> (u32, u32, u32) {
-    let eax: u32;
-    // SAFETY: CPUID leaf 1 is always valid on x86_64.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "pop rbx",
-            out("eax") eax,
-            out("ecx") _,
-            out("edx") _,
-            options(nomem, nostack),
-        );
-    }
+    // CPUID leaf 1 is always valid on x86_64.
+    let eax = __cpuid(1).eax;
     let stepping = eax & 0xF;
     let mut model = (eax >> 4) & 0xF;
     let mut family = (eax >> 8) & 0xF;

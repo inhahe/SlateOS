@@ -3836,6 +3836,58 @@ check_design_decisions_bands() {
 
 check_design_decisions_bands
 
+# Refuse to build when a self-test skip has fired on every recorded boot.
+#
+# This reads `bench/boot-history.jsonl`, so it is about the *previous* runs and
+# not about the one starting now -- which is why it belongs here, before the
+# build, rather than in the EXIT trap next to the recorder. Running it early
+# also means the failure arrives in seconds instead of after a fifteen-minute
+# build and boot.
+#
+# A skip that has never once *not* fired is a deleted test with a log line, and
+# the suite above it still prints PASSED. Six of those were found by eye on
+# 2026-08-31 (design-decisions.md sec 650); eye-finding does not scale to the
+# seventh. See scripts/check-boot-skips.py for why the check is dynamic rather
+# than static, and for the allowlist.
+#
+# Exit 2 (unreadable history) is treated as a hard stop for the same reason the
+# band checker does: a checker that cannot run is not a clean tree, and the two
+# must never produce the same output.
+check_boot_skips() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Never-running self-test check: skipped (no python) ===" >&2
+        return 0
+    fi
+
+    echo "=== Checking for self-tests that skip on every recorded boot ==="
+    local out rc
+    out="$("$py" -u "$PROJECT_ROOT/scripts/check-boot-skips.py" 2>&1)" && rc=0 || rc=$?
+    printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && return 0
+
+    echo "" >&2
+    if [ "$rc" -eq 2 ]; then
+        echo "ERROR: refusing to build.  The never-running self-test checker" >&2
+        echo "could not read bench/boot-history.jsonl (exit 2) -- a broken" >&2
+        echo "checker, not a broken tree.  Fix the checker first." >&2
+    else
+        echo "ERROR: refusing to build.  A self-test has announced SKIP on" >&2
+        echo "every recorded boot, which means its section has never run while" >&2
+        echo "the suite above it reported PASSED.  The lines above name each" >&2
+        echo "one and the three ways to resolve it; run" >&2
+        echo "    python scripts/check-boot-skips.py --list" >&2
+        echo "for the full per-skip standing." >&2
+    fi
+    exit 1
+}
+
+check_boot_skips
+
 # Resolved once, here, because two things now need it: the clippy gate below
 # and the build after it.  Hoisted out of the build block rather than
 # duplicated -- a gate that resolves `cargo` differently from the build it

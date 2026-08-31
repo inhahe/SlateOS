@@ -53283,6 +53283,129 @@ back to passing without testing anything. The only reason to do this is if the
 post-mount block itself is found to run before the mount — in which case the
 right fix is to move the *call*, not to restore the skip.
 
+## 651. The never-running-self-test gate asks the boot history, not the source: 100% of the last N ≥ 10 boots, with an allowlist that fails in both directions
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+
+**In short:** A test can print `SKIP: <name> (<reason>)` and be perfectly
+honest about it, and the suite above it still prints PASSED. If the reason is
+one that is *always* true — "the disk isn't mounted yet", when the code runs
+before mounting — then that test has never run once, in the whole life of the
+project, and nothing anywhere says so. §650 found six of those by reading code.
+This entry is the machine that finds the seventh. It works by watching: every
+boot now writes down which tests said SKIP, and if a test has said SKIP on
+every one of the last ten-or-more boots, the build stops and names it.
+
+### Why watching rather than reading
+
+§650 already recorded the choice of a dynamic check over a static one, and the
+reason has not changed: answering "is this function reachable only from a
+pre-mount call site?" needs cross-module call-graph resolution over a
+100k-line file, which is the kind of gate that becomes unreliable and then
+gets ignored. What this entry adds is what a *dynamic* check has to get right,
+and the answers are not obvious in either direction.
+
+### The four decisions
+
+**1. The unit of evidence is a boot, and rows that cannot testify are excluded
+rather than counted as "did not skip".** Three exclusions: a row written before
+the `skips` field existed, a boot that did not reach `BOOT_OK`, and an
+`experiment` probe. Each is the same argument — a row that says nothing must
+not be read as saying "no". Counting a pre-field row as "this skip did not
+fire" would break the 100% streak of every genuine offender, i.e. fail in the
+direction that hides the bug. The cost is that the gate is silent for the
+first ten boots after landing, which is the price of not being wrong.
+
+*Alternative rejected:* treat a missing field as "no skips". Cheaper, and it
+would have made the gate live immediately — on a dataset where every historical
+row asserts, falsely, that nothing was ever skipped.
+
+**2. The threshold is 100% of N, N ≥ 10 — not a percentage.** A 90% rule would
+catch a skip that fires almost always, which sounds strictly better and is
+worse: "almost always" is exactly what a genuine host-capability skip looks
+like when the harness is occasionally run with different flags, so a 90% rule
+converts real preconditions into recurring false positives. 100% is the only
+threshold that means *nobody has ever observed the precondition holding*,
+which is the claim being made. The floor of 10 is a floor on confidence: two
+consecutive skips are not evidence, and a gate that is wrong most of the time
+is disabled within a week.
+
+**3. The window is bounded at 25 boots, not "all of history".** A skip fixed
+today would otherwise keep its 100% rate for as many boots as it had
+accumulated before the fix, and the gate would go on failing long after the
+defect was gone. That is how a gate teaches its reader to reach for
+`--no-verify`.
+
+**4. The allowlist fails in both directions.** Five skips fire on every boot on
+this host and are not defects — a CPU without PCID, a single-core QEMU. From
+the log they are *indistinguishable* from §650's six, which is the whole
+difficulty, so the allowlist is where that distinction is written down rather
+than inferred. Two rules keep it from becoming a dumping ground:
+
+- Every entry must state the **observable condition** that would stop the skip
+  firing ("boot with `-smp 2`"). An entry that cannot say what would change in
+  the world does not describe a precondition; it describes a defect someone
+  wanted to stop hearing about. A test asserts this mechanically, weakly, by
+  requiring a justification of some length — it cannot check the sentence is
+  true, only that someone wrote one.
+- An allowlisted skip that has **stopped** firing is a hard failure. Either its
+  precondition now sometimes holds, making the entry a false statement about
+  the current tree, or the section was renamed or deleted and the entry names
+  nothing. Both are fixed by deleting a line, so the failure is cheap; a stale
+  allowlist entry that nobody is forced to look at is not.
+
+### The parser is the part that fails silently, so it is the part with the tests
+
+Every one of the 25 tests in `scripts/test-check-boot-skips.py` exists because
+a parser bug here is invisible and permanent: a skip *name* that carries
+anything run-specific is never equal to itself on the next boot, so the
+100%-of-N count can never accumulate and the gate reports "all clear" forever.
+That is a worse outcome than having no gate, because it also reports a number.
+
+The first draft did exactly this. `_SKIP_RE` used `\s*` between the log tag and
+the word SKIP; `\s` matches a newline, so it paired a tag on one line with a
+SKIP hundreds of lines later and produced names like `'[mm] Frame allocator
+self-test PASSED — 2 section(s) [mm] Kernel heap allocator initialized'`. Five
+of the nine names in the first real run were garbage of that shape, and every
+one of them looked like a plausible log line. Three consequences, all now
+pinned by tests:
+
+- Every quantifier in the regex is `[ \t]` or `[^\n]`, never `\s` or `.`.
+- The reason is stripped by scanning **inward from the closing paren**, because
+  reasons nest their own: `Zeroed frame allocation (HHDM is not mapped yet
+  (running before page_table::init))` splits wrong at the last `" ("` and right
+  at the first only by luck.
+- The closing summary `— 2 section(s) SKIPPED` and the ledger-overflow line
+  `SKIP: 3 further section(s)` are excluded: both carry a *count*, so a name
+  derived from either differs between boots — the same silent-forever failure
+  arriving through the front door.
+
+`SKIPPED` is matched as well as `SKIP:` because the kernel says both, at ~40
+sites. Normalising in the parser rather than renaming the call sites: a rename
+to satisfy a parser is the tail wagging the dog, and the parser is where a
+reader looks when a name looks wrong anyway.
+
+### What it found immediately
+
+Four more instances of §650's class, from one green log: `[mm] Zeroed frame
+allocation` and `[mm] Zero-on-free` (both "HHDM is not mapped yet"), and
+`[io_ring] File handle read/write` and `[io_ring] Positioned I/O` (both "/tmp
+is not mounted yet" — §650's own wording, one subsystem over, in a file that
+already contains the fix pattern). They are recorded in `known-issues.md` and
+deliberately **not** fixed in this change: a gate that lands together with the
+failures it finds is a gate whose first act is to be worked around.
+
+### How to reverse it
+
+Delete `scripts/check-boot-skips.py`, its test suite, and `check_boot_skips` in
+`scripts/boot-test.sh`. Leave `parse_skips` and the `skips` field in
+`boot-history.py`: the field is cheap, is already merged across lanes, and is
+the only record that exists of which sections did not run on a given boot.
+Reversing costs the answer to "has this ever run?", which was unanswerable
+before today and is the question §650's six spent their whole lives evading.
+
 ## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
 
 **Date:** 2026-08-30

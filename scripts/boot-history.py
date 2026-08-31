@@ -186,6 +186,23 @@ class Serial:
     #: that the conflation is provably wrong -- the first WHPX run on this host
     #: predates the banner -- and the same records are described here.
     accel: str | None = None
+    #: The names of the self-test sections that announced `SKIP:` on this boot,
+    #: deduplicated and sorted -- `"[mm] Zeroed frame allocation"` and so on.
+    #:
+    #: Names only, without the parenthesised reason. The reason is a
+    #: `&'static str` in the kernel (`fs::selftest::Skips::record`), so it is a
+    #: property of the *code* and never of the run: carrying it here would add
+    #: bytes to a committed file on every boot and could still only ever
+    #: disagree with itself across a code change, which is precisely when a
+    #: consumer comparing runs wants the two rows to still line up by name.
+    #:
+    #: Empty tuple means "this boot skipped nothing", which is a real and useful
+    #: answer; the *absent* field on a row means "recorded before this field
+    #: existed" -- the same three-way distinction `sanitizer` and `accel` keep
+    #: above, and for the same reason. `check-boot-skips.py` counts only rows
+    #: that carry the key, so a pre-field row cannot be mistaken for a boot on
+    #: which some skip did not fire.
+    skips: tuple[str, ...] = ()
 
     @property
     def last_line(self) -> str:
@@ -263,6 +280,128 @@ _NONFATAL_VECTOR_RE = re.compile(r"\(#BP\)")
 _SANITIZER_RE = re.compile(r"^\[boot\] build profile:.*\bsanitizer=(\S+)",
                            re.MULTILINE)
 
+#: A self-test section announcing that it did not run.
+#:
+#: The shape is fixed by `fs::selftest::Skips::report`, which prints
+#: `"{tag}   SKIP: {section} ({why})"`, and by the hand-rolled skips that
+#: predate that type and follow the same shape. Both the tag and the section
+#: are captured; the reason is left to `_skip_name` to strip, because it is not
+#: a fixed-width field and cannot be split off by this regex -- see there.
+#:
+#: `SKIPPED` is matched as well as `SKIP:`, with the colon optional, because
+#: the kernel says both: `[backtrace] Self-test SKIPPED (no frame pointers)`
+#: is the same event as `[mm]   SKIP: Zero-on-free (...)` and would otherwise
+#: be invisible to the gate that exists to notice a skip that never stops
+#: firing. The two spellings are normalised to one name here rather than in the
+#: kernel: renaming ~40 call sites to satisfy a parser is the tail wagging the
+#: dog, and the parser is where a reader looks when a name looks wrong anyway.
+#: Every quantifier here is `[ \t]` or `[^\n]`, never `\s` or `.`, and that is
+#: not style. `\s` matches a newline, so `^(\[tag\])\s*(.*?)SKIP` happily pairs
+#: a tag on one line with a `SKIP` five hundred lines later and names the skip
+#: after whatever text lay between. The first draft did exactly that and
+#: produced `'[mm] Frame allocator self-test PASSED - 2 section(s) [mm] Kernel
+#: heap allocator initialized'` as a section name -- wrong, and wrong in the
+#: expensive direction, because a name assembled from run-specific text is
+#: never equal to itself on the next boot and so the 100%-of-N test can never
+#: fire.
+_SKIP_RE = re.compile(
+    r"^(\[[^\]\n]+\])[ \t]*([^\n]*?)\bSKIP(?:PED)?:?[ \t]*([^\n]*)$",
+    re.MULTILINE)
+
+#: Punctuation a section name may end in once its reason is stripped: the
+#: kernel writes `name: SKIP (why)`, `Self-test SKIPPED (why)` and
+#: `... -- SKIP (why)` interchangeably.
+_SKIP_NAME_TRAILING = " \t:-\u2014\u2013."
+
+#: Lines that contain the word SKIPPED but do not *name* a skipped section.
+#:
+#: Two shapes, both from `fs::selftest::Skips`, and both actively harmful to
+#: let through:
+#:
+#:   * `[mm] Frame allocator self-test PASSED - 2 section(s) SKIPPED` is the
+#:     closing *summary* (`SkipSuffix`). It is a count, so the name derived
+#:     from it carries the count, so it differs between two boots that skipped
+#:     different numbers of sections -- and a name that changes is a name the
+#:     100%-of-N test can never accumulate evidence against. Worse, it names
+#:     the *suite*, which would double-count every suite that already
+#:     contributed its real skips a few lines above.
+#:   * `[tag]   SKIP: 3 further section(s) (ledger holds 8)` is the overflow
+#:     line: the ledger filled and the names were lost. Also a count, and
+#:     excluded for the same reason -- but note it is not a nothing. If this
+#:     line ever appears, `MAX_SKIPS` is too small and some skips are invisible
+#:     to this gate; the line stays in the log where a reader will see it.
+_SKIP_SUMMARY_RE = re.compile(
+    r"\d+[ \t]*(?:further[ \t]*)?section\(s\)", re.IGNORECASE)
+
+
+def _strip_trailing_paren(text: str) -> str:
+    """Drop one balanced parenthesised group from the end of `text`.
+
+    Not `text.split(" (")[0]`, and not a non-greedy regex: skip reasons nest
+    their own parentheses. The live log carries
+
+        [mm]   SKIP: Zeroed frame allocation (HHDM is not mapped yet (running
+        before page_table::init))
+
+    on which splitting at the first `" ("` keeps `Zeroed frame allocation` by
+    luck, while splitting at the last one yields the nonsense name
+    `Zeroed frame allocation (HHDM is not mapped yet`. Scanning inward from the
+    close paren is the only rule that is right on both.
+
+    Unbalanced input is returned unchanged rather than half-trimmed: a name
+    that keeps a stray `(` is obviously wrong to a reader, whereas a silently
+    truncated one looks like a different section and would split one skip's
+    history into two.
+    """
+    text = text.rstrip()
+    if not text.endswith(")"):
+        return text
+    depth = 0
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == ")":
+            depth += 1
+        elif text[i] == "(":
+            depth -= 1
+            if depth == 0:
+                return text[:i].rstrip()
+    return text
+
+
+def _skip_name(tag: str, before: str, after: str) -> str:
+    """One stable name for a skipped section, from a `_SKIP_RE` match.
+
+    `before` is what stood between the tag and the word SKIP (empty for the
+    `Skips::report` shape, `"Self-test "` for `[backtrace] Self-test SKIPPED`);
+    `after` is the rest of the line. Exactly one of the two carries the section
+    name, so they are concatenated and the reason trimmed off the end.
+
+    The name is deliberately coarse -- tag plus section, no reason, no counts.
+    Its whole job is to be the same string on two boots a week apart so that
+    "this skip has fired on every one of the last N boots" is answerable at
+    all; a name that carries anything run-specific answers "no two boots agree"
+    instead, which is the same as having no gate.
+    """
+    section = _strip_trailing_paren(f"{before.strip()} {after.strip()}".strip())
+    # Collapse internal runs of whitespace: the kernel's own indentation varies
+    # between suites and must not fork one skip into two names.
+    section = " ".join(section.split()).strip(_SKIP_NAME_TRAILING)
+    return f"{tag} {section}".rstrip()
+
+
+def parse_skips(text: str) -> tuple[str, ...]:
+    """Every distinct self-test skip announced in `text`, sorted.
+
+    Deduplicated because a suite that runs twice in a boot (the ACPI self-test
+    runs from either arm of an `if let`) would otherwise contribute the same
+    name twice and make one boot look like two pieces of evidence.
+    """
+    names = {
+        _skip_name(*m.groups())
+        for m in _SKIP_RE.finditer(text)
+        if not _SKIP_SUMMARY_RE.search(m.group(0))
+    }
+    return tuple(sorted(n for n in names if n))
+
 
 def _can_be_fatal(exc: str) -> bool:
     """Could this `EXCEPTION:` line be evidence that the kernel died?
@@ -326,6 +465,7 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
         has_panic=bool(_PANIC_RE.search(text)),
         sanitizer=san_match.group(1) if san_match else None,
         accel=_parse_accel(path),
+        skips=parse_skips(text),
     )
 
 
@@ -846,6 +986,25 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         # bench-history.py's ACCEL_RE shows is provably wrong, since the first
         # WHPX run on this host predates the banner.
         rec["accel"] = serial.accel
+        # Which self-test sections announced that they did not run.
+        #
+        # Written on every row that has a serial log, empty list included, and
+        # this is the field `check-boot-skips.py` reads. The point is not to
+        # know that a boot skipped something -- the log says that and nobody
+        # reads it -- but to make "has this skip fired on *every* recorded
+        # boot?" a question with an answer. A predicate that has never once
+        # been true is not a skip, it is a deletion with a log line, and six of
+        # them sat in this kernel printing SKIP under suites that printed
+        # PASSED (design-decisions.md sec 650). Eye-finding does not scale to the
+        # seventh; this does.
+        #
+        # Empty list rather than an omitted key when nothing skipped, for the
+        # reason `sanitizer` gives two fields up: absent must keep meaning
+        # "this row predates the field". Fold the two together and every row
+        # written before today reads as a boot on which every skip failed to
+        # fire, which would make the 100%-of-N test unfalsifiable in the
+        # direction that hides the bug.
+        rec["skips"] = list(serial.skips)
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps

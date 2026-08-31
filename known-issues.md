@@ -100241,8 +100241,10 @@ asking, or the first userspace caller whose correctness depends on it.
 
 ## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
 
-**Status:** FIXED 2026-08-31 (the six instances). The *class* gate remains
-open — see "Then close the class" below.
+**Status:** FIXED 2026-08-31 (the six instances). The *class* gate is **built**
+as of the same day — see "The class gate is now built" below — but it cannot
+return a verdict until ten boots have been recorded with the new field, and it
+has already named **four more instances** that are not fixed.
 
 **In short:** Six self-test cases ask the mount table whether `/` is mounted
 read-write, find that it is not, record an honest SKIP, and return. They run
@@ -100341,6 +100343,81 @@ precise self-deception §648's own entry criticises elsewhere — so §648's
 test half was blocked on this (it is now unblocked), and any future "it is
 covered by a self-test" claim about these six subsystems is worth checking
 against the log first.
+
+### The class gate is now built — and it found four more the same day (lane A, 2026-08-31)
+
+**Status of the class:** the gate exists and is wired into `boot-test.sh`. It
+is **not yet able to fail**, and will not be for about ten more boots; see
+"the ten-boot wait" below, which is a property of the design and not an
+oversight.
+
+**What was built.**
+
+| | |
+|---|---|
+| The names | `scripts/boot-history.py` → `parse_skips`, `Serial.skips`, and a `skips` field on every row of `bench/boot-history.jsonl` |
+| The verdict | `scripts/check-boot-skips.py` — fails when a named skip has fired on 100% of the last N ≥ 10 qualifying boots |
+| The gate | `scripts/boot-test.sh` → `check_boot_skips`, run before the build alongside the design-decisions band check |
+| The tests | `scripts/test-check-boot-skips.py`, 25 cases |
+| Rationale | `design-decisions.md` §651 |
+
+**Four more instances, found by pointing the new parser at one green log.**
+These are the same defect as the six above — a precondition that is a constant
+at the point it is evaluated — and they are not fixed:
+
+| Skip | Reason it prints | Why it is the same defect |
+|---|---|---|
+| `[mm] Zeroed frame allocation` | `HHDM is not mapped yet (running before page_table::init)` | `mm::frame::self_test` runs before `page_table::init`, always. The HHDM is never mapped when this asks. |
+| `[mm] Zero-on-free` | same | same |
+| `[io_ring] File handle read/write` | `/tmp is not mounted yet (running before filesystem init)` | Literally the six's own wording, one subsystem over. |
+| `[io_ring] Positioned I/O (pread/pwrite)` | same | same |
+
+The `io_ring` pair is the sharper of the two, because **the fix pattern is
+already in the same file**: `ipc::io_ring::self_test_fh()` is cited three
+paragraphs above as one of the three post-mount entry points the six were
+modelled on. Two of its sibling cases were left behind in the pre-mount suite
+when it was created. The `mm` pair needs a post-`page_table::init` entry point
+that does not exist yet, which is the larger half.
+
+Not fixed in the same change on purpose, and for the reason §650 gives for
+splitting the gate off from the six: a gate landed together with the failures
+it finds is a gate whose first act is to be worked around.
+
+**The ten-boot wait, and why it is not a defect.** No row in
+`bench/boot-history.jsonl` written before today carries a `skips` field, and a
+row that predates the field is deliberately *not* counted — treating "this row
+does not say" as "this skip did not fire" would break the 100% streak of every
+genuine offender, which is failure in the direction that hides the bug. So the
+gate reports `0 qualifying boot(s) recorded, need 10 … -- no verdict` and exits
+0 until ten green boots have accumulated. It prints the count rather than
+staying silent, because silence reads as "checked, nothing found".
+
+Backfilling was considered and is not possible: the historical rows have no
+serial log retained, so the names cannot be recovered. Lowering the floor was
+considered and rejected — a skip that fired on both of the last two boots is
+not evidence of anything, and a gate that is wrong most of the time is a gate
+that gets bypassed.
+
+**The allowlist is the part most likely to rot.** Five skips fire on every boot
+*on this host* and are not defects — `[pcid] live alloc_pcid tests` wants a CPU
+feature QEMU does not expose, `[hotplug] offline/online cycle` wants a second
+core, and so on. From the log they are indistinguishable from the six, which is
+exactly the problem, so `ALLOWED` in `check-boot-skips.py` carries each one
+with the **observable condition that would stop it firing** ("boot with `-smp
+2`"). Two properties keep it honest: an allowlisted skip that is still firing is
+printed on every run, and an allowlisted skip that has *stopped* firing is a
+hard failure rather than a shrug — either the entry is now a false statement
+about the tree, or the section was renamed and the entry names nothing.
+
+One of the five is worth a second look when the gate goes live:
+`[smep_smap] STAC/CLAC, with_user_access and the access counter` skips with
+"SMAP not available on this CPU", yet the harness boots QEMU with
+`-cpu qemu64,+smep,+smap,+umip`. Either the feature is requested and not
+delivered, or the detection is wrong. It is allowlisted for now on the reading
+that took the skip's word for it; if the detection is what is broken, this is a
+security self-test that has never run, and the allowlist entry is hiding it.
+That is the failure mode an allowlist has, stated here so the next reader
+checks rather than trusts.
 
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 

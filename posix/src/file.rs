@@ -1808,6 +1808,36 @@ fn stat_path_raw(
     0
 }
 
+/// The raw kernel stat record for an open descriptor.
+///
+/// The descriptor counterpart of [`stat_path_raw`], and it exists for the same
+/// reason: the 80-byte record carries a birth time that `struct stat` has no
+/// field for, so [`statx`] needs the record rather than the translation.
+///
+/// * `Some(0)` — `raw` now holds the record.
+/// * `Some(-1)` — the call failed and errno is set.
+/// * `None` — this descriptor *has* no record.  Pipes, sockets, epoll fds and
+///   the pty ends are not files the kernel can stat; [`fstat`] fabricates a
+///   `struct stat` for them from the handle kind alone.  A caller wanting the
+///   record's extra fields must fall back to `fstat` and report those fields
+///   as unavailable, which is honest — there is no birth time for a pipe.
+fn stat_fd_raw(fd: Fd, raw: &mut [u8; crate::stat::KERNEL_STAT_LEN]) -> Option<i32> {
+    let Some(entry) = lookup_fd(fd) else {
+        // `lookup_fd` set EBADF.  A closed fd is a failure, not an absence of
+        // a record, so this is `Some(-1)` rather than `None`.
+        return Some(-1);
+    };
+    if entry.kind != HandleKind::File {
+        return None;
+    }
+    let ret = syscall2(SYS_FS_FSTAT, entry.handle, raw.as_mut_ptr() as u64);
+    Some(if ret < 0 {
+        errno::translate(ret) as i32
+    } else {
+        0
+    })
+}
+
 /// Get file status by path.
 ///
 /// `SYS_FS_STAT` writes a compact, kernel-defined 80-byte `FsStatResult`,
@@ -2523,6 +2553,22 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) 
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    if is_empty_path(path) {
+        if flags & AT_EMPTY_PATH == 0 {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        // The descriptor itself. `access` above answers "the file exists" and
+        // then permits every mode, because we have no permission model to
+        // consult; the descriptor's counterpart of "the file exists" is that
+        // the fd is open, which `fstat` establishes. Any fd will do — Linux's
+        // `faccessat2` accepts a pipe here, and so does `fstat`.
+        if dirfd == AT_FDCWD {
+            return access(CWD_DOT.as_ptr(), mode);
+        }
+        let mut probe = Stat::default();
+        return fstat(dirfd, &raw mut probe);
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return access(path, mode);
     }
@@ -2591,6 +2637,52 @@ pub(crate) fn is_absolute_path(path: *const u8) -> bool {
     // We only read the first byte (if non-null), which is always safe for
     // a valid C-string (it's either the first character or the null terminator).
     !path.is_null() && unsafe { *path } == b'/'
+}
+
+/// Returns `true` if the C-string `path` is the empty string `""`.
+///
+/// Deliberately distinct from null. The two are different errors and Linux
+/// keeps them apart: a null path is `EFAULT`, an empty one is `ENOENT` — or,
+/// for the calls that take `AT_EMPTY_PATH`, the descriptor itself.
+#[inline]
+pub(crate) fn is_empty_path(path: *const u8) -> bool {
+    // SAFETY: same contract as `is_absolute_path` — callers guarantee `path`
+    // is null or a valid C string, and only the first byte is read.
+    !path.is_null() && unsafe { *path } == 0
+}
+
+/// The path to hand a path-based call when `AT_EMPTY_PATH` names `AT_FDCWD`.
+///
+/// `fstatat(AT_FDCWD, "", &st, AT_EMPTY_PATH)` stats the current working
+/// directory (measured on Linux 6.6), and there is no descriptor to operate on
+/// in that case — `AT_FDCWD` is a sentinel, not an fd. `"."` is the same file
+/// by definition, so the path-based route answers it correctly.
+const CWD_DOT: &[u8; 2] = b".\0";
+
+/// Refuse an empty relative path with `ENOENT`, returning `true` if it did.
+///
+/// Every `*at` call in the family does this, including with `AT_FDCWD`, and it
+/// happens very early: measured on Linux 6.6, an empty path outranks both a
+/// closed `dirfd` (`fstatat(999, "", &st, 0)` is `ENOENT`, not `EBADF`) and a
+/// NULL output buffer (`fstatat(dirfd, "", NULL, 0)` is `ENOENT`, not
+/// `EFAULT`). Only the flag gate outranks it — `fstatat(dirfd, "", &st, 0x40)`
+/// is `EINVAL`. So the call order in each `*at` function is: validate flags,
+/// then this, then everything else.
+///
+/// Callers that accept `AT_EMPTY_PATH` must test for it *before* calling this,
+/// since for them the empty path is a request rather than a mistake.
+///
+/// This exists because the textual join cannot express "no name at all". Given
+/// `""`, [`build_at_path`] produces `dir_path + "/"`, which is a perfectly good
+/// path naming the directory itself — so the call would quietly *succeed* on
+/// the wrong file rather than fail. That is the failure mode this prevents.
+#[inline]
+fn reject_empty_path(path: *const u8) -> bool {
+    if is_empty_path(path) {
+        errno::set_errno(errno::ENOENT);
+        return true;
+    }
+    false
 }
 
 /// Build an absolute path from a dirfd's stored path and a relative path.
@@ -2922,6 +3014,11 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
     if !validate_open_flags(flags) {
         return -1;
     }
+    // `openat` has no `AT_EMPTY_PATH`: there is no way to say "open the
+    // descriptor again", and an empty name is simply a name that is not there.
+    if reject_empty_path(path) {
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return open(path, flags, mode);
     }
@@ -2948,6 +3045,21 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
     if flags & !(AT_SYMLINK_NOFOLLOW | AT_NO_AUTOMOUNT | AT_EMPTY_PATH | AT_STATX_SYNC_TYPE) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
+    }
+    if is_empty_path(path) {
+        if flags & AT_EMPTY_PATH == 0 {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        // `fstat` on the descriptor itself, whatever kind it is — Linux
+        // accepts a pipe, a socket and an `O_PATH` fd here, and so does ours.
+        // `AT_SYMLINK_NOFOLLOW` is meaningless once there is no name left to
+        // follow, and Linux ignores it rather than refusing it (measured).
+        return if dirfd == AT_FDCWD {
+            stat(CWD_DOT.as_ptr(), buf)
+        } else {
+            fstat(dirfd, buf)
+        };
     }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return if flags & AT_SYMLINK_NOFOLLOW != 0 {
@@ -2990,6 +3102,10 @@ pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // `unlinkat` has no `AT_EMPTY_PATH` — removing a name requires a name.
+    if reject_empty_path(path) {
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return if flags & AT_REMOVEDIR != 0 {
             rmdir(path)
@@ -3024,6 +3140,10 @@ pub extern "C" fn renameat(
     newdirfd: i32,
     newpath: *const u8,
 ) -> i32 {
+    // Either name being empty is ENOENT, and the old name is examined first.
+    if reject_empty_path(oldpath) || reject_empty_path(newpath) {
+        return -1;
+    }
     // Resolve each path independently — each dirfd is ignored for
     // absolute paths (POSIX).
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
@@ -3080,6 +3200,9 @@ pub extern "C" fn renameat2(
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
+    if reject_empty_path(path) {
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return mkdir(path, mode);
     }
@@ -3096,6 +3219,20 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: SizeT) -> SsizeT {
+    // `readlinkat` takes no flags, and Linux nevertheless gives the empty path
+    // a meaning: if `dirfd` is itself a *symlink* — which needs
+    // `O_PATH|O_NOFOLLOW` to obtain — it reads that link's body, and otherwise
+    // it is ENOENT.  Measured both halves on 6.6.
+    //
+    // We cannot reach the first half: `open` does not implement `O_PATH`, so
+    // no fd in this libc ever refers to a symlink rather than its target, and
+    // ENOENT is the correct answer for every descriptor a caller can actually
+    // hold.  If `O_PATH` is implemented, this needs the other branch too —
+    // tracked in known-issues.md as
+    // `B-READLINKAT-CANNOT-READ-A-SYMLINK-FD-BECAUSE-O_PATH-IS-UNIMPLEMENTED`.
+    if reject_empty_path(path) {
+        return -1;
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return readlink(path, buf, bufsiz);
     }
@@ -3114,6 +3251,11 @@ pub extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: 
 /// doesn't affect whether we need `newdirfd`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
+    // Only `linkpath` is a path to resolve; `target` is stored verbatim, and an
+    // empty target is a legal (if useless) symlink body, not an error.
+    if reject_empty_path(linkpath) {
+        return -1;
+    }
     if newdirfd == AT_FDCWD || is_absolute_path(linkpath) {
         return symlink(target, linkpath);
     }
@@ -3139,6 +3281,17 @@ pub extern "C" fn linkat(
     // Linux do_linkat: reject flags outside AT_SYMLINK_FOLLOW | AT_EMPTY_PATH.
     if flags & !(AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) != 0 {
         errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // `linkat` accepts `AT_EMPTY_PATH` — "link the file this fd names, under
+    // whatever name it currently has none of" — but Linux gates it on
+    // `CAP_DAC_READ_SEARCH` and, crucially, reports the *absence* of that
+    // capability as ENOENT rather than EPERM, so an unprivileged caller cannot
+    // tell a missing file from a missing privilege. Measured on 6.6:
+    // `linkat(fd, "", dirfd, "l", AT_EMPTY_PATH)` is ENOENT. Since we do not
+    // implement the privileged form, ENOENT is the whole of the behaviour and
+    // the flag needs no separate branch.
+    if reject_empty_path(oldpath) || reject_empty_path(newpath) {
         return -1;
     }
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
@@ -3195,6 +3348,21 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32)
             chmod(p, mode)
         }
     };
+    if is_empty_path(path) {
+        if flags & AT_EMPTY_PATH == 0 {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        // The mode of whatever the descriptor names. `AT_SYMLINK_NOFOLLOW` has
+        // nothing to act on: an fd already refers to one specific inode, and
+        // if that inode is a symlink then it is the symlink that gets chmodded
+        // either way.
+        return if dirfd == AT_FDCWD {
+            chmod(CWD_DOT.as_ptr(), mode)
+        } else {
+            fchmod(dirfd, mode)
+        };
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return apply(path);
     }
@@ -3259,6 +3427,19 @@ pub extern "C" fn fchownat(
             chown(p, owner, group)
         }
     };
+    if is_empty_path(path) {
+        if flags & AT_EMPTY_PATH == 0 {
+            errno::set_errno(errno::ENOENT);
+            return -1;
+        }
+        // The owner of whatever the descriptor names; as with `fchmodat`,
+        // `AT_SYMLINK_NOFOLLOW` has no name left to decline to follow.
+        return if dirfd == AT_FDCWD {
+            chown(CWD_DOT.as_ptr(), owner, group)
+        } else {
+            fchown(dirfd, owner, group)
+        };
+    }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return apply(path);
     }
@@ -5067,6 +5248,17 @@ pub extern "C" fn utimensat(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // Ahead of the `times` validation, which is *not* where the ordering
+    // intuition puts it: `utimensat(dirfd, "", {tv_nsec: 2e9}, 0)` is ENOENT,
+    // not EINVAL, measured on Linux 6.6 — so the empty name is caught before
+    // the timestamps are looked at, even though a valid `times` is copied in
+    // first.  Only the flag gate above outranks it.  `utimensat` has no
+    // `AT_EMPTY_PATH`; the "operate on the fd" form is spelled with a NULL
+    // path instead, which is the GNU extension `futimens` uses and which we
+    // refuse above.
+    if reject_empty_path(path) {
+        return -1;
+    }
     // `times` validation matches what the VFS does before any path lookup.
     if !times.is_null() {
         // SAFETY: caller contract — `times` points to two valid Timespecs.
@@ -5546,6 +5738,13 @@ pub const NAME_TO_HANDLE_AT_FLAGS_VALID: i32 = AT_SYMLINK_FOLLOW | AT_EMPTY_PATH
 /// 2. `pathname` NULL → `EFAULT`.  `user_path_at(dfd, name, …)` takes
 ///    `getname_flags(name)` as an *argument* to `filename_lookup`, so the
 ///    name is imported — and faults — before `dfd` is ever consulted.
+/// 2a. `pathname` empty without `AT_EMPTY_PATH` → `ENOENT`, from the same
+///    import, and therefore also ahead of `dfd`:
+///    `name_to_handle_at(999, "", …, 0)` is `ENOENT`, not `EBADF` (measured
+///    on Linux 6.6).  *With* `AT_EMPTY_PATH` the lookup succeeds and the call
+///    goes on to report on the handle buffer — `EOVERFLOW` for a
+///    `handle_bytes` too small — which is past the point we can model, so
+///    that case falls through to the `ENOSYS` below.
 /// 3. If `dirfd != AT_FDCWD`, it must be a valid open fd → `EBADF`.
 /// 4. `handle` or `mount_id` NULL → `EFAULT`.  These are only touched in
 ///    `do_sys_name_to_handle`, which runs *after* `user_path_at` succeeds.
@@ -5573,6 +5772,9 @@ pub extern "C" fn name_to_handle_at(
     }
     if pathname.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if flags & AT_EMPTY_PATH == 0 && reject_empty_path(pathname) {
         return -1;
     }
     if dirfd != AT_FDCWD {
@@ -6280,6 +6482,17 @@ pub extern "C" fn statx(
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    // An empty path *without* `AT_EMPTY_PATH` is refused here, above the
+    // buffer test; an empty path *with* it is served below, under the buffer
+    // test.  The split is not tidiness — the two orders genuinely differ on
+    // Linux 6.6: `statx(fd, "", 0, …, NULL)` is ENOENT and
+    // `statx(fd, "", AT_EMPTY_PATH, …, NULL)` is EFAULT.  Refusing a nameless
+    // lookup happens during name resolution, which the flagged form skips
+    // entirely, so by the time the flagged form has anything to say the buffer
+    // has already been looked at.
+    if flags & AT_EMPTY_PATH == 0 && reject_empty_path(path) {
+        return -1;
+    }
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -6289,23 +6502,45 @@ pub extern "C" fn statx(
     // `fstatat`: an absolute path or `AT_FDCWD` skips dirfd resolution.
     // `AT_SYMLINK_NOFOLLOW` selects `lstat` semantics.
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
-    let ret = if dirfd == AT_FDCWD || is_absolute_path(path) {
-        stat_path_raw(path, follow, &mut raw)
-    } else {
-        let mut full = [0u8; crate::unistd::PATH_MAX];
-        let len = resolve_dirfd_path(dirfd, path, &mut full);
-        if len == 0 {
-            return -1;
-        }
-        stat_path_raw(full.as_ptr(), follow, &mut raw)
-    };
-    if ret != 0 {
-        return ret;
-    }
-
     let mut st = Stat::default();
-    crate::stat::fill_from_fsstat(&mut st, &raw);
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    // Whether `raw` holds a real kernel record.  Everything but a synthetic
+    // descriptor (pipe, socket, epoll, pty) does; for those, `st` is filled
+    // straight from the handle kind and `STATX_BTIME` stays unreported,
+    // because a pipe has no birth time to report.
+    let mut have_raw = true;
+    if is_empty_path(path) {
+        // The descriptor itself — `AT_EMPTY_PATH` is necessarily set, since
+        // the check above returned for the case where it is not.
+        let ret = if dirfd == AT_FDCWD {
+            stat_path_raw(CWD_DOT.as_ptr(), true, &mut raw)
+        } else if let Some(ret) = stat_fd_raw(dirfd, &mut raw) {
+            ret
+        } else {
+            have_raw = false;
+            fstat(dirfd, &raw mut st)
+        };
+        if ret != 0 {
+            return ret;
+        }
+    } else {
+        let ret = if dirfd == AT_FDCWD || is_absolute_path(path) {
+            stat_path_raw(path, follow, &mut raw)
+        } else {
+            let mut full = [0u8; crate::unistd::PATH_MAX];
+            let len = resolve_dirfd_path(dirfd, path, &mut full);
+            if len == 0 {
+                return -1;
+            }
+            stat_path_raw(full.as_ptr(), follow, &mut raw)
+        };
+        if ret != 0 {
+            return ret;
+        }
+    }
+    if have_raw {
+        crate::stat::fill_from_fsstat(&mut st, &raw);
+    }
 
     // SAFETY: caller guarantees `buf` points to valid memory.
     let sx = unsafe { &mut *buf };
@@ -6365,6 +6600,7 @@ pub extern "C" fn statx(
     // filesystem actually recorded a creation time; otherwise leave the
     // STATX_BTIME bit clear so callers know it is unavailable.
     if mask & STATX_BTIME != 0
+        && have_raw
         && let Some(btime) = crate::stat::btime_from_fsstat(&raw)
     {
         sx.stx_btime = timespec_to_statx_ts(&btime);
@@ -14067,6 +14303,381 @@ mod tests {
                     "flags={f:#x} alone should pass the gate"
                 );
             }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The empty relative path
+    // -----------------------------------------------------------------
+    //
+    // `build_at_path` cannot represent "no name at all": given `""` it
+    // produces `dir_path + "/"`, a valid path naming the directory itself.
+    // So before these gates existed, every `*at` call given an empty name
+    // silently operated on the *directory the caller happened to hold* and
+    // reported success. `unlinkat(fd, "", AT_REMOVEDIR)` removed the
+    // directory; `fchownat(fd, "", u, g, 0)` rechowned it; `scandirat(fd,
+    // "", …)` listed it. None of them failed, which is what makes this worse
+    // than a wrong errno.
+    //
+    // Linux answers ENOENT, and answers it very early — ahead of a closed
+    // `dirfd`, ahead of a NULL output buffer, ahead even of `utimensat`'s
+    // timestamp validation. Only the flag gate outranks it. All of the
+    // orderings asserted below were measured on Linux 6.6, not inferred.
+    mod at_empty_path {
+        use super::super::{
+            AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS,
+            STATX_BTIME, STATX_TYPE, Stat, Statx, faccessat, fchmodat, fchownat, fstatat,
+            is_empty_path, linkat, mkdirat, openat, readlinkat, renameat, statx, symlinkat,
+            unlinkat, utimensat,
+        };
+        use crate::fdtable::{self, HandleKind};
+
+        const EMPTY: *const u8 = b"\0".as_ptr();
+        const NAME: *const u8 = b"n\0".as_ptr();
+
+        fn errno_after(f: impl FnOnce()) -> i32 {
+            crate::errno::set_errno(0);
+            f();
+            crate::errno::get_errno()
+        }
+
+        #[test]
+        fn empty_is_neither_null_nor_a_name() {
+            assert!(is_empty_path(EMPTY));
+            assert!(!is_empty_path(core::ptr::null()));
+            assert!(!is_empty_path(NAME));
+            assert!(!is_empty_path(b"/\0".as_ptr()));
+        }
+
+        /// The whole family, against a `dirfd` that is open and usable.
+        ///
+        /// A real fd matters here: with a closed one the old code would have
+        /// failed anyway (for the wrong reason), so the bug only showed up
+        /// when everything else was right.
+        #[test]
+        fn every_at_call_refuses_an_empty_relative_name() {
+            let dir = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+            let mut st = Stat::default();
+            let mut sx = Statx::default();
+            let mut buf = [0u8; 64];
+
+            let cases: [(&str, &dyn Fn()); 12] = [
+                ("openat", &|| {
+                    openat(dir, EMPTY, crate::fcntl::O_RDONLY, 0);
+                }),
+                ("unlinkat", &|| {
+                    unlinkat(dir, EMPTY, 0);
+                }),
+                ("unlinkat AT_REMOVEDIR", &|| {
+                    unlinkat(dir, EMPTY, AT_REMOVEDIR);
+                }),
+                ("mkdirat", &|| {
+                    mkdirat(dir, EMPTY, 0o755);
+                }),
+                ("symlinkat", &|| {
+                    symlinkat(NAME, dir, EMPTY);
+                }),
+                ("renameat old", &|| {
+                    renameat(dir, EMPTY, dir, NAME);
+                }),
+                ("renameat new", &|| {
+                    renameat(dir, NAME, dir, EMPTY);
+                }),
+                ("linkat old", &|| {
+                    linkat(dir, EMPTY, dir, NAME, 0);
+                }),
+                ("linkat new", &|| {
+                    linkat(dir, NAME, dir, EMPTY, 0);
+                }),
+                ("utimensat", &|| {
+                    utimensat(dir, EMPTY, core::ptr::null(), 0);
+                }),
+                ("faccessat", &|| {
+                    faccessat(dir, EMPTY, crate::fcntl::F_OK, 0);
+                }),
+                ("fchmodat", &|| {
+                    fchmodat(dir, EMPTY, 0o644, 0);
+                }),
+            ];
+            for (name, run) in cases {
+                assert_eq!(
+                    errno_after(run),
+                    crate::errno::ENOENT,
+                    "{name} with an empty name must be ENOENT"
+                );
+            }
+
+            // The ones with awkward signatures, spelled out.
+            assert_eq!(
+                errno_after(|| {
+                    fchownat(dir, EMPTY, 0, 0, 0);
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    readlinkat(dir, EMPTY, buf.as_mut_ptr(), buf.len());
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    fstatat(dir, EMPTY, &raw mut st, 0);
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    statx(dir, EMPTY, 0, STATX_BASIC_STATS, &raw mut sx);
+                }),
+                crate::errno::ENOENT
+            );
+
+            assert!(fdtable::close_fd(dir).is_some());
+        }
+
+        /// `AT_FDCWD` is not a special case: an empty name is still no name.
+        #[test]
+        fn at_fdcwd_does_not_make_an_empty_name_mean_the_cwd() {
+            let mut st = Stat::default();
+            assert_eq!(
+                errno_after(|| {
+                    unlinkat(AT_FDCWD, EMPTY, 0);
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    mkdirat(AT_FDCWD, EMPTY, 0o755);
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    fstatat(AT_FDCWD, EMPTY, &raw mut st, 0);
+                }),
+                crate::errno::ENOENT
+            );
+        }
+
+        /// ENOENT outranks EBADF. `fstatat(999, "", &st, 0)` is ENOENT on
+        /// Linux 6.6 — the name is imported and rejected before the
+        /// descriptor is looked at.
+        #[test]
+        fn an_empty_name_outranks_a_closed_dirfd() {
+            let mut st = Stat::default();
+            let mut sx = Statx::default();
+            const CLOSED: i32 = 4242;
+
+            for (name, got) in [
+                (
+                    "fstatat",
+                    errno_after(|| {
+                        fstatat(CLOSED, EMPTY, &raw mut st, 0);
+                    }),
+                ),
+                (
+                    "unlinkat",
+                    errno_after(|| {
+                        unlinkat(CLOSED, EMPTY, 0);
+                    }),
+                ),
+                (
+                    "openat",
+                    errno_after(|| {
+                        openat(CLOSED, EMPTY, crate::fcntl::O_RDONLY, 0);
+                    }),
+                ),
+                (
+                    "mkdirat",
+                    errno_after(|| {
+                        mkdirat(CLOSED, EMPTY, 0o755);
+                    }),
+                ),
+                (
+                    "utimensat",
+                    errno_after(|| {
+                        utimensat(CLOSED, EMPTY, core::ptr::null(), 0);
+                    }),
+                ),
+                (
+                    "statx",
+                    errno_after(|| {
+                        statx(CLOSED, EMPTY, 0, STATX_BASIC_STATS, &raw mut sx);
+                    }),
+                ),
+            ] {
+                assert_eq!(
+                    got,
+                    crate::errno::ENOENT,
+                    "{name} should be ENOENT not EBADF"
+                );
+            }
+        }
+
+        /// But *with* `AT_EMPTY_PATH` the descriptor is the whole point, so a
+        /// closed one is EBADF again.
+        #[test]
+        fn with_the_flag_a_closed_dirfd_is_ebadf_again() {
+            let mut st = Stat::default();
+            assert_eq!(
+                errno_after(|| {
+                    fstatat(4242, EMPTY, &raw mut st, AT_EMPTY_PATH);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_after(|| {
+                    fchmodat(4242, EMPTY, 0o644, AT_EMPTY_PATH);
+                }),
+                crate::errno::EBADF
+            );
+            assert_eq!(
+                errno_after(|| {
+                    fchownat(4242, EMPTY, 0, 0, AT_EMPTY_PATH);
+                }),
+                crate::errno::EBADF
+            );
+        }
+
+        /// The flag gate still outranks the empty name.
+        #[test]
+        fn a_bad_flag_bit_outranks_an_empty_name() {
+            let mut st = Stat::default();
+            let mut sx = Statx::default();
+            assert_eq!(
+                errno_after(|| {
+                    unlinkat(AT_FDCWD, EMPTY, 0x40);
+                }),
+                crate::errno::EINVAL
+            );
+            assert_eq!(
+                errno_after(|| {
+                    fstatat(AT_FDCWD, EMPTY, &raw mut st, 0x40);
+                }),
+                crate::errno::EINVAL
+            );
+            assert_eq!(
+                errno_after(|| {
+                    statx(AT_FDCWD, EMPTY, 0x40, STATX_BASIC_STATS, &raw mut sx);
+                }),
+                crate::errno::EINVAL
+            );
+            assert_eq!(
+                errno_after(|| {
+                    utimensat(AT_FDCWD, EMPTY, core::ptr::null(), 0x40);
+                }),
+                crate::errno::EINVAL
+            );
+        }
+
+        /// `statx` is the one place the two orders differ, and both halves are
+        /// Linux's: `statx(fd, "", 0, …, NULL)` is ENOENT because the nameless
+        /// lookup is refused during name resolution, while
+        /// `statx(fd, "", AT_EMPTY_PATH, …, NULL)` is EFAULT because the
+        /// flagged form skips resolution entirely and reaches the buffer.
+        #[test]
+        fn statx_reports_the_empty_name_before_the_buffer_but_the_flag_after() {
+            assert_eq!(
+                errno_after(|| {
+                    statx(AT_FDCWD, EMPTY, 0, STATX_BASIC_STATS, core::ptr::null_mut());
+                }),
+                crate::errno::ENOENT
+            );
+            assert_eq!(
+                errno_after(|| {
+                    statx(
+                        AT_FDCWD,
+                        EMPTY,
+                        AT_EMPTY_PATH,
+                        STATX_BASIC_STATS,
+                        core::ptr::null_mut(),
+                    );
+                }),
+                crate::errno::EFAULT
+            );
+        }
+
+        /// `AT_EMPTY_PATH` genuinely reaches the descriptor, and this is the
+        /// test that shows it rather than inferring it.
+        ///
+        /// A pipe fd is the lever: `fstat` answers a pipe from the handle kind
+        /// alone, with no syscall, so it is the one kind that *succeeds* on a
+        /// host build. If `fstatat` were still going through the textual join,
+        /// the pipe would have no stored path and the answer would be ENOTDIR.
+        /// A pipe is also a case the join could never serve at all — there is
+        /// no name in the filesystem to join to.
+        #[test]
+        fn at_empty_path_stats_the_descriptor_itself() {
+            let pipe = fdtable::alloc_fd(HandleKind::Pipe, 0x1234).expect("fd table full");
+            let mut st = Stat::default();
+
+            assert_eq!(fstatat(pipe, EMPTY, &raw mut st, AT_EMPTY_PATH), 0);
+            assert_eq!(st.st_mode, crate::fcntl::S_IFIFO);
+
+            // `AT_SYMLINK_NOFOLLOW` alongside it is accepted and ignored —
+            // there is no name left to decline to follow.
+            let mut st2 = Stat::default();
+            assert_eq!(
+                fstatat(
+                    pipe,
+                    EMPTY,
+                    &raw mut st2,
+                    AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW
+                ),
+                0
+            );
+            assert_eq!(st2.st_mode, crate::fcntl::S_IFIFO);
+
+            // And a non-empty name does *not* take the flag's route: the flag
+            // is simply ignored, and the pipe has no path to join to.
+            assert_eq!(fstatat(pipe, NAME, &raw mut st, AT_EMPTY_PATH), -1);
+
+            assert!(fdtable::close_fd(pipe).is_some());
+        }
+
+        /// The same for `statx`, which has its own stat source and so could
+        /// have been wired to the descriptor incorrectly and independently.
+        ///
+        /// Also pins the honest consequence: a pipe has no kernel stat record,
+        /// so there is no birth time to report and `STATX_BTIME` must stay out
+        /// of `stx_mask` rather than being reported as zero.
+        #[test]
+        fn statx_with_the_flag_reaches_the_descriptor_and_omits_btime() {
+            let pipe = fdtable::alloc_fd(HandleKind::Pipe, 0x1234).expect("fd table full");
+            let mut sx = Statx::default();
+
+            assert_eq!(
+                statx(pipe, EMPTY, AT_EMPTY_PATH, STATX_BASIC_STATS, &raw mut sx),
+                0
+            );
+            assert_eq!(u32::from(sx.stx_mode), crate::fcntl::S_IFIFO);
+            assert_ne!(sx.stx_mask & STATX_TYPE, 0);
+            assert_eq!(
+                sx.stx_mask & STATX_BTIME,
+                0,
+                "a pipe has no creation time; the bit must stay clear"
+            );
+
+            assert!(fdtable::close_fd(pipe).is_some());
+        }
+
+        /// `faccessat` with the flag asks only whether the descriptor is open,
+        /// which is the descriptor-shaped form of the "does it exist" question
+        /// `access` answers for a path.
+        #[test]
+        fn faccessat_with_the_flag_tests_the_descriptor() {
+            let pipe = fdtable::alloc_fd(HandleKind::Pipe, 0x1234).expect("fd table full");
+            assert_eq!(faccessat(pipe, EMPTY, crate::fcntl::F_OK, AT_EMPTY_PATH), 0);
+            assert!(fdtable::close_fd(pipe).is_some());
+
+            // Now closed.
+            assert_eq!(
+                errno_after(|| {
+                    faccessat(pipe, EMPTY, crate::fcntl::F_OK, AT_EMPTY_PATH);
+                }),
+                crate::errno::EBADF
+            );
         }
     }
 }

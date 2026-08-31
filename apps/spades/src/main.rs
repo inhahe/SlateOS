@@ -102,6 +102,14 @@ const BID_COLS: u8 = 7;
 /// Narrower than this and the seat panel is left out rather than squeezed.
 const MIN_PANEL_W: f32 = 128.0;
 
+/// How much taller than a card the hand strip is.
+///
+/// The slack is what the chosen card lifts into, and it is the *only* reason
+/// the strip and the card are two different heights. Both `Layout::solve`'s
+/// cap on the card and `Layout::hand_lift`'s answer come from this one number,
+/// so a card can never be taller than the strip that holds it.
+const HAND_STRIP_SLACK: f32 = 1.14;
+
 // ── Card types ──────────────────────────────────────────────────────
 
 /// Card suits in standard order. Spades are trump.
@@ -599,19 +607,28 @@ impl Layout {
         let status_h = (font + pad * 1.1).min((h - header.h).max(0.0));
         let status = Rect::new(0.0, h - status_h, w, status_h);
 
-        // A card is sized by what the hand strip and the table can both pay
-        // for. Taking the width alone survives every containment test and eats
-        // the table in a wide, short window.
-        let free_h = (status.y - header.bottom()).max(0.0);
-        let card_w = (w / 11.0).min(free_h / 5.6).clamp(0.0, MAX_CARD_W);
-        let card_h = card_w * CARD_ASPECT;
-
         // The hand strip is taller than a card on purpose: the card the player
         // is pointing at lifts out of the fan, and it has to lift into
         // something. The old program lifted it ten pixels into the table's
         // airspace and then hit-tested the row it had left.
+        let free_h = (status.y - header.bottom()).max(0.0);
         let footer_h = (small * 2.4).min(free_h);
-        let hand_h = (card_h * 1.14).min((free_h - footer_h).max(0.0));
+        let strip_h = (free_h - footer_h).max(0.0);
+
+        // A card is sized by what the hand strip and the table can both pay
+        // for. Taking the width alone survives every containment test and eats
+        // the table in a wide, short window -- and taking the free height
+        // alone is not enough either, because the strip is what is left of it
+        // once the footer has been paid for. A card measured against the whole
+        // of the free height is taller than the strip in a window about sixty
+        // pixels high, and a card taller than its strip hangs out of the top
+        // of it, over the felt, with a hit box that hangs out with it.
+        let card_w = (w / 11.0)
+            .min(free_h / 5.6)
+            .min(strip_h / (CARD_ASPECT * HAND_STRIP_SLACK))
+            .clamp(0.0, MAX_CARD_W);
+        let card_h = card_w * CARD_ASPECT;
+        let hand_h = (card_h * HAND_STRIP_SLACK).min(strip_h);
         let footer = Rect::new(0.0, (status.y - footer_h).max(header.bottom()), w, footer_h);
         let hand = Rect::new(
             pad,
@@ -1807,10 +1824,10 @@ impl SpadesGame {
         if l.header.is_empty() {
             return;
         }
-        text_at(
+        bounded(
             f,
-            l.pad,
-            l.header.y + (l.header.h - l.title) / 2.0,
+            (l.pad, l.header.y + (l.header.h - l.title) / 2.0),
+            (l.header.w - l.pad * 2.0).max(0.0),
             TITLE,
             LAVENDER,
             l.title,
@@ -2235,19 +2252,24 @@ impl SpadesGame {
             if y + l.small > card.bottom() {
                 break;
             }
-            text_at(
+            // The card is clipped to the window when the window is smaller
+            // than the help it holds, so each column is bounded by the room
+            // the card actually has rather than by what the row measured.
+            let key_x = card.x + l.pad;
+            bounded(
                 f,
-                card.x + l.pad,
-                y,
+                (key_x, y),
+                key_w.min((card.right() - l.pad - key_x).max(0.0)),
                 key,
                 BLUE,
                 l.small,
                 FontWeightHint::Bold,
             );
-            text_at(
+            let desc_x = key_x + key_w + l.pad;
+            bounded(
                 f,
-                card.x + l.pad + key_w + l.pad,
-                y,
+                (desc_x, y),
+                (card.right() - l.pad - desc_x).max(0.0),
                 desc,
                 SUBTEXT0,
                 l.small,
@@ -2413,7 +2435,18 @@ fn centred(
     weight: FontWeightHint,
 ) {
     let measured = text::measure(s, size, weight);
-    text_at(f, x + (w - measured) / 2.0, y, s, color, size, weight);
+    // Centred *in* `w`, which means it never leaves `w`: a run too wide to
+    // centre starts at the left edge and is elided at the right one, rather
+    // than being centred by a negative offset that hangs off both sides.
+    bounded(
+        f,
+        (x + ((w - measured) / 2.0).max(0.0), y),
+        w,
+        s,
+        color,
+        size,
+        weight,
+    );
 }
 
 /// A card, face up: rank and suit in the corner, the suit again in the middle.
@@ -2432,19 +2465,25 @@ fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
     if corner * 2.0 > r.w {
         return;
     }
-    text_at(
+    // Every glyph is bounded by the card it is written on. A ten is two
+    // characters where every other rank is one, so the corner is the one place
+    // in the picture where the text can be wider than the space measured for
+    // it, and a card at the edge of the fan would write it onto the felt.
+    let corner_x = r.x + r.w * 0.10;
+    let corner_w = (r.right() - corner_x).max(0.0);
+    bounded(
         f,
-        r.x + r.w * 0.10,
-        r.y + r.h * 0.06,
+        (corner_x, r.y + r.h * 0.06),
+        corner_w,
         card.rank.label(),
         ink,
         corner,
         FontWeightHint::Bold,
     );
-    text_at(
+    bounded(
         f,
-        r.x + r.w * 0.10,
-        corner.mul_add(1.05, r.y + r.h * 0.06),
+        (corner_x, corner.mul_add(1.05, r.y + r.h * 0.06)),
+        corner_w,
         card.suit.symbol(),
         ink,
         corner,
@@ -2452,10 +2491,11 @@ fn draw_card_face(f: &mut Frame<Target>, r: Rect, card: Card, dim: bool) {
     );
     let big = r.w * 0.46;
     let measured = text::measure(card.suit.symbol(), big, FontWeightHint::Regular);
-    text_at(
+    let big_x = (r.right() - r.w * 0.12 - measured).max(r.x);
+    bounded(
         f,
-        r.right() - r.w * 0.12 - measured,
-        r.bottom() - r.h * 0.10 - big,
+        (big_x, r.bottom() - r.h * 0.10 - big),
+        (r.right() - big_x).max(0.0),
         card.suit.symbol(),
         ink,
         big,
@@ -2536,11 +2576,13 @@ mod tests {
     #![expect(
         clippy::indexing_slicing,
         clippy::panic,
+        clippy::expect_used,
         reason = "a test that indexes past the end should fail loudly"
     )]
 
     use super::*;
-    use guitk::probe::press;
+    use guitk::event::Modifiers;
+    use guitk::probe::{click_sized, press, press_with, rect_of_sized};
 
     /// Run the clock until the game stops asking for time.
     ///
@@ -3589,5 +3631,941 @@ mod tests {
         // The card matching led_suit wins; here neither matches, so
         // only self.suit == led matters: clubs != hearts so clubs doesn't beat
         assert!(!ace_clubs.beats(ace_diamonds, Suit::Hearts));
+    }
+
+    // ── Window wiring ───────────────────────────────────────────────
+    //
+    // Everything below is about the program being in a window: that the
+    // picture is drawn at the size it is given, that what the pointer
+    // reaches is what the painter painted, and that the machine seats
+    // answer on a clock rather than inside the human's own click.
+
+    /// The window widths every layout claim is checked at.
+    ///
+    /// A rule about `Layout::solve` is a rule at *every* size, so a handful of
+    /// sampled sizes tests a handful of points and nothing else. The sizes that
+    /// break a layout rule are exactly the ones nobody would think to sample:
+    /// 20 wide, where the padding is a fifth of the window; 1400 wide, where a
+    /// capped card leaves the hand's step longer than the card itself.
+    const GRID_W: [f32; 7] = [0.0, 20.0, 60.0, 120.0, 360.0, 900.0, 1400.0];
+    /// The window heights every layout claim is checked at.
+    const GRID_H: [f32; 6] = [0.0, 57.0, 120.0, 280.0, 620.0, 900.0];
+
+    /// Every window size the layout claims sweep.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is the answer the
+    /// layout gives when a thing does not fit and is left out, and a thing that
+    /// was left out cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// Do these two rectangles share any area?
+    fn overlaps(a: Rect, b: Rect) -> bool {
+        a.intersect(b).is_some_and(|r| r.w > 0.01 && r.h > 0.01)
+    }
+
+    #[test]
+    fn the_panes_are_stacked_and_do_not_overlap() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            assert!(l.header.bottom() <= l.table.y + 0.01, "header/table {at}");
+            assert!(l.table.bottom() <= l.hand.y + 0.01, "table/hand {at}");
+            assert!(l.hand.bottom() <= l.footer.y + 0.01, "hand/footer {at}");
+            assert!(l.footer.bottom() <= l.status.y + 0.01, "footer/status {at}");
+            assert!(l.status.bottom() <= h + 0.01, "status/window {at}");
+        }
+    }
+
+    #[test]
+    fn every_pane_stays_inside_the_window() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for (name, r) in [
+                ("header", l.header),
+                ("table", l.table),
+                ("hand", l.hand),
+                ("footer", l.footer),
+                ("status", l.status),
+                ("panel", l.panel),
+            ] {
+                assert!(inside(l.window, r), "{name} escapes the window at {at}");
+            }
+            assert!(inside(l.table, l.panel), "panel escapes the felt at {at}");
+        }
+    }
+
+    #[test]
+    fn the_hand_fits_the_window_it_is_drawn_in() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for i in 0..HAND_SIZE {
+                let card = l.hand_card(i, HAND_SIZE);
+                assert!(inside(l.hand, card), "card {i} escapes the strip at {at}");
+                let lifted = card.translated(0.0, -l.hand_lift());
+                assert!(
+                    inside(l.hand, lifted),
+                    "card {i} lifts out of the strip at {at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_wide_window_lays_the_hand_out_without_hiding_any_card() {
+        // The card is capped, so past a certain width the fan stops growing and
+        // the strip does not: the step is clamped to the card's own width and
+        // the thirteen cards sit side by side. Uncapped, the card outgrows the
+        // step and every card but the last is partly behind its neighbour.
+        let l = Layout::solve(1400.0, 900.0);
+        for i in 1..HAND_SIZE {
+            let left = l.hand_card(i - 1, HAND_SIZE);
+            let right = l.hand_card(i, HAND_SIZE);
+            assert!(
+                !overlaps(left, right),
+                "card {i} hides part of card {}: {left:?} vs {right:?}",
+                i - 1
+            );
+        }
+    }
+
+    #[test]
+    fn each_seat_plays_its_card_in_its_own_place() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            for a in 0..SEATS {
+                for b in (a + 1)..SEATS {
+                    let (ra, rb) = (l.trick_card(a), l.trick_card(b));
+                    assert!(
+                        !overlaps(ra, rb),
+                        "seats {a} and {b} play on the same felt at {w}x{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_seat_labels_stay_on_the_felt_and_clear_of_their_own_card() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let at = format!("{w}x{h}");
+            for seat in 0..SEATS {
+                let label = l.seat_label(seat);
+                assert!(
+                    inside(l.table, label),
+                    "seat {seat} label off the felt at {at}"
+                );
+                assert!(
+                    !overlaps(label, l.trick_card(seat)),
+                    "seat {seat} label sits on its own card at {at}"
+                );
+                assert!(
+                    !overlaps(label, l.panel),
+                    "seat {seat} label sits under the panel at {at}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_bid_button_is_inside_the_pad_that_holds_it() {
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let pad = l.bid_pad();
+            for value in 0..=MAX_BID {
+                let cell = l.bid_button(value);
+                assert!(
+                    inside(pad, cell),
+                    "bid {value} escapes the pad at {w}x{h}: {cell:?} vs {pad:?}"
+                );
+            }
+            assert!(
+                inside(l.table, pad),
+                "the bid pad escapes the felt at {w}x{h}"
+            );
+        }
+    }
+
+    // ── What was painted is what the pointer reaches ────────────────
+
+    /// A game past bidding, with the human to play and a hand to play from.
+    fn playing_game() -> SpadesGame {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        game.submit_human_bid();
+        settle(&mut game);
+        game
+    }
+
+    #[test]
+    fn the_hand_is_hit_boxed_where_it_is_painted() {
+        let game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let f = game.frame(w, h);
+        let l = Layout::solve(w, h);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        assert!(
+            n > 0,
+            "the human has to hold cards for this to mean anything"
+        );
+        for i in 0..n {
+            let boxed = f
+                .hits()
+                .iter()
+                .find(|&&(t, _)| t == Target::Card(i))
+                .map(|&(_, r)| r)
+                .unwrap_or_else(|| panic!("card {i} has no hit box"));
+            let painted = l.hand_card(i, n);
+            let lifted = painted.translated(0.0, -l.hand_lift());
+            assert!(
+                boxed == painted || boxed == lifted,
+                "card {i} is hit-boxed at {boxed:?}, painted at {painted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_chosen_card_lifts_and_its_hit_box_lifts_with_it() {
+        // The old program drew the chosen card ten pixels higher than the rest
+        // and then searched the row the card had left, so the top ten pixels of
+        // the card the player had chosen were the one part of it that could not
+        // be clicked.
+        let mut game = playing_game();
+        game.selected_card = 3;
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        assert!(l.hand_lift() > 0.5, "there is no lift to test");
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let unlifted = l.hand_card(3, n);
+        let boxed =
+            rect_of_sized(&game, Target::Card(3), (w, h)).expect("the chosen card is drawn");
+        assert!(
+            (boxed.y - (unlifted.y - l.hand_lift())).abs() < 0.01,
+            "the chosen card's hit box did not lift with it: {boxed:?} vs {unlifted:?}"
+        );
+        // And the very top of the lifted card reaches the card, not the felt.
+        let hit = game.frame(w, h).hit_test(boxed.centre().0, boxed.y + 1.0);
+        assert_eq!(
+            hit,
+            Some(Target::Card(3)),
+            "the top of the lifted card is dead"
+        );
+    }
+
+    #[test]
+    fn a_click_where_two_cards_overlap_reaches_the_one_on_top() {
+        let game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let (left, right) = (l.hand_card(0, n), l.hand_card(1, n));
+        let shared = left.intersect(right).expect("the fan has to overlap");
+        assert!(
+            shared.w > 1.0,
+            "the fan does not overlap at the default size"
+        );
+        let (x, y) = shared.centre();
+        assert_eq!(
+            game.frame(w, h).hit_test(x, y),
+            Some(Target::Card(1)),
+            "the click reached the card underneath"
+        );
+    }
+
+    #[test]
+    fn the_bid_pad_is_drawn_where_it_is_clicked() {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        assert_eq!(game.phase, Phase::Bidding);
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        for value in 0..=MAX_BID {
+            let painted = l.bid_button(value);
+            let boxed = rect_of_sized(&game, Target::Bid(value), (w, h))
+                .unwrap_or_else(|| panic!("bid {value} has no hit box"));
+            assert_eq!(
+                boxed, painted,
+                "bid {value} is clicked somewhere it is not drawn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_bid_bids_it() {
+        let mut game = SpadesGame::with_seed(7);
+        settle(&mut game);
+        click_sized(
+            &mut game,
+            Target::Bid(5),
+            MouseButton::Left,
+            SpadesGame::SIZE,
+        );
+        assert_eq!(game.player_rounds[PlayerId::SOUTH.index()].bid, Some(5));
+    }
+
+    #[test]
+    fn a_frame_is_drawn_at_the_size_it_is_given_not_the_size_it_remembers() {
+        // `render` used to take no size at all and paint a 900x700 picture into
+        // a window of any other size.
+        let game = playing_game();
+        for (w, h) in sizes() {
+            let f = game.frame(w, h);
+            assert!(
+                (f.width - w).abs() < 0.01,
+                "frame width {} for {w}",
+                f.width
+            );
+            assert!(
+                (f.height - h).abs() < 0.01,
+                "frame height {} for {h}",
+                f.height
+            );
+            let l = Layout::solve(w, h);
+            for &(target, r) in f.hits() {
+                assert!(
+                    inside(l.window, r),
+                    "{target:?} is hit-boxed outside the {w}x{h} window at {r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn render_draws_at_the_window_it_was_given_and_records_it() {
+        // The click handler resolves a pointer against the frame the renderer
+        // last drew, so the renderer has to remember what size that was.
+        let mut game = playing_game();
+        let _ = game.render(640.0, 480.0);
+        assert_eq!(game.size, (640.0, 480.0));
+        let _ = game.render(1280.0, 300.0);
+        assert_eq!(game.size, (1280.0, 300.0));
+    }
+
+    #[test]
+    fn a_click_lands_on_what_was_drawn_in_that_window_not_the_last_one() {
+        // Draw at one size, then another: a click has to be answered against
+        // the picture that is actually on the screen.
+        let mut game = playing_game();
+        let narrow = (420.0, 520.0);
+        let _ = game.render(narrow.0, narrow.1);
+        let l = Layout::solve(narrow.0, narrow.1);
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        let (x, y) = l.hand_card(n - 1, n).centre();
+        game.selected_card = 0;
+        game.handle_mouse(&MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(
+            game.selected_card,
+            n - 1,
+            "the click found nothing at {x},{y} in a {}x{} window",
+            narrow.0,
+            narrow.1
+        );
+    }
+
+    // ── The footer, the keys and the help card ──────────────────────
+
+    /// Everything about a game that a button could change.
+    ///
+    /// A button and its key have to reach the *same* state, not merely both
+    /// change something, so the comparison has to be of the whole game.
+    fn snapshot(game: &SpadesGame) -> String {
+        format!(
+            "{:?}|{:?}|{:?}|{}|{}|{}|{}|{:?}|{}|{}|{:?}|{}",
+            game.phase,
+            game.sort_order,
+            game.hands,
+            game.show_help,
+            game.selected_card,
+            game.bid_selection,
+            game.round_number,
+            game.player_rounds,
+            game.tricks_played,
+            game.status_message,
+            game.current_trick,
+            game.spades_broken,
+        )
+    }
+
+    /// Every text the frame carries, in painting order.
+    fn texts(f: &Frame<Target>) -> Vec<String> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_button_does_what_its_key_does() {
+        // The old program's only clickable thing was the hand; every other verb
+        // was a keystroke listed in a one-line hint. Now each verb exists twice
+        // -- as a key and as a button -- and the two have to stay one verb.
+        for button in BUTTONS {
+            let mut by_key = playing_game();
+            let mut by_click = playing_game();
+            assert_eq!(
+                snapshot(&by_key),
+                snapshot(&by_click),
+                "two games from one seed already differ"
+            );
+            by_key.key_at(&press(button.key()), SpadesGame::SIZE);
+            click_sized(
+                &mut by_click,
+                Target::Button(button),
+                MouseButton::Left,
+                SpadesGame::SIZE,
+            );
+            assert_eq!(
+                snapshot(&by_key),
+                snapshot(&by_click),
+                "{button:?}: the button and the key disagree"
+            );
+        }
+    }
+
+    #[test]
+    fn a_button_too_wide_for_the_footer_is_left_out() {
+        // Left out, not drawn off the edge: the last thing a narrow window
+        // should show is half a button hanging past the frame.
+        let game = playing_game();
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let f = game.frame(w, h);
+            for &(target, r) in f.hits() {
+                if matches!(target, Target::Button(_)) {
+                    assert!(
+                        inside(l.footer, r),
+                        "{target:?} hangs off the footer at {w}x{h}: {r:?} vs {:?}",
+                        l.footer
+                    );
+                }
+            }
+        }
+        // And at sixty pixels wide there is genuinely not room for all four.
+        let narrow = game.frame(60.0, 700.0);
+        let drawn = narrow
+            .hits()
+            .iter()
+            .filter(|&&(t, _)| matches!(t, Target::Button(_)))
+            .count();
+        assert!(drawn < BUTTONS.len(), "four buttons fitted a 60px window");
+    }
+
+    #[test]
+    fn the_confirm_button_says_what_enter_will_do() {
+        // Enter means five different things across the five phases. The button
+        // and the help card both read `confirm_label`, so they cannot drift.
+        let mut game = playing_game();
+        for phase in [
+            Phase::Bidding,
+            Phase::Playing,
+            Phase::TrickDone,
+            Phase::RoundOver,
+            Phase::GameOver,
+        ] {
+            game.phase = phase;
+            assert_eq!(game.button_label(Button::Confirm), confirm_label(phase));
+            let f = game.frame(SpadesGame::SIZE.0, SpadesGame::SIZE.1);
+            assert!(
+                texts(&f).iter().any(|t| t == confirm_label(phase)),
+                "the footer does not say {:?} in {phase:?}",
+                confirm_label(phase)
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_card_lists_every_button_and_is_dismissed_by_a_click() {
+        let mut game = playing_game();
+        assert!(!game.show_help);
+        game.key_at(&press(Key::H), SpadesGame::SIZE);
+        assert!(game.show_help, "H did not raise the help");
+        let f = game.draw(SpadesGame::SIZE);
+        let said = texts(&f);
+        for button in BUTTONS {
+            assert!(
+                said.iter().any(|t| t == button.key_name()),
+                "the help card does not name {button:?}'s key"
+            );
+            assert!(
+                said.iter().any(|t| t == game.button_label(button)),
+                "the help card does not say what {button:?} does"
+            );
+        }
+        // The card swallows the click, so a player reaching for a line of the
+        // help does not play the card underneath it.
+        let held = game.hand_of(PlayerId::SOUTH).len();
+        click_sized(&mut game, Target::Help, MouseButton::Left, SpadesGame::SIZE);
+        assert!(!game.show_help, "the click did not dismiss the help");
+        assert_eq!(
+            game.hand_of(PlayerId::SOUTH).len(),
+            held,
+            "the click through the help card played a card"
+        );
+    }
+
+    #[test]
+    fn the_help_card_fits_the_window_it_is_drawn_in() {
+        let mut game = playing_game();
+        game.show_help = true;
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let f = game.frame(w, h);
+            let card = f
+                .hits()
+                .iter()
+                .find(|&&(t, _)| t == Target::Help)
+                .map(|&(_, r)| r);
+            if let Some(card) = card {
+                assert!(inside(l.window, card), "the help card escapes {w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn no_text_runs_off_the_window_it_is_drawn_in() {
+        // Every text in the old program was `max_width: None`, so a status
+        // naming a seat and a card ran straight off a narrow window -- and so
+        // did the title, the help card's rows and a card's own corner.
+        let mut game = playing_game();
+        game.status_message = "West played the king of diamonds and took the trick".repeat(4);
+        for (w, h) in sizes() {
+            let f = game.frame(w, h);
+            for c in f.commands() {
+                if let RenderCommand::Text {
+                    text,
+                    x,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } = c
+                {
+                    let bound =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    assert!(
+                        x + bound <= w + 0.01,
+                        "{text:?} runs off a {w}x{h} window: x {x} + {bound}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_key_with_a_modifier_is_left_to_the_window() {
+        // Ctrl+N is the compositor's new window. It used to throw away the
+        // round in progress, because no modifier was ever examined.
+        let mut game = playing_game();
+        let before = snapshot(&game);
+        for key in [Key::N, Key::S, Key::H, Key::Enter, Key::Left] {
+            for mods in [
+                Modifiers {
+                    ctrl: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    alt: true,
+                    ..Modifiers::default()
+                },
+                Modifiers {
+                    super_key: true,
+                    ..Modifiers::default()
+                },
+            ] {
+                let result = game.handle_key(&press_with(key, mods));
+                assert_eq!(result, EventResult::Ignored, "{key:?} with {mods:?}");
+            }
+        }
+        assert_eq!(snapshot(&game), before, "a modified key changed the game");
+    }
+
+    #[test]
+    fn a_key_release_does_nothing() {
+        let mut game = playing_game();
+        let before = snapshot(&game);
+        let mut release = press(Key::N);
+        release.pressed = false;
+        assert_eq!(game.handle_key(&release), EventResult::Ignored);
+        assert_eq!(snapshot(&game), before);
+    }
+
+    #[test]
+    fn a_click_on_nothing_changes_nothing() {
+        let mut game = playing_game();
+        let (w, h) = SpadesGame::SIZE;
+        let before = snapshot(&game);
+        // The very corner of the header, which carries no target at all.
+        let hit = game.frame(w, h).hit_test(w - 1.0, 1.0);
+        assert_eq!(hit, None, "the top-right corner is a target");
+        game.handle_mouse(&MouseEvent {
+            x: w - 1.0,
+            y: 1.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        assert_eq!(snapshot(&game), before);
+    }
+
+    #[test]
+    fn the_status_line_is_elided_rather_than_cut_off() {
+        let mut game = playing_game();
+        game.status_message = "North played the king of diamonds and took it".repeat(3);
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let f = game.frame(w, h);
+        let said = f
+            .commands()
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if *text == game.status_message => Some((*max_width, *overflow)),
+                _ => None,
+            })
+            .expect("the status is drawn");
+        assert_eq!(
+            said.1,
+            TextOverflow::Ellipsis,
+            "the status is cut, not elided"
+        );
+        let bound = said.0.expect("the status is bounded");
+        assert!(
+            bound <= l.status.w - l.pad * 2.0 + 0.01,
+            "the status is bounded to {bound}, wider than its own bar"
+        );
+    }
+
+    // ── The clock ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_machine_seats_answer_on_a_clock_not_inside_the_human_s_click() {
+        // The old program ran all three machine seats inside the human's own
+        // event, so three seats answered instantly and simultaneously in the
+        // middle of a click that was supposed to play one card.
+        let mut game = SpadesGame::with_seed(11);
+        assert_eq!(game.phase, Phase::Bidding);
+        assert!(
+            !game.current_player.is_human(),
+            "seed 11 opens on a machine"
+        );
+        assert!(
+            game.player_rounds.iter().all(|pr| pr.bid.is_none()),
+            "a seat bid before the clock ever ran"
+        );
+        // One tick short of the pause: still nobody.
+        assert!(game.tick(u64::from(THINK_MS) - 1));
+        assert!(
+            game.player_rounds.iter().all(|pr| pr.bid.is_none()),
+            "a seat answered before its time was up"
+        );
+        assert!(game.tick(1));
+        assert_eq!(
+            game.player_rounds
+                .iter()
+                .filter(|pr| pr.bid.is_some())
+                .count(),
+            1,
+            "more than one seat answered on one tick"
+        );
+    }
+
+    #[test]
+    fn nobody_plays_while_a_settled_trick_is_still_on_the_table() {
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(
+                    game.tick(u64::from(THINK_MS)),
+                    "the clock stopped mid-trick"
+                );
+            }
+        }
+        assert!(
+            game.sweep_ms > 0,
+            "a settled trick has no time on the table"
+        );
+        let held: Vec<usize> = game.hands.iter().map(Vec::len).collect();
+        // The sweep has to run out before anybody may play again.
+        for _ in 0..((SWEEP_MS / 10) - 1) {
+            assert!(game.tick(10));
+            assert_eq!(game.phase, Phase::TrickDone, "the trick was swept early");
+            assert_eq!(
+                game.hands.iter().map(Vec::len).collect::<Vec<_>>(),
+                held,
+                "a card was played onto a settled trick"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settled_trick_stays_face_up_and_names_who_took_it() {
+        // `finish_trick` used to replace the trick the instant the fourth card
+        // landed, and what the table showed in its place was four blank grey
+        // rectangles with no rank and no suit on them.
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(game.tick(u64::from(THINK_MS)));
+            }
+        }
+        let taker = game
+            .last_trick
+            .as_ref()
+            .and_then(Trick::winner)
+            .expect("a settled trick has a taker");
+        let (w, h) = SpadesGame::SIZE;
+        let l = Layout::solve(w, h);
+        let f = game.frame(w, h);
+        // Four cards, face up: every rank on the table is written on the felt.
+        let said = texts(&f);
+        for &(player, card) in &game.last_trick.as_ref().expect("a trick").cards {
+            assert!(
+                said.iter().any(|t| t == card.rank.label()),
+                "the card {player:?} played is not face up"
+            );
+        }
+        // And the taker's card, and only the taker's, wears the green ring.
+        let ringed: Vec<Rect> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    color,
+                    ..
+                } if *color == GREEN => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ringed.len(), 1, "the ring is round {} cards", ringed.len());
+        assert_eq!(ringed[0], l.trick_card(taker.index()));
+        assert!(
+            game.status_message.contains(taker.name()),
+            "the status does not say who took it: {:?}",
+            game.status_message
+        );
+    }
+
+    #[test]
+    fn a_trick_left_alone_is_swept_and_the_next_one_starts() {
+        // The old program parked at `TrickDone` for ever waiting on Enter --
+        // and Enter was also the only thing that unblocked the machine seats,
+        // so a game left alone stopped dead.
+        let mut game = playing_game();
+        while game.phase != Phase::TrickDone {
+            if game.current_player.is_human() {
+                game.play_card(PlayerId::SOUTH, game.legal_plays(PlayerId::SOUTH)[0]);
+            } else {
+                assert!(game.tick(u64::from(THINK_MS)));
+            }
+        }
+        assert_eq!(game.tricks_played, 1);
+        settle(&mut game);
+        assert_ne!(game.phase, Phase::TrickDone, "the trick was never swept");
+        assert!(
+            game.current_trick.cards.is_empty() || game.current_player.is_human(),
+            "the machines stopped after the sweep"
+        );
+    }
+
+    #[test]
+    fn a_game_left_alone_reaches_the_human_and_stops_there() {
+        // The clock is only ever owed to a machine seat: when it is the human's
+        // turn, `tick` says no, and the program is not spinning.
+        let mut game = playing_game();
+        settle(&mut game);
+        assert!(
+            game.current_player.is_human()
+                || matches!(game.phase, Phase::RoundOver | Phase::GameOver),
+            "the clock stopped on {:?} in {:?}",
+            game.current_player,
+            game.phase
+        );
+    }
+
+    #[test]
+    fn every_seat_always_has_a_legal_card() {
+        // `machine_acts` would hold the game for ever on a seat with nothing
+        // legal to play, so there had better be no such seat.
+        for seed in 0..12u64 {
+            let mut game = SpadesGame::with_seed(seed);
+            settle(&mut game);
+            game.submit_human_bid();
+            for _ in 0..600 {
+                if matches!(game.phase, Phase::RoundOver | Phase::GameOver) {
+                    break;
+                }
+                let seat = game.current_player;
+                if !game.hand_of(seat).is_empty() && game.phase == Phase::Playing {
+                    assert!(
+                        !game.legal_plays(seat).is_empty(),
+                        "seed {seed}: {seat:?} holds {:?} and may play none of it",
+                        game.hand_of(seat)
+                    );
+                }
+                if seat.is_human() && game.phase == Phase::Playing {
+                    let legal = game.legal_plays(seat);
+                    game.play_card(seat, legal[0]);
+                } else if !game.tick(u64::from(THINK_MS.max(SWEEP_MS))) {
+                    break;
+                }
+            }
+        }
+    }
+
+    // ── The pointer, the panel and a fresh deal ─────────────────────
+
+    #[test]
+    fn the_selection_stays_on_a_card_that_exists() {
+        let mut game = playing_game();
+        // Walk the pointer off the right-hand end, then off the left.
+        for _ in 0..40 {
+            game.key_at(&press(Key::Right), SpadesGame::SIZE);
+        }
+        assert_eq!(game.selected_card, game.hand_of(PlayerId::SOUTH).len() - 1);
+        for _ in 0..40 {
+            game.key_at(&press(Key::Left), SpadesGame::SIZE);
+        }
+        assert_eq!(game.selected_card, 0);
+        // And it survives the hand shrinking under it: point at the last card,
+        // play a different one, and the pointer must not be past the end.
+        let n = game.hand_of(PlayerId::SOUTH).len();
+        game.selected_card = n - 1;
+        game.play_card(PlayerId::SOUTH, 0);
+        settle(&mut game);
+        assert!(
+            game.selected_card < game.hand_of(PlayerId::SOUTH).len().max(1),
+            "the pointer is past the end of a {} card hand",
+            game.hand_of(PlayerId::SOUTH).len()
+        );
+    }
+
+    #[test]
+    fn re_sorting_keeps_the_pointer_on_the_same_card() {
+        // The pointer follows the card, not the index: a re-sort that left the
+        // pointer where it was would silently move it to a different card.
+        let mut game = playing_game();
+        for start in [0usize, 4, 9] {
+            game.selected_card = start;
+            let held = game.hand_of(PlayerId::SOUTH)[start];
+            game.key_at(&press(Key::S), SpadesGame::SIZE);
+            assert_eq!(
+                game.hand_of(PlayerId::SOUTH)[game.selected_card],
+                held,
+                "re-sorting moved the pointer to a different card"
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_is_left_out_rather_than_squeezed() {
+        // The old sidebar was pinned at x = 720 in a window of any width, so it
+        // hung off the right edge of anything narrower than about 860.
+        let mut seen_out = false;
+        let mut seen_in = false;
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            if l.panel.is_empty() {
+                seen_out = true;
+            } else {
+                seen_in = true;
+                assert!(
+                    l.panel.w >= MIN_PANEL_W,
+                    "a {}-wide panel was squeezed in at {w}x{h}",
+                    l.panel.w
+                );
+                assert!(
+                    inside(l.table, l.panel),
+                    "the panel escapes the felt at {w}x{h}"
+                );
+            }
+        }
+        assert!(seen_out, "the panel is never left out");
+        assert!(seen_in, "the panel is never drawn");
+    }
+
+    #[test]
+    fn the_panel_says_what_each_team_bid_and_what_it_has_taken() {
+        let mut game = playing_game();
+        game.player_rounds[PlayerId::SOUTH.index()].bid = Some(4);
+        game.player_rounds[PlayerId::NORTH.index()].bid = Some(3);
+        game.player_rounds[PlayerId::SOUTH.index()].tricks_won = 2;
+        let f = game.frame(SpadesGame::SIZE.0, SpadesGame::SIZE.1);
+        let said = texts(&f).join("\n");
+        assert!(
+            said.contains("bid 7") && said.contains("won 2"),
+            "the panel does not carry the contract: {said}"
+        );
+    }
+
+    #[test]
+    fn a_new_game_from_the_button_deals_a_fresh_round() {
+        let mut game = playing_game();
+        game.play_card(PlayerId::SOUTH, 0);
+        settle(&mut game);
+        click_sized(
+            &mut game,
+            Target::Button(Button::New),
+            MouseButton::Left,
+            SpadesGame::SIZE,
+        );
+        assert_eq!(game.round_number, 1);
+        assert_eq!(game.tricks_played, 0);
+        assert_eq!(game.phase, Phase::Bidding);
+        assert!(!game.spades_broken);
+        for hand in &game.hands {
+            assert_eq!(
+                hand.len(),
+                HAND_SIZE,
+                "a fresh deal is thirteen cards a seat"
+            );
+        }
+        for team in &game.teams {
+            assert_eq!(team.score, 0);
+            assert_eq!(team.bags, 0);
+        }
+    }
+
+    #[test]
+    fn two_different_seeds_deal_two_different_games() {
+        // The deal used to come from a fixed seed, so the identical thirteen
+        // cards arrived every time the program was opened. `new()` asks the
+        // system for a seed now and `with_seed` is what the tests use -- and
+        // *that* the seed differs per launch cannot be asserted off-target,
+        // where the system source is out of reach and every launch falls back
+        // to the same number by design. What can be asserted, and is what the
+        // repair actually rests on, is that the seed is what decides the deal.
+        let a = SpadesGame::with_seed(1);
+        let b = SpadesGame::with_seed(2);
+        assert_ne!(a.hands, b.hands, "two seeds dealt the same cards");
     }
 }

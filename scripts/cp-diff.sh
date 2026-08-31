@@ -808,7 +808,119 @@ run_case -rv tree/link dst
 run_case -v tree/link dst
 
 # =============================================================================
-# 15. Options GNU has and this cp has not
+# 15. -P, -H, -L: the link or what it points at
+# =============================================================================
+# Three options that set one field, so the interesting cases are not "does -P
+# work" but the two places the field is read:
+#
+#   * the operand -- `-P` keeps a link named on the command line, `-L` and `-H`
+#     follow it, and with none of the three given it depends on `-r`; and
+#   * everything found underneath it -- where `-L` follows and `-H` does *not*,
+#     which is the only difference between those two and is invisible in any
+#     case that copies a single file.
+#
+# Two more read it indirectly: the same-file guard (`cp -P linkA linkB` is
+# allowed, `cp linkA linkB` is "the same file") and the announcement, which is
+# why every case here is also `-v` -- the stdout line names what was copied and
+# so says which of the two a case actually did.
+#
+# No case here puts a link to an ancestor under `-L`. Measured: GNU descends
+# through it until the path is too long, taking minutes and megabytes of
+# output, and ours does the same by doing nothing special -- agreeing about an
+# unbounded walk is not something a harness can wait for. Section 8's `tree/up`
+# covers the same link under the policy that terminates.
+
+# The operand. `tree/link` is a link to a sibling file, `treelink` a link to a
+# directory: the first shows the file/link distinction, the second the one that
+# decides whether a walk happens at all.
+run_case -Pv tree/link dst
+run_case -Lv tree/link dst
+run_case -Hv tree/link dst
+run_case -v tree/link dst
+run_case -rPv tree/link dst
+run_case -rLv tree/link dst
+run_case -rHv tree/link dst
+# A link to a directory without `-r`: followed, it is a directory and the copy
+# is refused; kept, it is a link and copies fine. So `-P` succeeds here and the
+# other two print `-r not specified`.
+TREE='mktree; ln -s tree treelink'
+run_case -Pv treelink dst
+TREE='mktree; ln -s tree treelink'
+run_case -Lv treelink dst
+TREE='mktree; ln -s tree treelink'
+run_case -Hv treelink dst
+TREE='mktree; ln -s tree treelink'
+run_case -rPv treelink dst
+TREE='mktree; ln -s tree treelink'
+run_case -rLv treelink dst
+TREE='mktree; ln -s tree treelink'
+run_case -rHv treelink dst
+
+# A dangling operand. `-P` copies the link; `-L` and `-H` have nothing to stat
+# and fail, with the name of the *link* in the diagnostic.
+TREE='mktree; ln -s nowhere dangling'
+run_case -Pv dangling dst
+TREE='mktree; ln -s nowhere dangling'
+run_case -Lv dangling dst
+TREE='mktree; ln -s nowhere dangling'
+run_case -Hv dangling dst
+TREE='mktree; ln -s loop loop'
+run_case -Lv loop dst
+TREE='mktree; ln -s loop loop'
+run_case -Pv loop dst
+
+# Inside the walk, which is where `-H` and `-L` part company. `tree` already
+# holds `link -> a.txt`; the extra links below give the walk a directory link
+# and a broken one to disagree about too.
+run_case -rPv tree dst
+run_case -rLv tree dst
+run_case -rHv tree dst
+TREE='mktree; ln -s sub tree/todir'
+run_case -rLv tree dst
+TREE='mktree; ln -s sub tree/todir'
+run_case -rHv tree dst
+TREE='mktree; ln -s nowhere tree/dangling'
+run_case -rLv tree dst
+TREE='mktree; ln -s nowhere tree/dangling'
+run_case -rHv tree dst
+TREE='mktree; ln -s /etc/hostname tree/absolute'
+run_case -rLv tree dst
+# A link to a directory as the operand *and* links inside it: `-H` follows the
+# first and keeps the rest, which no other combination does.
+TREE='mktree; ln -s tree treelink; ln -s sub tree/todir'
+run_case -rHv treelink dst
+TREE='mktree; ln -s tree treelink; ln -s sub tree/todir'
+run_case -rLv treelink dst
+
+# The same-file guard reads the policy, not `-r`. Two distinct links to one
+# file are two things when the links are what is being copied, and one thing
+# when they are not.
+TREE='mktree; ln -s file.txt one; ln -s file.txt two'
+run_case -Pv one two
+TREE='mktree; ln -s file.txt one; ln -s file.txt two'
+run_case -v one two
+TREE='mktree; ln -s file.txt one; ln -s file.txt two'
+run_case -Lv one two
+TREE='mktree; ln -s file.txt soft.txt'
+run_case -Pv soft.txt file.txt
+TREE='mktree; ln -s file.txt soft.txt'
+run_case -Lv soft.txt file.txt
+
+# Last one wins, and giving two is not an error.
+run_case -PLv tree/link dst
+run_case -LPv tree/link dst
+run_case -HPv tree/link dst
+run_case -PHv tree/link dst
+run_case --no-dereference -v tree/link dst
+run_case --dereference -v tree/link dst
+# Abbreviations, which the two long spellings make interesting: `--no-d` is
+# unambiguous but `--d` is not -- `--debug` is in the table too.
+run_case --no-d -v tree/link dst
+run_case --dere -v tree/link dst
+run_case --d -v tree/link dst
+
+# =============================================================================
+# 16. Options GNU has and this cp has not
 # =============================================================================
 # An inventory, one line per option, kept as `xfail` so that the count is
 # visible in the summary and so that `xpass` fires the moment one is
@@ -824,19 +936,18 @@ missing --backup file.txt tree/a.txt
 missing --backup=numbered file.txt tree/a.txt
 missing --copy-contents -r tree dst
 missing --debug file.txt new.txt
+# `-d` outlives `-P`, which it contains: GNU's `-d` is `--no-dereference`
+# *and* `--preserve=links`, and honouring only the half that exists would turn
+# two hard-linked sources into two independent copies with nothing said.
 missing -d tree/link dst
 missing -f file.txt new.txt
 missing --force file.txt new.txt
-missing -H -r tree dst
 missing -i file.txt tree/a.txt
 missing --interactive file.txt tree/a.txt
 missing -l file.txt new.txt
 missing --link file.txt new.txt
-missing -L -r tree dst
-missing --dereference tree/link dst
 missing -n file.txt tree/a.txt
 missing --no-clobber file.txt tree/a.txt
-missing --no-dereference tree/link dst
 missing --no-preserve=mode file.txt new.txt
 missing --one-file-system -r tree dst
 missing -p file.txt new.txt
@@ -844,7 +955,6 @@ missing --preserve file.txt new.txt
 missing --preserve=mode,timestamps file.txt new.txt
 missing --parents tree/a.txt dir
 missing --path tree/a.txt dir
-missing -P -r tree dst
 missing --reflink=auto file.txt new.txt
 missing --remove-destination file.txt tree/a.txt
 missing -s file.txt new.txt
@@ -860,7 +970,7 @@ missing -Z file.txt new.txt
 missing --context file.txt new.txt
 
 # =============================================================================
-# 16. --help and --version
+# 17. --help and --version
 # =============================================================================
 
 xfail_case 'help omits GNU bug-report block' --help

@@ -135,16 +135,19 @@
 //! # Options this implementation does not have
 //!
 //! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory`,
-//! `-T`/`--no-target-directory` and `-v`/`--verbose`. The rest are recognised
-//! and rejected with a message saying they are not implemented, rather than
-//! ignored, and they are listed in [`LONG_OPTIONS`] anyway because the table is
-//! what decides whether an abbreviation is ambiguous.
+//! `-T`/`--no-target-directory`, `-v`/`--verbose` and the three symlink
+//! policies `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`. The rest
+//! are recognised and rejected with a message saying they are not implemented,
+//! rather than ignored, and they are listed in [`LONG_OPTIONS`] anyway because
+//! the table is what decides whether an abbreviation is ambiguous.
 //!
 //! Ignoring them would be worse than refusing in almost every case: `-n` asks
 //! for an existing file to be left alone, `-p` asks for ownership and timestamps
-//! to survive, `-l` and `-s` ask for a link rather than a copy, and `-P`/`-L`
-//! choose whether a symlink or its target is copied. Every one of those, ignored,
-//! produces a destination that looks right and is not.
+//! to survive, and `-l` and `-s` ask for a link rather than a copy. Every one of
+//! those, ignored, produces a destination that looks right and is not. `-d` is
+//! refused for a subtler version of the same reason: it is `-P` *plus*
+//! `--preserve=links`, and honouring only the half that exists would turn two
+//! hard-linked sources into two independent copies without saying so.
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
@@ -238,6 +241,32 @@ const ALIASES: &[(&str, &str)] = &[("path", "parents")];
 /// those into silently wrong operand lists.
 const SHORT_OPTIONS: &str = "abdfHilLnprst:uvxPRS:TZ";
 
+/// Whether `cp` copies a symbolic link, or copies whatever it points at.
+///
+/// GNU's `enum Dereference_symlink` (`copy.h`), spelled the same way and with
+/// the same four members, including the one that is not a policy: `Undefined`
+/// means none of `-P`, `-H`, `-L` was given, and is resolved by
+/// [`CpFlags::resolved_deref`] rather than acted on.
+///
+/// Two policies and not one, because "follow a link" is answered differently
+/// depending on *where the link was found*. That distinction is the whole of
+/// `-H`, and it is invisible in any single boolean.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+enum Deref {
+    /// None of the three options was given. Never observed outside
+    /// [`CpFlags::resolved_deref`].
+    #[default]
+    Undefined,
+    /// `-P` / `--no-dereference`: copy the link itself, wherever it was found.
+    Never,
+    /// `-H`: follow a link named as an operand; copy links found by walking a
+    /// directory.
+    CommandLine,
+    /// `-L` / `--dereference`: follow every link, wherever it was found.
+    Always,
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 struct CpFlags {
@@ -253,6 +282,55 @@ struct CpFlags {
     /// `-v` / `--verbose`: name every copy as it is made. See [`announce`] for
     /// where those lines come out and why they are not diagnostics.
     verbose: bool,
+    /// `-P` / `-H` / `-L`: what to do with a symbolic link. Stored exactly as
+    /// given, including "not given"; ask [`CpFlags::follow_operand`] and
+    /// [`CpFlags::follow_walked`] rather than reading it.
+    dereference: Deref,
+}
+
+impl CpFlags {
+    /// [`Self::dereference`] with `Undefined` replaced by what it means.
+    ///
+    /// GNU does this once, after the option loop (`cp.c:1239`), and calls the
+    /// default "compatible with FreeBSD": recursive copies keep links, flat
+    /// copies follow them. That is why plain `cp link dst` writes a *file* and
+    /// plain `cp -r link dst` writes a *link* — one option that was never
+    /// given changing meaning because another one was.
+    ///
+    /// Resolved on demand here rather than written back into the struct, so
+    /// that the parse tests can see `-r` and `-rP` as the different command
+    /// lines they are, and so that there is no window in which an unresolved
+    /// value could be read. GNU's `x.hard_link` also takes part in the rule
+    /// (`x.recursive && ! x.hard_link`); `-l` is not implemented here, so its
+    /// half of the condition is not yet expressible and is noted rather than
+    /// guessed at.
+    fn resolved_deref(&self) -> Deref {
+        match self.dereference {
+            Deref::Undefined if self.recursive => Deref::Never,
+            Deref::Undefined => Deref::Always,
+            given => given,
+        }
+    }
+
+    /// Whether a source *named on the command line* is stat'd through.
+    ///
+    /// `copy.c:2250` picks `AT_SYMLINK_NOFOLLOW` exactly when the policy is
+    /// `DEREF_NEVER`, so `-H` follows here and `-P` does not.
+    fn follow_operand(&self) -> bool {
+        self.resolved_deref() != Deref::Never
+    }
+
+    /// Whether a source *found by walking a directory* is stat'd through.
+    ///
+    /// GNU expresses this by handing the recursion a modified copy of the
+    /// options: `copy.c:845` sets `non_command_line_options.dereference =
+    /// DEREF_NEVER` when the policy is `DEREF_COMMAND_LINE_ARGUMENTS`. So only
+    /// `-L` follows in here, which is what makes `cp -Hr` and `cp -Lr` differ
+    /// at all — they agree about the operand and disagree about everything
+    /// underneath it.
+    fn follow_walked(&self) -> bool {
+        self.resolved_deref() == Deref::Always
+    }
 }
 
 /// What the command line asked for.
@@ -320,6 +398,9 @@ Usage: cp [OPTION]... SOURCE DEST
   or:  cp [OPTION]... SOURCE... DIRECTORY
 Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
 
+  -H                    follow command-line symbolic links in SOURCE
+  -L, --dereference     always follow symbolic links in SOURCE
+  -P, --no-dereference  never follow symbolic links in SOURCE
   -r, -R, --recursive   copy directories recursively.  Symbolic links are
                           copied as symbolic links, not followed.
   -t, --target-directory=DIRECTORY
@@ -381,6 +462,25 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 flags.no_target_directory = true;
             }
             Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            // Plain assignment, so the last of several wins: `cp -LP` copies
+            // the link and `cp -PL` follows it. GNU's three `case` arms do the
+            // same, and there is no diagnostic for giving two of them — unlike
+            // `-t`, where a repeat is an error.
+            //
+            // `-d` is deliberately *not* here. It is `--no-dereference` and
+            // `--preserve=links` together (`cp.c:1044`), and the second half —
+            // recreating a hard link between two sources that share an inode
+            // rather than copying the file twice — is not implemented. Half of
+            // `-d` would be the silent wrong answer the module docs are about,
+            // so it stays refused until `--preserve=links` exists.
+            Opt::Short(b'P', _) | Opt::Long("no-dereference", _) => {
+                flags.dereference = Deref::Never;
+            }
+            Opt::Short(b'L', _) | Opt::Long("dereference", _) => {
+                flags.dereference = Deref::Always;
+            }
+            // No long spelling: GNU gives `-H` none either.
+            Opt::Short(b'H', _) => flags.dereference = Deref::CommandLine,
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
             // Everything else in the two tables is an option GNU has and this
@@ -421,8 +521,9 @@ fn unimplemented_long(name: &str) -> getopt::Error {
 /// One value rather than three parameters, because it is the *recursion* that
 /// needs them. [`copy_tree`] and [`copy_entry`] could reach neither the flags
 /// nor stdout, so no option that changes what happens inside a directory could
-/// be written at all — and `--verbose`, `-p`, `-x`, `-L` and `--copy-contents`
-/// are all of them that.
+/// be written at all — and `--verbose`, `-p`, `-x`, `-L`/`-H` and
+/// `--copy-contents` are all of them that. Two of those now exist: `--verbose`
+/// reads `job.out`, and `-L` reads `job.flags` from inside [`copy_entry`].
 ///
 /// Both sinks are parameters rather than `stdout()`/`stderr()` taken directly,
 /// so that a test can assert on what a copy said. The old file had no test of
@@ -660,15 +761,19 @@ fn copy_one<O: Write, E: Write>(
     let flags = job.flags;
     let src_path = Path::new(src);
 
-    // Whether a symlink *operand* is followed depends on `-r`, and this matches
-    // GNU: plain `cp link dst` copies what the link points at, while `cp -r`
-    // copies the link itself. The recursive case must not follow, because a
-    // followed link is what turns a link to an ancestor into an endless descent
-    // (module docs, bug 1).
-    let metadata = if flags.recursive {
-        fs::symlink_metadata(src_path)
-    } else {
+    // Whether a symlink *operand* is followed is the whole of `-P`/`-H`/`-L`,
+    // and with none of them given it depends on `-r`: plain `cp link dst`
+    // copies what the link points at, while `cp -r link dst` copies the link
+    // itself. [`CpFlags::follow_operand`] holds that rule and its citation.
+    //
+    // Not following is what keeps `cp -r` finite: a followed link to an
+    // ancestor is an endless descent (module docs, bug 1). `cp -Lr` therefore
+    // *is* endless on such a tree — measured, and GNU is too, which is why
+    // there is no guard against it here.
+    let metadata = if flags.follow_operand() {
         fs::metadata(src_path)
+    } else {
+        fs::symlink_metadata(src_path)
     };
     let metadata = match metadata {
         Ok(m) => m,
@@ -765,7 +870,7 @@ fn copy_one<O: Write, E: Write>(
         // only comparison that catches every spelling; GNU's `same_file_ok`
         // makes the same one, at the same point in the same order. Asked only
         // when the destination exists, again as GNU asks it.
-        if is_same_file(src_path, &target, flags.recursive) {
+        if is_same_file(src_path, &target, !flags.follow_operand()) {
             let _ = writeln!(
                 job.err,
                 "cp: {} and {} are the same file",
@@ -894,20 +999,38 @@ fn place_source<O: Write, E: Write>(
     job: &mut Job<'_, O, E>,
 ) -> bool {
     if metadata.file_type().is_symlink() {
-        // Only reachable under `-r`; see the stat in [`copy_one`].
+        // Reachable exactly when the stat in [`copy_one`] did not follow — `-P`,
+        // or `-r` with none of `-P`/`-H`/`-L` given. Not under `-H`: that
+        // follows an operand, so a link named on the command line never gets
+        // here, only one found inside a tree does (in [`copy_entry`]).
         //
         // An existing destination is removed first. `symlinkat` has no
         // "replace", and refusing instead would leave `cp -r` unable to update
         // a tree it had already copied once — so GNU unlinks, under exactly
         // this condition (`copy.c`: `dereference == DEREF_NEVER` and the source
         // is not a regular file).
-        if dest_exists
-            && let Err(e) = fs::remove_file(target)
-            && e.kind() != io::ErrorKind::NotFound
-        {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
-            return false;
+        if dest_exists {
+            if let Err(e) = fs::remove_file(target)
+                && e.kind() != io::ErrorKind::NotFound
+            {
+                let why = strerror(&e);
+                let _ = writeln!(job.err, "cp: cannot remove {}: {why}", quoteaf_os(target));
+                return false;
+            }
+            // `-v` names the removal too, on stdout, in its own sentence and
+            // before the arrow line (`copy.c:2586`). Only here: this is the one
+            // place anything is unlinked, because replacing a *regular* file is
+            // done by truncating it rather than by removing it.
+            //
+            // Reached on "it was already gone" as well as on success, which is
+            // GNU's control flow rather than an oversight — its condition is
+            // `unlinkat (…) != 0 && errno != ENOENT`, so a destination that
+            // vanished between the stat and the unlink is still announced as
+            // removed. Only a race can produce that, and agreeing about it
+            // costs nothing.
+            if job.flags.verbose {
+                let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
+            }
         }
         // *After* the removal above, which is GNU's order: its `unlink` of the
         // destination (`copy.c:2582`) comes before `emit_verbose`
@@ -952,24 +1075,29 @@ fn place_source<O: Write, E: Write>(
 ///
 /// Both are *followed*, so a destination that is a symlink to the source counts
 /// — writing through it truncates the source exactly as surely as naming the
-/// source directly. The one exception is GNU's, and it is the reason `recursive`
-/// is a parameter: under `-r`, two names that are both symlinks are the same
-/// file only when they are the same *link*, because replacing one link with a
-/// copy of another does not touch what either points at. `cp -r linkA linkB`
-/// where both point at one file is therefore allowed, while `cp -r link file`
-/// — where `link` resolves to `file` — is not, and GNU makes exactly that
-/// distinction in `same_file_ok`.
+/// source directly. The one exception is GNU's, and it is the reason `nofollow`
+/// is a parameter: when the source is *not* being followed, two names that are
+/// both symlinks are the same file only when they are the same *link*, because
+/// replacing one link with a copy of another does not touch what either points
+/// at. `cp -P linkA linkB` where both point at one file is therefore allowed,
+/// while `cp -P link file` — where `link` resolves to `file` — is not, and GNU
+/// makes exactly that distinction in `same_file_ok` (`copy.c:1764`), keyed on
+/// `x->dereference == DEREF_NEVER` and not on `-r`.
+///
+/// The caller passes `!flags.follow_operand()`, which under `-r` alone is the
+/// `-P` case — which is why this used to take `recursive` and behaved the same.
+/// It stops behaving the same the moment `-L` or `-H` is given with `-r`.
 ///
 /// `false` when either side cannot be stat'd. A source that is a dangling
 /// symlink is not the same file as anything, and a destination that cannot be
 /// reached will produce its own diagnostic a moment later.
 #[cfg(unix)]
-fn is_same_file(src: &Path, dst: &Path, recursive: bool) -> bool {
+fn is_same_file(src: &Path, dst: &Path, nofollow: bool) -> bool {
     use std::os::unix::fs::MetadataExt;
     fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
         a.dev() == b.dev() && a.ino() == b.ino()
     }
-    if recursive {
+    if nofollow {
         let (sl, dl) = (fs::symlink_metadata(src), fs::symlink_metadata(dst));
         if let (Ok(sl), Ok(dl)) = (&sl, &dl)
             && sl.file_type().is_symlink()
@@ -991,7 +1119,7 @@ fn is_same_file(src: &Path, dst: &Path, recursive: bool) -> bool {
 /// `#[cfg(unix)]` arm above — the arm the target OS and the certification
 /// harness both use. The unit tests that pin the refusal run on both.
 #[cfg(not(unix))]
-fn is_same_file(src: &Path, dst: &Path, _recursive: bool) -> bool {
+fn is_same_file(src: &Path, dst: &Path, _nofollow: bool) -> bool {
     match (fs::canonicalize(src), fs::canonicalize(dst)) {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
@@ -1396,7 +1524,18 @@ fn copy_entry<O: Write, E: Write>(
     // `DirEntry::metadata` does **not** follow symlinks, unlike `Path::is_dir`.
     // That is the whole of the fix for bug 1, and it also hands over the mode
     // the copy is to be created with, which a second `stat` might not.
-    let meta = match entry.metadata() {
+    //
+    // `-L` is the one policy that wants the other answer *here*, and asking for
+    // it costs the extra `stat` that `entry.metadata()` was avoiding — there is
+    // no following variant of it. That is the right way round: the option that
+    // is not given pays nothing. See [`CpFlags::follow_walked`] for why `-H`
+    // takes this branch and not the other one.
+    let meta = if job.flags.follow_walked() {
+        fs::metadata(&from)
+    } else {
+        entry.metadata()
+    };
+    let meta = match meta {
         Ok(m) => m,
         Err(e) => {
             let why = strerror(&e);
@@ -1942,8 +2081,10 @@ mod tests {
             // `-S` is here with a value attached: it takes a required one, so
             // bare `-S` would swallow the operand after it and this would be an
             // arity test rather than a rejection test.
-            "-a", "-b", "-d", "-f", "-H", "-i", "-l", "-L", "-n", "-p", "-P", "-s", "-S.bak", "-u",
-            "-x", "-Z",
+            // `-d` is here and `-P` is not, though the two set the same
+            // dereference policy: `-d` is also `--preserve=links`, which does
+            // not exist yet. See the parse arm.
+            "-a", "-b", "-d", "-f", "-i", "-l", "-n", "-p", "-s", "-S.bak", "-u", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -1961,12 +2102,10 @@ mod tests {
             "--attributes-only",
             "--backup",
             "--copy-contents",
-            "--dereference",
             "--force",
             "--interactive",
             "--link",
             "--no-clobber",
-            "--no-dereference",
             "--one-file-system",
             "--parents",
             "--preserve",
@@ -2169,12 +2308,14 @@ mod tests {
         target_directory: None,
         no_target_directory: false,
         verbose: false,
+        dereference: Deref::Undefined,
     };
     const RECURSIVE: CpFlags = CpFlags {
         recursive: true,
         target_directory: None,
         no_target_directory: false,
         verbose: false,
+        dereference: Deref::Undefined,
     };
     /// `-T`, which the two above never set. Named for what it does rather than
     /// for the letter: the destination is a name, not a directory to fill.
@@ -2183,18 +2324,53 @@ mod tests {
         target_directory: None,
         no_target_directory: true,
         verbose: false,
+        dereference: Deref::Undefined,
     };
     const VERBOSE: CpFlags = CpFlags {
         recursive: false,
         target_directory: None,
         no_target_directory: false,
         verbose: true,
+        dereference: Deref::Undefined,
     };
     const VERBOSE_RECURSIVE: CpFlags = CpFlags {
         recursive: true,
         target_directory: None,
         no_target_directory: false,
         verbose: true,
+        dereference: Deref::Undefined,
+    };
+    // The three below are `#[cfg(unix)]` because every test that uses one has
+    // to create a symlink to mean anything, and the development host cannot.
+    // Without the gate they are dead code there and the build is not warning-
+    // free. [`the_dereference_table`] needs no filesystem and so runs on both.
+    /// `-P`: the link, not its target, with no `-r` to make that the default.
+    #[cfg(unix)]
+    const NO_DEREF: CpFlags = CpFlags {
+        recursive: false,
+        target_directory: None,
+        no_target_directory: false,
+        verbose: false,
+        dereference: Deref::Never,
+    };
+    /// `-Lr`: follow every link, including ones found inside the tree.
+    #[cfg(unix)]
+    const DEREF_ALL_R: CpFlags = CpFlags {
+        recursive: true,
+        target_directory: None,
+        no_target_directory: false,
+        verbose: false,
+        dereference: Deref::Always,
+    };
+    /// `-Hr`: follow the operand, keep the links found underneath it. The one
+    /// combination in which the two questions have different answers.
+    #[cfg(unix)]
+    const DEREF_CMD_R: CpFlags = CpFlags {
+        recursive: true,
+        target_directory: None,
+        no_target_directory: false,
+        verbose: false,
+        dereference: Deref::CommandLine,
     };
 
     /// `copy_all` plus whatever it wrote to its error sink.
@@ -2493,6 +2669,7 @@ mod tests {
             no_target_directory: true,
             recursive: false,
             verbose: false,
+            dereference: Deref::Undefined,
         };
         let (ok, e) = cp(&flags, &[Path::new("a"), Path::new("b")]);
         assert!(!ok);
@@ -2746,6 +2923,242 @@ mod tests {
         assert!(rendered_src.starts_with('\''), "{rendered_src}");
         assert!(rendered_src.ends_with("a b'"), "{rendered_src}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // -------------------------------------- -P / -H / -L: links or targets --
+
+    /// The whole of `cp.c:1239` and `copy.c:845` as a table, with no
+    /// filesystem in the way. Every row is a command line; the two columns are
+    /// the only two questions the rest of the program ever asks.
+    ///
+    /// The two rows worth staring at are the `-H` ones — they are the only
+    /// place the columns disagree, and a single `follow: bool` could not
+    /// express them at all.
+    #[test]
+    fn the_dereference_table() {
+        let rows: &[(bool, Deref, bool, bool)] = &[
+            // recursive, given,               operand, walked
+            (false, Deref::Undefined, true, true),
+            (true, Deref::Undefined, false, false),
+            (false, Deref::Never, false, false),
+            (true, Deref::Never, false, false),
+            (false, Deref::Always, true, true),
+            (true, Deref::Always, true, true),
+            (false, Deref::CommandLine, true, false),
+            (true, Deref::CommandLine, true, false),
+        ];
+        for &(recursive, dereference, operand, walked) in rows {
+            let flags = CpFlags {
+                recursive,
+                dereference,
+                ..PLAIN
+            };
+            assert_eq!(
+                (flags.follow_operand(), flags.follow_walked()),
+                (operand, walked),
+                "{recursive} {dereference:?}"
+            );
+        }
+    }
+
+    /// `-P` alone. Without it, `cp link dst` writes a *file*; the point of the
+    /// option is to get `-r`'s behaviour without `-r`.
+    #[cfg(unix)]
+    #[test]
+    fn no_dereference_copies_the_link_without_r() {
+        let dir = scratch("P_link");
+        fs::write(dir.join("file"), b"BODY").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("file", &link).unwrap();
+        let dst = dir.join("dst");
+
+        let (ok, e) = cp(&NO_DEREF, &[&link, &dst]);
+        assert!(ok, "{e}");
+        let meta = fs::symlink_metadata(&dst).unwrap();
+        assert!(meta.file_type().is_symlink(), "a link, not its target");
+        assert_eq!(fs::read_link(&dst).unwrap(), PathBuf::from("file"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same-file guard keys on the policy and not on `-r`, which is what
+    /// changed when `-P` arrived: two distinct links to one file are two
+    /// distinct things to copy, so this is allowed. Under [`PLAIN`] — where
+    /// both are followed — the identical command is refused, and the test
+    /// above this one in the file pins that half.
+    #[cfg(unix)]
+    #[test]
+    fn no_dereference_lets_one_link_replace_another_without_r() {
+        let dir = scratch("P_two_links");
+        fs::write(dir.join("file"), b"BODY").unwrap();
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::os::unix::fs::symlink("file", &one).unwrap();
+        std::os::unix::fs::symlink("file", &two).unwrap();
+
+        let (ok, e) = cp(&NO_DEREF, &[&one, &two]);
+        assert!(ok, "{e}");
+        assert_eq!(e, "");
+        let (ok, e) = cp(&PLAIN, &[&one, &two]);
+        assert!(!ok, "followed, they are one file");
+        assert!(e.contains("are the same file"), "{e}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-L` reaches *inside* the tree, which is the half no option could
+    /// express before [`Job`] carried the flags into the recursion: the link
+    /// to a file becomes a file, and the link to a directory becomes a
+    /// directory with the contents copied again.
+    #[cfg(unix)]
+    #[test]
+    fn dereference_follows_links_found_by_the_walk() {
+        let dir = scratch("L_walk");
+        let src = dir.join("t");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), b"A").unwrap();
+        fs::write(src.join("sub/s.txt"), b"S").unwrap();
+        std::os::unix::fs::symlink("a.txt", src.join("flink")).unwrap();
+        std::os::unix::fs::symlink("sub", src.join("dlink")).unwrap();
+        let dst = dir.join("d");
+
+        let (ok, e) = cp(&DEREF_ALL_R, &[&src, &dst]);
+        assert!(ok, "{e}");
+        assert!(
+            !fs::symlink_metadata(dst.join("flink"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link to a file became a file"
+        );
+        assert_eq!(fs::read(dst.join("flink")).unwrap(), b"A");
+        assert!(
+            dst.join("dlink").is_dir()
+                && !fs::symlink_metadata(dst.join("dlink"))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+            "the link to a directory became a directory"
+        );
+        assert_eq!(fs::read(dst.join("dlink/s.txt")).unwrap(), b"S");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A link that points at nothing has no target to copy, so `-L` fails on
+    /// it where the default would have copied the link. GNU's wording, from
+    /// the same `stat` this one comes from: `cannot stat 't/dangle'`.
+    #[cfg(unix)]
+    #[test]
+    fn dereference_fails_on_a_dangling_link_in_the_tree() {
+        let dir = scratch("L_dangle");
+        let src = dir.join("t");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a.txt"), b"A").unwrap();
+        std::os::unix::fs::symlink("nowhere", src.join("dangle")).unwrap();
+        let dst = dir.join("d");
+
+        let (ok, e) = cp(&DEREF_ALL_R, &[&src, &dst]);
+        assert!(!ok, "one entry failed, so the copy failed");
+        assert!(e.contains("cannot stat "), "{e}");
+        assert!(e.contains("dangle"), "{e}");
+        // The rest of the directory is still copied: one bad entry ends that
+        // entry, not the walk.
+        assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-H` is the split one: the operand is followed, so a link to a
+    /// directory is descended into, and every link *found* down there is
+    /// copied as a link — including a dangling one, which `-L` could not have
+    /// copied at all.
+    #[cfg(unix)]
+    #[test]
+    fn command_line_dereference_follows_only_the_operand() {
+        let dir = scratch("H_split");
+        let src = dir.join("t");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("a.txt"), b"A").unwrap();
+        std::os::unix::fs::symlink("a.txt", src.join("flink")).unwrap();
+        std::os::unix::fs::symlink("nowhere", src.join("dangle")).unwrap();
+        let dlink = dir.join("dlink");
+        std::os::unix::fs::symlink("t", &dlink).unwrap();
+        let dst = dir.join("d");
+
+        let (ok, e) = cp(&DEREF_CMD_R, &[&dlink, &dst]);
+        assert!(ok, "{e}");
+        assert!(
+            dst.is_dir() && !fs::symlink_metadata(&dst).unwrap().file_type().is_symlink(),
+            "the operand was followed"
+        );
+        assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"A");
+        for name in ["flink", "dangle"] {
+            assert!(
+                fs::symlink_metadata(dst.join(name))
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{name} was found by the walk, so it stays a link"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Replacing a link says two things, in this order: the removal and then
+    /// the copy. The removal line exists because there is no atomic "replace"
+    /// for a symlink — and it is the only case where `cp` unlinks anything, so
+    /// a regular file overwritten in place says nothing extra.
+    #[cfg(unix)]
+    #[test]
+    fn verbose_names_the_link_it_removed_first() {
+        let dir = scratch("P_removed");
+        fs::write(dir.join("file"), b"BODY").unwrap();
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::os::unix::fs::symlink("file", &one).unwrap();
+        std::os::unix::fs::symlink("file", &two).unwrap();
+
+        let flags = CpFlags {
+            verbose: true,
+            ..NO_DEREF
+        };
+        let (ok, out, err) = cp_out(&flags, &[&one, &two]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(lines[0].starts_with("removed "), "{out}");
+        assert!(lines[0].contains("two"), "{out}");
+        assert!(lines[1].contains(" -> "), "{out}");
+
+        // Nothing to remove, nothing said.
+        let three = dir.join("three");
+        let (ok, out, err) = cp_out(&flags, &[&one, &three]);
+        assert!(ok, "{err}");
+        assert_eq!(out.lines().count(), 1, "{out}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Three options that set one field, so the last one given wins and there
+    /// is no diagnostic for giving two. Measured against GNU: `cp -LP link d`
+    /// writes a link and `cp -PL link d` writes a file.
+    #[test]
+    fn the_last_dereference_option_wins() {
+        for (argv, want) in [
+            (["-P", "-L"], Deref::Always),
+            (["-L", "-P"], Deref::Never),
+            (["-H", "-P"], Deref::Never),
+            (["-P", "-H"], Deref::CommandLine),
+        ] {
+            let (flags, _) = run_parse(&[argv[0], argv[1], "a", "b"]);
+            assert_eq!(flags.dereference, want, "{argv:?}");
+        }
+    }
+
+    /// The long spellings, and the fact that `-H` has none — GNU gives it no
+    /// entry in `long_opts[]`, so `--H` is not an option at all.
+    #[test]
+    fn the_dereference_long_spellings() {
+        let (flags, _) = run_parse(&["--dereference", "a", "b"]);
+        assert_eq!(flags.dereference, Deref::Always);
+        let (flags, _) = run_parse(&["--no-dereference", "a", "b"]);
+        assert_eq!(flags.dereference, Deref::Never);
     }
 
     // ---------------------------------------- the order a directory is read --

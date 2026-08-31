@@ -102427,9 +102427,29 @@ is about an unregistered *entry point*, and an io_uring opcode is one, though
 the name reads as syscall-specific and may deserve widening if this lands), and
 add an assertion to `io_ring`'s self-test in the shape of
 `test_dispatch_unimplemented`: an unknown opcode gives -10, -10 is not -2, and
-the Linux-ABI mapping is unchanged. Check first whether any caller in
-`userspace/` or `posix/` probes CQE `res == -2`; if one does, it needs the same
-two-lines treatment lane B is getting for the syscall half.
+the Linux-ABI mapping is unchanged.
+
+**The blast-radius question is already answered — 2026-08-31, lane A.** The fix
+step above used to open with "check first whether any caller in `userspace/` or
+`posix/` probes CQE `res == -2`; if one does, it needs the same two-line
+treatment lane B is getting for the syscall half." That check has now been run,
+so whoever picks this up does not have to re-derive it:
+
+**No caller anywhere in the tree reads a CQE `res` and compares it to `-2`.**
+The only consumers of io_uring results outside the kernel are
+`posix/src/linux_io_uring.rs`, `posix/src/aio.rs` and
+`posix/src/linux_aio_abi.rs`, and the sole `ENOSYS`-shaped reasoning in them
+(`linux_io_uring.rs` lines 578, 1372, 1542) is about **`io_uring_setup` itself**
+returning `-1`/`ENOSYS` because no real ring exists yet — it is not a probe of a
+completion result. So this is a kernel-local change: one match arm plus the
+self-test assertion, **no `requests/` file and no cross-lane coordination**.
+
+That has a cost consequence worth stating plainly: the reason this stayed
+deferred was never the risk, it was the absence of evidence that anyone needs
+the distinction. Re-verify cheaply before acting — `rg -n 'cqe.*res|\.res\b'
+posix/ userspace/ services/` and look for a comparison against a negative
+literal — because the answer above is a fact about the tree on a date, not a
+property of the design.
 
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.

@@ -541,6 +541,57 @@ pub const SYS_FS_OPEN_MODE: u64 = 659;
 /// `kernel/src/syscall/handlers.rs::sys_fs_openat2` and
 /// `requests/a-b-openat2-is-661-and-the-mode-is-twelve-bits.md`.
 pub const SYS_FS_OPENAT2: u64 = 661;
+
+// The pinned `*at` family: fd-relative calls where the kernel resolves the
+// *handle* rather than a path this libc reconstructed from it.
+//
+// The difference matters because `resolve_dirfd_path` — which every other
+// `*at` here still uses — turns `unlinkat(dirfd, "x")` back into
+// `unlink("/the/path/dirfd/had/when/it/was/opened/x")`.  Between the open and
+// the unlink, anything may have swapped a component of that path for a
+// symlink; the walk then leaves the directory the caller thought it held.
+// That is `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-\
+// possible.md`, and these three calls are lane A's answer to it.
+//
+// Each takes a `dirfd` **kernel handle** (not a libc fd) and a *single*
+// component: no `/`, not `.`, not `..`, non-empty, at most 255 bytes.  The
+// strictness is the point — verifying that a handle still denotes the
+// directory it was opened on proves nothing if the name may then climb out of
+// it.  The kernel captures `(fs_id, inode)` at open and re-checks it inside
+// the same filesystem lock as the operation, so the check is atomic rather
+// than a smaller copy of the race.  A mismatch is `StaleHandle` → `ESTALE`,
+// which means *re-open*, never *retry*.
+//
+// See `requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-\
+// handle.md` for the wire formats and for the two things they do not fix.
+/// `(dirfd, name ptr, name len, flags) -> 0`.  `AT_REMOVEDIR_PINNED` (0x200)
+/// selects `rmdir` over `unlink`; unknown bits are `EINVAL`, not ignored.
+pub const SYS_FS_UNLINKAT_PINNED: u64 = 662;
+/// `(dirfd, name ptr, name len, flags, out buf) -> 0`.  Writes the same
+/// `FS_META_SIZE` record `SYS_FS_METADATA` writes, from the same encoder.
+/// `AT_SYMLINK_NOFOLLOW_PINNED` (0x100) selects `lstat` over `stat`.
+///
+/// **Not yet usable for [`crate::file::fstatat`], and the reason is the
+/// record.**  The 64-byte `FS_META_SIZE` layout has no inode number, no hard
+/// link count and no block count; the 80-byte one `SYS_FS_STAT` writes — the
+/// one `crate::stat::fill_from_fsstat` decodes — has all three.  Wiring
+/// `fstatat` onto this constant as it stands would make `st_ino` zero for
+/// every file, which does not fail loudly anywhere: it silently breaks `cp`'s
+/// refusal to copy a file onto itself, `ls -i`, hardlink coalescing in `du`
+/// and `tar`, and `find -samefile`.  The constant is declared so the number is
+/// recorded in one place, and is deliberately unused pending a wider record.
+pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
+/// `(dirfd, out buf, out cap) -> size of the complete listing`.
+///
+/// The return is **not** bytes written.  `ret <= cap` means the whole listing
+/// arrived; `ret > cap` means it truncated and `ret` is the buffer size to
+/// re-issue with.  Unpaginated, so a `getdents64`-style bytes-written return
+/// could not distinguish a listing that exactly filled the buffer from one
+/// that overflowed it — and a recursive caller would then delete a subtree it
+/// had half enumerated and report success.  Truncation is always at a record
+/// boundary.
+pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
+
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;
 pub const SYS_FS_WRITE: u64 = 613;
@@ -725,15 +776,29 @@ pub const SYS_TCP_LOCAL_PORT: u64 = 854;
 // host-meaningful behaviour (e.g. `getpid`, `eventfd`, `timerfd_create`)
 // detect this sentinel via `errno::translate` and either fall back to
 // a host-friendly implementation or fail cleanly.  Tests that need to
-// exercise post-syscall validator logic on host use the dedicated
-// test-only fdtable helpers (see `fdtable::test_install_handle_kind`)
-// rather than calling the real wrappers.
+// exercise post-syscall validator logic on host install a fd table entry
+// directly — `fdtable::alloc_fd(HandleKind::…, handle)` and
+// `fdtable::close_fd` — rather than calling the real wrappers, since the
+// wrapper would only report `HOST_ENOSYS` and the validator would never run.
+// (This paragraph named a `fdtable::test_install_handle_kind` helper that has
+// never existed; `alloc_fd` is what the tests that do this actually use.)
 
 /// Sentinel returned by every `syscallN()` on host builds.  Equals
 /// `-(errno::ENOSYS as i64)`.  Pinned by `host_enosys_matches_errno_module`
 /// so a future renumbering of ENOSYS won't drift this value.
-#[cfg(not(target_os = "none"))]
-const HOST_ENOSYS: i64 = -38;
+///
+/// Defined for both targets, and `pub(crate)`, because it is not only
+/// *produced* here but *recognised* elsewhere: `file.rs`'s pinned `*at` fast
+/// path treats it as "this build has no syscalls, fall back to the
+/// path-based route".  That comparison has to name the same constant the
+/// wrappers return, or a renumbering would leave the fast path testing for a
+/// value nothing produces — and it would fail open, taking the pinned route's
+/// answer on a host build where there is no kernel to have given one.
+///
+/// It is a safe sentinel to overload this way because no `KernelError`
+/// discriminant is -38: `kernel/src/error.rs` uses -1..-9 and then banded
+/// hundreds (-100, -200, -300, -400, -500, -600, -700).
+pub(crate) const HOST_ENOSYS: i64 = -38;
 
 // Host-only shim for the wall-clock / monotonic-clock syscalls.  These
 // are by far the most-called bare `syscall0` in the posix crate (>20

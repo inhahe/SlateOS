@@ -75,9 +75,10 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf};
 use coreutils::stdfd::{self, Stream};
+use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::ffi::OsString;
 use std::fs::{self, Metadata};
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -460,49 +461,11 @@ fn bad_preserve_root(given: &[u8]) -> getopt::Error {
 }
 
 // ------------------------------------------------------------- the answer ---
-
-/// Where a prompt's answer comes from.
-///
-/// A trait because the prompts are the half of `rm` that most needs testing
-/// and the least testable through a real terminal: a test supplies a queue of
-/// canned lines and asserts on the transcript.
-trait Answers {
-    /// The next line of input, newline included, or `None` at end of file.
-    fn line(&mut self) -> Option<Vec<u8>>;
-}
-
-/// The real one: standard input, held open across the whole run so that
-/// several prompts consume several lines of one stream.
-struct StdinAnswers {
-    stdin: io::Stdin,
-}
-
-impl StdinAnswers {
-    fn new() -> Self {
-        StdinAnswers { stdin: io::stdin() }
-    }
-}
-
-impl Answers for StdinAnswers {
-    fn line(&mut self) -> Option<Vec<u8>> {
-        let mut buf: Vec<u8> = Vec::new();
-        match self.stdin.lock().read_until(b'\n', &mut buf) {
-            // End of input, or a read that failed. GNU's `yesno` treats a
-            // `getline` returning `<= 0` as "no" without distinguishing them.
-            Ok(0) | Err(_) => None,
-            Ok(_) => Some(buf),
-        }
-    }
-}
-
-/// gnulib's `yesno` under the C locale, where `rpmatch` is `^[yY]`.
-///
-/// Measured: `y`, `Y` and `yes` are yes; `maybe`, an empty line and end of
-/// input are no. Anything that is not a yes is a no — there is no third answer
-/// and no re-prompt.
-fn is_yes(line: Option<&[u8]>) -> bool {
-    matches!(line.and_then(<[u8]>::first), Some(b'y' | b'Y'))
-}
+//
+// What counts as an answer is [`coreutils::yesno`], shared with `cp -i` and
+// `find -ok`: `rm` and `find` had each written their own and already disagreed
+// about a non-UTF-8 line. What is *asked* stays here — the wording is per
+// utility, and `rm`'s is the most elaborate of them (see [`Rm::prompt`]).
 
 // --------------------------------------------------------------- removal ----
 
@@ -932,8 +895,7 @@ impl Rm<'_> {
     fn ask(&mut self, sentence: &str) -> bool {
         let _ = self.err.write_all(sentence.as_bytes());
         let _ = self.err.flush();
-        let line = self.answers.line();
-        is_yes(line.as_deref())
+        yesno(self.answers)
     }
 
     // ------------------------------------------------------------- output --
@@ -1132,6 +1094,9 @@ fn is_write_protected(_path: &[u8]) -> bool {
 )]
 mod tests {
     use super::*;
+    /// The canned answer queue is shared with `cp`'s prompt tests; see
+    /// [`coreutils::yesno`].
+    use coreutils::yesno::Canned;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -1518,18 +1483,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn yes_is_only_a_leading_y() {
-        assert!(is_yes(Some(b"y\n")));
-        assert!(is_yes(Some(b"Y\n")));
-        assert!(is_yes(Some(b"yes\n")));
-        assert!(is_yes(Some(b"yeah, whatever")));
-        assert!(!is_yes(Some(b"n\n")));
-        assert!(!is_yes(Some(b"maybe\n")));
-        assert!(!is_yes(Some(b"\n")));
-        assert!(!is_yes(Some(b"")));
-        assert!(!is_yes(None), "end of input is no");
-    }
+    // What counts as a yes is tested in `coreutils::yesno`, where the rule
+    // now lives; the tests below are about *which* question `rm` asks and
+    // when, which is the part that is `rm`'s own.
 
     // ------------------------------------------------------------ removal --
 
@@ -1559,29 +1515,6 @@ mod tests {
         bytes.push(b'/');
         bytes.extend_from_slice(tail.as_bytes());
         std::path::PathBuf::from(os_from_bytes(&bytes))
-    }
-
-    /// A canned queue of answers, and a record of how many were consumed.
-    struct Canned {
-        lines: Vec<Vec<u8>>,
-        at: usize,
-    }
-
-    impl Canned {
-        fn new(lines: &[&str]) -> Self {
-            Canned {
-                lines: lines.iter().map(|l| l.as_bytes().to_vec()).collect(),
-                at: 0,
-            }
-        }
-    }
-
-    impl Answers for Canned {
-        fn line(&mut self) -> Option<Vec<u8>> {
-            let line = self.lines.get(self.at).cloned();
-            self.at = self.at.saturating_add(1);
-            line
-        }
     }
 
     /// One run, with the whole transcript back.

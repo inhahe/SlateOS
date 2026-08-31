@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are sixteen so far. Three are about the interface these programs share
+//! There are nineteen so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -269,6 +269,40 @@
 //!
 //! [`Stream`]: stdfd::Stream
 //!
+//! The eighteenth is the smallest module here and the one whose absence did the
+//! most damage, because what it replaces is not a wrong answer but a correct
+//! answer obtained destructively:
+//!
+//! - [`umask`] — the file-creation mask, read without setting it. POSIX has no
+//!   read-only spelling, so gnulib and every utility that needs the value do
+//!   `old = umask(0); umask(old)` — a window in which the mask is wrong.
+//!   Upstream is entitled to that: `cp` is one thread and creates nothing in
+//!   between. `cargo test` is not one thread, and the copies here had each
+//!   reproduced the idiom privately — five of them, one probing with `0777`,
+//!   which denies everything, so a file *another test* created in the window
+//!   arrived at mode `0000`. That is what two of `cp`'s tests had been failing
+//!   on intermittently, under two symptoms (`assert!(ok)` and a read denied)
+//!   that pointed at the code under test rather than at the instrument. No
+//!   lock could have fixed it, since the thread being harmed never touches the
+//!   umask. Linux — and `procfs.rs` on the target — publishes the value in
+//!   `/proc/self/status`, which is a read, so there is no window at all.
+//!
+//!   `mkdir` and `mkfifo` keep their own calls on purpose: they *clear* the
+//!   mask rather than read it, because `-m` names an exact mode, so they are
+//!   not copies of this and must not be folded into it.
+//!
+//! The nineteenth is the shared-interface argument again, but about an input
+//! rather than an output — the one thing these programs ask the *user* for:
+//!
+//! - [`yesno`] — what counts as "yes" at a `? ` prompt. gnulib has one of these
+//!   (`lib/yesno.c`) and `rm -i`, `cp -i`, `mv -i`, `ln -i`, `install` and
+//!   `find -ok` all call it, so upstream cannot drift; the two private copies
+//!   here already had. `find -ok`'s read the answer with `read_line` into a
+//!   `String` and so returned "no" for any input that was not UTF-8 — which a
+//!   terminal in a single-byte locale sends — while `rm`'s read bytes and
+//!   accepted it. A person who has learned what `rm -i` takes types the same
+//!   thing at `cp -i`, and must not get a different answer.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -294,6 +328,8 @@ pub use quoting as quote;
 pub mod shell;
 pub mod stdfd;
 pub mod tabstops;
+pub mod umask;
 pub mod userspec;
 pub mod vercmp;
 pub mod xnum;
+pub mod yesno;

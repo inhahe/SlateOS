@@ -1960,7 +1960,7 @@ struct Var {
 }
 
 /// The letters `set` understands, in the order `$-` prints them.
-const OPT_LETTERS: [u8; 8] = [b'a', b'C', b'e', b'f', b'n', b'u', b'v', b'x'];
+const OPT_LETTERS: [u8; 8] = *b"aCefnuvx";
 
 /// The `set -o` names, parallel to [`OPT_LETTERS`].
 const OPT_NAMES: [&str; 8] = [

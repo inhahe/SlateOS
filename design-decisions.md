@@ -54827,3 +54827,1251 @@ Ours treats everything that is not a plain success as "not write-protected".
   worth certifying properly, the way to do it is a `chroot` under
   `unshare --map-root-user`, where `/` is a scratch directory with six copied
   files in it — not by pointing the real thing at the real root.
+
+## 724. `cp -r` refuses a copy into itself before it writes anything, where GNU discovers it mid-walk and leaves whatever it had already written
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+
+**In short:** `cp -r tree tree` asks for a directory to be copied inside
+itself, which cannot terminate, and both our `cp` and GNU's refuse it with the
+same message and the same exit status. They differ in what is left on disk
+afterwards. Ours leaves the tree exactly as it found it. GNU leaves a partial
+copy — sometimes a complete one, sometimes an empty directory — because it
+only notices the problem when the walk trips over the destination it made
+earlier. We keep our behaviour and mark those cases in the differential
+harness as differing on purpose, because GNU's leftovers are not a behaviour
+anything could rely on: the same command on the same files produces different
+leftovers depending on which inode number the kernel hands out.
+
+### The two mechanisms
+
+Ours is a check on the paths, run once, before any directory is created: the
+destination is resolved and compared against the source, and if the
+destination lies inside the source the copy is refused whole.
+
+GNU's is a check on inode numbers, run continuously during the walk
+(`copy.c`). When it creates the first destination directory for a command-line
+argument it records that directory's `(device, inode)` pair
+(`remember_copied`, `copy.c:2982`). Every directory the walk later descends
+into is looked up in that table; a hit whose name is the same directory entry
+produces
+
+```
+cp: cannot copy a directory, 'tree', into itself, 'tree/tree'
+```
+
+and breaks out of the loop (`copy.c:2701`, `copy_dir`'s `if
+(local_copy_into_self) break;`). Everything copied before that moment stays.
+
+### Why the leftovers are not reproducible
+
+`copy_dir` snapshots the source directory with `savedir (…,
+SAVEDIR_SORT_FASTREAD)`, which orders the entries **by inode number** — a
+speed optimisation, since reading inodes in ascending order is close to
+sequential on disk. The destination directory is created just before that
+snapshot is taken, so it appears in it, and *where* it appears is decided by
+the inode number the filesystem happened to allocate for it.
+
+On a young filesystem a new directory gets a high inode, sorts last, and the
+walk therefore copies the whole source before tripping. That is what makes the
+behaviour look deterministic. It is not. Measured under GNU coreutils 9.4 on
+ext4, with the same command, the same source contents and the same binary:
+
+| Free-inode state before the copy | Destination's inode | Residue |
+|---|---|---|
+| fresh directory, 100 files | higher than every source entry | the complete 100-file copy |
+| 1900 files created then deleted first | *lower* than every source entry | one empty directory |
+
+The second row was produced by creating 2000 files, deleting the first 1900 to
+free their inodes, and copying the remaining 100 — the new directory reused a
+freed low inode (556010, against a surviving range of 821019–821118), sorted
+first, and was tripped over immediately. Nothing about the request changed.
+
+So the residue is a function of the filesystem's free-inode list. It is also a
+function of the filesystem *type*: `SAVEDIR_SORT_FASTREAD` degrades to plain
+readdir order where `struct dirent` carries no `d_ino`.
+
+### The alternatives
+
+- **Match GNU, residue and all.** *For:* the harness's standard is "no
+  observable difference", and the filesystem is observable. *Against:* there
+  is no fixed thing to match. Any test asserting a particular residue would
+  pass or fail on the state of the free-inode list, which is exactly the flake
+  the harness exists to prevent — and we would be reproducing an artefact of
+  an optimisation (`SAVEDIR_SORT_FASTREAD`) rather than a decision.
+- **Refuse early, as we do.** *For:* same diagnostic, same exit status, and
+  the one difference is that a command which failed changed nothing. A user
+  who mistypes `cp -r tree tree` does not then have to work out which of the
+  files under `tree/tree` are real. *Against:* it is a genuine behavioural
+  difference from GNU, and a script that somehow depended on the partial copy
+  would not be served — though such a script would already be broken on GNU,
+  per the table above.
+- **Refuse early *and* clean up after GNU's fashion** — copy, then remove what
+  was written. Rejected: it does strictly more filesystem work to reach the
+  same end state, and a failure during the cleanup would leave a mess worse
+  than either alternative.
+
+### Where this bites
+
+Six cases in `scripts/cp-diff.sh` are marked `xfail_case` with this reason:
+`-r tree tree`, `-r tree tree/sub`, `-r . dst`, `-r ./ dst`, `-r tree/.. dst`
+and `-r tree dir dir`. The stderr and exit status of all six agree exactly;
+only the directory snapshot differs. If our resolution ever stops refusing one
+of them, the case turns into an `XPASS` and says so.
+
+The other four spellings in that section (`-r tree .`, `-r tree ./`, `-r
+tree/. dst`, `-r tree/sub/.. dst`) agree completely, because there GNU refuses
+before writing too — the destination already exists as a directory, so no
+first directory is created and the trip happens on the first entry.
+
+## 725. `cp -r` reads a directory in one go and walks it in inode order, because that is what GNU's `savedir` does and `-v` made the difference visible
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous)
+
+**In short:** Copying a folder means listing what is in it and copying each
+thing. Until now our `cp` listed them in whatever order the filesystem handed
+them back; GNU sorts the list first. Nobody could tell, because the copy comes
+out the same either way. Then `cp -v` landed — the option that prints one line
+per file as it goes — and suddenly the order is *printed*, and ours printed a
+different one from GNU's. The decision is to sort the way GNU sorts, which also
+happens to be the faster way to read a disk, at the cost of holding the whole
+list in memory instead of one name at a time.
+
+### What was measured
+
+A directory holding `a.txt`, `sub` and `link`, created in the order `sub`,
+`a.txt`, `link`, on ext4 under WSL:
+
+```
+$ cp -rv tree dst              $ ours -rv tree dst
+'tree' -> 'dst'                'tree' -> 'dst'
+'tree/sub' -> 'dst/sub'        'tree/a.txt' -> 'dst/a.txt'
+'tree/sub/b.txt' -> …          'tree/link' -> 'dst/link'
+'tree/a.txt' -> 'dst/a.txt'    'tree/sub' -> 'dst/sub'
+'tree/link' -> 'dst/link'      'tree/sub/b.txt' -> …
+```
+
+GNU's order is creation order; ours was ext4's htree hash order. The cause is
+`copy.c:834`, `savedir (src_name_in, SAVEDIR_SORT_FASTREAD)`. In gnulib's
+`savedir.c` that option resolves to `direntry_cmp_inode` wherever
+`D_INO_IN_DIRENT` is defined — an ascending sort on `d_ino` — and to no sort at
+all where it is not. Inode numbers on ext4 are allocated in sequence, so
+creation order and inode order coincide.
+
+### The decision
+
+`read_dir_fastread` in `userspace/coreutils/src/bin/cp.rs` collects the whole
+directory into a `Vec<DirEntry>` and, under `#[cfg(unix)]`, sorts it by
+`DirEntryExt::ino()`. Off Unix it does not sort, which is gnulib's own
+fallback and not an approximation of it.
+
+### Why, and what it costs
+
+**For it.**
+
+* *It is the only order that matches.* This program's contract is that its
+  output cannot be told from GNU's, and `scripts/cp-diff.sh` is where that is
+  certified. Without the sort, `run_case -rv tree dst` differs — and the honest
+  responses to that are either to fix it or to mark an *implemented* option as
+  differing on purpose. The second would put a lie in the summary line.
+* *It is also the fast order, which is why gnulib calls it `FASTREAD` and not
+  `SORTED`.* On any filesystem that keeps inodes in tables, inode number is
+  roughly on-disk position, so reading entries in inode order turns the
+  scattered seeks of one `stat` per entry into a forward scan. The gain is on a
+  cold cache and is exactly the reason upstream does it.
+* *The list had to be materialised anyway* the moment we wanted to sort, and
+  materialising it is separately what GNU does — so the memory cost below is
+  not a cost relative to GNU, only relative to what we had.
+
+**Against it.**
+
+* *Memory.* `fs::read_dir` streams; this does not. A directory with ten million
+  entries now costs a `DirEntry` each — on the order of a hundred bytes with
+  the name — where before it cost one. That is the real price, and it is paid
+  on directories nobody has, by a program that is about to `stat` every one of
+  those entries anyway.
+* *A `readdir` that fails part-way through now abandons the directory* instead
+  of copying the entries already read and then reporting. This is a behaviour
+  change, and it is *toward* GNU: `savedir` returns `NULL` on any error and
+  `copy_dir` reports the single `cannot access` diagnostic, having copied
+  nothing. The old streaming code copied a prefix and then complained, which
+  no version of GNU does.
+* *The order is not portable and the sort does not make it so.* Two filesystems
+  can allocate inodes differently and both programs will then agree with each
+  other while disagreeing with a third machine. That is acceptable because the
+  claim is only ever "same as GNU here", never "same everywhere" — and it is
+  the claim `cp-diff.sh` actually tests.
+
+### The alternative that was rejected
+
+**Sort by name.** Deterministic everywhere, easy to explain, and what a user
+might expect. It is wrong for the only reason that matters: GNU does not do it,
+so `cp -rv` would still differ — just differently, and now in a way that looks
+deliberate enough that nobody would go back and check.
+
+### Where it bites
+
+`userspace/coreutils/src/bin/cp.rs` → `read_dir_fastread`, and its two tests
+`the_directory_read_returns_every_entry_once` (both platforms) and
+`the_directory_read_is_in_inode_order` (`#[cfg(unix)]`).
+`scripts/cp-diff.sh` section 14 has four `-rv` cases over multi-entry
+directories that go red without it, and the fixture comment above `mktree`
+records that the fixture's creation order is now load-bearing for that reason.
+
+**`rm` asks the same question and gets the opposite answer, correctly.** It has
+had `-v` for some time, and `scripts/rm-diff.sh` already compares `-rv` over
+multi-entry directories — green, with no sort anywhere. That is not luck: GNU's
+`rm` walks with `fts_open` and a *null* comparison function, so it takes raw
+`readdir` order, and so do we. Both unsorted is as good a match as both sorted;
+what would break either program is one of each. So the rule is not "sort" but
+"do what the program being matched does", and the two answers differ only
+because upstream's two programs do.
+
+### A measurement worth keeping, because it contradicts a comment we had written
+
+On the ext4 filesystem the harnesses run on, `readdir` order for a three-entry
+directory is *not* insertion order:
+
+```
+$ ls -f tree        $ ls -i tree
+..                  674264 a.txt
+a.txt               674266 link
+link                674263 sub
+sub
+.
+```
+
+`dir_index` is on, so even a directory this small is hashed, and hash order is
+a function of the *names*. `rm-diff.sh`'s fixture comment claimed the opposite
+— "a directory this small is a linear one, whose readdir order is insertion
+order" — and has been corrected. Its conclusion survives the correction and is
+in fact stronger: hash order depends only on the names, so two case directories
+holding the same names enumerate identically however they were built. What
+would break that is a fixture whose two sides hold *different* names, which is
+a thing no harness here does.
+
+## 726. The differential harnesses build their own GNU reference, because the installed one is Debian-patched — §700's trigger has fired
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Every `scripts/*-diff.sh` harness proves our version of a utility
+behaves like GNU's by running both and comparing the output. The "GNU" it ran
+was whatever the machine had installed — and that binary is not GNU's. Ubuntu
+ships `coreutils 9.4-3ubuntu6.1`, which carries Debian and Ubuntu patches that
+change what some of these programs *do*. A second such patch has now been
+found, which is the condition §700 named for changing the arrangement. So
+`diff-wsl.sh` can now download the GNU release tarball, build it, and compare
+against that instead. It is opt-in per harness; `ls` is converted with this
+change and the rest follow one at a time.
+
+### Context — the two known patches
+
+§700 found the first, in `df`: Debian and Ubuntu add `devtmpfs` and `squashfs`
+to gnulib's list of "dummy" file system types, so the installed `df` hides the
+`/dev` row that upstream prints, on 37 cases. That section decided the *policy*
+— our source follows upstream, and the harness subtracts the divergence from
+both sides rather than importing the patch — and explicitly deferred the
+*mechanism*:
+
+> **Compare against a locally-built pristine coreutils 9.4 instead.** Genuinely
+> correct, and rejected only on cost/benefit … If a *second* distribution patch
+> is ever found, this becomes the right answer and should be revisited for all
+> the harnesses at once.
+
+The second turned up on 2026-08-30, in `cp -n`, while implementing the
+overwrite-policy options. The measurement and the source disagreed:
+
+| | `cp -n a b`, `b` exists |
+|---|---|
+| upstream 9.4 (`cp.c:1070` → `I_ALWAYS_NO`, `copy.c:2437`) | `cp: not replacing 'b'`, exit **1** |
+| installed `9.4-3ubuntu6.1` | silent skip, exit **0**, plus a warning on stderr |
+
+The warning is `cp: warning: behavior of -n is non-portable and may change in
+future; use --update=none instead`, and it is emitted at option-parse time —
+`cp -n a newfile`, where nothing is overwritten, prints it too.
+
+Establishing which side was upstream took the same shape of elimination §700
+needed. `curl`ing `cp.c` at tags `v9.4`, `v9.5`, `v9.6` and `master` found the
+string in none of them (and confirmed the tag pin works: 1290, 1307 and 1336
+lines respectively). The full 9.4 tarball has it in no file at all. `strings
+/usr/bin/cp` has it. And then the changelog names it outright:
+
+```text
+coreutils (9.4-3) unstable; urgency=low
+  * revert cp -n behavior to debian 12 & prior (Closes: #1058752)
+  * add deprecation/compatibility warning for above
+```
+
+The same changelog names four more behavioural patches whose blast radius
+includes a harness here — `uname -i -p` (no harness yet), `tail` on sysfs
+files, `split`'s CVE-2024-0684 fix, `ls -l` on NFS — so two is a lower bound
+on how often this will happen, not a total.
+
+### Decision
+
+1. **`diff-wsl.sh` grows `DIFF_GNU_SOURCE=<version>`.** A harness that sets it
+   is compared against coreutils of that version, fetched from `ftp.gnu.org`,
+   configured once and `make`d one binary at a time into a cache under `$HOME`.
+2. **Opt-in, one harness at a time.** Not a flag day. Converting a harness may
+   surface real differences — that is the point — and a change that flipped 50
+   harnesses' oracle at once would mix an infrastructure change with an
+   unknown number of behavioural findings in one commit.
+3. **Skip rather than fall back.** No compiler, no network, no tarball ⇒ the
+   harness exits 0 saying it was skipped. It never quietly reverts to the
+   installed binary, which is the failure the whole knob exists to prevent and
+   which would look green.
+4. **A version mismatch is fatal, not a skip.** Unlike a missing compiler it
+   cannot be an accident of the host: something handed us the wrong binary, and
+   running on would report the version gap as differences in *our* program.
+5. **`ls-diff.sh` becomes a caller rather than the owner.** It had been
+   building 9.5 from source since §366, for the unrelated reason that 9.4 and
+   9.5 lay columns out differently. That block *is* the mechanism §700 wanted,
+   and it moves into `diff-wsl.sh` unchanged in substance.
+
+### Rationale
+
+The cost §700 weighed the alternative against had already been paid. Its two
+objections were "it means building coreutils inside the WSL environment as a
+harness prerequisite" and "one harness with a different reference is a trap for
+whoever reads two of them". The first was already true — `ls-diff.sh` had been
+doing it for weeks, and the fetch/configure/make/cache/verify sequence was
+written, debugged and working. The second was *inverted*: with `ls` on a built
+9.5 and everything else on the installed 9.4, the odd harness out existed
+already, and the trap was live. Generalising removes it in both directions.
+
+There is also the argument `diff-wsl.sh`'s own header makes about
+`DIFF_NO_BINDIR`: "Two copies of one judgement is one copy that is wrong, and
+the wrong one is the one nobody rereads." A download-and-build sequence living
+inside one of fifty harnesses is exactly that shape. `df-diff.sh` met a
+distribution patch and solved it locally; `cp-diff.sh` met one and had to
+rediscover the whole category from scratch, because nothing outside
+`df-diff.sh` and §700 recorded that the category existed.
+
+And the reason to prefer upstream at all is §700's, unchanged: the reference
+binary is a *measurement instrument*, valuable exactly insofar as it settles
+arguments about what GNU does. An instrument with an undocumented offset does
+not settle anything — it silently moves the answer. Ubuntu's `cp -n` is a
+reasonable choice *for Ubuntu* (it preserves what Debian users had before 9.3);
+it is not what `cp.c` says, and `cp.c` is what this transcription is a
+transcription of.
+
+### Alternatives considered
+
+- **Keep the installed binary and xfail each patched case, as `df` does.**
+  This is what §700 chose and it worked, but it scales by discovery: each
+  patch costs an investigation like the two above before anyone knows there is
+  something to xfail, and the failure mode of *not* discovering one is a case
+  that certifies the patch as correct behaviour. `cp -n` would have been
+  written to match Ubuntu, in a file whose comments cite `copy.c`.
+- **Vendor the coreutils source into the repository.** Rejected: 5.9 MB of C
+  per version in a tree that does not build it, and a second thing to keep in
+  step with the tarball. The download is cached and needed once per machine.
+- **Build only the binaries a harness names (`make src/cp`).** Tried first, on
+  the assumption that a whole build was the expensive option; it does not
+  work, and the way it fails is the finding of the day. Automake makes
+  `BUILT_SOURCES` a prerequisite of the **default target only**, and in
+  coreutils the built sources are gnulib's replacement headers — `lib/fcntl.h`,
+  `lib/stdckdint.h`, `lib/wchar.h` and forty more. Naming a target directly
+  compiles gnulib against the system headers it exists to shield itself from,
+  and it dies on `O_BINARY undeclared`, `stdckdint.h: No such file or
+  directory`, `O_SEARCH undeclared`, `unknown type name 'wint_t'` — none of
+  which says "you named the wrong target"; they read like a broken host.
+
+  This is exactly what `ls-diff.sh` had been doing since §366, so on this
+  machine it had been **skipping every run**, reporting "a C compiler and make
+  are needed" on a host with both, and our `ls` was uncertified for as long as
+  that line existed. `known-issues.md`, `B-LS-DIFF-HAS-BEEN-SKIPPING`.
+
+  So the whole package is built, once per version per machine, and the
+  economy is documented as a trap above the code rather than merely absent
+  from it. It costs about 90 seconds at `-j8`, after which every harness on
+  that version pays nothing. A related hardening came from the same
+  investigation: a half-built tree does **not** recover when the correct
+  `make` is run over it — the stale objects were compiled against the wrong
+  headers and the link fails with `undefined reference to rpl_mbrtoc32` — so
+  a failed build is wiped, and completion is recorded by a marker file
+  written after `make` returns 0 rather than inferred from a binary existing.
+- **Convert every harness at once, as §700's wording suggests.** Rejected in
+  favour of "revisit for all the harnesses" meaning the *decision*, not the
+  edit. See point 2 above.
+
+### What it does not settle
+
+`cp -n`'s own behaviour is now unambiguous — upstream's `not replacing`, exit
+1 — but only once `cp-diff.sh` is converted, which is a separate change.
+Nothing here changes any subject program.
+
+**And the built reference is upstream's *source*, not upstream's *build*.**
+`configure` on this machine reports three features off, because their
+development headers are not installed and `sudo` here needs a password:
+
+```text
+configure: WARNING: GNU coreutils will be built without ACL support.
+configure: WARNING: GNU coreutils will be built without xattr support.
+configure: WARNING: GNU coreutils will be built without capability support.
+```
+
+Ubuntu's binary has all three. So a case that turns on an access control list,
+an extended attribute or a file capability is comparing against a GNU
+configured differently from the one a user would have — the `+` after `ls -l`'s
+mode string, `cp --preserve=xattr`, and `--color`'s `ca` slot are the three
+places it could show. None of them is reachable today: no harness fixture
+creates an ACL, an xattr or a capability, and no subject program here
+implements any of the three. It becomes reachable the moment one does, and the
+fix is `libacl1-dev libattr1-dev libcap-dev`, which needs the operator.
+Recorded in `known-issues.md` under the oracle entry so that it is found by
+whoever writes the first such case rather than by whoever debugs it.
+
+### Where it lives
+
+- `scripts/diff-wsl.sh` — the `DIFF_GNU_SOURCE` / `DIFF_GNU_DIR` /
+  `DIFF_GNU_CACHE` knobs, the fetch-and-build block in section 3,
+  `diff_gnu_verify`, and the `gnu_dir` arms in the reference resolution and in
+  the multi-binary `bindir` loop. The header section "Why a built reference"
+  carries the short version of this entry.
+- `scripts/ls-diff.sh` — now `DIFF_GNU_SOURCE=9.5` and nothing else; it no
+  longer sets `DIFF_NO_REF` or `DIFF_NO_BINDIR`, and its `GNU` and
+  `LS_DIFF_CACHE` knobs are replaced by the shared `DIFF_GNU_DIR` and
+  `DIFF_GNU_CACHE`.
+- `known-issues.md`, `B-THE-DIFFERENTIAL-ORACLE-IS-DEBIAN-PATCHED` — the
+  inventory of patches and which harness each one can reach.
+
+### How to reverse
+
+Delete `DIFF_GNU_SOURCE` from a harness and it is back on the installed
+binary immediately; the knob has no other effect. Reversing it for `ls` would
+mean restoring its own build block from before this commit, since `ls` cannot
+run against 9.4 at all.
+
+## 727. `cp`'s three overwrite options are reproduced as three separate mechanisms, acting at three different points, because that is what makes them observably different
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+
+**In short:** `cp` has three options that all sound like "what to do about a
+destination that already exists": `-f` (force), `--remove-destination`, and `-n`
+(no-clobber). They are not settings of one knob. In GNU they are three separate
+fields consulted at three separate moments, and the differences show up in
+ordinary use — which of them replaces a working symlink, which one can be given
+a read-only file and succeed, and even the *order the two lines of `-v` output
+come out in*. This `cp` now reproduces all three as three mechanisms rather than
+collapsing them into one "overwrite policy" enum, and the harness pins the
+differences.
+
+### The temptation, and why it is wrong
+
+The obvious model is one three-valued setting — *replace* / *unlink first* /
+*refuse* — chosen by whichever option was given last, and consulted once, where
+the destination is opened. It is smaller, it is easier to explain, and it gets
+the common cases right. It is also wrong in at least five measured ways, because
+the three options are not three answers to one question:
+
+| | field in GNU's `struct cp_options` | consulted where | reached when the open would have *succeeded*? |
+|---|---|---|---|
+| `-f` | `unlink_dest_after_failed_open` | inside `copy_reg`, after `open` returned an error other than `ENOENT` | **no** |
+| `--remove-destination` | `unlink_dest_before_opening` | in `copy_internal`, before `emit_verbose`, before anything is opened | **yes** |
+| `-n` | `interactive = I_ALWAYS_NO` | in `copy_internal`, at the point the destination is found to exist | **yes** |
+
+The middle column is the whole entry. `-f` is a *recovery*, not a *policy*: on a
+destination that opens for writing it does nothing whatsoever, so `cp -fv a b`
+and `cp -v a b` on an ordinary file are the same program. `--remove-destination`
+is a policy and applies always, so it unlinks a perfectly writable file and
+makes a new one. And `-n` is neither — it is a refusal, on stderr, with exit
+status 1.
+
+### What that buys, concretely
+
+Five behaviours that the collapsed model cannot produce, each measured against
+a from-source GNU 9.4 (see 726 for why not the installed one):
+
+- **The order of `-v`'s two lines distinguishes `-f` from `--remove-destination`.**
+  `-f` prints the arrow line and *then* `removed`, because the removal is a
+  recovery from a failure already in progress. `--remove-destination` prints
+  `removed` first, because removing is the first thing it does. A harness
+  comparing exit status alone would call the two options identical.
+- **`-f` does not rescue a dangling symlink**, which is the opposite of what
+  "force" suggests. The refusal (`not writing through dangling symlink`) comes
+  from the `O_CREAT|O_EXCL` arm, and `-f` retries by *creating* — which is what
+  already failed. `--remove-destination` succeeds there, because it never
+  reaches that arm at all.
+- **`-f` *does* rescue a self-referential symlink**, which is the opposite
+  surprise. There the failure is in `stat`, not in `open`: `ELOOP` is checked
+  against `unlink_dest_after_failed_open` too (`copy.c:2326`), so `cp -f a loop`
+  succeeds with `removed 'loop'`.
+- **Only `--remove-destination` replaces a *working* symlink.** Plain `cp` and
+  `cp -f` both write through it to its target, because the open succeeds.
+- **`-n` skips the same-file check.** `cp -n a a` is silent and exits 0 where
+  `cp a a` reports that the two names are the same file — GNU guards that check
+  with `x->interactive != I_ALWAYS_NO` (`copy.c:2344`), because a refusal to
+  replace is not a mistake worth reporting.
+
+### The shape in the code
+
+- A `Dest` enum returned by `stat_destination`, with an `Opaque` variant for
+  "the destination exists but cannot be stat'd", which is what models GNU's
+  `ELOOP` case above. Without a distinct variant for it, the self-loop
+  behaviour is unreachable.
+- `create_destination` returns a `DestError` that distinguishes `Io`,
+  `Dangling` and `Remove`, because `-f`'s decision is *about which error it
+  was*, and a flattened `io::Error` cannot carry "this was the dangling-symlink
+  refusal, which retrying will not fix".
+- `-n` refuses in `copy_one`/`copy_entry` before the destination is touched,
+  and is guarded by "the source is not a directory" so that `cp -rn` still
+  descends — the refusal is about files, not about the walk.
+
+### The cost
+
+More surface than one enum: three fields on `CpFlags` instead of one, a
+four-variant `Dest`, and a three-variant error where an `io::Error` would
+otherwise do. That is the price of the five behaviours above, and each of them
+is pinned by a case in `scripts/cp-diff.sh` section 16 and by a unit test, so a
+future simplification that loses one will fail rather than pass quietly.
+
+### How to reverse
+
+Collapsing the three back into one policy enum is mechanical, and section 16 of
+`scripts/cp-diff.sh` would report exactly which behaviours it cost — which is
+the reason that section is written as fifty-eight small cases rather than a
+handful of large ones.
+
+### Where
+
+- `userspace/coreutils/src/bin/cp.rs` — the module-doc section "The three
+  overwrite policies are three different options", `Interactive`, the three
+  `CpFlags` fields, `Dest`/`stat_destination`/`is_eloop`, `refuse_no_clobber`,
+  `remove_destination_first`, and `create_destination`'s `DestError`.
+- `scripts/cp-diff.sh` section 16 — 58 cases, all agreeing with GNU 9.4.
+- `known-issues.md`, `B-CP-R-COULD-NOT-REPLACE-AN-EXISTING-SYMLINK` — a bug in
+  the *existing* recursive copy that writing section 16 uncovered.
+
+## 728. The umask is read from `/proc/self/status` rather than by POSIX's set-and-restore, and the read lives in one shared module
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+
+**In short:** Every program that creates files needs to know the *file-creation
+mask* — the process-wide setting that says which permission bits new files may
+not have. POSIX gives no way to read it: the only call, `umask(2)`, sets it and
+hands back the old value, so reading means writing twice and living with a
+moment in between where the mask is wrong. That moment was corrupting unrelated
+tests. The mask is now read out of `/proc/self/status`, which is a read, and the
+code that does it lives in one module instead of five copies.
+
+### The problem this replaces
+
+GNU's idiom, reproduced verbatim in five binaries here, is to set the mask to a
+known value, keep what came back, and set it straight back again. In GNU that is
+sound and this entry is not a criticism of it: `cp` is one thread that creates
+nothing between the two calls, so nothing can observe the wrong mask. Under
+`cargo test` it is not sound, because a binary's tests run on threads of one
+process and the mask is per-process. `cp.rs`'s copy probed with `0777` — deny
+everything — and, under `#[cfg(test)]`, probed on every single copy rather than
+once. A file another test created inside that window arrived at mode `0000`. Two
+of `cp`'s tests had been failing a few percent of runs for weeks, with a
+`PermissionDenied` and a bare `assert!(ok)` that both pointed at the code under
+test. See `known-issues.md`,
+`B-READING-THE-UMASK-BY-SETTING-IT-CORRUPTED-OTHER-TESTS-MODES`.
+
+### The options
+
+**Leave it; serialise the readers with a mutex.** *What changes:* nothing — the
+failures continue. A lock orders the threads that take it, and the thread being
+harmed is calling `File::create` and takes nothing. This does not work, and
+looking as though it might is the worst property it has.
+
+**Leave it; run the tests single-threaded.** *What changes:* `cargo test` gets
+several times slower, permanently, for every binary in the crate. It does fix
+the race, at a cost paid by 86 binaries to serve a hazard in three.
+
+**Keep the probe but probe with `umask(0)` instead of `umask(0777)`.** *What
+changes:* the failures get rarer and change shape. The window remains; a file
+created inside it is merely too permissive rather than unreadable, so the race
+stops failing loudly and starts failing silently. Strictly worse as a *fix* —
+which is why it is kept only as the fallback's behaviour.
+
+**Read `/proc/self/status` (chosen).** *What changes:* the mask is never
+written, so there is no window at all. Linux has published a `Umask:` line since
+4.7, and `kernel/src/fs/procfs.rs` writes the same field on the target — so this
+is not a host-only trick that the shipped binaries would lose.
+
+### Why a shared module and not a fix in `cp.rs`
+
+Because the copy in `cp.rs` was one of five, and the next binary that needed a
+umask would have made six. The five had already drifted: two probed with `0`,
+one with `0777`, one never restored the mask at all, and two of them were not
+reading it in the first place — `mkdir` and `mkfifo` *clear* it deliberately,
+because `-m` names an exact mode. A module makes that last distinction explicit
+(they are documented as deliberately not migrating) rather than leaving it to be
+rediscovered by whoever next greps for `umask`.
+
+`userspace/chown` is a separate crate and cannot depend on `coreutils`, so it
+keeps its own cached, permissive-direction probe. That is the same constraint
+that moved `quote` out to `userspace/quoting` (370); if a third crate needs
+this, the module should move out beside `quoting` rather than be copied again.
+
+### The cost, and what is given up
+
+The value is no longer cached inside the module, because a `/proc` read is cheap
+and a live answer is the more useful one — `cp`'s tests set the mask around each
+copy and must see the change. Callers that consult it per-file (`cp -r`) keep
+their own `OnceLock`, so the caching decision is now the caller's, which is one
+more thing for a caller to get wrong. Against that: the shared module cannot be
+got wrong the way the five copies were, and the fallback path — a Unix with no
+`/proc` — is the only place the old hazard survives.
+
+### If it is ever unavailable
+
+`from_proc` returning `None` falls through to the POSIX probe, so a kernel
+without the field is slower to be correct, not incorrect. The probe uses
+`umask(0)` on purpose: between two bad windows, one that permits too much and
+one that denies everything, take the one that does not deny.
+
+### Where
+
+- `userspace/coreutils/src/umask.rs` — `current`, `from_proc`, `probe`, and the
+  test that reads the mask a hundred times and checks it was not moved.
+- `userspace/coreutils/src/lib.rs` — the eighteenth entry in the module
+  narrative, including why `mkdir` and `mkfifo` are not in it.
+- `cp.rs`'s `cached_umask`, `tar.rs`'s `read_umask`, `chmod.rs`'s `read_umask` —
+  the three migrated callers.
+
+---
+
+## 729. One kernel-error → errno table, and a test that reads the kernel's enum, rather than two hand-maintained mirrors and a comment saying they must agree
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+
+**In short:** the kernel numbers its errors (-500 is "not found", -700 is
+"connection refused"). C programs expect a different set of numbers, called
+`errno`. Something has to translate, and that something was two separate
+hand-typed copies of the kernel's list, one in `errno.rs` and one in
+`socket.rs`. Both had fallen behind — nine kernel errors were missing from the
+first and eighteen from the second — and neither could tell, because both end
+with "anything I don't recognise is an I/O error", which is also a legitimate
+answer. The decision is to keep one table, make the socket one delegate to it,
+and add a test that reads the kernel's source and fails if a number is missing.
+
+### The problem
+
+`posix/src/errno.rs` carried:
+
+```
+/// MUST stay in sync with kernel/src/error.rs — any mismatch causes
+/// wrong errno values throughout the entire POSIX layer.
+```
+
+That is a correct and urgent statement with no mechanism behind it. Lane A
+added `CrossDevice` (-512), `StaleHandle` (-513) and the seven-code `-700`
+network range at various points; none reached this file. `socket.rs`'s
+`translate_net_error` was worse — a second transcription that had never
+included the network range *at all*, despite that range existing solely for
+sockets and each of its kernel doc comments naming the errno it is for.
+
+The observable cost: a non-blocking `connect` that is still handshaking
+returns `EINPROGRESS` on every other Unix and returned `EIO` here. A client
+library reads the first as "call `poll` and check `SO_ERROR`" and the second
+as "this socket is finished". `bind` to a taken port said `EIO` instead of
+`EADDRINUSE`; `mv` across a mount point would have said `EIO` instead of the
+`EXDEV` it reads to decide it must copy-then-delete.
+
+### The options
+
+**A. Update both tables and leave the comment.**
+*What changes:* the nine errnos become right today, and the next code lane A
+adds is wrong again on the same schedule.
+
+**B. Update both tables; add a test that pins the current mappings.**
+*What changes:* the nine become right, and a regression that *alters* a row is
+caught. A row that is *absent* is still not caught — the test would enumerate
+what the table already says, which is the thing that was never the problem.
+
+**C. One table; a test that reads `kernel/src/error.rs` and requires every
+discriminant to be accounted for.** (Chosen.)
+*What changes:* adding an error to the kernel and not to this file becomes a
+red `cargo test -p posix`, naming the variant and its number.
+
+**D. Generate the table from the kernel enum at build time, or share a crate.**
+*What changes:* drift becomes structurally impossible rather than tested-for.
+
+### Why C rather than D
+
+D is the better shape and is not available. The kernel crate is `no_std` and
+builds only for `x86_64-slateos`; `posix` builds for the host as well, because
+that is how its 20,000 tests run. Making `posix` depend on `kernel` would drag
+a kernel build into every host test run; a `build.rs` that parses the enum
+would move the same text-scraping into the build graph, where a failure is a
+build error with worse diagnostics and no way to say "this code deliberately
+never crosses the syscall boundary". A third crate holding the enum is the
+genuinely right answer and is a cross-lane change to a file lane A owns; it is
+worth filing if the enum keeps moving, and is not worth blocking nine wrong
+errnos on today.
+
+C keeps the check in the place a lane-B reader will see it fail, and its
+failure message says exactly what to type.
+
+### Why one table rather than two updated ones
+
+`translate_net_error` differed from `translate` in two rows. Only one of them —
+`AlreadyExists` → `EADDRINUSE` — was actually about sockets: the only thing a
+socket call creates by name is a local address binding, so `EEXIST` is never
+the right answer there. The other, `InvalidCapability` → `EACCES`, was not a
+socket decision at all; it was simply present in one table and absent from the
+other, which is what drift looks like from the inside. Two tables that differ
+in one deliberate row and one accidental row cannot be told apart by reading
+them.
+
+So `translate_net_error` is now that one row plus a delegation, and keeps its
+name and its ~30 call sites. The cost is one extra call in the socket error
+path, which is not a hot path — it runs once per failed syscall.
+
+### The part that is easy to get wrong
+
+The accounting test accepts a *comment* as accounting: `// PageFault = -102
+(not typically returned to userspace)` satisfies it, because the bar is that
+someone looked at the number, not that they mapped it. That generosity had a
+hole. Section dividers read `// --- Filesystem (500 range: -500 to -513) ---`,
+so a divider permanently satisfies the codes at its own endpoints — and a
+range grows at its end, so those are exactly the codes most likely to be new.
+Deleting `STALE_HANDLE` and watching the test pass is how this was found.
+Dividers are now excluded from the searched text; nothing else is.
+
+The general form: a sync check that has never been made to fail is not known
+to be a sync check. Both tests here were run against a deliberately broken
+tree before being believed.
+
+### Where
+
+`posix/src/errno.rs` (`mod native`, `errno_for`, `translate`, and the two
+accounting tests at the end of the file); `posix/src/socket.rs`
+(`translate_net_error`). Written up as
+`B-NINE-KERNEL-ERROR-CODES-REACHED-USERSPACE-AS-EIO` in `known-issues.md`.
+Answers the errno half of
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`.
+
+## 730. `unlinkat` takes the pinned syscall only for the shape it fits, falls back only on "no such syscall", and decides which of those it is by observation rather than by guessing
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** deleting a file "inside a directory you hold open" was, until
+now, done by remembering the directory's *name* and gluing the file's name onto
+it. If anything moved that directory in the meantime, the delete landed
+somewhere else — possibly somewhere an attacker chose. Lane A added a syscall
+that hands the kernel the open directory itself, so there is no name to
+subvert. This entry is about the three judgement calls in switching over to it:
+which calls get the new route, what happens when the new route is unavailable,
+and how we tell "unavailable" apart from "refused".
+
+### Background
+
+`posix::unlinkat(dirfd, "x", flags)` was implemented as
+`resolve_dirfd_path` — look up the path `dirfd` had when it was opened, append
+`/x`, and call the path-based `SYS_FS_DELETE`. Everything the descriptor exists
+to provide is discarded in that step. Lane A's
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`
+answers it with `SYS_FS_UNLINKAT_PINNED` (662), which takes the kernel handle,
+accepts exactly one path component, and verifies inside the filesystem lock
+that the handle still denotes the directory it was opened on — `ESTALE` if not.
+
+### Decision 1 — the fast path is opt-*in* by shape, and the fallback is by path
+
+662 accepts a single component only. `unlinkat` may be handed `sub/dir/x`.
+Options were:
+
+- **A. Take the pinned route where it fits; otherwise the old join.** Chosen.
+- **B. Walk multi-component names ourselves** — `openat2` each intermediate
+  directory, pin the last, unlink there.
+- **C. Refuse multi-component names.**
+
+C is out: it would break callers for whom the old behaviour was correct, to
+defend against an attack they may not face. B is the eventually-right answer
+and is where this should go, but it is a different and larger change: it needs
+a descriptor per component, an unwind path that closes them all on every exit,
+and a decision about depth limits — and it would make `unlinkat("a/b/c")`
+issue four syscalls where it issues one today. A gets the security benefit for
+the shape that overwhelmingly dominates real callers (`rm -r` and `cp -r` walk
+one component at a time by construction) at no cost to the rest.
+
+The cost of A is honest and worth stating: **`unlinkat("sub/x")` is still
+racy.** It is not *more* racy than before, but a reader could reasonably assume
+that "unlinkat is pinned now" means all of it.
+
+### Decision 2 — only "no such syscall" falls back; every real error is final
+
+A pinned call that returns `ESTALE`, `EACCES` or `ENOENT` has *answered*.
+Retrying it through `resolve_dirfd_path` would reintroduce the exact race the
+call exists to close, and would do it on the failure path, where no test looks
+and no log records it. So the fallback is triggered by exactly one condition —
+the kernel does not have the call — and never by the call's own verdict.
+
+This is deliberately fail-*closed*: a kernel bug that makes 662 return
+`EACCES` for everything will break `rm` loudly rather than silently downgrade
+every deletion to the unsafe route.
+
+### Decision 3 — `NotSupported` is ambiguous, so it is resolved by observation
+
+`dispatch.rs` returns `NotSupported` (-2) for an unregistered syscall slot,
+which is what a kernel predating 662 does. But a *registered* handler may also
+return `NotSupported` for a filesystem that cannot perform the operation. The
+two are indistinguishable in the return value, and they want opposite
+handling: the first must fall back, the second must not (decision 2).
+
+Options:
+
+- **A. Treat every -2 as "kernel too old".** Simple, and quietly reopens the
+  race whenever a filesystem refuses.
+- **B. Treat no -2 as "kernel too old".** Safe, but `unlinkat` then fails
+  outright on any kernel without 662 — including, at the time of writing,
+  every host build.
+- **C. Ask the kernel whether 662 exists.** No such query exists, and inventing
+  one is a cross-lane ABI change for a transitional problem.
+- **D. Latch on first evidence.** Chosen. A single relaxed `AtomicBool`
+  records whether 662 has ever answered with something other than
+  `NotSupported`/`-ENOSYS`. Before that, -2 means "fall back"; after it, -2 is
+  honoured as the real answer.
+
+D converges correctly in both worlds. On a kernel with 662, the first call
+returns success or a genuine error, the flag flips, and every later -2 is
+final. On a kernel without it every call returns -2, the flag never flips, and
+the fallback stays available forever. The race between two threads both
+observing `false` is benign — they each fall back once — so no ordering is
+required.
+
+The same test covers the host: `syscallN` compiles out the `SYSCALL`
+instruction on a host build and returns `-ENOSYS`, so the flag never flips
+there and `unlinkat` under `cargo test` behaves exactly as it did before. That
+is why `HOST_ENOSYS` moved from a private host-only constant in `syscall.rs` to
+a `pub(crate)` one defined for both targets: it is now *recognised* in
+`file.rs`, not only produced, and a second copy of `-38` could drift.
+
+### Decision 4 — flags are translated, not forwarded
+
+662 rejects unknown flag bits with `EINVAL`; the path-based route ignores them.
+Passing the caller's word through unfiltered would make a junk flag behave
+differently depending on which route ran — a difference no caller could
+predict. So only `AT_REMOVEDIR` is inspected, and it is re-emitted as 662's own
+constant. (That `unlinkat` ignores unknown flags at all is a separate
+divergence from Linux, which returns `EINVAL`; it is unchanged here so that
+this commit does not smuggle in a behaviour change.)
+
+Likewise `pinned_base` sets no errno when it declines a `dirfd`.
+`resolve_dirfd_path` stays the single author of `EBADF`/`ENOTDIR`, so the fast
+path cannot be observed in the diagnostics even if it is wrong about which
+descriptors it can handle.
+
+### Not done: `fstatat` on 663
+
+663 writes the 64-byte `FS_META_SIZE` record, which has no inode number, no
+hard link count and no block count. `Stat` needs all three, and the 80-byte
+record `SYS_FS_STAT` writes has them. A pinned `fstatat` built on 663 would
+report `st_ino == 0` for every file — which fails nowhere and silently breaks
+`cp`'s refusal to copy a file onto itself, `ls -i`, hardlink coalescing in `du`
+and `tar`, and `find -samefile`. A slower `fstatat` that answers correctly
+beats a faster one that does not, so `fstatat` stays on the textual join until
+lane A can write the wider record. Filed as
+`requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`.
+
+**Where this lives:** `posix/src/file.rs` (the "pinned `*at` fast path"
+section, `try_pinned_unlinkat`, and `unlinkat`); `posix/src/syscall.rs`
+(`SYS_FS_UNLINKAT_PINNED`/`SYS_FS_FSTATAT_PINNED`/`SYS_FS_GETDENTS_PINNED`,
+`HOST_ENOSYS`). Answers the fd-relative half of
+`requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`;
+the errno half is §729.
+
+---
+
+## 731. The `*at` flag sets were measured against a running Linux rather than read out of its source, and the two surprises that produced are kept rather than tidied
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
+
+**In short:** three of our nine `*at` system calls — `unlinkat`, `fstatat`
+and `statx` — accepted any bit pattern at all in their `flags` argument and
+quietly ignored the bits they did not recognise, so a program passing a flag
+we have not implemented got the *unflagged* behaviour instead of an error
+saying so. They now reject unknown bits with `EINVAL`, like the other six
+already did. Which bits count as "known" was determined by *running* the
+calls on Linux 6.6 and recording what it did, not by reading Linux's source
+— and that turned up two behaviours that a source reading would probably
+have smoothed over, both of which we deliberately copy.
+
+### The problem
+
+Six of our `*at` calls validated their flags. `unlinkat`, `fstatat` and
+`statx` did not: they tested the bits they cared about and dropped the rest
+on the floor. That is the worst of the three possible behaviours. Rejecting
+an unimplemented flag tells the caller. Implementing it serves the caller.
+*Ignoring* it does neither, and does so invisibly: a program that asks for
+`AT_SYMLINK_NOFOLLOW` and is silently given follow-the-link semantics gets a
+wrong answer that looks like a right one, and the bug surfaces somewhere
+else entirely.
+
+### Why measurement rather than reading
+
+The flag sets are small enough that reading `fs/stat.c` would have been
+quicker. Two purpose-written C programs were used instead, because the
+question is not "what does the kernel source say" but "what will a program
+ported to us have observed on Linux", and those differ wherever the source
+is subtle. Both surprises below are exactly that case.
+
+**Surprise 1: `unlinkat` accepts only `AT_REMOVEDIR` — not even
+`AT_SYMLINK_NOFOLLOW`.** The natural guess is that `unlinkat` accepts the
+no-follow flag, since `unlink` must not follow the final symlink and
+`AT_SYMLINK_NOFOLLOW` is how every other call in the family says so. It does
+not: `unlink` implies no-follow *unconditionally*, so the flag would be
+redundant, and Linux rejects it with `EINVAL` rather than accepting a
+no-op. Passing it is a sign the caller has confused `unlinkat` with
+`fstatat`, and Linux says so.
+
+**Surprise 2: `newfstatat` accepts `AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC`
+together; `statx` refuses that same pair.** "Force a sync" and "do not sync"
+are contradictory, and `statx` returns `EINVAL` for the combination. The
+older `newfstatat`, which reaches the same code, does not check — it ignores
+both bits entirely, so there is nothing to contradict. We reproduce the
+asymmetry rather than making the two consistent.
+
+This is the entry's real purpose: the asymmetry looks exactly like an
+oversight in our code, and a future reader tidying it in either direction
+would break the compatibility it exists to provide. It is measured, it is
+intentional, and there are tests pinning both halves.
+
+### Ordering was measured too
+
+Which error wins when a call has several things wrong with it is itself
+observable, and a program that tests for `EFAULT` will not see it if we
+return `EINVAL` first. For all three calls the flag gate outranks `EFAULT`,
+`ENOENT` and `EBADF`; within `statx`, the reserved-mask check outranks the
+NULL-buffer check. The tests assert the ordering, not merely that some error
+occurs.
+
+### The alternative that was rejected
+
+Accepting unknown bits and ignoring them is what we did before, and it has
+one genuine argument for it: it is forward-compatible, in that a program
+compiled against a newer header passing a newer flag keeps working rather
+than failing outright. That argument is wrong here for the same reason it is
+wrong on Linux. The program passing the new flag is asking for behaviour we
+do not have; "keeps working" means "silently gets different semantics than
+it asked for". `EINVAL` is the diagnosis, and it is what a program that
+checks for it — which is how portable code probes for a flag's availability
+— is written to expect.
+
+**Where this lives:** `posix/src/file.rs` — the flag gates at the top of
+`unlinkat`, `fstatat` and `statx`, the `AT_NO_AUTOMOUNT` /
+`AT_STATX_FORCE_SYNC` / `AT_STATX_DONT_SYNC` / `AT_STATX_SYNC_TYPE` and
+`STATX_RESERVED` constants, and the `at_flag_validation` test module with its
+three `const` tables of accepted and rejected bits.
+
+## 732. An empty relative name in the `*at` family is `ENOENT`, and `AT_EMPTY_PATH` reaches the descriptor directly rather than through a synthesised path
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
+
+**In short:** Every `*at` call — `unlinkat`, `fchownat`, `scandirat` and a
+dozen more — builds the full path by gluing the directory's name and the
+caller's name together with a `/`. Given an *empty* name that produces
+`"/some/dir/"`, which is a perfectly valid path naming the directory itself.
+So `unlinkat(fd, "", AT_REMOVEDIR)` deleted the caller's directory and reported
+success, and `fchownat(fd, "", uid, gid, 0)` re-owned it. The fix is to refuse
+an empty name with `ENOENT` before the join happens — and, for the five calls
+that take the `AT_EMPTY_PATH` flag (which asks to operate on the descriptor
+*itself*, with no name at all), to serve them from the descriptor rather than
+from any path.
+
+**Terms used below.** *`*at` call*: a variant like `unlinkat` that takes a
+directory descriptor plus a name relative to it, instead of one absolute path.
+*`AT_EMPTY_PATH`*: a flag meaning "the name is empty on purpose — act on the
+descriptor". *TOCTOU*: a race where a name is checked and then used, and
+something swaps what the name refers to in between.
+
+### The problem
+
+`resolve_dirfd_path` / `build_at_path` cannot represent "no name at all". They
+take a directory path and a component and return `dir + "/" + component`. With
+an empty component that is `dir + "/"`, and every filesystem in existence
+treats a trailing slash as naming the directory. The failure mode is therefore
+not an error — it is a *success on the wrong object*, which is the worst shape
+a bug can have. Fifteen call sites across `posix/src/file.rs`,
+`posix/src/unistd.rs` and `posix/src/dirent.rs` had it.
+
+Separately, five of those calls advertise `AT_EMPTY_PATH` and did nothing with
+it: `fstatat(file_fd, "", &st, AT_EMPTY_PATH)` — the documented way to `fstat`
+a descriptor through the `*at` interface — joined its way to `ENOTDIR`.
+
+### Decision 1: refuse, rather than quietly mean the directory
+
+The alternative was to make the empty name mean the directory, since that is
+what the code already did and it is occasionally a convenience. Rejected: it is
+not what Linux does, and more importantly it makes a *destructive* call
+(`unlinkat`, `renameat`) succeed on an object the caller did not name. A caller
+that means the directory can say `"."`. The one-character difference between
+`""` and `"."` is exactly the difference between an uninitialised buffer and an
+intentional argument, and only one of the two should destroy a directory tree.
+
+### Decision 2: `AT_EMPTY_PATH` goes to the descriptor, not to `/proc/self/fd/N`
+
+glibc's older `fexecve` and several ports synthesise a path — `/proc/self/fd/N`
+— and hand that to the path-based call. That would have been a small change
+here, since the path route already exists. Rejected for three reasons:
+
+- It needs a working `/proc/self/fd`, which is a filesystem dependency for what
+  is otherwise a pure fd operation, and it fails on any process without `/proc`
+  mounted — including early boot and anything in a namespace.
+- It reintroduces the TOCTOU that `AT_EMPTY_PATH` exists to avoid: the whole
+  point of naming a descriptor is that nothing can be swapped underneath it,
+  and resolving a path — any path — gives that back.
+- It cannot serve the kinds that have no name. A pipe, a socket and an epoll fd
+  are all legal arguments to `fstatat(…, "", …, AT_EMPTY_PATH)` on Linux, and
+  none of them has a filesystem path to synthesise.
+
+So each call dispatches to its own fd-based sibling: `fstatat` → `fstat`,
+`fchmodat` → `fchmod`, `fchownat` → `fchown`, and `faccessat` → an `fstat`
+used as a descriptor-validity probe (we have no permission model for `access`,
+so validity is the only question it can answer). When `dirfd` is `AT_FDCWD`
+there is no descriptor to use, so the calls take the path route against `"."` —
+which is what `AT_FDCWD` means.
+
+`statx` is the odd one: it reads the raw 80-byte kernel record directly (for
+birth time, which `struct stat` has nowhere to put), and had no fd-side way to
+get one. Rather than drop birth time on the flagged route, `stat_fd_raw` was
+added beside the existing `stat_path_raw`. It returns three-valued —
+`Some(0)` record obtained, `Some(-1)` failed, `None` *this descriptor has no
+record* — because a pipe is not an error, it is a thing with no stat record,
+and `statx` then falls back to `fstat` and omits `STATX_BTIME` from the result
+mask rather than reporting a birth time of zero.
+
+### Decision 3: the orderings are the measured ones, not the plausible ones
+
+Where the empty-path check goes relative to the other checks is observable, and
+three of the four orderings I first wrote down from reasoning were wrong. They
+were fixed by running the real calls on Linux 6.6 (`~/atprobe/`), the same
+method as §731:
+
+| I assumed | Linux actually does |
+|---|---|
+| a closed `dirfd` outranks the empty name | `fstatat(999, "", &st, 0)` is `ENOENT`, not `EBADF` |
+| `utimensat`'s `tv_nsec` validation runs first | `utimensat(fd, "", {tv_nsec: 2e9}, 0)` is `ENOENT`, not `EINVAL` |
+| `statx`'s NULL-buffer check runs first | `statx(fd, "", 0, …, NULL)` is `ENOENT`; `statx(fd, "", AT_EMPTY_PATH, …, NULL)` is `EFAULT` |
+| `readlinkat` needs `AT_EMPTY_PATH` to mean anything | it takes no flags at all, and reads the link body whenever `dirfd` is itself a symlink |
+
+The `statx` row is why the check is *split* across the buffer test rather than
+placed on one side of it — the unflagged refusal above, the flagged route
+below. That looks like untidiness and is not: the two orders genuinely differ.
+
+The `readlinkat` row we cannot implement, because `open` does not implement
+`O_PATH` and so no descriptor in this libc ever refers to a symlink rather than
+its target. `ENOENT` is therefore correct for every fd a caller can actually
+hold; the gap is recorded as
+`B-READLINKAT-CANNOT-READ-A-SYMLINK-FD-BECAUSE-O_PATH-IS-UNIMPLEMENTED`.
+
+### Verification
+
+By mutation, not by the tests merely passing. Neutering `reject_empty_path` to
+a no-op fails three tests; routing the `AT_EMPTY_PATH` branch back through the
+textual join fails exactly the two descriptor-route tests and nothing else.
+The `HandleKind::Pipe` case is the load-bearing one in a host build: `fstat`
+answers a pipe from the handle kind alone with no syscall, so it is the only
+kind that can succeed off-target — and it is precisely the case a synthesised
+path could never have served.
+
+
+## 733. `O_PATH` is honoured for everything userspace can observe and left unimplemented for the part that needs the kernel, rather than being refused outright
+
+**Date:** 2026-08-30 · **Decided by:** Claude (autonomous) · **Lane:** B
+
+**In short:** `O_PATH` is a flag that asks `open` for a descriptor naming a
+*file* without actually opening it — useful for pinning a directory you will
+then operate on with the `*at` calls, without asking for permission to read it.
+We accepted the flag and then ignored it, so every operation a program tries on
+such a descriptor quietly worked when Linux would have refused it. We now
+refuse them, but we still get the descriptor by really opening the file. The
+choice was between doing that half, doing nothing, and making the flag an
+outright error; the half was chosen because it is the half a program can see,
+and because the other two options each break something that works today.
+
+### The problem
+
+`open` stored the flag in the descriptor's status flags and nothing ever read
+it. Concretely, on a descriptor opened `O_PATH`, Linux answers `EBADF` to
+`read`, `write`, `pread`, `pwrite`, `readv`, `writev`, `preadv`, `pwritev`,
+`lseek`, `ftruncate`, `fsync`, `fdatasync`, `flock`, `fchmod`, `fchown`,
+`fallocate`, `posix_fadvise`, `ioctl`, a file-backed `mmap`, and four of
+`fcntl`'s commands — and we answered all twenty as though the flag were not
+there. The failure direction is *over-permissive*, which is why nothing
+noticed: no program fails, things merely work that should not.
+
+There is a second, smaller half that userspace cannot fix. `O_PATH` is also
+supposed to let you open a file you may not read, and to let you name a symlink
+without following it. Both require a kernel handle that has no open file
+description behind it. Ours does not exist, so we obtain the descriptor by
+opening the file for real.
+
+### The options
+
+| | *What changes:* |
+|---|---|
+| **A. Keep ignoring it** | Nothing. A program using `O_PATH` defensively gets none of the protection it asked for, silently. |
+| **B. Refuse it — `open` returns `EOPNOTSUPP`** | Programs that pass `O_PATH` stop working, loudly, instead of working over-permissively. |
+| **C. Honour the observable half** | Operations on the file report `EBADF` as Linux does. Obtaining the descriptor still requires read permission, and still cannot name a symlink. |
+
+**C was chosen.**
+
+### Why not B, which is what this file's own precedent seemed to argue for
+
+The precedent is `O_TMPFILE`, which this libc refuses with `EOPNOTSUPP` rather
+than ignoring, and the `known-issues.md` entry for `O_PATH` originally proposed
+copying it. On re-examination the precedent does not transfer, for two reasons.
+
+The first is that the two flags fail differently when ignored. `O_TMPFILE`
+names a *directory* and asks for an unnamed file inside it; ignore the flag and
+`open` succeeds on the directory itself, which is not a thing any caller
+asked for and which subsequent writes will do damage through. `O_PATH` names
+the file the caller actually named; ignore the flag and the caller gets a
+working descriptor for the right file with more authority than it wanted.
+Over-authority is a real bug, but it is not the same *kind* of bug, and the
+"turn a silent divergence into a loud one" argument is only compelling when the
+silent behaviour is actively wrong rather than merely lax.
+
+The second is decisive: three uses of `O_PATH` already work end to end here.
+It works as a `dirfd` for the whole `*at` family, because the fd table stores
+the resolved path and the `*at` calls join against it. It works as an argument
+to `fstat`, which Linux also permits. And it works as an argument to `fexecve`,
+which resolves the descriptor through `fdtable::get_fd_path` and never touches
+the file. `EOPNOTSUPP` would break all three in order to make the fourth loud —
+trading three working behaviours for one diagnostic.
+
+### Why C is not merely "the easy part"
+
+The objection to a half-fix is that it produces a flag which is *partly* real,
+and a program may reason from the working half to the broken half. That risk is
+narrower than it sounds, because the two halves are separated by what a program
+can test. A program that opens `O_PATH` and then reads gets the right answer.
+A program that opens `O_PATH` on a file it cannot read gets an error *at the
+open*, which is a failure it must already handle, not a wrong success. The
+divergence is therefore "an open that should have succeeded did not" — the safe
+direction — rather than "an operation that should have failed did not", which
+is what C removes.
+
+### The check goes in exactly one place, and that is not a stylistic choice
+
+Linux does not repeat this test in twenty syscalls. `fdget()` — the generic
+"turn a descriptor number into a file" helper — masks `FMODE_PATH` and returns
+nothing, so the refusal is emitted at precisely the position of the closed-fd
+`EBADF`. `fdget_raw()`, used by the handful of calls that legitimately accept
+these descriptors, does not mask it. That single mechanism is what makes the
+implementation mechanical: put the check beside each descriptor lookup and
+every ordering question answers itself, because whatever outranks `EBADF` for a
+*closed* descriptor outranks it here, and nothing else does.
+
+That claim was checked rather than assumed, in both directions:
+`ftruncate(path_fd, -1)` is `EINVAL` and so is `ftruncate(999closed, -1)`;
+`lseek(path_fd, 0, <nonsense whence>)` is `EBADF` and so is
+`lseek(999closed, 0, <nonsense whence>)`. Both pairs are pinned by tests.
+
+### What it cost, which is the part worth recording
+
+Placing the check at the descriptor lookup meant two functions had to *acquire*
+a descriptor lookup at that position, because they had been validating their
+arguments first. `lseek` reported `EINVAL` for a bad `whence` on a closed
+descriptor where Linux reports `EBADF`, and `posix_fadvise` reported `EINVAL`
+for a bad `advice` or a negative `len` on a closed descriptor where Linux
+reports `EBADF`. Both were pre-existing bugs, invisible until this rule made
+them contradictions; both are fixed, with the measured orderings in comments
+and tests. `posix_fadvise`'s old tests had even encoded the wrong rule as a
+comment — "Linux validates advice before touching the fd table; we do the
+same" — which it does not.
+
+A third measurement fell out of the same probe: `lseek(f, -5, SEEK_DATA)` is
+`ENXIO` on both ext4 and tmpfs, not the `EINVAL` we returned, because a
+negative start is reached by the same `offset < 0 || offset >= i_size` test
+that reports a past-EOF start. Our kernel reports that condition as the generic
+`InvalidArgument`, so `lseek` remaps it — precisely, since `fs/handle.rs`'s
+`SeekFrom::Data`/`SeekFrom::Hole` arms are the only places those two syscalls
+can produce it.
+
+---
+
+## 734. `yesno` is one shared module with the answer source as a trait, rather than a third private copy — and `cp` carries it as `dyn` in the job
+
+**Date:** 2026-08-30
+**Decided by:** Claude (autonomous)
+
+**In short:** Several of these utilities stop and ask a yes/no question — `rm -i`
+deleting a file, `cp -i` overwriting one, `find -ok` before running a command.
+*What counts as yes* has to be the same answer in all of them: a person who has
+learned that `rm -i` accepts `yes` will type `yes` at `cp -i` too. There were
+already two separate copies of that rule in this tree and they had already
+drifted apart in a way a user could hit. Adding a third for `cp -i` would have
+made it worse, so the rule is now one module (`coreutils::yesno`), and `cp`
+holds the place its answers come from as a field in its job struct.
+
+### The divergence that was already there
+
+gnulib has exactly one of these (`lib/yesno.c`), called by `rm`, `cp`, `mv`,
+`ln`, `install` and — through its own wrapper — `find -ok`. This tree had two:
+
+| | how it read the line | what it did with a non-UTF-8 answer |
+|---|---|---|
+| `rm -i` | `read_until(b'\n')`, as bytes | accepted `y` normally |
+| `find -ok` | `read_line` into a `String` | **failed the read and declined** |
+
+The second row is a real bug, not a theoretical one. `read_line` returns
+`InvalidData` for input that is not UTF-8, and `find`'s code treated a failed
+read as end of input, which is a decline. A terminal in a single-byte locale
+sends exactly that kind of byte, so a `y` typed at `find -ok` after a stray high
+byte was refused where the same key at `rm -i` was accepted. Two copies of a
+five-line rule had drifted within one crate; a third was not going to hold.
+
+The module also puts the *locale* question in one place. Upstream's `rpmatch`
+consults `LC_MESSAGES`, so a French `oui` is a yes under `fr_FR`. This tree has
+one locale and implements the C one's `yesexpr` (`^[yY]`); when locales arrive,
+there is now exactly one function that has to learn about them.
+
+### The cost: a test double in the shipped library
+
+`Canned` — a queue of answers for tests — is a `pub` type in the library, not
+`#[cfg(test)]`. That is a real cost: it is API surface that exists only for
+testing, and it ships.
+
+It cannot be `#[cfg(test)]`, because the things that need it are the tests of
+the *binaries*, and each binary is a separate compilation unit from the library.
+A `cfg(test)` item in `lib.rs` is invisible to every one of them. The
+alternative — a private `Canned` duplicated in each binary's test module — is
+the same duplication this entry is about, one level down, and `rm`'s and `cp`'s
+copies would drift in the same way the readers did.
+
+Against that, a prompt is the part of these programs that most needs testing and
+is least testable through a real terminal: the interesting cases are several
+answers consumed by several prompts, and an input that ends part way through.
+`cp -i a b c d` asks three questions of one stream, and "asked and was declined"
+versus "never asked" are two behaviours that leave the same bytes on disk and
+the same exit status — only a count of consumed answers tells them apart. A
+trait was the way to get at that, and a trait with no test implementation in
+reach is a trait nobody can use.
+
+### Why `dyn` in `Job`, not a third type parameter
+
+`cp`'s `Job` is already generic over its two output sinks, and eleven function
+signatures name it. Adding `A: Answers` would have touched all eleven to serve
+one call site. The field is `&'a mut dyn Answers` instead.
+
+The usual objection to `dyn` on a hot path does not apply: the indirect call
+happens once per *prompt*, which is once per human keypress. `rm` had already
+made the same choice for the same reason, so the two agree.
+
+### What was rejected
+
+- **A free function that reads `io::stdin()`.** Simplest, and untestable except
+  by spawning a process and driving its stdin — which is a different kind of
+  test with a different failure mode, and would have made the eight `-i`
+  behaviours below into eight process spawns.
+- **Leaving `find -ok`'s copy alone and sharing only between `rm` and `cp`.**
+  That fixes nothing: the bug is in the copy that would have been left.
+- **Taking a `&mut dyn BufRead` instead of a purpose-named trait.** It reads
+  more generally and says less: the contract is *one line per call, `None` at
+  end of input, and end of input is indistinguishable from a failed read* —
+  which is gnulib's contract, since `getline` returns `-1` for both — and a
+  `BufRead` parameter states none of that.

@@ -1,29 +1,38 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(clippy::needless_range_loop)]
-#![allow(unused_imports)]
-
-//! Slate OS Dots and Boxes — classic pencil-and-paper strategy game.
+//! Slate OS Dots and Boxes -- classic pencil-and-paper strategy game.
 //!
 //! Two players take turns drawing lines between adjacent dots on a grid.
 //! When a player completes the fourth side of a box, that box is claimed and
 //! the player gets another turn. The game ends when all boxes are filled.
 //! Supports human-vs-AI and two-player modes, configurable grid sizes
 //! (3x3, 4x4, 5x5 dots), keyboard and mouse input, and a greedy AI opponent.
+//!
+//! # The window
+//!
+//! [`Layout::solve`] derives every rectangle in the frame from the width and
+//! height the compositor hands `render`. There is deliberately no
+//! `window_width()` or `window_height()` any more -- there were, and they were
+//! the drawing pass telling the window how big to be: the footer bar was
+//! painted at `window_height() - FOOTER_HEIGHT`, which is the bottom of the
+//! window the app *wanted*, so in every other window it floated somewhere in
+//! the middle with unpainted canvas beneath it.
+//!
+//! The lattice ignored the window entirely. `dot_pos` was
+//! `PADDING + DOT_RADIUS + col * DOT_SPACING`, three compile-time constants,
+//! so a 5x5 board was 340 pixels wide in a 1200-pixel window and 340 pixels
+//! wide in a 300-pixel one -- in the first it sat in the top-left corner with
+//! most of the canvas empty, and in the second it ran off the right edge.
+//! The spacing is now what the smaller of the two free dimensions can pay for.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seed_from_system};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -34,13 +43,9 @@ const SURFACE1: Color = Color::from_hex(0x45475A);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
-const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // ── Player colors ───────────────────────────────────────────────────
@@ -49,19 +54,39 @@ const PLAYER2_COLOR: Color = RED;
 const PLAYER1_BOX_COLOR: Color = Color::from_hex(0x2A3A5E);
 const PLAYER2_BOX_COLOR: Color = Color::from_hex(0x5E2A3A);
 
-// ── Layout constants ────────────────────────────────────────────────
-const DOT_RADIUS: f32 = 6.0;
-const LINE_THICKNESS: f32 = 5.0;
-const LINE_HOVER_THICKNESS: f32 = 7.0;
-const DOT_SPACING: f32 = 70.0;
-const PADDING: f32 = 20.0;
-const HEADER_HEIGHT: f32 = 60.0;
-const FOOTER_HEIGHT: f32 = 40.0;
-const HEADER_FONT_SIZE: f32 = 18.0;
-const TITLE_FONT_SIZE: f32 = 24.0;
-const SCORE_FONT_SIZE: f32 = 16.0;
-const STATUS_FONT_SIZE: f32 = 14.0;
-const OVERLAY_FONT_SIZE: f32 = 16.0;
+// ── The window ──────────────────────────────────────────────────────
+/// The size the window opens at. Nothing is measured from it: every
+/// rectangle in the frame comes from [`Layout::solve`], which is given the
+/// live window each time `render` is called.
+const WINDOW_WIDTH: f32 = 560.0;
+const WINDOW_HEIGHT: f32 = 620.0;
+
+/// The title, drawn and measured from one place.
+const TITLE: &str = "Dots & Boxes";
+
+/// The footer's list of keys.
+const FOOTER_HELP: &str =
+    "Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size";
+
+/// The largest a cell may grow to, in pixels.
+///
+/// Without a cap a 2000-pixel window draws a 3x3 board with 900 pixels between
+/// its dots: two dots and a line, filling a monitor. The board stops growing
+/// here and is centred in what is left.
+const MAX_SPACING: f32 = 90.0;
+
+/// The dot's radius as a fraction of the spacing, and the two together as a
+/// fraction of the board's span.
+///
+/// The lattice reaches half a dot past the outermost centres on every side, so
+/// a board of `n` cells spans `n * spacing + 2 * radius`. Writing the radius as
+/// a fraction of the spacing lets `solve` invert that exactly rather than
+/// guessing and then discovering the discs do not fit -- which is what the old
+/// `board_pixel_span` had to correct for after the fact.
+const DOT_FRACTION: f32 = 0.12;
+
+/// How many lines bound a box. A box is complete when it has this many.
+const SIDES_PER_BOX: usize = 4;
 
 /// Default grid size: 4x4 dots = 3x3 boxes.
 const DEFAULT_GRID_SIZE: usize = 4;
@@ -82,6 +107,148 @@ const MAX_GRID_SIZE: usize = 5;
 /// failure; see [`guitk::rng::seeded_from_system`]. "DOTSBOX!" in ASCII.
 const FALLBACK_SEED: u64 = 0x444F_5453_424F_5821;
 
+// ── Layout ──────────────────────────────────────────────────────────
+/// Every rectangle in the frame, derived from the window and the grid size.
+///
+/// The board is square and centred in what the header and the footer leave.
+/// Nothing here is a constant offset: the old code laid the lattice out from
+/// `PADDING + DOT_RADIUS + col * DOT_SPACING` and the footer from a
+/// `window_height()` the window had never agreed to.
+#[derive(Clone, Copy, Debug)]
+struct Layout {
+    window: Rect,
+    header: Rect,
+    footer: Rect,
+    /// The square the lattice occupies, discs included.
+    board: Rect,
+    pad: f32,
+    spacing: f32,
+    dot_radius: f32,
+    line_w: f32,
+    cursor_w: f32,
+    /// How far from a line a click may land and still count.
+    reach: f32,
+    title: f32,
+    font: f32,
+    small: f32,
+}
+
+impl Layout {
+    fn solve(w: f32, h: f32, grid_size: usize) -> Self {
+        let w = w.max(0.0);
+        let h = h.max(0.0);
+        let window = Rect::new(0.0, 0.0, w, h);
+        let pad = (w.min(h) * 0.035).clamp(4.0, 20.0);
+        let font = (h / 34.0).clamp(9.0, 18.0);
+        let title = (font * 1.35).clamp(12.0, 24.0);
+        let small = (font - 3.0).max(8.0);
+
+        let header = Rect::new(0.0, 0.0, w, (title + small + pad * 1.4).min(h));
+        let footer_h = (small * 2.2).min((h - header.h).max(0.0));
+        let footer = Rect::new(0.0, h - footer_h, w, footer_h);
+
+        // What the two bars leave, less a pad on every side.
+        let free = Rect::new(
+            pad,
+            header.bottom() + pad,
+            (w - pad * 2.0).max(0.0),
+            (footer.y - pad - (header.bottom() + pad)).max(0.0),
+        );
+
+        // A board of `cells` cells spans `cells * spacing + 2 * radius`, and
+        // the radius is `DOT_FRACTION * spacing`, so the span the free square
+        // can pay for inverts exactly.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "grid_size is clamped to 3..=5; exact in f32"
+        )]
+        let cells = grid_size.max(2).saturating_sub(1) as f32;
+        let span = free.w.min(free.h);
+        let spacing = (span / DOT_FRACTION.mul_add(2.0, cells)).clamp(0.0, MAX_SPACING);
+        let dot_radius = spacing * DOT_FRACTION;
+        let board_span = dot_radius.mul_add(2.0, cells * spacing);
+        let board = Rect::new(
+            free.x + (free.w - board_span).max(0.0) / 2.0,
+            free.y + (free.h - board_span).max(0.0) / 2.0,
+            board_span,
+            board_span,
+        );
+
+        Self {
+            window,
+            header,
+            footer,
+            board,
+            pad,
+            spacing,
+            dot_radius,
+            line_w: (spacing * 0.07).clamp(1.0, 6.0),
+            cursor_w: (spacing * 0.11).clamp(2.0, 9.0),
+            reach: spacing * 0.2,
+            title,
+            font,
+            small,
+        }
+    }
+
+    /// Centre of the dot at grid coordinates `(row, col)`, in pixels.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "grid_size is clamped to 3..=5; exact in f32"
+    )]
+    fn dot_pos(&self, row: usize, col: usize) -> (f32, f32) {
+        (
+            self.dot_radius
+                .mul_add(1.0, self.board.x + col as f32 * self.spacing),
+            self.dot_radius
+                .mul_add(1.0, self.board.y + row as f32 * self.spacing),
+        )
+    }
+
+    /// The two dots a line runs between, in pixels.
+    ///
+    /// A horizontal line joins `(row, col)` to the dot on its right; a
+    /// vertical one joins it to the dot below. Painting and hit-testing both
+    /// read this, so a line cannot be drawn between one pair of dots and
+    /// clicked between another.
+    fn line_endpoints(&self, line: LineId) -> ((f32, f32), (f32, f32)) {
+        let start = self.dot_pos(line.row, line.col);
+        let end = match line.orientation {
+            Orientation::Horizontal => (
+                self.dot_pos(line.row, line.col.saturating_add(1)).0,
+                start.1,
+            ),
+            Orientation::Vertical => (
+                start.0,
+                self.dot_pos(line.row.saturating_add(1), line.col).1,
+            ),
+        };
+        (start, end)
+    }
+
+    /// The rectangle a click on `line` must land in.
+    ///
+    /// It is the line's own band, inset at both ends by `reach`, so the bands
+    /// of a horizontal and a vertical line that meet at a dot do not overlap
+    /// and "which line did I click" is never a tie to be broken. The old code
+    /// had no boxes at all: it walked every line measuring the perpendicular
+    /// distance and kept the nearest, an inverse of the drawing mapping that
+    /// only agreed with the picture because both called `line_endpoints`.
+    /// Now the pass that paints a line records the box, so it cannot.
+    fn line_box(&self, line: LineId) -> Rect {
+        let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
+        let r = self.reach;
+        match line.orientation {
+            Orientation::Horizontal => {
+                Rect::new(x1 + r, y1 - r, (x2 - x1 - r * 2.0).max(0.0), r * 2.0)
+            }
+            Orientation::Vertical => {
+                Rect::new(x1 - r, y1 + r, r * 2.0, (y2 - y1 - r * 2.0).max(0.0))
+            }
+        }
+    }
+}
+
 // ── Line orientation ────────────────────────────────────────────────
 /// A line can be horizontal (connecting dots in the same row) or vertical
 /// (connecting dots in the same column).
@@ -89,6 +256,16 @@ const FALLBACK_SEED: u64 = 0x444F_5453_424F_5821;
 enum Orientation {
     Horizontal,
     Vertical,
+}
+
+impl Orientation {
+    /// The other one.
+    const fn toggled(self) -> Self {
+        match self {
+            Self::Horizontal => Self::Vertical,
+            Self::Vertical => Self::Horizontal,
+        }
+    }
 }
 
 // ── Line identifier ─────────────────────────────────────────────────
@@ -184,19 +361,25 @@ enum GamePhase {
 }
 
 // ── Cursor for keyboard navigation ─────────────────────────────────
-/// The cursor selects a line on the grid. It tracks which line is currently
-/// highlighted for keyboard-based play.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Cursor {
-    orientation: Orientation,
-    row: usize,
-    col: usize,
-}
+//
+// There is no `Cursor` type. There was, and its three fields were
+// `orientation`, `row` and `col` -- the three fields of `LineId`, declared a
+// second time with a `to_line_id` to convert one into the other. The cursor
+// *is* a line; a second name for it only creates the possibility that the line
+// the cursor is on and the line it converts to are not the same one.
 
-impl Cursor {
-    fn to_line_id(self) -> LineId {
-        LineId::new(self.orientation, self.row, self.col)
-    }
+// ── What a click can land on ────────────────────────────────────────
+/// Everything in the frame a pointer can press.
+///
+/// Recorded by the pass that paints each thing, so there is no second mapping
+/// from pixels back to meaning that could disagree with the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    /// One of the lines between two adjacent dots.
+    Line(LineId),
+    NewGame,
+    Mode,
+    Size(usize),
 }
 
 // ── Board ───────────────────────────────────────────────────────────
@@ -238,61 +421,37 @@ impl Board {
         self.grid_size.saturating_sub(1)
     }
 
-    /// Total number of boxes on the board.
-    fn total_boxes(&self) -> usize {
-        let bps = self.boxes_per_side();
-        bps * bps
+    /// The grid of lines of one orientation.
+    fn lines(&self, orientation: Orientation) -> &Vec<Vec<bool>> {
+        match orientation {
+            Orientation::Horizontal => &self.h_lines,
+            Orientation::Vertical => &self.v_lines,
+        }
     }
 
-    /// Total number of lines on the board.
-    fn total_lines(&self) -> usize {
-        let n = self.grid_size;
-        let bps = self.boxes_per_side();
-        // Horizontal: n rows, each with (n-1) lines
-        // Vertical: (n-1) rows, each with n lines
-        n * bps + bps * n
+    /// Whether the line at these coordinates is drawn; `false` off the board.
+    ///
+    /// Every read of a line goes through here.  `is_box_complete`,
+    /// `box_side_count` and `available_lines` each used to index the two
+    /// grids directly, so each carried its own bounds reasoning and its own
+    /// way of being wrong at the edge.
+    fn drawn(&self, orientation: Orientation, row: usize, col: usize) -> bool {
+        self.lines(orientation)
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Count how many lines have been drawn.
     fn drawn_line_count(&self) -> usize {
-        let mut count = 0;
-        for row in &self.h_lines {
-            for &drawn in row {
-                if drawn {
-                    count += 1;
-                }
-            }
-        }
-        for row in &self.v_lines {
-            for &drawn in row {
-                if drawn {
-                    count += 1;
-                }
-            }
-        }
-        count
+        let count = |rows: &Vec<Vec<bool>>| rows.iter().flatten().filter(|&&d| d).count();
+        count(&self.h_lines).saturating_add(count(&self.v_lines))
     }
 
     /// Check if a line has been drawn.
     fn is_line_drawn(&self, line: LineId) -> bool {
-        match line.orientation {
-            Orientation::Horizontal => {
-                if line.row < self.h_lines.len()
-                    && let Some(&drawn) = self.h_lines[line.row].get(line.col)
-                {
-                    return drawn;
-                }
-                false
-            }
-            Orientation::Vertical => {
-                if line.row < self.v_lines.len()
-                    && let Some(&drawn) = self.v_lines[line.row].get(line.col)
-                {
-                    return drawn;
-                }
-                false
-            }
-        }
+        self.drawn(line.orientation, line.row, line.col)
     }
 
     /// Check if a line ID is valid for this board.
@@ -304,31 +463,53 @@ impl Board {
         }
     }
 
-    /// Draw a line and return how many boxes were completed by it.
-    /// Completed boxes are assigned to the given player.
-    fn draw_line(&mut self, line: LineId, player: Player) -> usize {
-        if !self.is_valid_line(line) || self.is_line_drawn(line) {
-            return 0;
+    /// Whether `line` is a line of this board that has not been drawn yet.
+    ///
+    /// This is the one rule that decides whether a click, a keypress or the
+    /// AI may play a line, and `is_valid_line(line) && !is_line_drawn(line)`
+    /// used to be spelled out three times over: in `draw_line`, in
+    /// `try_place_line` and in the pass that records the hit boxes.
+    /// `try_place_line`'s copy stood in front of `draw_line`'s, so nothing
+    /// could reach the latter -- deleting either half of it changed no
+    /// behaviour any test could observe (lesson 92).
+    fn is_available(&self, line: LineId) -> bool {
+        self.is_valid_line(line) && !self.is_line_drawn(line)
+    }
+
+    /// Draw a line for `player` and claim any box it completes.
+    ///
+    /// `None` if there was no such line to draw -- off the board, or already
+    /// drawn -- and `Some(n)` for a move that completed `n` boxes. The two
+    /// answers used to be the same `0`, so a caller could not tell a refused
+    /// move from a move that merely captured nothing, which is the difference
+    /// between keeping the turn and passing it.
+    fn draw_line(&mut self, line: LineId, player: Player) -> Option<usize> {
+        if !self.is_available(line) {
+            return None;
         }
 
-        match line.orientation {
-            Orientation::Horizontal => {
-                self.h_lines[line.row][line.col] = true;
-            }
-            Orientation::Vertical => {
-                self.v_lines[line.row][line.col] = true;
-            }
+        let grid = match line.orientation {
+            Orientation::Horizontal => &mut self.h_lines,
+            Orientation::Vertical => &mut self.v_lines,
+        };
+        if let Some(cell) = grid.get_mut(line.row).and_then(|r| r.get_mut(line.col)) {
+            *cell = true;
         }
 
-        let mut completed = 0;
-        let adjacent = self.adjacent_boxes(line);
-        for (br, bc) in adjacent {
-            if self.is_box_complete(br, bc) && self.boxes[br][bc].is_none() {
-                self.boxes[br][bc] = Some(player);
-                completed += 1;
+        let mut completed = 0usize;
+        for (br, bc) in self.adjacent_boxes(line) {
+            if !self.is_box_complete(br, bc) {
+                continue;
+            }
+            let Some(cell) = self.boxes.get_mut(br).and_then(|r| r.get_mut(bc)) else {
+                continue;
+            };
+            if cell.is_none() {
+                *cell = Some(player);
+                completed = completed.saturating_add(1);
             }
         }
-        completed
+        Some(completed)
     }
 
     /// Get the box coordinates adjacent to a line.
@@ -346,7 +527,7 @@ impl Board {
         match line.orientation {
             Orientation::Horizontal => {
                 if line.row > 0 {
-                    let br = line.row - 1;
+                    let br = line.row.saturating_sub(1);
                     if br < bps && line.col < bps {
                         result.push((br, line.col));
                     }
@@ -357,7 +538,7 @@ impl Board {
             }
             Orientation::Vertical => {
                 if line.col > 0 {
-                    let bc = line.col - 1;
+                    let bc = line.col.saturating_sub(1);
                     if line.row < bps && bc < bps {
                         result.push((line.row, bc));
                     }
@@ -371,20 +552,12 @@ impl Board {
     }
 
     /// Check if all four sides of a box are drawn.
+    ///
+    /// This is `box_side_count == 4` and nothing else.  It used to be its own
+    /// copy of the same four reads, so "which four lines bound this box" was
+    /// written down twice and the two copies could drift apart.
     fn is_box_complete(&self, box_row: usize, box_col: usize) -> bool {
-        let bps = self.boxes_per_side();
-        if box_row >= bps || box_col >= bps {
-            return false;
-        }
-        // Top: horizontal line at (box_row, box_col)
-        let top = self.h_lines[box_row][box_col];
-        // Bottom: horizontal line at (box_row+1, box_col)
-        let bottom = self.h_lines[box_row + 1][box_col];
-        // Left: vertical line at (box_row, box_col)
-        let left = self.v_lines[box_row][box_col];
-        // Right: vertical line at (box_row, box_col+1)
-        let right = self.v_lines[box_row][box_col + 1];
-        top && bottom && left && right
+        self.box_side_count(box_row, box_col) == SIDES_PER_BOX
     }
 
     /// Count sides drawn for a specific box.
@@ -393,20 +566,14 @@ impl Board {
         if box_row >= bps || box_col >= bps {
             return 0;
         }
-        let mut count = 0;
-        if self.h_lines[box_row][box_col] {
-            count += 1;
-        }
-        if self.h_lines[box_row + 1][box_col] {
-            count += 1;
-        }
-        if self.v_lines[box_row][box_col] {
-            count += 1;
-        }
-        if self.v_lines[box_row][box_col + 1] {
-            count += 1;
-        }
-        count
+        let sides = [
+            // Top, bottom, left, right.
+            self.drawn(Orientation::Horizontal, box_row, box_col),
+            self.drawn(Orientation::Horizontal, box_row.saturating_add(1), box_col),
+            self.drawn(Orientation::Vertical, box_row, box_col),
+            self.drawn(Orientation::Vertical, box_row, box_col.saturating_add(1)),
+        ];
+        sides.into_iter().filter(|&s| s).count()
     }
 
     /// Return all valid lines that haven't been drawn yet.
@@ -415,14 +582,14 @@ impl Board {
         let bps = self.boxes_per_side();
         for row in 0..self.grid_size {
             for col in 0..bps {
-                if !self.h_lines[row][col] {
+                if !self.drawn(Orientation::Horizontal, row, col) {
                     lines.push(LineId::horizontal(row, col));
                 }
             }
         }
         for row in 0..bps {
             for col in 0..self.grid_size {
-                if !self.v_lines[row][col] {
+                if !self.drawn(Orientation::Vertical, row, col) {
                     lines.push(LineId::vertical(row, col));
                 }
             }
@@ -451,28 +618,11 @@ impl Board {
 
     /// Count boxes owned by a given player.
     fn score(&self, player: Player) -> usize {
-        let mut count = 0;
-        for row in &self.boxes {
-            for cell in row {
-                if *cell == Some(player) {
-                    count += 1;
-                }
-            }
-        }
-        count
-    }
-
-    /// Count how many boxes have been claimed.
-    fn claimed_boxes(&self) -> usize {
-        let mut count = 0;
-        for row in &self.boxes {
-            for cell in row {
-                if cell.is_some() {
-                    count += 1;
-                }
-            }
-        }
-        count
+        self.boxes
+            .iter()
+            .flatten()
+            .filter(|cell| **cell == Some(player))
+            .count()
     }
 }
 
@@ -488,75 +638,42 @@ fn ai_choose_line(board: &Board, rng: &mut SeededRng) -> Option<LineId> {
         return None;
     }
 
-    // Phase 1: Find lines that complete boxes (greedy capture).
-    let mut completing = Vec::new();
-    for &line in &available {
-        let adjacent = board.adjacent_boxes(line);
-        for (br, bc) in &adjacent {
-            if board.box_side_count(*br, *bc) == 3 {
-                completing.push(line);
-                break;
-            }
-        }
-    }
-    if !completing.is_empty() {
-        // Prefer completing multiple boxes at once.
-        let mut best_line = completing[0];
-        let mut best_count = 0;
-        for &line in &completing {
-            let mut count = 0;
-            let adjacent = board.adjacent_boxes(line);
-            for (br, bc) in &adjacent {
-                if board.box_side_count(*br, *bc) == 3 {
-                    count += 1;
-                }
-            }
-            if count > best_count {
-                best_count = count;
-                best_line = line;
-            }
-        }
-        return Some(best_line);
+    // How many of a line's boxes already have exactly `sides` sides drawn.
+    // Phase 1 counts boxes at three sides -- the ones this line completes.
+    // Phases 2 and 3 count boxes at two -- the ones this line hands over.
+    let boxes_at = |line: LineId, sides: usize| {
+        board
+            .adjacent_boxes(line)
+            .into_iter()
+            .filter(|&(br, bc)| board.box_side_count(br, bc) == sides)
+            .count()
+    };
+
+    // Phase 1: take the line that completes the most boxes.
+    let best_capture = available
+        .iter()
+        .map(|&line| (boxes_at(line, SIDES_PER_BOX.saturating_sub(1)), line))
+        .filter(|&(count, _)| count > 0)
+        .max_by_key(|&(count, _)| count);
+    if let Some((_, line)) = best_capture {
+        return Some(line);
     }
 
-    // Phase 2: Find safe lines (don't give opponent a box with 3 sides).
-    let mut safe = Vec::new();
-    for &line in &available {
-        let mut gives_away = false;
-        let adjacent = board.adjacent_boxes(line);
-        for (br, bc) in &adjacent {
-            // Drawing this line would bring this box to side_count+1 sides.
-            if board.box_side_count(*br, *bc) == 2 {
-                gives_away = true;
-                break;
-            }
-        }
-        if !gives_away {
-            safe.push(line);
-        }
-    }
+    // Phase 2: a safe line hands no box its third side. Pick one at random.
+    let safe: Vec<LineId> = available
+        .iter()
+        .copied()
+        .filter(|&line| boxes_at(line, SIDES_PER_BOX.saturating_sub(2)) == 0)
+        .collect();
     if !safe.is_empty() {
-        let idx = rng.below(safe.len());
-        return Some(safe[idx]);
+        return safe.get(rng.below(safe.len())).copied();
     }
 
-    // Phase 3: All moves are dangerous. Pick the one that gives away the fewest boxes.
-    let mut best_line = available[0];
-    let mut best_damage = usize::MAX;
-    for &line in &available {
-        let mut damage = 0;
-        let adjacent = board.adjacent_boxes(line);
-        for (br, bc) in &adjacent {
-            if board.box_side_count(*br, *bc) == 2 {
-                damage += 1;
-            }
-        }
-        if damage < best_damage {
-            best_damage = damage;
-            best_line = line;
-        }
-    }
-    Some(best_line)
+    // Phase 3: every move is dangerous. Give away the fewest boxes.
+    available
+        .iter()
+        .copied()
+        .min_by_key(|&line| boxes_at(line, SIDES_PER_BOX.saturating_sub(2)))
 }
 
 // ── Main app struct ─────────────────────────────────────────────────
@@ -565,10 +682,18 @@ struct DotsAndBoxes {
     current_player: Player,
     phase: GamePhase,
     mode: GameMode,
-    cursor: Cursor,
-    score_p1: usize,
-    score_p2: usize,
-    total_moves: usize,
+    /// The line the keyboard is pointing at. It *is* a line, not a second
+    /// three-field type that converts into one.
+    cursor: LineId,
+    /// The window the last frame was drawn at, so a click resolves against
+    /// what the player is looking at rather than against a constant.
+    size: (f32, f32),
+    // There are no `score_p1`, `score_p2` or `total_moves` fields. There
+    // were, raised by hand in `try_place_line` and again in `do_ai_move`,
+    // while `Board::score` and `Board::drawn_line_count` computed the same
+    // two answers from the grid. Four assignments maintaining a fact the
+    // board already holds is four chances for the readout and the board to
+    // disagree; `score` and `moves_made` below derive them instead.
     rng: SeededRng,
     /// Accumulated time for AI delay.
     ai_delay_ms: u64,
@@ -595,14 +720,8 @@ impl DotsAndBoxes {
             current_player: Player::One,
             phase: GamePhase::Playing,
             mode,
-            cursor: Cursor {
-                orientation: Orientation::Horizontal,
-                row: 0,
-                col: 0,
-            },
-            score_p1: 0,
-            score_p2: 0,
-            total_moves: 0,
+            cursor: LineId::horizontal(0, 0),
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             rng: SeededRng::new(seed),
             ai_delay_ms: 0,
             ai_pending: false,
@@ -611,17 +730,23 @@ impl DotsAndBoxes {
 
     /// Start a new game with the current grid size and mode.
     fn new_game(&mut self) {
-        let size = self.board.grid_size;
-        let mode = self.mode;
-        let seed = self.rng.next_u64();
-        *self = Self::with_config(size, mode, seed);
+        let grid = self.board.grid_size;
+        self.new_game_with_size(grid);
     }
 
     /// Start a new game with a specific grid size.
+    ///
+    /// The window survives it. `*self = Self::with_config(..)` replaces every
+    /// field, and one of them is the size the last frame was drawn at -- so
+    /// without carrying it across, pressing New in a resized window sent the
+    /// next click back to the 560x620 the app opened at, and the board the
+    /// player could see stopped answering the pointer.
     fn new_game_with_size(&mut self, grid_size: usize) {
         let mode = self.mode;
         let seed = self.rng.next_u64();
+        let window = self.size;
         *self = Self::with_config(grid_size, mode, seed);
+        self.size = window;
     }
 
     /// Grid size (number of dots per side).
@@ -636,23 +761,15 @@ impl DotsAndBoxes {
 
     /// Try to place a line at the given position. Returns true if a line was placed.
     fn try_place_line(&mut self, line: LineId) -> bool {
-        if self.phase != GamePhase::Playing {
-            return false;
-        }
-        if !self.board.is_valid_line(line) || self.board.is_line_drawn(line) {
-            return false;
-        }
-        if self.ai_pending {
+        if !self.accepts_moves() {
             return false;
         }
 
-        let completed = self.board.draw_line(line, self.current_player);
-        self.total_moves += 1;
-
-        match self.current_player {
-            Player::One => self.score_p1 += completed,
-            Player::Two => self.score_p2 += completed,
-        }
+        // Whether the line can be played is `draw_line`'s rule, and asking it
+        // by trying is what keeps the answer in one place.
+        let Some(completed) = self.board.draw_line(line, self.current_player) else {
+            return false;
+        };
 
         if self.board.all_lines_drawn() {
             self.phase = GamePhase::GameOver;
@@ -684,9 +801,10 @@ impl DotsAndBoxes {
             return;
         }
         if let Some(line) = ai_choose_line(&self.board, &mut self.rng) {
-            let completed = self.board.draw_line(line, Player::Two);
-            self.total_moves += 1;
-            self.score_p2 += completed;
+            // `ai_choose_line` picks from `available_lines`, so the draw
+            // cannot be refused; treating a refusal as "captured nothing"
+            // would pass the turn, which is the safe reading either way.
+            let completed = self.board.draw_line(line, Player::Two).unwrap_or(0);
 
             if self.board.all_lines_drawn() {
                 self.phase = GamePhase::GameOver;
@@ -707,123 +825,95 @@ impl DotsAndBoxes {
         }
     }
 
+    /// How many boxes a player has claimed, read off the board.
+    fn score(&self, player: Player) -> usize {
+        self.board.score(player)
+    }
+
+    /// How many lines have been drawn, read off the board.
+    fn moves_made(&self) -> usize {
+        self.board.drawn_line_count()
+    }
+
     /// Get the winner, if any. Returns None for a draw.
     fn winner(&self) -> Option<Player> {
-        if self.score_p1 > self.score_p2 {
-            Some(Player::One)
-        } else if self.score_p2 > self.score_p1 {
-            Some(Player::Two)
-        } else {
-            None
+        let (one, two) = (self.score(Player::One), self.score(Player::Two));
+        match one.cmp(&two) {
+            std::cmp::Ordering::Greater => Some(Player::One),
+            std::cmp::Ordering::Less => Some(Player::Two),
+            std::cmp::Ordering::Equal => None,
         }
     }
 
     // ── Cursor navigation ──────────────────────────────────────────
 
-    /// Move the cursor in the given direction, wrapping around.
-    fn move_cursor(&mut self, key: Key) {
+    /// The extent of the line grid of one orientation, as `(rows, columns)`.
+    ///
+    /// Horizontal lines run `grid_size` rows of `boxes_per_side` columns;
+    /// vertical lines are the transpose. `move_cursor` used to spell this out
+    /// once per direction per orientation -- eight arms of the same rule --
+    /// and `toggle_cursor_orientation` spelled it out twice more.
+    fn cursor_extent(&self, orientation: Orientation) -> (usize, usize) {
         let bps = self.boxes_per_side();
         let gs = self.grid_size();
-        match self.cursor.orientation {
-            Orientation::Horizontal => {
-                // Horizontal lines: row 0..grid_size, col 0..bps
-                match key {
-                    Key::Left => {
-                        if self.cursor.col > 0 {
-                            self.cursor.col -= 1;
-                        } else {
-                            self.cursor.col = bps.saturating_sub(1);
-                        }
-                    }
-                    Key::Right => {
-                        if self.cursor.col + 1 < bps {
-                            self.cursor.col += 1;
-                        } else {
-                            self.cursor.col = 0;
-                        }
-                    }
-                    Key::Up => {
-                        if self.cursor.row > 0 {
-                            self.cursor.row -= 1;
-                        } else {
-                            // Switch to vertical, going to a vertical line at bottom.
-                            self.cursor.orientation = Orientation::Vertical;
-                            self.cursor.row = bps.saturating_sub(1);
-                            self.cursor.col = self.cursor.col.min(gs.saturating_sub(1));
-                        }
-                    }
-                    Key::Down => {
-                        if self.cursor.row + 1 < gs {
-                            self.cursor.row += 1;
-                        } else {
-                            // Switch to vertical orientation at top.
-                            self.cursor.orientation = Orientation::Vertical;
-                            self.cursor.row = 0;
-                            self.cursor.col = self.cursor.col.min(gs.saturating_sub(1));
-                        }
-                    }
-                    _ => {}
+        match orientation {
+            Orientation::Horizontal => (gs, bps),
+            Orientation::Vertical => (bps, gs),
+        }
+    }
+
+    /// Move the cursor in the given direction, wrapping around.
+    ///
+    /// Left and right wrap within the row. Up and down step off the top or the
+    /// bottom into the *other* orientation's grid, entering it from the far
+    /// side, with the column clamped to what that grid actually has.
+    fn move_cursor(&mut self, key: Key) {
+        let (rows, cols) = self.cursor_extent(self.cursor.orientation);
+        let other = self.cursor.orientation.toggled();
+        let (other_rows, other_cols) = self.cursor_extent(other);
+        let flip_to = |cursor: &mut LineId, row: usize| {
+            cursor.orientation = other;
+            cursor.row = row;
+            cursor.col = cursor.col.min(other_cols.saturating_sub(1));
+        };
+        match key {
+            Key::Left => {
+                self.cursor.col = if self.cursor.col > 0 {
+                    self.cursor.col.saturating_sub(1)
+                } else {
+                    cols.saturating_sub(1)
+                };
+            }
+            Key::Right => {
+                let next = self.cursor.col.saturating_add(1);
+                self.cursor.col = if next < cols { next } else { 0 };
+            }
+            Key::Up => {
+                if self.cursor.row > 0 {
+                    self.cursor.row = self.cursor.row.saturating_sub(1);
+                } else {
+                    flip_to(&mut self.cursor, other_rows.saturating_sub(1));
                 }
             }
-            Orientation::Vertical => {
-                // Vertical lines: row 0..bps, col 0..grid_size
-                match key {
-                    Key::Left => {
-                        if self.cursor.col > 0 {
-                            self.cursor.col -= 1;
-                        } else {
-                            self.cursor.col = gs.saturating_sub(1);
-                        }
-                    }
-                    Key::Right => {
-                        if self.cursor.col + 1 < gs {
-                            self.cursor.col += 1;
-                        } else {
-                            self.cursor.col = 0;
-                        }
-                    }
-                    Key::Up => {
-                        if self.cursor.row > 0 {
-                            self.cursor.row -= 1;
-                        } else {
-                            // Switch to horizontal orientation at bottom.
-                            self.cursor.orientation = Orientation::Horizontal;
-                            self.cursor.row = gs.saturating_sub(1);
-                            self.cursor.col = self.cursor.col.min(bps.saturating_sub(1));
-                        }
-                    }
-                    Key::Down => {
-                        if self.cursor.row + 1 < bps {
-                            self.cursor.row += 1;
-                        } else {
-                            // Switch to horizontal at top.
-                            self.cursor.orientation = Orientation::Horizontal;
-                            self.cursor.row = 0;
-                            self.cursor.col = self.cursor.col.min(bps.saturating_sub(1));
-                        }
-                    }
-                    _ => {}
+            Key::Down => {
+                let next = self.cursor.row.saturating_add(1);
+                if next < rows {
+                    self.cursor.row = next;
+                } else {
+                    flip_to(&mut self.cursor, 0);
                 }
             }
+            _ => {}
         }
     }
 
     /// Toggle cursor orientation between horizontal and vertical.
     fn toggle_cursor_orientation(&mut self) {
-        let bps = self.boxes_per_side();
-        let gs = self.grid_size();
-        match self.cursor.orientation {
-            Orientation::Horizontal => {
-                self.cursor.orientation = Orientation::Vertical;
-                self.cursor.row = self.cursor.row.min(bps.saturating_sub(1));
-                self.cursor.col = self.cursor.col.min(gs.saturating_sub(1));
-            }
-            Orientation::Vertical => {
-                self.cursor.orientation = Orientation::Horizontal;
-                self.cursor.row = self.cursor.row.min(gs.saturating_sub(1));
-                self.cursor.col = self.cursor.col.min(bps.saturating_sub(1));
-            }
-        }
+        let other = self.cursor.orientation.toggled();
+        let (rows, cols) = self.cursor_extent(other);
+        self.cursor.orientation = other;
+        self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
+        self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
     }
 
     // ── Board geometry ─────────────────────────────────────────────
@@ -839,49 +929,12 @@ impl DotsAndBoxes {
     // nothing calls is green about code that does not ship; see
     // design-decisions.md §486. The midpoint version is gone.
     //
-    // The endpoints of a line were also derived at six sites (twice in each
-    // hit test, twice in `render_lines`, twice in `render_cursor`), which is
-    // what let a hit test and the picture of the same line disagree in the
-    // first place. `line_endpoints` is now the one place that is written.
-
-    /// How far from a line a click may land and still count, in pixels.
-    ///
-    /// Measured perpendicular to the line, so the whole of a line is equally
-    /// clickable -- the alternative, distance to the line's midpoint, makes
-    /// the ends of every line dead and is what the deleted `hit_test_line`
-    /// did. At `DOT_SPACING` 70 and this threshold, the bands around two
-    /// parallel lines never touch, so "nearest line" is never a close call.
-    const CLICK_THRESHOLD: f32 = 10.0;
-
-    /// Centre of the dot at grid coordinates (row, col), in pixels.
-    ///
-    /// The first dot's *centre* used to sit at `PADDING`, which put its left
-    /// half inside the padding while the window still reserved a whole dot's
-    /// width past the last column -- so the board hung 12px up and to the
-    /// left of centre in its own window. Offsetting by `DOT_RADIUS` here
-    /// makes the painted board, discs included, sit exactly `PADDING` from
-    /// every edge; `board_pixel_span` measures the same discs, so the two
-    /// agree by construction.
-    fn dot_pos(&self, row: usize, col: usize) -> (f32, f32) {
-        let x = PADDING + DOT_RADIUS + col as f32 * DOT_SPACING;
-        let y = PADDING + DOT_RADIUS + HEADER_HEIGHT + row as f32 * DOT_SPACING;
-        (x, y)
-    }
-
-    /// The two dots a line runs between, in pixels.
-    ///
-    /// A horizontal line joins `(row, col)` to the dot on its right; a
-    /// vertical one joins it to the dot below. Both hit-testing and painting
-    /// read this, so a line cannot be drawn between one pair of dots and
-    /// clicked between another.
-    fn line_endpoints(&self, line: LineId) -> ((f32, f32), (f32, f32)) {
-        let start = self.dot_pos(line.row, line.col);
-        let end = match line.orientation {
-            Orientation::Horizontal => (self.dot_pos(line.row, line.col + 1).0, start.1),
-            Orientation::Vertical => (start.0, self.dot_pos(line.row + 1, line.col).1),
-        };
-        (start, end)
-    }
+    // What is left of that story now lives in `Layout`: the endpoints of a
+    // line are written once, and the *only* way a click reaches a line is the
+    // hit box the drawing pass records for it. There is no `hit_test_line` at
+    // all -- an inverse of the drawing mapping is a second mapping, and two
+    // mappings agree with each other in every window and with the screen in
+    // one.
 
     /// Every line on the board, drawn or not.
     fn all_lines(&self) -> impl Iterator<Item = LineId> + use<> {
@@ -894,512 +947,597 @@ impl DotsAndBoxes {
         horizontals.chain(verticals)
     }
 
-    /// Distance from the far side of the outermost dots to the window edge.
-    ///
-    /// The dots are drawn as discs of `DOT_RADIUS` centred on the lattice, so
-    /// the picture reaches half a dot past the last dot's centre on every
-    /// side; the window has to hold that as well as the lattice itself.
-    fn board_pixel_span(&self) -> f32 {
-        let gs = self.grid_size();
-        let (near, _) = self.dot_pos(0, 0);
-        let (far, _) = self.dot_pos(0, gs - 1);
-        far - near + DOT_RADIUS * 2.0
-    }
-
-    /// Window width for current grid size.
-    fn window_width(&self) -> f32 {
-        PADDING * 2.0 + self.board_pixel_span()
-    }
-
-    /// Window height for current grid size.
-    fn window_height(&self) -> f32 {
-        PADDING * 2.0 + HEADER_HEIGHT + FOOTER_HEIGHT + self.board_pixel_span()
-    }
-
-    /// The line a click at `(mx, my)` lands on, or `None` if it is not within
-    /// `CLICK_THRESHOLD` of any of them.
-    fn hit_test_line(&self, mx: f32, my: f32) -> Option<LineId> {
-        let mut best_line: Option<LineId> = None;
-        let mut best_dist = Self::CLICK_THRESHOLD;
-        for line in self.all_lines() {
-            let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
-            let dist = point_to_segment_distance(mx, my, x1, y1, x2, y2);
-            if dist < best_dist {
-                best_dist = dist;
-                best_line = Some(line);
-            }
-        }
-        best_line
-    }
-
     // ── Event handling ─────────────────────────────────────────────
 
-    fn handle_event(&mut self, event: &Event) {
+    fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
-            Event::Key(ke) if ke.pressed => {
-                self.handle_key(ke.key);
-            }
-            Event::Mouse(me) => {
-                self.handle_mouse(me);
-            }
-            Event::Tick { elapsed_ms } => {
-                self.handle_tick(*elapsed_ms);
-            }
-            _ => {}
+            Event::Key(ke) if ke.pressed => self.handle_key(ke.key),
+            Event::Mouse(me) => self.handle_mouse(me),
+            Event::Tick { elapsed_ms } => self.handle_tick(*elapsed_ms),
+            _ => EventResult::Ignored,
         }
     }
 
-    fn handle_key(&mut self, key: Key) {
+    fn handle_key(&mut self, key: Key) -> EventResult {
+        // The verbs a key and a button share are `activate`d rather than
+        // spelled a second time here: `N` and the New button run the same
+        // line, so the two cannot drift apart.
         match key {
-            Key::N => {
-                self.new_game();
+            Key::N => self.activate(Target::NewGame),
+            Key::M => self.activate(Target::Mode),
+            Key::Num3 => self.activate(Target::Size(3)),
+            Key::Num4 => self.activate(Target::Size(4)),
+            Key::Num5 => self.activate(Target::Size(5)),
+            Key::Left | Key::Right | Key::Up | Key::Down if self.accepts_moves() => {
+                self.move_cursor(key);
+                EventResult::Consumed
             }
-            Key::M => {
+            Key::Tab if self.accepts_moves() => {
+                self.toggle_cursor_orientation();
+                EventResult::Consumed
+            }
+            Key::Enter | Key::Space if self.accepts_moves() => {
+                let line = self.cursor;
+                self.activate(Target::Line(line))
+            }
+            _ => EventResult::Ignored,
+        }
+    }
+
+    /// Whether the board is taking input from the player right now.
+    ///
+    /// Written once. It was written five times -- `phase == Playing &&
+    /// !ai_pending` in four key arms and again in `handle_mouse` -- and
+    /// `try_place_line` holds a sixth copy that is the one that actually
+    /// protects the board.
+    fn accepts_moves(&self) -> bool {
+        self.phase == GamePhase::Playing && !self.ai_pending
+    }
+
+    /// Do what a target does, whether a key or a click asked for it.
+    fn activate(&mut self, target: Target) -> EventResult {
+        match target {
+            Target::Line(line) => {
+                if self.try_place_line(line) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
+            }
+            Target::NewGame => {
+                self.new_game();
+                EventResult::Consumed
+            }
+            Target::Mode => {
                 self.mode = match self.mode {
                     GameMode::VsAi => GameMode::TwoPlayer,
                     GameMode::TwoPlayer => GameMode::VsAi,
                 };
                 self.new_game();
+                EventResult::Consumed
             }
-            Key::Num3 => {
-                self.new_game_with_size(3);
+            Target::Size(n) => {
+                self.new_game_with_size(n);
+                EventResult::Consumed
             }
-            Key::Num4 => {
-                self.new_game_with_size(4);
-            }
-            Key::Num5 => {
-                self.new_game_with_size(5);
-            }
-            Key::Left | Key::Right | Key::Up | Key::Down
-                if self.phase == GamePhase::Playing && !self.ai_pending =>
-            {
-                self.move_cursor(key);
-            }
-            Key::Tab if self.phase == GamePhase::Playing && !self.ai_pending => {
-                self.toggle_cursor_orientation();
-            }
-            Key::Enter | Key::Space if self.phase == GamePhase::Playing && !self.ai_pending => {
-                let line = self.cursor.to_line_id();
-                self.try_place_line(line);
-            }
-            _ => {}
         }
     }
 
-    fn handle_mouse(&mut self, me: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = me.kind
-            && self.phase == GamePhase::Playing
-            && !self.ai_pending
-            && let Some(line) = self.hit_test_line(me.x, me.y)
-            && !self.board.is_line_drawn(line)
-        {
-            self.try_place_line(line);
+    fn handle_mouse(&mut self, me: &MouseEvent) -> EventResult {
+        let MouseEventKind::Press(MouseButton::Left) = me.kind else {
+            return EventResult::Ignored;
+        };
+        let (w, h) = self.size;
+        match self.frame(w, h).hit_test(me.x, me.y) {
+            Some(target) => self.activate(target),
+            None => EventResult::Ignored,
         }
     }
 
-    fn handle_tick(&mut self, elapsed_ms: u64) {
+    fn handle_tick(&mut self, elapsed_ms: u64) -> EventResult {
         if self.ai_pending && self.phase == GamePhase::Playing {
-            self.ai_delay_ms += elapsed_ms;
+            self.ai_delay_ms = self.ai_delay_ms.saturating_add(elapsed_ms);
             if self.ai_delay_ms >= AI_DELAY {
                 self.ai_pending = false;
                 self.do_ai_move();
+                return EventResult::Consumed;
             }
         }
+        EventResult::Ignored
     }
 
     // ── Rendering ──────────────────────────────────────────────────
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// The frame, with a hit box on every line and every verb.
+    ///
+    /// `render` used to take the window and use it for four things -- the
+    /// background, the header bar's width, the footer bar's width and the
+    /// game-over wash -- while the board, the fonts and the footer's *position*
+    /// came from constants. Everything is measured from `Layout` now.
+    fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h, self.grid_size());
+        let mut f = Frame::new(w, h);
 
-        // Background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: BASE,
-            corner_radii: CornerRadii::all(6.0),
-        });
-
-        // Header.
-        self.render_header(&mut cmds, width);
-
-        // Boxes (filled areas).
-        self.render_boxes(&mut cmds);
-
-        // Drawn lines.
-        self.render_lines(&mut cmds);
-
-        // Cursor highlight.
-        if self.phase == GamePhase::Playing && !self.ai_pending {
-            self.render_cursor(&mut cmds);
+        fill(&mut f, l.window, BASE, 6.0);
+        self.draw_header(&mut f, &l);
+        self.draw_boxes(&mut f, &l);
+        self.draw_lines(&mut f, &l);
+        if self.accepts_moves() {
+            self.draw_cursor(&mut f, &l);
         }
-
-        // Dots.
-        self.render_dots(&mut cmds);
-
-        // Footer with controls help.
-        self.render_footer(&mut cmds, width);
-
-        // Game over overlay.
+        self.draw_dots(&mut f, &l);
+        self.draw_footer(&mut f, &l);
         if self.phase == GamePhase::GameOver {
-            self.render_game_over(&mut cmds, width, height);
+            self.draw_game_over(&mut f, &l);
         }
-
-        cmds
+        f
     }
 
-    fn render_header(&self, cmds: &mut Vec<RenderCommand>, win_width: f32) {
-        // Header background.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: win_width,
-            height: HEADER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.header, MANTLE, 0.0);
+        if l.header.is_empty() {
+            return;
+        }
 
-        // Title.
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 8.0,
-            text: String::from("Dots & Boxes"),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Mode label.
+        text_at(
+            f,
+            l.pad,
+            l.pad * 0.4,
+            TITLE,
+            LAVENDER,
+            l.title,
+            FontWeightHint::Bold,
+        );
         let mode_text = format!(
-            "{} | {}x{}",
+            "{} | {1}x{1} | {2} moves",
             self.mode.label(),
             self.grid_size(),
-            self.grid_size()
+            self.moves_made()
         );
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: 34.0,
-            text: mode_text,
-            color: SUBTEXT0,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+        text_at(
+            f,
+            l.pad,
+            l.pad.mul_add(0.4, l.title),
+            &mode_text,
+            SUBTEXT0,
+            l.small,
+            FontWeightHint::Regular,
+        );
+
+        // The scores and the turn indicator were drawn at `win_width - 200.0`
+        // and `win_width - 100.0`: a width used as a coordinate, with an
+        // offset that was right for one set of words. They are measured and
+        // laid out from the right edge inwards now, and a window too narrow to
+        // hold one drops it rather than drawing it over the title.
+        let right = l.header.right() - l.pad;
+        let turn = self.turn_text();
+        let turn_w = text::measure(&turn, l.small, FontWeightHint::Bold);
+        let scores = [
+            (self.player_one_label(), PLAYER1_COLOR),
+            (self.player_two_label(), PLAYER2_COLOR),
+        ];
+        let score_w = scores.iter().fold(0.0f32, |acc, (s, _)| {
+            acc.max(text::measure(s, l.small, FontWeightHint::Bold))
         });
 
-        // Scores.
-        let p1_text = format!("{}: {}", Player::One.label(), self.score_p1);
-        let p1_label = if self.mode == GameMode::VsAi {
-            format!("You: {}", self.score_p1)
-        } else {
-            p1_text
-        };
-        cmds.push(RenderCommand::Text {
-            x: win_width - 200.0,
-            y: 8.0,
-            text: p1_label,
-            color: PLAYER1_COLOR,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let p2_text = if self.mode == GameMode::VsAi {
-            format!("AI: {}", self.score_p2)
-        } else {
-            format!("{}: {}", Player::Two.label(), self.score_p2)
-        };
-        cmds.push(RenderCommand::Text {
-            x: win_width - 200.0,
-            y: 28.0,
-            text: p2_text,
-            color: PLAYER2_COLOR,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Current turn indicator.
-        let turn_text = if self.phase == GamePhase::GameOver {
-            String::from("Game Over!")
-        } else if self.ai_pending {
-            String::from("AI thinking...")
-        } else {
-            let name = if self.mode == GameMode::VsAi {
-                match self.current_player {
-                    Player::One => "Your turn",
-                    Player::Two => "AI's turn",
-                }
-            } else {
-                match self.current_player {
-                    Player::One => "P1's turn",
-                    Player::Two => "P2's turn",
-                }
-            };
-            String::from(name)
-        };
-        cmds.push(RenderCommand::Text {
-            x: win_width - 100.0,
-            y: 18.0,
-            text: turn_text,
-            color: self.current_player.color(),
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    fn render_boxes(&self, cmds: &mut Vec<RenderCommand>) {
-        let bps = self.boxes_per_side();
-        for row in 0..bps {
-            for col in 0..bps {
-                if let Some(player) = self.board.boxes[row][col] {
-                    let (x1, y1) = self.dot_pos(row, col);
-                    let (x2, y2) = self.dot_pos(row + 1, col + 1);
-                    let margin = 3.0;
-                    cmds.push(RenderCommand::FillRect {
-                        x: x1 + margin,
-                        y: y1 + margin,
-                        width: x2 - x1 - margin * 2.0,
-                        height: y2 - y1 - margin * 2.0,
-                        color: player.box_color(),
-                        corner_radii: CornerRadii::all(3.0),
-                    });
-
-                    // Player initial in the box.
-                    let label = match player {
-                        Player::One => {
-                            if self.mode == GameMode::VsAi {
-                                "Y"
-                            } else {
-                                "1"
-                            }
-                        }
-                        Player::Two => {
-                            if self.mode == GameMode::VsAi {
-                                "A"
-                            } else {
-                                "2"
-                            }
-                        }
-                    };
-                    let cx = f32::midpoint(x1, x2) - 5.0;
-                    let cy = f32::midpoint(y1, y2) - 8.0;
-                    cmds.push(RenderCommand::Text {
-                        x: cx,
-                        y: cy,
-                        text: String::from(label),
-                        color: player.color(),
-                        font_size: SCORE_FONT_SIZE,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                }
+        let title_end = l.pad
+            + text::measure(TITLE, l.title, FontWeightHint::Bold).max(text::measure(
+                &mode_text,
+                l.small,
+                FontWeightHint::Regular,
+            ));
+        let turn_x = right - turn_w;
+        if turn_x > title_end {
+            text_at(
+                f,
+                turn_x,
+                (l.header.h - l.small) / 2.0,
+                &turn,
+                self.current_player.color(),
+                l.small,
+                FontWeightHint::Bold,
+            );
+        }
+        let score_x = turn_x - l.pad - score_w;
+        if score_x > title_end {
+            for (i, (s, colour)) in scores.iter().enumerate() {
+                #[expect(clippy::cast_precision_loss, reason = "two scores")]
+                let row = i as f32;
+                text_at(
+                    f,
+                    score_x,
+                    l.pad.mul_add(0.4, row * l.small * 1.5),
+                    s,
+                    *colour,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
             }
         }
     }
 
-    fn render_lines(&self, cmds: &mut Vec<RenderCommand>) {
-        // One loop over `all_lines`, not one per orientation, and the ends of
-        // each line come from `line_endpoints` -- the same call the hit test
-        // makes -- so a line is painted exactly where clicking it works.
+    /// What the header says about whose turn it is.
+    fn turn_text(&self) -> String {
+        if self.phase == GamePhase::GameOver {
+            return String::from("Game Over!");
+        }
+        if self.ai_pending {
+            return String::from("AI thinking...");
+        }
+        let name = match (self.mode, self.current_player) {
+            (GameMode::VsAi, Player::One) => "Your turn",
+            (GameMode::VsAi, Player::Two) => "AI's turn",
+            (GameMode::TwoPlayer, Player::One) => "P1's turn",
+            (GameMode::TwoPlayer, Player::Two) => "P2's turn",
+        };
+        String::from(name)
+    }
+
+    fn player_one_label(&self) -> String {
+        if self.mode == GameMode::VsAi {
+            format!("You: {}", self.score(Player::One))
+        } else {
+            format!("{}: {}", Player::One.label(), self.score(Player::One))
+        }
+    }
+
+    fn player_two_label(&self) -> String {
+        if self.mode == GameMode::VsAi {
+            format!("AI: {}", self.score(Player::Two))
+        } else {
+            format!("{}: {}", Player::Two.label(), self.score(Player::Two))
+        }
+    }
+
+    /// The single letter a claimed box carries.
+    fn box_initial(&self, player: Player) -> &'static str {
+        match (self.mode, player) {
+            (GameMode::VsAi, Player::One) => "Y",
+            (GameMode::VsAi, Player::Two) => "A",
+            (GameMode::TwoPlayer, Player::One) => "1",
+            (GameMode::TwoPlayer, Player::Two) => "2",
+        }
+    }
+
+    fn draw_boxes(&self, f: &mut Frame<Target>, l: &Layout) {
+        let bps = self.boxes_per_side();
+        let margin = l.spacing * 0.06;
+        for row in 0..bps {
+            for col in 0..bps {
+                let Some(Some(player)) = self.board.boxes.get(row).map(|r| r.get(col).copied())
+                else {
+                    continue;
+                };
+                let Some(player) = player else { continue };
+                let (x1, y1) = l.dot_pos(row, col);
+                let (x2, y2) = l.dot_pos(row.saturating_add(1), col.saturating_add(1));
+                let cell = Rect::new(
+                    x1 + margin,
+                    y1 + margin,
+                    (x2 - x1 - margin * 2.0).max(0.0),
+                    (y2 - y1 - margin * 2.0).max(0.0),
+                );
+                fill(f, cell, player.box_color(), l.spacing * 0.06);
+
+                // The initial was centred by subtracting 5 and 8 -- half of
+                // one glyph at one font size. It is measured now.
+                let label = self.box_initial(player);
+                let size = (l.spacing * 0.28).clamp(6.0, 18.0);
+                let (cx, cy) = cell.centre();
+                text_at(
+                    f,
+                    cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
+                    cy - size / 2.0,
+                    label,
+                    player.color(),
+                    size,
+                    FontWeightHint::Bold,
+                );
+            }
+        }
+    }
+
+    /// Every line, painted -- and every line, recorded as a hit box.
+    ///
+    /// The two happen in the same loop deliberately. A line that is drawn
+    /// somewhere the player cannot click, or clickable somewhere nothing is
+    /// drawn, would need the two to be written apart.
+    fn draw_lines(&self, f: &mut Frame<Target>, l: &Layout) {
         for line in self.all_lines() {
-            let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
+            let ((x1, y1), (x2, y2)) = l.line_endpoints(line);
             let drawn = self.board.is_line_drawn(line);
-            let color = if drawn { LAVENDER } else { SURFACE0 };
-            let w = if drawn { LINE_THICKNESS } else { 2.0 };
-            cmds.push(RenderCommand::Line {
+            f.push(RenderCommand::Line {
                 x1,
                 y1,
                 x2,
                 y2,
-                color,
-                width: w,
+                color: if drawn { LAVENDER } else { SURFACE0 },
+                width: if drawn {
+                    l.line_w
+                } else {
+                    (l.line_w * 0.4).max(1.0)
+                },
             });
+            if !drawn && self.accepts_moves() {
+                f.hit(Target::Line(line), l.line_box(line));
+            }
         }
     }
 
-    fn render_cursor(&self, cmds: &mut Vec<RenderCommand>) {
-        let line = self.cursor.to_line_id();
-        if !self.board.is_valid_line(line) {
+    fn draw_cursor(&self, f: &mut Frame<Target>, l: &Layout) {
+        let line = self.cursor;
+        if !self.board.is_available(line) {
             return;
         }
-        if self.board.is_line_drawn(line) {
-            // Cursor is on an already-drawn line; show it dimmer.
-            return;
-        }
-
-        let ((x1, y1), (x2, y2)) = self.line_endpoints(line);
-        cmds.push(RenderCommand::Line {
+        let ((x1, y1), (x2, y2)) = l.line_endpoints(line);
+        f.push(RenderCommand::Line {
             x1,
             y1,
             x2,
             y2,
             color: self.current_player.color(),
-            width: LINE_HOVER_THICKNESS,
+            width: l.cursor_w,
         });
     }
 
-    fn render_dots(&self, cmds: &mut Vec<RenderCommand>) {
+    fn draw_dots(&self, f: &mut Frame<Target>, l: &Layout) {
         let gs = self.grid_size();
+        let r = l.dot_radius;
         for row in 0..gs {
             for col in 0..gs {
-                let (x, y) = self.dot_pos(row, col);
-                cmds.push(RenderCommand::FillRect {
-                    x: x - DOT_RADIUS,
-                    y: y - DOT_RADIUS,
-                    width: DOT_RADIUS * 2.0,
-                    height: DOT_RADIUS * 2.0,
-                    color: TEXT_COLOR,
-                    corner_radii: CornerRadii::all(DOT_RADIUS),
-                });
+                let (x, y) = l.dot_pos(row, col);
+                fill(f, Rect::new(x - r, y - r, r * 2.0, r * 2.0), TEXT_COLOR, r);
             }
         }
     }
 
-    fn render_footer(&self, cmds: &mut Vec<RenderCommand>, win_width: f32) {
-        let footer_y = self.window_height() - FOOTER_HEIGHT;
+    /// The footer, and the verbs in it.
+    ///
+    /// It used to be one line of text naming six keys -- a label describing
+    /// keystrokes where buttons would do -- painted at
+    /// `window_height() - FOOTER_HEIGHT`, the bottom of a window the app had
+    /// decided on rather than the one it was given. Every verb is a button
+    /// now, and the bar sits at the bottom of the actual window.
+    fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.footer, MANTLE, 0.0);
+        if l.footer.is_empty() {
+            return;
+        }
 
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: footer_y,
-            width: win_width,
-            height: FOOTER_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        let size = (l.small * 0.95).max(7.0);
+        let gap = l.pad * 0.4;
+        let mut buttons: Vec<(String, Target, bool)> = vec![
+            (String::from("New"), Target::NewGame, false),
+            (String::from(self.mode.label()), Target::Mode, false),
+        ];
+        for n in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            buttons.push((format!("{n}x{n}"), Target::Size(n), n == self.grid_size()));
+        }
 
-        cmds.push(RenderCommand::Text {
-            x: PADDING,
-            y: footer_y + 12.0,
-            text: String::from(
-                "Arrows: move | Tab: toggle H/V | Enter: draw | N: new | M: mode | 3/4/5: size",
-            ),
-            color: OVERLAY0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        // Laid out from the left, and any button that would not fit whole is
+        // left out rather than drawn off the edge.
+        let mut x = l.pad;
+        let h = (l.footer.h - gap).max(0.0);
+        let y = l.footer.y + (l.footer.h - h) / 2.0;
+        for (label, target, on) in &buttons {
+            let w = text::measure(label, size, FontWeightHint::Bold) + l.pad;
+            if x + w > l.footer.right() - l.pad {
+                break;
+            }
+            let r = Rect::new(x, y, w, h);
+            fill(f, r, if *on { SURFACE1 } else { SURFACE0 }, h * 0.25);
+            let (cx, cy) = r.centre();
+            text_at(
+                f,
+                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
+                cy - size / 2.0,
+                label,
+                if *on { TEXT_COLOR } else { SUBTEXT0 },
+                size,
+                FontWeightHint::Bold,
+            );
+            f.hit(*target, r);
+            x += w + gap;
+        }
+
+        // The list of keys, if what is left can hold it.
+        let help_w = text::measure(FOOTER_HELP, size * 0.9, FontWeightHint::Regular);
+        if x + help_w <= l.footer.right() - l.pad {
+            text_at(
+                f,
+                l.footer.right() - l.pad - help_w,
+                y + (h - size * 0.9) / 2.0,
+                FOOTER_HELP,
+                OVERLAY0,
+                size * 0.9,
+                FontWeightHint::Regular,
+            );
+        }
     }
 
-    fn render_game_over(&self, cmds: &mut Vec<RenderCommand>, win_width: f32, win_height: f32) {
-        // Semi-transparent overlay.
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: win_width,
-            height: win_height,
-            color: Color::from_hex(0x11111B),
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The end-of-game card.
+    ///
+    /// It was a fixed 260x140 box with its four lines at fixed offsets inside
+    /// it, so in a window narrower than 260 it hung off both edges and in a
+    /// short one it hung off the bottom. It is sized from the lines it holds
+    /// and clamped to the window now.
+    fn draw_game_over(&self, f: &mut Frame<Target>, l: &Layout) {
+        fill(f, l.window, CRUST, 0.0);
 
-        let box_w = 260.0;
-        let box_h = 140.0;
-        let box_x = (win_width - box_w) / 2.0;
-        let box_y = (win_height - box_h) / 2.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: box_x,
-            y: box_y,
-            width: box_w,
-            height: box_h,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 16.0,
-            text: String::from("Game Over!"),
-            color: YELLOW,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        let result_text = match self.winner() {
-            Some(Player::One) => {
-                if self.mode == GameMode::VsAi {
-                    String::from("You win!")
-                } else {
-                    String::from("Player 1 wins!")
-                }
-            }
-            Some(Player::Two) => {
-                if self.mode == GameMode::VsAi {
-                    String::from("AI wins!")
-                } else {
-                    String::from("Player 2 wins!")
-                }
-            }
+        let result = match self.winner() {
+            Some(Player::One) if self.mode == GameMode::VsAi => String::from("You win!"),
+            Some(Player::One) => String::from("Player 1 wins!"),
+            Some(Player::Two) if self.mode == GameMode::VsAi => String::from("AI wins!"),
+            Some(Player::Two) => String::from("Player 2 wins!"),
             None => String::from("It's a draw!"),
         };
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 50.0,
-            text: result_text,
-            color: TEXT_COLOR,
-            font_size: HEADER_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let score = format!(
+            "Score: {} - {}",
+            self.score(Player::One),
+            self.score(Player::Two)
+        );
+        let lines: [(&str, f32, Color, FontWeightHint); 4] = [
+            ("Game Over!", l.title, YELLOW, FontWeightHint::Bold),
+            (&result, l.font, TEXT_COLOR, FontWeightHint::Regular),
+            (&score, l.small, SUBTEXT0, FontWeightHint::Regular),
+            (
+                "Press N or the New button",
+                l.small,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            ),
+        ];
 
-        let score_text = format!("Score: {} - {}", self.score_p1, self.score_p2);
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 76.0,
-            text: score_text,
-            color: SUBTEXT0,
-            font_size: SCORE_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+        let widest = lines.iter().fold(0.0f32, |acc, (s, size, _, weight)| {
+            acc.max(text::measure(s, *size, *weight))
         });
+        let text_h = lines
+            .iter()
+            .fold(0.0f32, |acc, (_, size, _, _)| acc + size * 1.9);
+        let card_w = (widest + l.pad * 2.0).min(l.window.w);
+        let card_h = (text_h + l.pad * 2.0).min(l.window.h);
+        let card = Rect::new(
+            (l.window.w - card_w) / 2.0,
+            (l.window.h - card_h) / 2.0,
+            card_w,
+            card_h,
+        );
+        fill(f, card, SURFACE0, l.pad * 0.4);
 
-        cmds.push(RenderCommand::Text {
-            x: box_x + 20.0,
-            y: box_y + 106.0,
-            text: String::from("Press N for new game"),
-            color: OVERLAY0,
-            font_size: STATUS_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let mut y = card.y + l.pad;
+        for (s, size, colour, weight) in lines {
+            text_at(
+                f,
+                card.x + (card.w - text::measure(s, size, weight)) / 2.0,
+                y,
+                s,
+                colour,
+                size,
+                weight,
+            );
+            y += size * 1.9;
+        }
     }
 }
 
-// ── Geometry helper ─────────────────────────────────────────────────
-/// Compute the distance from point (px, py) to the line segment from (x1, y1) to (x2, y2).
-fn point_to_segment_distance(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
-    let dx = x2 - x1;
-    let dy = y2 - y1;
-    let len_sq = dx * dx + dy * dy;
-    if len_sq < 0.0001 {
-        // Degenerate segment (zero length).
-        return ((px - x1).powi(2) + (py - y1).powi(2)).sqrt();
+// ── Drawing helpers ─────────────────────────────────────────────────
+
+/// A filled rectangle, skipped when there is nothing to fill.
+fn fill(f: &mut Frame<Target>, r: Rect, color: Color, radius: f32) {
+    if r.is_empty() {
+        return;
     }
-    // Project point onto the line, clamping to [0, 1].
-    let t = ((px - x1) * dx + (py - y1) * dy) / len_sq;
-    let t_clamped = t.clamp(0.0, 1.0);
-    let proj_x = x1 + t_clamped * dx;
-    let proj_y = y1 + t_clamped * dy;
-    ((px - proj_x).powi(2) + (py - proj_y).powi(2)).sqrt()
+    f.push(RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    });
 }
 
-fn main() {
-    let _app = DotsAndBoxes::new();
+/// One run of text.
+fn text_at(
+    f: &mut Frame<Target>,
+    x: f32,
+    y: f32,
+    s: &str,
+    color: Color,
+    font_size: f32,
+    font_weight: FontWeightHint,
+) {
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: String::from(s),
+        color,
+        font_size,
+        font_weight,
+        max_width: None,
+        overflow: TextOverflow::Clip,
+    });
+}
+
+// There is no `point_to_segment_distance`. It was the arithmetic behind the
+// nearest-line hit test: project the click onto every one of the board's 24 to
+// 60 segments, keep the closest within a threshold. A geometry routine that
+// decides which line was clicked has to agree with the geometry routine that
+// decides where the line was drawn, and nothing made them agree -- the drawn
+// line came from `line_endpoints`, the click came from here, and the reach was
+// a constant. The drawing pass now records a hit box for each line as it
+// paints it, so a click resolves against the rectangle the line was actually
+// put in, and this had no remaining caller.
+
+// ── The app ─────────────────────────────────────────────────────────
+
+impl App for DotsAndBoxes {
+    fn title(&self) -> String {
+        String::from(TITLE)
+    }
+
+    fn app_id(&self) -> String {
+        String::from("dots")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        // The AI waits `AI_DELAY` before it moves, so that "AI thinking..." is
+        // a state a frame can be drawn in rather than a string that is true
+        // only for the duration of a function call.
+        Some(std::time::Duration::from_millis(40))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.size = (width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for DotsAndBoxes {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> EventResult {
+        self.size = size;
+        self.handle_event(&Event::Key(key.clone()))
+    }
+
+    fn scroll_at(&mut self, _x: f32, _y: f32, _dy: f32, _size: (f32, f32)) -> Option<EventResult> {
+        None
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = DotsAndBoxes::new();
+    app::launch("dots", &mut app)
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1407,21 +1545,45 @@ fn main() {
 // ═══════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod tests {
-    // A test that indexes out of range should fail loudly and point at the line
-    // that did it -- that is the diagnosis. The defensive lints exist to keep
-    // panics out of code that runs on a user's data, which this is not.
-    #![allow(
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![expect(
         clippy::indexing_slicing,
         clippy::unwrap_used,
-        clippy::expect_used,
         clippy::panic,
         clippy::float_cmp,
-        clippy::arithmetic_side_effects
+        reason = "test code: a panic is a diagnosis"
     )]
 
     use super::*;
+    use guitk::probe::{click_sized, is_visible_sized, press, rect_of_sized};
 
-    // ── Helper functions ───────────────────────────────────────────
+    // ── Fixtures ───────────────────────────────────────────────────
+
+    /// The windows every geometric claim is checked at.
+    ///
+    /// The board is square, so the *shorter* side is the one that pays for it.
+    /// A list of near-4:3 windows would let width and height take turns being
+    /// the binding constraint without ever making that visible -- so this list
+    /// deliberately spans both orders, both extremes and the degenerate cases:
+    /// wider than tall, taller than wide, exactly square, one so short the
+    /// header and the footer have already spent the height, and one so narrow
+    /// the footer cannot hold a single button.
+    const SIZES: [(f32, f32); 12] = [
+        (560.0, 620.0),
+        (320.0, 240.0),
+        (240.0, 320.0),
+        (400.0, 400.0),
+        (1280.0, 800.0),
+        (800.0, 1280.0),
+        (1920.0, 1080.0),
+        (200.0, 900.0),
+        (900.0, 200.0),
+        (140.0, 140.0),
+        (900.0, 60.0),
+        (60.0, 900.0),
+    ];
 
     fn test_app() -> DotsAndBoxes {
         DotsAndBoxes::with_config(4, GameMode::VsAi, 12345)
@@ -1435,1905 +1597,1369 @@ mod tests {
         DotsAndBoxes::with_config(3, GameMode::TwoPlayer, 99)
     }
 
-    fn make_key_event(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        })
-    }
-
-    fn make_key_release(key: Key) -> Event {
-        Event::Key(KeyEvent {
-            key,
-            pressed: false,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        })
-    }
-
-    fn make_click(x: f32, y: f32) -> Event {
-        Event::Mouse(MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        })
-    }
-
-    fn make_tick(ms: u64) -> Event {
-        Event::Tick { elapsed_ms: ms }
-    }
-
-    // ── Board construction ─────────────────────────────────────────
-
-    #[test]
-    fn test_board_new_3x3() {
-        let board = Board::new(3);
-        assert_eq!(board.grid_size, 3);
-        assert_eq!(board.boxes_per_side(), 2);
-        assert_eq!(board.total_boxes(), 4);
-    }
-
-    #[test]
-    fn test_board_new_4x4() {
-        let board = Board::new(4);
-        assert_eq!(board.grid_size, 4);
-        assert_eq!(board.boxes_per_side(), 3);
-        assert_eq!(board.total_boxes(), 9);
-    }
-
-    #[test]
-    fn test_board_new_5x5() {
-        let board = Board::new(5);
-        assert_eq!(board.grid_size, 5);
-        assert_eq!(board.boxes_per_side(), 4);
-        assert_eq!(board.total_boxes(), 16);
-    }
-
-    #[test]
-    fn test_board_total_lines_3x3() {
-        let board = Board::new(3);
-        // 3*2 horizontal + 2*3 vertical = 12
-        assert_eq!(board.total_lines(), 12);
-    }
-
-    #[test]
-    fn test_board_total_lines_4x4() {
-        let board = Board::new(4);
-        // 4*3 horizontal + 3*4 vertical = 24
-        assert_eq!(board.total_lines(), 24);
-    }
-
-    #[test]
-    fn test_board_total_lines_5x5() {
-        let board = Board::new(5);
-        // 5*4 horizontal + 4*5 vertical = 40
-        assert_eq!(board.total_lines(), 40);
-    }
-
-    #[test]
-    fn test_board_initially_empty() {
-        let board = Board::new(4);
-        assert_eq!(board.drawn_line_count(), 0);
-        assert_eq!(board.claimed_boxes(), 0);
-    }
-
-    #[test]
-    fn test_board_no_lines_drawn_initially() {
-        let board = Board::new(4);
-        assert!(!board.is_line_drawn(LineId::horizontal(0, 0)));
-        assert!(!board.is_line_drawn(LineId::vertical(0, 0)));
-    }
-
-    #[test]
-    fn test_board_all_lines_not_drawn_initially() {
-        let board = Board::new(4);
-        assert!(!board.all_lines_drawn());
-    }
-
-    // ── Line drawing ───────────────────────────────────────────────
-
-    #[test]
-    fn test_draw_horizontal_line() {
-        let mut board = Board::new(4);
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        assert!(board.is_line_drawn(LineId::horizontal(0, 0)));
-        assert_eq!(board.drawn_line_count(), 1);
-    }
-
-    #[test]
-    fn test_draw_vertical_line() {
-        let mut board = Board::new(4);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        assert!(board.is_line_drawn(LineId::vertical(0, 0)));
-        assert_eq!(board.drawn_line_count(), 1);
-    }
-
-    #[test]
-    fn test_draw_line_returns_zero_incomplete() {
-        let mut board = Board::new(4);
-        let completed = board.draw_line(LineId::horizontal(0, 0), Player::One);
-        assert_eq!(completed, 0);
-    }
-
-    #[test]
-    fn test_draw_duplicate_line_returns_zero() {
-        let mut board = Board::new(4);
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        let completed = board.draw_line(LineId::horizontal(0, 0), Player::Two);
-        assert_eq!(completed, 0);
-        assert_eq!(board.drawn_line_count(), 1);
-    }
-
-    #[test]
-    fn test_draw_invalid_line_returns_zero() {
-        let mut board = Board::new(4);
-        let completed = board.draw_line(LineId::horizontal(99, 99), Player::One);
-        assert_eq!(completed, 0);
-    }
-
-    // ── Box completion ─────────────────────────────────────────────
-
-    #[test]
-    fn test_complete_single_box() {
-        let mut board = Board::new(4);
-        // Complete box (0,0): top, bottom, left, right.
-        board.draw_line(LineId::horizontal(0, 0), Player::One); // top
-        board.draw_line(LineId::horizontal(1, 0), Player::One); // bottom
-        board.draw_line(LineId::vertical(0, 0), Player::One); // left
-        let completed = board.draw_line(LineId::vertical(0, 1), Player::One); // right
-        assert_eq!(completed, 1);
-        assert_eq!(board.boxes[0][0], Some(Player::One));
-    }
-
-    #[test]
-    fn test_box_side_count_increments() {
-        let mut board = Board::new(4);
-        assert_eq!(board.box_side_count(0, 0), 0);
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        assert_eq!(board.box_side_count(0, 0), 1);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        assert_eq!(board.box_side_count(0, 0), 2);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        assert_eq!(board.box_side_count(0, 0), 3);
-        board.draw_line(LineId::vertical(0, 1), Player::One);
-        assert_eq!(board.box_side_count(0, 0), 4);
-    }
-
-    #[test]
-    fn test_is_box_complete() {
-        let mut board = Board::new(4);
-        assert!(!board.is_box_complete(0, 0));
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 1), Player::One);
-        assert!(board.is_box_complete(0, 0));
-    }
-
-    #[test]
-    fn test_complete_two_boxes_one_line() {
-        let mut board = Board::new(4);
-        // Set up two adjacent boxes sharing a vertical line at col=1.
-        // Box (0,0): top=h(0,0), bottom=h(1,0), left=v(0,0), right=v(0,1)
-        // Box (0,1): top=h(0,1), bottom=h(1,1), left=v(0,1), right=v(0,2)
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(0, 1), Player::One);
-        board.draw_line(LineId::horizontal(1, 1), Player::One);
-        board.draw_line(LineId::vertical(0, 2), Player::One);
-        // The shared vertical line at (0,1) completes both boxes.
-        let completed = board.draw_line(LineId::vertical(0, 1), Player::One);
-        assert_eq!(completed, 2);
-    }
-
-    #[test]
-    fn test_score_tracking() {
-        let mut board = Board::new(4);
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 1), Player::One);
-        assert_eq!(board.score(Player::One), 1);
-        assert_eq!(board.score(Player::Two), 0);
-    }
-
-    #[test]
-    fn test_claimed_boxes_count() {
-        let mut board = Board::new(3);
-        assert_eq!(board.claimed_boxes(), 0);
-        // Complete box (0,0).
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 1), Player::One);
-        assert_eq!(board.claimed_boxes(), 1);
-    }
-
-    // ── Line validity ──────────────────────────────────────────────
-
-    #[test]
-    fn test_valid_horizontal_lines() {
-        let board = Board::new(4);
-        assert!(board.is_valid_line(LineId::horizontal(0, 0)));
-        assert!(board.is_valid_line(LineId::horizontal(3, 2)));
-        assert!(!board.is_valid_line(LineId::horizontal(4, 0)));
-        assert!(!board.is_valid_line(LineId::horizontal(0, 3)));
-    }
-
-    #[test]
-    fn test_valid_vertical_lines() {
-        let board = Board::new(4);
-        assert!(board.is_valid_line(LineId::vertical(0, 0)));
-        assert!(board.is_valid_line(LineId::vertical(2, 3)));
-        assert!(!board.is_valid_line(LineId::vertical(3, 0)));
-        assert!(!board.is_valid_line(LineId::vertical(0, 4)));
-    }
-
-    // ── Available lines ────────────────────────────────────────────
-
-    #[test]
-    fn test_available_lines_full_board() {
-        let board = Board::new(4);
-        let available = board.available_lines();
-        assert_eq!(available.len(), board.total_lines());
-    }
-
-    #[test]
-    fn test_available_lines_after_draw() {
-        let mut board = Board::new(4);
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        let available = board.available_lines();
-        assert_eq!(available.len(), board.total_lines() - 1);
-    }
-
-    #[test]
-    fn test_available_lines_excludes_drawn() {
-        let mut board = Board::new(4);
-        let line = LineId::horizontal(0, 0);
-        board.draw_line(line, Player::One);
-        let available = board.available_lines();
-        assert!(!available.contains(&line));
-    }
-
-    // ── Adjacent boxes ─────────────────────────────────────────────
-
-    #[test]
-    fn test_adjacent_boxes_top_horizontal() {
-        let board = Board::new(4);
-        // Top edge horizontal line at (0, 0) only borders box (0, 0) below.
-        let adj = board.adjacent_boxes(LineId::horizontal(0, 0));
-        assert_eq!(adj.len(), 1);
-        assert_eq!(adj[0], (0, 0));
-    }
-
-    #[test]
-    fn test_adjacent_boxes_middle_horizontal() {
-        let board = Board::new(4);
-        // Horizontal line at (1, 0) borders box (0, 0) above and box (1, 0) below.
-        let adj = board.adjacent_boxes(LineId::horizontal(1, 0));
-        assert_eq!(adj.len(), 2);
-    }
-
-    #[test]
-    fn test_adjacent_boxes_bottom_horizontal() {
-        let board = Board::new(4);
-        // Bottom edge horizontal line at (3, 0) only borders box (2, 0) above.
-        let adj = board.adjacent_boxes(LineId::horizontal(3, 0));
-        assert_eq!(adj.len(), 1);
-        assert_eq!(adj[0], (2, 0));
-    }
-
-    #[test]
-    fn test_adjacent_boxes_left_vertical() {
-        let board = Board::new(4);
-        // Left edge vertical line at (0, 0) only borders box (0, 0) to the right.
-        let adj = board.adjacent_boxes(LineId::vertical(0, 0));
-        assert_eq!(adj.len(), 1);
-        assert_eq!(adj[0], (0, 0));
-    }
-
-    #[test]
-    fn test_adjacent_boxes_middle_vertical() {
-        let board = Board::new(4);
-        // Middle vertical line at (0, 1) borders box (0, 0) left and box (0, 1) right.
-        let adj = board.adjacent_boxes(LineId::vertical(0, 1));
-        assert_eq!(adj.len(), 2);
-    }
-
-    #[test]
-    fn test_adjacent_boxes_right_vertical() {
-        let board = Board::new(4);
-        // Right edge vertical at (0, 3) only borders box (0, 2) to the left.
-        let adj = board.adjacent_boxes(LineId::vertical(0, 3));
-        assert_eq!(adj.len(), 1);
-        assert_eq!(adj[0], (0, 2));
-    }
-
-    // ── All lines drawn ────────────────────────────────────────────
-
-    #[test]
-    fn test_all_lines_drawn_small() {
-        let mut board = Board::new(3);
-        // Draw all 12 lines.
-        for row in 0..3 {
-            for col in 0..2 {
-                board.draw_line(LineId::horizontal(row, col), Player::One);
-            }
-        }
-        for row in 0..2 {
-            for col in 0..3 {
-                board.draw_line(LineId::vertical(row, col), Player::One);
-            }
-        }
-        assert!(board.all_lines_drawn());
-    }
-
-    // ── DotsAndBoxes construction ──────────────────────────────────
-
-    #[test]
-    fn test_app_default_grid_size() {
-        let app = DotsAndBoxes::new();
-        assert_eq!(app.grid_size(), DEFAULT_GRID_SIZE);
-    }
-
-    #[test]
-    fn test_app_initial_scores_zero() {
-        let app = test_app();
-        assert_eq!(app.score_p1, 0);
-        assert_eq!(app.score_p2, 0);
-    }
-
-    #[test]
-    fn test_app_initial_phase_playing() {
-        let app = test_app();
-        assert_eq!(app.phase, GamePhase::Playing);
-    }
-
-    #[test]
-    fn test_app_initial_player_one() {
-        let app = test_app();
-        assert_eq!(app.current_player, Player::One);
-    }
-
-    #[test]
-    fn test_app_initial_total_moves() {
-        let app = test_app();
-        assert_eq!(app.total_moves, 0);
-    }
-
-    #[test]
-    fn test_app_vs_ai_mode() {
-        let app = DotsAndBoxes::with_config(4, GameMode::VsAi, 42);
-        assert_eq!(app.mode, GameMode::VsAi);
-    }
-
-    #[test]
-    fn test_app_two_player_mode() {
-        let app = DotsAndBoxes::with_config(4, GameMode::TwoPlayer, 42);
-        assert_eq!(app.mode, GameMode::TwoPlayer);
-    }
-
-    #[test]
-    fn test_grid_size_clamping_min() {
-        let app = DotsAndBoxes::with_config(1, GameMode::VsAi, 42);
-        assert_eq!(app.grid_size(), MIN_GRID_SIZE);
-    }
-
-    #[test]
-    fn test_grid_size_clamping_max() {
-        let app = DotsAndBoxes::with_config(10, GameMode::VsAi, 42);
-        assert_eq!(app.grid_size(), MAX_GRID_SIZE);
-    }
-
-    // ── Line placement ─────────────────────────────────────────────
-
-    #[test]
-    fn test_place_line_success() {
-        let mut app = two_player_app();
-        let result = app.try_place_line(LineId::horizontal(0, 0));
-        assert!(result);
-        assert!(app.board.is_line_drawn(LineId::horizontal(0, 0)));
-    }
-
-    #[test]
-    fn test_place_line_switches_player() {
-        let mut app = two_player_app();
-        assert_eq!(app.current_player, Player::One);
-        app.try_place_line(LineId::horizontal(0, 0));
-        assert_eq!(app.current_player, Player::Two);
-    }
-
-    #[test]
-    fn test_place_line_increments_moves() {
-        let mut app = two_player_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        assert_eq!(app.total_moves, 1);
-    }
-
-    #[test]
-    fn test_place_duplicate_line_fails() {
-        let mut app = two_player_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        let result = app.try_place_line(LineId::horizontal(0, 0));
-        assert!(!result);
-        assert_eq!(app.total_moves, 1);
-    }
-
-    #[test]
-    fn test_place_invalid_line_fails() {
-        let mut app = two_player_app();
-        let result = app.try_place_line(LineId::horizontal(99, 99));
-        assert!(!result);
-    }
-
-    #[test]
-    fn test_completing_box_keeps_same_player() {
-        let mut app = two_player_app();
-        // Player 1 draws 3 sides.
-        app.try_place_line(LineId::horizontal(0, 0));
-        // Now P2's turn.
-        app.try_place_line(LineId::horizontal(1, 0));
-        // P1 again.
-        app.try_place_line(LineId::vertical(0, 0));
-        // P2 again.
-        // The last side completes the box - P2 gets another turn.
-        app.try_place_line(LineId::vertical(0, 1));
-        assert_eq!(app.score_p2, 1);
-        assert_eq!(app.current_player, Player::Two);
-    }
-
-    #[test]
-    fn test_cant_place_when_game_over() {
-        let mut app = two_player_app();
-        app.phase = GamePhase::GameOver;
-        let result = app.try_place_line(LineId::horizontal(0, 0));
-        assert!(!result);
-    }
-
-    // ── Score tracking ─────────────────────────────────────────────
-
-    #[test]
-    fn test_score_after_completing_box() {
-        let mut app = two_player_app();
-        // P1: top, P2: bottom, P1: left, P2: right (completes box).
-        app.try_place_line(LineId::horizontal(0, 0));
-        app.try_place_line(LineId::horizontal(1, 0));
-        app.try_place_line(LineId::vertical(0, 0));
-        app.try_place_line(LineId::vertical(0, 1));
-        assert_eq!(app.score_p2, 1);
-    }
-
-    // ── Game over ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_game_over_when_all_lines_drawn() {
-        let mut app = DotsAndBoxes::with_config(3, GameMode::TwoPlayer, 42);
-        let bps = app.boxes_per_side();
-        let gs = app.grid_size();
-        // Draw all lines.
-        for row in 0..gs {
-            for col in 0..bps {
-                app.try_place_line(LineId::horizontal(row, col));
-            }
-        }
-        for row in 0..bps {
-            for col in 0..gs {
-                app.try_place_line(LineId::vertical(row, col));
-            }
-        }
-        assert_eq!(app.phase, GamePhase::GameOver);
-    }
-
-    #[test]
-    fn test_total_scores_equal_total_boxes() {
-        let mut app = DotsAndBoxes::with_config(3, GameMode::TwoPlayer, 42);
-        let total_boxes = app.board.total_boxes();
-        // Draw all lines.
-        let bps = app.boxes_per_side();
-        let gs = app.grid_size();
-        for row in 0..gs {
-            for col in 0..bps {
-                app.try_place_line(LineId::horizontal(row, col));
-            }
-        }
-        for row in 0..bps {
-            for col in 0..gs {
-                app.try_place_line(LineId::vertical(row, col));
-            }
-        }
-        assert_eq!(app.score_p1 + app.score_p2, total_boxes);
-    }
-
-    // ── Winner ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_winner_p1() {
-        let mut app = two_player_app();
-        app.score_p1 = 5;
-        app.score_p2 = 3;
-        assert_eq!(app.winner(), Some(Player::One));
-    }
-
-    #[test]
-    fn test_winner_p2() {
-        let mut app = two_player_app();
-        app.score_p1 = 2;
-        app.score_p2 = 7;
-        assert_eq!(app.winner(), Some(Player::Two));
-    }
-
-    #[test]
-    fn test_winner_draw() {
-        let mut app = two_player_app();
-        app.score_p1 = 4;
-        app.score_p2 = 4;
-        assert_eq!(app.winner(), None);
-    }
-
-    // ── Player ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_player_other() {
-        assert_eq!(Player::One.other(), Player::Two);
-        assert_eq!(Player::Two.other(), Player::One);
-    }
-
-    #[test]
-    fn test_player_labels() {
-        assert_eq!(Player::One.label(), "Player 1");
-        assert_eq!(Player::Two.label(), "Player 2");
-    }
-
-    #[test]
-    fn test_player_colors_different() {
-        assert_ne!(Player::One.color(), Player::Two.color());
-    }
-
-    #[test]
-    fn test_player_box_colors_different() {
-        assert_ne!(Player::One.box_color(), Player::Two.box_color());
-    }
-
-    // ── GameMode ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_game_mode_labels() {
-        assert_eq!(GameMode::VsAi.label(), "vs AI");
-        assert_eq!(GameMode::TwoPlayer.label(), "2-Player");
-    }
-
-    // ── Cursor navigation ──────────────────────────────────────────
-
-    #[test]
-    fn test_cursor_initial_position() {
-        let app = test_app();
-        assert_eq!(app.cursor.orientation, Orientation::Horizontal);
-        assert_eq!(app.cursor.row, 0);
-        assert_eq!(app.cursor.col, 0);
-    }
-
-    #[test]
-    fn test_cursor_move_right() {
-        let mut app = test_app();
-        app.move_cursor(Key::Right);
-        assert_eq!(app.cursor.col, 1);
-    }
-
-    #[test]
-    fn test_cursor_move_left_wrap() {
-        let mut app = test_app();
-        app.move_cursor(Key::Left);
-        assert_eq!(app.cursor.col, app.boxes_per_side() - 1);
-    }
-
-    #[test]
-    fn test_cursor_move_down() {
-        let mut app = test_app();
-        app.move_cursor(Key::Down);
-        assert_eq!(app.cursor.row, 1);
-    }
-
-    #[test]
-    fn test_cursor_move_up_switches_to_vertical() {
-        let mut app = test_app();
-        // At row 0 horizontal, moving up switches to vertical.
-        app.move_cursor(Key::Up);
-        assert_eq!(app.cursor.orientation, Orientation::Vertical);
-    }
-
-    #[test]
-    fn test_cursor_toggle_orientation() {
-        let mut app = test_app();
-        assert_eq!(app.cursor.orientation, Orientation::Horizontal);
-        app.toggle_cursor_orientation();
-        assert_eq!(app.cursor.orientation, Orientation::Vertical);
-        app.toggle_cursor_orientation();
-        assert_eq!(app.cursor.orientation, Orientation::Horizontal);
-    }
-
-    #[test]
-    fn test_cursor_to_line_id() {
-        let app = test_app();
-        let line = app.cursor.to_line_id();
-        assert_eq!(line.orientation, Orientation::Horizontal);
-        assert_eq!(line.row, 0);
-        assert_eq!(line.col, 0);
-    }
-
-    #[test]
-    fn test_cursor_right_wraps() {
-        let mut app = test_app();
-        let bps = app.boxes_per_side();
-        for _ in 0..bps {
-            app.move_cursor(Key::Right);
-        }
-        assert_eq!(app.cursor.col, 0);
-    }
-
-    #[test]
-    fn test_cursor_down_past_grid_switches_to_vertical() {
-        let mut app = test_app();
-        let gs = app.grid_size();
-        for _ in 0..gs {
-            app.move_cursor(Key::Down);
-        }
-        assert_eq!(app.cursor.orientation, Orientation::Vertical);
-    }
-
-    // ── Keyboard event handling ────────────────────────────────────
-
-    #[test]
-    fn test_key_n_new_game() {
-        let mut app = two_player_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        app.handle_event(&make_key_event(Key::N));
-        assert_eq!(app.total_moves, 0);
-        assert_eq!(app.phase, GamePhase::Playing);
-    }
-
-    #[test]
-    fn test_key_m_toggles_mode() {
-        let mut app = test_app();
-        assert_eq!(app.mode, GameMode::VsAi);
-        app.handle_event(&make_key_event(Key::M));
-        assert_eq!(app.mode, GameMode::TwoPlayer);
-        app.handle_event(&make_key_event(Key::M));
-        assert_eq!(app.mode, GameMode::VsAi);
-    }
-
-    #[test]
-    fn test_key_3_sets_grid_3() {
-        let mut app = test_app();
-        app.handle_event(&make_key_event(Key::Num3));
-        assert_eq!(app.grid_size(), 3);
-    }
-
-    #[test]
-    fn test_key_4_sets_grid_4() {
-        let mut app = test_app();
-        app.handle_event(&make_key_event(Key::Num4));
-        assert_eq!(app.grid_size(), 4);
-    }
-
-    #[test]
-    fn test_key_5_sets_grid_5() {
-        let mut app = test_app();
-        app.handle_event(&make_key_event(Key::Num5));
-        assert_eq!(app.grid_size(), 5);
-    }
-
-    #[test]
-    fn test_arrow_keys_move_cursor() {
-        let mut app = two_player_app();
-        app.handle_event(&make_key_event(Key::Right));
-        assert_eq!(app.cursor.col, 1);
-    }
-
-    #[test]
-    fn test_tab_toggles_orientation() {
-        let mut app = two_player_app();
-        app.handle_event(&make_key_event(Key::Tab));
-        assert_eq!(app.cursor.orientation, Orientation::Vertical);
-    }
-
-    #[test]
-    fn test_enter_places_line() {
-        let mut app = two_player_app();
-        app.handle_event(&make_key_event(Key::Enter));
-        assert!(app.board.is_line_drawn(LineId::horizontal(0, 0)));
-    }
-
-    #[test]
-    fn test_space_places_line() {
-        let mut app = two_player_app();
-        app.handle_event(&make_key_event(Key::Space));
-        assert!(app.board.is_line_drawn(LineId::horizontal(0, 0)));
-    }
-
-    #[test]
-    fn test_key_release_ignored() {
-        let mut app = two_player_app();
-        app.handle_event(&make_key_release(Key::Enter));
-        assert!(!app.board.is_line_drawn(LineId::horizontal(0, 0)));
-    }
-
-    // ── Mouse click ────────────────────────────────────────────────
-
-    #[test]
-    fn test_mouse_click_on_line() {
-        let mut app = two_player_app();
-        // Click near the midpoint of the top-left horizontal line.
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (x2, _y2) = app.dot_pos(0, 1);
-        let mid_x = f32::midpoint(x1, x2);
-        app.handle_event(&make_click(mid_x, y1));
-        assert!(app.board.is_line_drawn(LineId::horizontal(0, 0)));
-    }
-
-    #[test]
-    fn test_mouse_click_on_vertical_line() {
-        let mut app = two_player_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (_x2, y2) = app.dot_pos(1, 0);
-        let mid_y = f32::midpoint(y1, y2);
-        app.handle_event(&make_click(x1, mid_y));
-        assert!(app.board.is_line_drawn(LineId::vertical(0, 0)));
-    }
-
-    #[test]
-    fn test_mouse_click_far_away_no_effect() {
-        let mut app = two_player_app();
-        app.handle_event(&make_click(9999.0, 9999.0));
-        assert_eq!(app.board.drawn_line_count(), 0);
-    }
-
-    #[test]
-    fn test_mouse_click_on_drawn_line_no_effect() {
-        let mut app = two_player_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (x2, _) = app.dot_pos(0, 1);
-        let mid_x = f32::midpoint(x1, x2);
-        app.handle_event(&make_click(mid_x, y1));
-        assert_eq!(app.board.drawn_line_count(), 1);
-        // Click same line again.
-        app.handle_event(&make_click(mid_x, y1));
-        assert_eq!(app.board.drawn_line_count(), 1);
-    }
-
-    // ── AI ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_ai_triggers_after_player_turn() {
-        let mut app = test_app();
-        // Place a line as P1. Since it's VsAi, AI should be pending.
-        app.try_place_line(LineId::horizontal(0, 0));
-        assert!(app.ai_pending);
-        assert_eq!(app.current_player, Player::Two);
-    }
-
-    #[test]
-    fn test_ai_executes_after_delay() {
-        let mut app = test_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        assert!(app.ai_pending);
-        // Simulate enough time for AI to act.
-        app.handle_event(&make_tick(AI_DELAY + 50));
-        // AI should have made a move.
-        assert!(app.board.drawn_line_count() >= 2);
-    }
-
-    #[test]
-    fn test_ai_no_move_during_delay() {
-        let mut app = test_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        assert!(app.ai_pending);
-        // Not enough time.
-        app.handle_event(&make_tick(100));
-        assert!(app.ai_pending);
-        assert_eq!(app.board.drawn_line_count(), 1);
-    }
-
-    #[test]
-    fn test_ai_choose_completing_move() {
-        let mut board = Board::new(4);
-        // Set up box (0,0) with 3 sides drawn.
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        let mut rng = SeededRng::new(42);
-        let line = ai_choose_line(&board, &mut rng);
-        // AI should pick the completing line.
-        assert_eq!(line, Some(LineId::vertical(0, 1)));
-    }
-
-    #[test]
-    fn test_ai_avoids_giving_away_boxes() {
-        let mut board = Board::new(4);
-        // Set up box (0,0) with 2 sides. AI should avoid the third side.
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        let mut rng = SeededRng::new(42);
-        let line = ai_choose_line(&board, &mut rng);
-        // AI should not pick v(0,0) or v(0,1) because both would leave box (0,0) with 3 sides.
-        if let Some(chosen) = line {
-            let adj = board.adjacent_boxes(chosen);
-            for (br, bc) in &adj {
-                // After drawing the chosen line, no adjacent box should have 3 sides
-                // (unless AI is forced to).
-                let current_sides = board.box_side_count(*br, *bc);
-                assert_ne!(
-                    current_sides, 2,
-                    "AI should avoid lines that give box 3 sides when possible"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_ai_returns_none_empty_board_is_some() {
-        let board = Board::new(4);
-        let mut rng = SeededRng::new(42);
-        assert!(ai_choose_line(&board, &mut rng).is_some());
-    }
-
-    #[test]
-    fn test_ai_returns_none_full_board() {
-        let mut board = Board::new(3);
-        // Draw all lines.
-        for row in 0..3 {
-            for col in 0..2 {
-                board.draw_line(LineId::horizontal(row, col), Player::One);
-            }
-        }
-        for row in 0..2 {
-            for col in 0..3 {
-                board.draw_line(LineId::vertical(row, col), Player::One);
-            }
-        }
-        let mut rng = SeededRng::new(42);
-        assert!(ai_choose_line(&board, &mut rng).is_none());
-    }
-
-    #[test]
-    fn test_ai_prefers_double_completion() {
-        let mut board = Board::new(4);
-        // Set up two adjacent boxes both with 3 sides, sharing the missing vertical.
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(0, 1), Player::One);
-        board.draw_line(LineId::horizontal(1, 1), Player::One);
-        board.draw_line(LineId::vertical(0, 2), Player::One);
-        // Both boxes (0,0) and (0,1) need v(0,1).
-        let mut rng = SeededRng::new(42);
-        let line = ai_choose_line(&board, &mut rng);
-        assert_eq!(line, Some(LineId::vertical(0, 1)));
-    }
-
-    // ── New game ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_new_game_resets_scores() {
-        let mut app = two_player_app();
-        app.score_p1 = 5;
-        app.score_p2 = 3;
-        app.new_game();
-        assert_eq!(app.score_p1, 0);
-        assert_eq!(app.score_p2, 0);
-    }
-
-    #[test]
-    fn test_new_game_resets_phase() {
-        let mut app = two_player_app();
-        app.phase = GamePhase::GameOver;
-        app.new_game();
-        assert_eq!(app.phase, GamePhase::Playing);
-    }
-
-    #[test]
-    fn test_new_game_resets_board() {
-        let mut app = two_player_app();
-        app.try_place_line(LineId::horizontal(0, 0));
-        app.new_game();
-        assert_eq!(app.board.drawn_line_count(), 0);
-    }
-
-    #[test]
-    fn test_new_game_preserves_grid_size() {
-        let mut app = DotsAndBoxes::with_config(5, GameMode::TwoPlayer, 42);
-        app.new_game();
-        assert_eq!(app.grid_size(), 5);
-    }
-
-    #[test]
-    fn test_new_game_preserves_mode() {
-        let mut app = two_player_app();
-        app.new_game();
-        assert_eq!(app.mode, GameMode::TwoPlayer);
-    }
-
-    #[test]
-    fn test_new_game_with_size() {
-        let mut app = test_app();
-        app.new_game_with_size(5);
-        assert_eq!(app.grid_size(), 5);
-    }
-
-    // ── Rendering ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_render_produces_commands() {
-        let app = test_app();
-        let cmds = app.render(400.0, 400.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_game_over_produces_commands() {
-        let mut app = test_app();
-        app.phase = GamePhase::GameOver;
-        let cmds = app.render(400.0, 400.0);
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_with_completed_box() {
-        let mut app = two_player_app();
-        app.board.draw_line(LineId::horizontal(0, 0), Player::One);
-        app.board.draw_line(LineId::horizontal(1, 0), Player::One);
-        app.board.draw_line(LineId::vertical(0, 0), Player::One);
-        app.board.draw_line(LineId::vertical(0, 1), Player::One);
-        let cmds = app.render(400.0, 400.0);
-        assert!(cmds.len() > 5);
-    }
-
-    #[test]
-    fn test_render_different_grid_sizes() {
-        for size in [3, 4, 5] {
-            let app = DotsAndBoxes::with_config(size, GameMode::TwoPlayer, 42);
-            let cmds = app.render(600.0, 600.0);
-            assert!(!cmds.is_empty(), "render failed for grid size {size}");
-        }
-    }
-
-    // ── Window dimensions ──────────────────────────────────────────
-
-    #[test]
-    fn test_window_width_positive() {
-        let app = test_app();
-        assert!(app.window_width() > 0.0);
-    }
-
-    #[test]
-    fn test_window_height_positive() {
-        let app = test_app();
-        assert!(app.window_height() > 0.0);
-    }
-
-    #[test]
-    fn test_window_larger_for_bigger_grid() {
-        let app3 = DotsAndBoxes::with_config(3, GameMode::VsAi, 42);
-        let app5 = DotsAndBoxes::with_config(5, GameMode::VsAi, 42);
-        assert!(app5.window_width() > app3.window_width());
-        assert!(app5.window_height() > app3.window_height());
-    }
-
-    // ── Dot positions ──────────────────────────────────────────────
-
-    #[test]
-    fn test_dot_pos_origin() {
-        // Stated as a property of the picture rather than as a copy of the
-        // arithmetic: the first dot's *disc* -- not its centre -- begins one
-        // PADDING in from the window's left edge and from under the header.
-        // Restating `PADDING + HEADER_HEIGHT` here would have passed happily
-        // while the board hung 12px off-centre, which is what it did.
-        let app = test_app();
-        let (x, y) = app.dot_pos(0, 0);
-        assert_eq!(x - DOT_RADIUS, PADDING);
-        assert_eq!(y - DOT_RADIUS, PADDING + HEADER_HEIGHT);
-    }
-
-    #[test]
-    fn test_dot_pos_spacing() {
-        let app = test_app();
-        let (x0, y0) = app.dot_pos(0, 0);
-        let (x1, y1) = app.dot_pos(0, 1);
-        assert!((x1 - x0 - DOT_SPACING).abs() < 0.01);
-        assert!((y1 - y0).abs() < 0.01);
-    }
-
-    #[test]
-    fn test_dot_pos_row_spacing() {
-        let app = test_app();
-        let (_x0, y0) = app.dot_pos(0, 0);
-        let (_x1, y1) = app.dot_pos(1, 0);
-        assert!((y1 - y0 - DOT_SPACING).abs() < 0.01);
-    }
-
-    // ── Hit testing ────────────────────────────────────────────────
-
-    #[test]
-    fn test_hit_test_on_horizontal_line() {
-        let app = test_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (x2, _) = app.dot_pos(0, 1);
-        let mid_x = f32::midpoint(x1, x2);
-        let result = app.hit_test_line(mid_x, y1);
-        assert_eq!(result, Some(LineId::horizontal(0, 0)));
-    }
-
-    #[test]
-    fn test_hit_test_on_vertical_line() {
-        let app = test_app();
-        let (x1, y1) = app.dot_pos(0, 0);
-        let (_, y2) = app.dot_pos(1, 0);
-        let mid_y = f32::midpoint(y1, y2);
-        let result = app.hit_test_line(x1, mid_y);
-        assert_eq!(result, Some(LineId::vertical(0, 0)));
-    }
-
-    #[test]
-    fn test_hit_test_far_away_returns_none() {
-        let app = test_app();
-        let result = app.hit_test_line(9999.0, 9999.0);
-        assert!(result.is_none());
-    }
-
-    // The three tests that used to follow here were `_precise` copies of the
-    // three above, aimed at the second hit test. With one hit test left they
-    // were the same three tests written twice, so they are gone; what they
-    // were really covering -- that a click anywhere along a line, not just at
-    // its middle, finds it -- is now covered properly by
-    // `every_point_along_a_line_is_clickable`.
-
-    // ── Board geometry (design-decisions.md §485 checklist) ────────
-
-    /// Distance between two points, for comparing painted geometry.
-    fn apart(a: (f32, f32), b: (f32, f32)) -> f32 {
-        ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt()
-    }
-
-    fn same_point(a: (f32, f32), b: (f32, f32)) -> bool {
-        apart(a, b) < 0.01
-    }
-
-    /// The centre of every dot the renderer paints.
+    /// Draw `line` while setting a fixture up, insisting it was really drawn.
     ///
-    /// Dots are the only `FillRect` drawn `DOT_RADIUS * 2` square in
-    /// `TEXT_COLOR`; the completed-box fills are far larger and a different
-    /// colour.
-    fn painted_dots(app: &DotsAndBoxes) -> Vec<(f32, f32)> {
-        app.render(app.window_width(), app.window_height())
+    /// `draw_line` answers `None` for a line the board refused -- off the
+    /// board, or already there -- so a fixture with a typo in it used to set
+    /// up a position other than the one it described and the test went on to
+    /// pass about the wrong board (lesson 90). This is where that becomes a
+    /// failure instead.
+    fn set(b: &mut Board, line: LineId) {
+        assert!(
+            b.draw_line(line, Player::One).is_some(),
+            "the fixture could not draw {line:?}"
+        );
+    }
+
+    /// Every rectangle the frame recorded a hit box for.
+    fn hit_boxes(app: &DotsAndBoxes, size: (f32, f32)) -> Vec<(Target, Rect)> {
+        app.draw(size).hits().to_vec()
+    }
+
+    /// Every rectangle the frame filled.
+    fn painted_rects(app: &DotsAndBoxes, size: (f32, f32)) -> Vec<Rect> {
+        app.draw(size)
+            .commands()
             .iter()
-            .filter_map(|c| match c {
+            .filter_map(|c| match *c {
                 RenderCommand::FillRect {
                     x,
                     y,
                     width,
                     height,
-                    color,
                     ..
-                } if (*width - DOT_RADIUS * 2.0).abs() < 0.01
-                    && (*height - DOT_RADIUS * 2.0).abs() < 0.01
-                    && *color == TEXT_COLOR =>
-                {
-                    Some((x + DOT_RADIUS, y + DOT_RADIUS))
-                }
+                } => Some(Rect::new(x, y, width, height)),
                 _ => None,
             })
             .collect()
     }
 
-    /// Every line segment the renderer paints for the board itself.
-    ///
-    /// The cursor is drawn as a line too, at `LINE_HOVER_THICKNESS`, and it
-    /// sits on top of a board line rather than being one; excluding it by
-    /// width keeps the two apart.
-    fn painted_board_lines(app: &DotsAndBoxes) -> Vec<((f32, f32), (f32, f32))> {
-        app.render(app.window_width(), app.window_height())
+    /// Every line segment the frame painted, as `((x1, y1), (x2, y2))`.
+    fn painted_lines(app: &DotsAndBoxes, size: (f32, f32)) -> Vec<((f32, f32), (f32, f32))> {
+        app.draw(size)
+            .commands()
             .iter()
-            .filter_map(|c| match c {
-                RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    width,
-                    ..
-                } if (*width - LINE_HOVER_THICKNESS).abs() >= 0.01 => {
-                    Some(((*x1, *y1), (*x2, *y2)))
-                }
+            .filter_map(|c| match *c {
+                RenderCommand::Line { x1, y1, x2, y2, .. } => Some(((x1, y1), (x2, y2))),
                 _ => None,
             })
             .collect()
     }
 
-    /// The cursor's hover line, if one is painted.
-    fn painted_cursor_line(app: &DotsAndBoxes) -> Option<((f32, f32), (f32, f32))> {
-        app.render(app.window_width(), app.window_height())
-            .iter()
-            .find_map(|c| match c {
-                RenderCommand::Line {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    width,
-                    ..
-                } if (*width - LINE_HOVER_THICKNESS).abs() < 0.01 => Some(((*x1, *y1), (*x2, *y2))),
-                _ => None,
-            })
-    }
+    // ── The layout follows the window ──────────────────────────────
 
-    /// §485 item 1 and 6: the lattice is square and evenly spaced, and the
-    /// frame around it is positive and even on all four sides.
-    ///
-    /// "Inside the window" on its own would pass with any amount of slack on
-    /// one side, which is how a board measured with a spacing it does not
-    /// have stays invisible.
     #[test]
-    fn the_painted_dots_are_a_square_even_lattice_centred_in_the_window() {
-        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
-            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
-            let dots = painted_dots(&app);
-            assert_eq!(
-                dots.len(),
-                gs * gs,
-                "a {gs}x{gs} board should paint {} dots, painted {}",
-                gs * gs,
-                dots.len()
-            );
+    fn the_layout_follows_the_window_rather_than_a_constant() {
+        // Each pair has to sit in the band where the quantity being compared
+        // is free to move, or the comparison is between two *clamped* values
+        // and passes against a program that ignores the window entirely. The
+        // first pair written here was 400 against 1200 and read 291.6 against
+        // 291.6: `spacing` saturates `MAX_SPACING` above about 385px square.
+        // `font` is clamped to 9 below about 306px tall and to 18 above 612,
+        // so no one pair can exercise both.
 
-            let mut xs: Vec<f32> = dots.iter().map(|d| d.0).collect();
-            let mut ys: Vec<f32> = dots.iter().map(|d| d.1).collect();
-            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            ys.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-            ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-            assert_eq!(xs.len(), gs, "expected {gs} distinct dot columns");
-            assert_eq!(ys.len(), gs, "expected {gs} distinct dot rows");
+        // The board grows with the window, below the cap.
+        let small = Layout::solve(150.0, 150.0, 4);
+        let large = Layout::solve(300.0, 300.0, 4);
+        assert!(
+            small.spacing < MAX_SPACING && large.spacing < MAX_SPACING,
+            "the board fixture saturated the cap: {} and {}",
+            small.spacing,
+            large.spacing
+        );
+        assert!(
+            large.board.w > small.board.w * 1.8,
+            "a window twice as wide drew a board {} wide against {}",
+            large.board.w,
+            small.board.w
+        );
 
-            for i in 1..gs {
+        // The type grows with the window, inside its own clamp.
+        let short = Layout::solve(400.0, 340.0, 4);
+        let tall = Layout::solve(400.0, 600.0, 4);
+        assert!(
+            short.font > 9.0 && tall.font < 18.0,
+            "the type fixture hit a clamp: {} and {}",
+            short.font,
+            tall.font
+        );
+        assert!(
+            tall.font > short.font * 1.5,
+            "the type did not grow with the window: {} vs {}",
+            tall.font,
+            short.font
+        );
+
+        assert_eq!(small.window, Rect::new(0.0, 0.0, 150.0, 150.0));
+    }
+
+    #[test]
+    fn the_board_is_square_at_every_window_shape() {
+        for (w, h) in SIZES {
+            for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+                let l = Layout::solve(w, h, gs);
                 assert!(
-                    (xs[i] - xs[i - 1] - DOT_SPACING).abs() < 0.01,
-                    "columns {} and {i} are {} apart, not DOT_SPACING",
-                    i - 1,
-                    xs[i] - xs[i - 1]
-                );
-                assert!(
-                    (ys[i] - ys[i - 1] - DOT_SPACING).abs() < 0.01,
-                    "rows {} and {i} are {} apart, not DOT_SPACING",
-                    i - 1,
-                    ys[i] - ys[i - 1]
+                    (l.board.w - l.board.h).abs() < 0.01,
+                    "{w}x{h} grid {gs}: the board is {}x{}, not square",
+                    l.board.w,
+                    l.board.h
                 );
             }
-            assert!(
-                ((xs[gs - 1] - xs[0]) - (ys[gs - 1] - ys[0])).abs() < 0.01,
-                "the lattice is {} wide and {} tall -- not square",
-                xs[gs - 1] - xs[0],
-                ys[gs - 1] - ys[0]
-            );
+        }
+    }
 
-            let (win_w, win_h) = (app.window_width(), app.window_height());
-            let left = xs[0] - DOT_RADIUS;
-            let right = win_w - (xs[gs - 1] + DOT_RADIUS);
-            assert!(left > 0.0, "the leftmost dot is off the left edge");
-            assert!(right > 0.0, "the rightmost dot is off the right edge");
+    #[test]
+    fn the_board_is_centred_in_what_the_two_bars_leave() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, 4);
+            if l.board.w <= 0.0 {
+                continue;
+            }
+            let left = l.board.x;
+            let right = w - l.board.right();
             assert!(
                 (left - right).abs() < 0.01,
-                "the board sits {left} from the left and {right} from the right"
+                "{w}x{h}: {left} of slack on the left and {right} on the right"
             );
-
-            let top = ys[0] - DOT_RADIUS - HEADER_HEIGHT;
-            let bottom = win_h - FOOTER_HEIGHT - (ys[gs - 1] + DOT_RADIUS);
-            assert!(top > 0.0, "the top row of dots is under the header");
-            assert!(bottom > 0.0, "the bottom row of dots is under the footer");
+            let above = l.board.y - l.header.bottom();
+            let below = l.footer.y - l.board.bottom();
             assert!(
-                (top - bottom).abs() < 0.01,
-                "the board sits {top} below the header and {bottom} above the footer"
+                (above - below).abs() < 0.01,
+                "{w}x{h}: {above} above the board and {below} below it"
             );
         }
     }
 
-    /// §485 item 5: a line is painted between exactly the two dots it joins.
     #[test]
-    fn every_line_is_painted_between_the_two_dots_it_joins() {
-        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
-            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
-            let dots = painted_dots(&app);
-            for line in app.all_lines() {
-                let (a, b) = app.line_endpoints(line);
-                assert!(
-                    dots.iter().any(|d| same_point(*d, a)),
-                    "{line:?} starts at {a:?}, where no dot is painted"
-                );
-                assert!(
-                    dots.iter().any(|d| same_point(*d, b)),
-                    "{line:?} ends at {b:?}, where no dot is painted"
-                );
-                assert!(
-                    (apart(a, b) - DOT_SPACING).abs() < 0.01,
-                    "{line:?} spans {}, not one lattice step",
-                    apart(a, b)
-                );
-            }
-        }
-    }
-
-    /// §485 item 2: the whole length of a line is clickable, not just a disc
-    /// around its middle.
-    ///
-    /// This is the test the old midpoint hit test would have failed: it
-    /// answered only within 12px of a line's centre, leaving roughly the
-    /// outer two-thirds of every 70px line dead. The dots themselves are
-    /// excluded here because up to four lines meet at one, so a click exactly
-    /// on a dot has not said which line was meant -- see
-    /// `a_click_on_a_dot_still_lands_on_a_line_meeting_there`.
-    #[test]
-    fn every_point_along_a_line_is_clickable() {
-        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
-            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
-            for line in app.all_lines() {
-                let ((x1, y1), (x2, y2)) = app.line_endpoints(line);
-                for step in 1..40 {
-                    let t = step as f32 / 40.0;
-                    let x = x1 + (x2 - x1) * t;
-                    let y = y1 + (y2 - y1) * t;
-                    assert_eq!(
-                        app.hit_test_line(x, y),
-                        Some(line),
-                        "a click at ({x}, {y}), {}% of the way along {line:?}, missed it",
-                        t * 100.0
+    fn every_part_of_the_layout_stays_inside_the_window() {
+        for (w, h) in SIZES {
+            for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+                let l = Layout::solve(w, h, gs);
+                for (name, r) in [
+                    ("header", l.header),
+                    ("footer", l.footer),
+                    ("board", l.board),
+                ] {
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= w + 0.01
+                            && r.bottom() <= h + 0.01,
+                        "{w}x{h} grid {gs}: the {name} is {r:?}, outside the window"
                     );
                 }
             }
         }
     }
 
-    /// A dot is a 12px target where up to four lines meet. Whichever line the
-    /// tie is broken toward, it must be one of them -- a dot must not be a
-    /// dead spot in the middle of the board.
     #[test]
-    fn a_click_on_a_dot_still_lands_on_a_line_meeting_there() {
-        let app = test_app();
-        for (row, col) in
-            (0..app.grid_size()).flat_map(|r| (0..app.grid_size()).map(move |c| (r, c)))
-        {
-            let dot = app.dot_pos(row, col);
-            let hit = app
-                .hit_test_line(dot.0, dot.1)
-                .unwrap_or_else(|| panic!("the dot at ({row}, {col}) is a dead spot"));
-            let (a, b) = app.line_endpoints(hit);
+    fn the_header_the_board_and_the_footer_do_not_overlap() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, 5);
+            if l.board.is_empty() {
+                continue;
+            }
             assert!(
-                same_point(a, dot) || same_point(b, dot),
-                "clicking the dot at ({row}, {col}) selected {hit:?}, which does not touch it"
+                l.board.y >= l.header.bottom() - 0.01,
+                "{w}x{h}: the board starts at {} , above the header's bottom {}",
+                l.board.y,
+                l.header.bottom()
+            );
+            assert!(
+                l.board.bottom() <= l.footer.y + 0.01,
+                "{w}x{h}: the board ends at {} , below the footer's top {}",
+                l.board.bottom(),
+                l.footer.y
             );
         }
     }
 
-    /// The clickable band around a line is wide enough to cover the line the
-    /// player can see, and narrow enough not to reach the next line over.
-    ///
-    /// Deliberately stated in `LINE_HOVER_THICKNESS` and `DOT_SPACING` rather
-    /// than in `CLICK_THRESHOLD`: every other slop test here measures against
-    /// the threshold constant, so all of them move when it does and none of
-    /// them can object to a bad value for it. A mutation that cut the
-    /// threshold to a tenth survived the whole sweep for exactly that reason
-    /// -- the tests restated the number instead of the requirement, which is
-    /// design-decisions.md §487 in miniature. These two bounds are the
-    /// requirement: below the first, clicks that visibly land on a line miss
-    /// it; above the second, the bands of two parallel lines overlap and
-    /// "nearest line" becomes a coin flip in the empty space between them.
     #[test]
-    fn the_clickable_band_covers_the_painted_line_but_not_its_neighbour() {
-        let app = test_app();
-        let h = LineId::horizontal(1, 1);
-        let ((x1, y), (x2, _)) = app.line_endpoints(h);
-        let mid = f32::midpoint(x1, x2);
-
-        let visible = LINE_HOVER_THICKNESS / 2.0;
-        assert_eq!(
-            app.hit_test_line(mid, y - visible),
-            Some(h),
-            "a click on the top edge of the painted line misses it"
-        );
-        assert_eq!(
-            app.hit_test_line(mid, y + visible),
-            Some(h),
-            "a click on the bottom edge of the painted line misses it"
-        );
-
-        let halfway = DOT_SPACING / 2.0;
+    fn the_dots_stop_growing_before_they_become_saucers() {
+        // Without the cap a 4K window would draw five dinner plates joined by
+        // beams. `MAX_SPACING` bounds the lattice; the board then keeps the
+        // centring slack instead of spending it.
+        let l = Layout::solve(4000.0, 4000.0, 3);
         assert!(
-            app.hit_test_line(mid, y + halfway - 0.05).is_none(),
-            "a click in the dead centre between two parallel lines picked one of them"
+            l.spacing <= MAX_SPACING + 0.01,
+            "spacing ran to {} in a 4000px window",
+            l.spacing
+        );
+        assert!(
+            l.board.w < 4000.0 * 0.2,
+            "the board took {} of a 4000px window",
+            l.board.w
         );
     }
 
-    /// §485 item 3: the slop is the same on both sides of a line.
-    ///
-    /// Measured on an interior line, where there is nothing else within
-    /// reach, so what is being measured is the threshold and not a
-    /// neighbour winning the tie.
     #[test]
-    fn a_line_takes_the_same_slop_on_both_sides_of_it() {
-        let app = test_app();
-        let eps = 0.05;
-        let t = DotsAndBoxes::CLICK_THRESHOLD;
-
-        let h = LineId::horizontal(1, 1);
-        let ((hx1, hy), (hx2, _)) = app.line_endpoints(h);
-        let hmid = f32::midpoint(hx1, hx2);
-        assert_eq!(app.hit_test_line(hmid, hy - t + eps), Some(h), "above");
-        assert_eq!(app.hit_test_line(hmid, hy + t - eps), Some(h), "below");
-        assert_ne!(app.hit_test_line(hmid, hy - t - eps), Some(h), "too high");
-        assert_ne!(app.hit_test_line(hmid, hy + t + eps), Some(h), "too low");
-
-        let v = LineId::vertical(1, 1);
-        let ((vx, vy1), (_, vy2)) = app.line_endpoints(v);
-        let vmid = f32::midpoint(vy1, vy2);
-        assert_eq!(app.hit_test_line(vx - t + eps, vmid), Some(v), "left");
-        assert_eq!(app.hit_test_line(vx + t - eps, vmid), Some(v), "right");
-        assert_ne!(
-            app.hit_test_line(vx - t - eps, vmid),
-            Some(v),
-            "too far left"
-        );
-        assert_ne!(
-            app.hit_test_line(vx + t + eps, vmid),
-            Some(v),
-            "too far right"
-        );
-    }
-
-    /// §485 item 3 again, at the four outer edges: the outside of the board
-    /// is as forgiving as the inside, and equally so on all four sides.
-    #[test]
-    fn the_board_edges_take_the_same_slop_on_all_four_sides() {
-        let app = test_app();
-        let gs = app.grid_size();
-        let eps = 0.05;
-        let t = DotsAndBoxes::CLICK_THRESHOLD;
-        let (min_x, min_y) = app.dot_pos(0, 0);
-        let (max_x, max_y) = app.dot_pos(gs - 1, gs - 1);
-        let mid_x = f32::midpoint(min_x, max_x);
-        let mid_y = f32::midpoint(min_y, max_y);
-
-        // Just outside each edge, still on the outermost line.
-        assert!(
-            app.hit_test_line(mid_x, min_y - t + eps).is_some(),
-            "just above the top edge is dead"
-        );
-        assert!(
-            app.hit_test_line(mid_x, max_y + t - eps).is_some(),
-            "just below the bottom edge is dead"
-        );
-        assert!(
-            app.hit_test_line(min_x - t + eps, mid_y).is_some(),
-            "just left of the left edge is dead"
-        );
-        assert!(
-            app.hit_test_line(max_x + t - eps, mid_y).is_some(),
-            "just right of the right edge is dead"
-        );
-
-        // A hair further out, on none of them -- the same distance on each
-        // side, which is what makes the four edges reflections of each other.
-        assert!(
-            app.hit_test_line(mid_x, min_y - t - eps).is_none(),
-            "the top edge reaches further out than the others"
-        );
-        assert!(
-            app.hit_test_line(mid_x, max_y + t + eps).is_none(),
-            "the bottom edge reaches further out than the others"
-        );
-        assert!(
-            app.hit_test_line(min_x - t - eps, mid_y).is_none(),
-            "the left edge reaches further out than the others"
-        );
-        assert!(
-            app.hit_test_line(max_x + t + eps, mid_y).is_none(),
-            "the right edge reaches further out than the others"
-        );
-    }
-
-    /// §485 item 4: sweep well past the board on all four sides and find
-    /// nothing, so an off-board click can never place a line.
-    #[test]
-    fn nothing_far_outside_the_painted_board_lands_on_a_line() {
-        let app = test_app();
-        let gs = app.grid_size();
-        let far = DotsAndBoxes::CLICK_THRESHOLD + 1.0;
-        let (min_x, min_y) = app.dot_pos(0, 0);
-        let (max_x, max_y) = app.dot_pos(gs - 1, gs - 1);
-
-        for step in 0..120 {
-            // Sweep the full height of the window and past it, on both sides.
-            let y = step as f32 * 10.0 - 50.0;
+    fn a_window_with_no_room_for_a_board_draws_none_and_offers_no_lines() {
+        // The header and the footer have spent the height; there is nothing
+        // left. The board must be empty rather than negative, and no line may
+        // claim a hit box in a board that was never drawn.
+        //
+        // 900x60 is *not* one of these: 60px of height still leaves 8.6px
+        // between the bars, so the program draws a real -- microscopic --
+        // lattice with 1.6px hit boxes. That is small, not absent, and the
+        // containment tests already cover it. Asserting emptiness there would
+        // be asserting a threshold the program does not have.
+        for size in [(30.0, 30.0), (10.0, 10.0), (0.0, 0.0)] {
+            let l = Layout::solve(size.0, size.1, 4);
             assert!(
-                app.hit_test_line(min_x - far, y).is_none(),
-                "a click at ({}, {y}) -- left of the whole board -- hit a line",
-                min_x - far
+                l.board.w >= 0.0 && l.board.h >= 0.0,
+                "{size:?}: the board is {:?}",
+                l.board
             );
-            assert!(
-                app.hit_test_line(max_x + far, y).is_none(),
-                "a click at ({}, {y}) -- right of the whole board -- hit a line",
-                max_x + far
-            );
-
-            let x = step as f32 * 10.0 - 50.0;
-            assert!(
-                app.hit_test_line(x, min_y - far).is_none(),
-                "a click at ({x}, {}) -- above the whole board -- hit a line",
-                min_y - far
-            );
-            assert!(
-                app.hit_test_line(x, max_y + far).is_none(),
-                "a click at ({x}, {}) -- below the whole board -- hit a line",
-                max_y + far
-            );
+            let app = test_app();
+            for (target, r) in hit_boxes(&app, size) {
+                if let Target::Line(_) = target {
+                    assert!(
+                        r.is_empty(),
+                        "{size:?}: {target:?} kept a hit box {r:?} in a window with no board"
+                    );
+                }
+            }
         }
     }
 
-    /// The picture and the hit test are the same geometry: every line the
-    /// renderer paints answers to a click at its own midpoint, with the same
-    /// endpoints it was painted with.
+    // ── The lattice ────────────────────────────────────────────────
+
     #[test]
-    fn every_painted_line_is_clickable_where_it_is_painted() {
-        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
-            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
-            for (a, b) in painted_board_lines(&app) {
-                let mid = (f32::midpoint(a.0, b.0), f32::midpoint(a.1, b.1));
-                let hit = app
-                    .hit_test_line(mid.0, mid.1)
-                    .unwrap_or_else(|| panic!("the line painted {a:?}..{b:?} is not clickable"));
-                let (ha, hb) = app.line_endpoints(hit);
+    fn the_dots_are_an_even_lattice_that_fills_the_board_square() {
+        for (w, h) in SIZES {
+            for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+                let l = Layout::solve(w, h, gs);
+                if l.spacing <= 0.0 {
+                    continue;
+                }
+                // Adjacent dots are one spacing apart, in both axes.
+                for row in 0..gs {
+                    for col in 1..gs {
+                        let a = l.dot_pos(row, col - 1);
+                        let b = l.dot_pos(row, col);
+                        assert!(
+                            (b.0 - a.0 - l.spacing).abs() < 0.01,
+                            "{w}x{h} grid {gs}: dots {col} and {} of row {row} are {} apart, not {}",
+                            col - 1,
+                            b.0 - a.0,
+                            l.spacing
+                        );
+                        assert_eq!(a.1, b.1, "{w}x{h} grid {gs}: row {row} is not level");
+                    }
+                }
+                // The lattice reaches exactly one radius inside each edge.
+                let first = l.dot_pos(0, 0);
+                let last = l.dot_pos(gs - 1, gs - 1);
                 assert!(
-                    same_point(ha, a) && same_point(hb, b),
-                    "the line painted {a:?}..{b:?} answers as {hit:?}, painted {ha:?}..{hb:?}"
+                    (first.0 - l.board.x - l.dot_radius).abs() < 0.01,
+                    "{w}x{h} grid {gs}: the first dot sits {} from the board's left edge, not {}",
+                    first.0 - l.board.x,
+                    l.dot_radius
+                );
+                assert!(
+                    (l.board.right() - last.0 - l.dot_radius).abs() < 0.01,
+                    "{w}x{h} grid {gs}: the last dot sits {} from the board's right edge, not {}",
+                    l.board.right() - last.0,
+                    l.dot_radius
                 );
             }
         }
     }
 
-    /// §485 item 7: the board carries exactly the lines the rules say it
-    /// does -- `gs * (gs - 1)` in each direction -- each painted once.
     #[test]
-    fn the_renderer_paints_every_line_on_the_board_exactly_once() {
-        for gs in MIN_GRID_SIZE..=MAX_GRID_SIZE {
-            let app = DotsAndBoxes::with_config(gs, GameMode::TwoPlayer, 7);
-            let expected = 2 * gs * (gs - 1);
-            assert_eq!(
-                app.all_lines().count(),
-                expected,
-                "a {gs}x{gs} board has {expected} lines"
-            );
-
-            let painted = painted_board_lines(&app);
-            assert_eq!(
-                painted.len(),
-                expected,
-                "a {gs}x{gs} board painted {} lines, not {expected}",
-                painted.len()
-            );
+    fn every_line_is_painted_between_the_two_dots_it_joins() {
+        let app = test_app();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, app.grid_size());
+            if l.spacing <= 0.0 {
+                continue;
+            }
+            let painted = painted_lines(&app, (w, h));
             for line in app.all_lines() {
-                let (a, b) = app.line_endpoints(line);
-                let hits = painted
-                    .iter()
-                    .filter(|(pa, pb)| same_point(*pa, a) && same_point(*pb, b))
-                    .count();
-                assert_eq!(hits, 1, "{line:?} was painted {hits} times, not once");
+                let a = l.dot_pos(line.row, line.col);
+                let b = match line.orientation {
+                    Orientation::Horizontal => l.dot_pos(line.row, line.col + 1),
+                    Orientation::Vertical => l.dot_pos(line.row + 1, line.col),
+                };
+                assert!(
+                    painted.iter().any(|&(p, q)| (p.0 - a.0).abs() < 0.01
+                        && (p.1 - a.1).abs() < 0.01
+                        && (q.0 - b.0).abs() < 0.01
+                        && (q.1 - b.1).abs() < 0.01),
+                    "{w}x{h}: {line:?} was not painted from {a:?} to {b:?}"
+                );
             }
         }
     }
 
-    /// The cursor is drawn on the line it points at, not the one next door.
     #[test]
-    fn the_cursor_is_drawn_on_the_line_it_points_at() {
+    fn nothing_is_painted_outside_the_window() {
         let mut app = two_player_app();
-        for line in app.all_lines() {
-            app.cursor = Cursor {
-                orientation: line.orientation,
-                row: line.row,
-                col: line.col,
-            };
-            let (a, b) = app.line_endpoints(line);
-            let drawn = painted_cursor_line(&app)
-                .unwrap_or_else(|| panic!("no cursor is drawn while it points at {line:?}"));
-            assert!(
-                same_point(drawn.0, a) && same_point(drawn.1, b),
-                "the cursor on {line:?} ({a:?}..{b:?}) is drawn at {drawn:?}"
+        // A claimed box, a cursor and a game-over card all draw; check the
+        // ordinary board and the end card both stay inside.
+        app.try_place_line(LineId::horizontal(0, 0));
+        app.try_place_line(LineId::vertical(0, 0));
+        app.try_place_line(LineId::vertical(0, 1));
+        app.try_place_line(LineId::horizontal(1, 0));
+        for (w, h) in SIZES {
+            for r in painted_rects(&app, (w, h)) {
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01 && r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "{w}x{h}: painted {r:?} outside the window"
+                );
+            }
+            for (p, q) in painted_lines(&app, (w, h)) {
+                for (x, y) in [p, q] {
+                    assert!(
+                        x >= -0.01 && y >= -0.01 && x <= w + 0.01 && y <= h + 0.01,
+                        "{w}x{h}: painted a line endpoint at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    // ── The hit boxes ──────────────────────────────────────────────
+
+    #[test]
+    fn every_undrawn_line_has_a_hit_box_and_it_is_on_the_line() {
+        let app = test_app();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, app.grid_size());
+            if l.spacing <= 0.0 {
+                continue;
+            }
+            for line in app.all_lines() {
+                let r = rect_of_sized(&app, Target::Line(line), (w, h))
+                    .unwrap_or_else(|| panic!("{w}x{h}: {line:?} has no hit box"));
+                let ((x1, y1), (x2, y2)) = l.line_endpoints(line);
+                // The box straddles the segment it belongs to: its centre is
+                // the segment's midpoint, to a pixel.
+                let (cx, cy) = r.centre();
+                assert!(
+                    (cx - f32::midpoint(x1, x2)).abs() < 0.01
+                        && (cy - f32::midpoint(y1, y2)).abs() < 0.01,
+                    "{w}x{h}: {line:?} is painted {:?}..{:?} but its box centres on {:?}",
+                    (x1, y1),
+                    (x2, y2),
+                    (cx, cy)
+                );
+                // And it never reaches past the ends of the segment -- with
+                // `reach` of slop across the line, which is the band's whole
+                // width, but none along it.
+                assert!(
+                    r.x >= x1.min(x2) - l.reach - 0.01
+                        && r.right() <= x1.max(x2) + l.reach + 0.01
+                        && r.y >= y1.min(y2) - l.reach - 0.01
+                        && r.bottom() <= y1.max(y2) + l.reach + 0.01,
+                    "{w}x{h}: {line:?} claims {r:?}, past its own endpoints"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_lines_claim_the_same_pixel() {
+        // The old hit test walked every segment and kept the nearest, so a
+        // click at a dot -- where four segments meet -- was resolved by
+        // whichever comparison happened to win. The boxes are inset at both
+        // ends so that question never arises.
+        let app = test_app();
+        for (w, h) in SIZES {
+            let boxes: Vec<(Target, Rect)> = hit_boxes(&app, (w, h))
+                .into_iter()
+                .filter(|(t, r)| matches!(t, Target::Line(_)) && !r.is_empty())
+                .collect();
+            for (i, (a_t, a)) in boxes.iter().enumerate() {
+                for (b_t, b) in boxes.iter().skip(i + 1) {
+                    let overlap = a.intersect(*b).filter(|o| o.w > 0.01 && o.h > 0.01);
+                    assert!(
+                        overlap.is_none(),
+                        "{w}x{h}: {a_t:?} at {a:?} and {b_t:?} at {b:?} overlap in {overlap:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_in_a_lines_box_draws_that_line_and_no_other() {
+        for (w, h) in SIZES {
+            let probe = test_app();
+            let l = Layout::solve(w, h, probe.grid_size());
+            if l.spacing <= 1.0 {
+                continue;
+            }
+            for line in probe.all_lines() {
+                let mut app = two_player_app();
+                let r = rect_of_sized(&app, Target::Line(line), (w, h)).unwrap();
+                let (cx, cy) = r.centre();
+                let out = click_sized(&mut app, Target::Line(line), MouseButton::Left, (w, h));
+                assert_eq!(
+                    out,
+                    EventResult::Consumed,
+                    "{w}x{h}: a click at ({cx}, {cy}) on {line:?} was ignored"
+                );
+                assert!(
+                    app.board.is_line_drawn(line),
+                    "{w}x{h}: clicking {line:?} drew something else"
+                );
+                assert_eq!(
+                    app.moves_made(),
+                    1,
+                    "{w}x{h}: clicking {line:?} drew {} lines",
+                    app.moves_made()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_click_where_no_line_is_does_nothing() {
+        let mut app = two_player_app();
+        let size = (560.0, 620.0);
+        let l = Layout::solve(size.0, size.1, app.grid_size());
+        // The centre of the first box: as far from any of its four sides as a
+        // point on the board can be.
+        let (x1, y1) = l.dot_pos(0, 0);
+        let (x2, y2) = l.dot_pos(1, 1);
+        let out = app.click_at(
+            f32::midpoint(x1, x2),
+            f32::midpoint(y1, y2),
+            MouseButton::Left,
+            size,
+        );
+        assert_eq!(out, EventResult::Ignored);
+        assert_eq!(app.moves_made(), 0);
+    }
+
+    #[test]
+    fn a_line_already_drawn_stops_offering_a_hit_box() {
+        let mut app = two_player_app();
+        let size = (560.0, 620.0);
+        let line = LineId::horizontal(1, 1);
+        assert!(is_visible_sized(&app, Target::Line(line), size));
+        assert!(app.try_place_line(line));
+        assert!(
+            !is_visible_sized(&app, Target::Line(line), size),
+            "a drawn line still answered the pointer"
+        );
+    }
+
+    #[test]
+    fn the_board_stops_answering_the_pointer_while_the_ai_thinks() {
+        let mut app = test_app();
+        let size = (560.0, 620.0);
+        assert!(app.try_place_line(LineId::horizontal(0, 0)));
+        assert!(app.ai_pending, "the AI's turn did not begin");
+        assert!(
+            hit_boxes(&app, size)
+                .iter()
+                .all(|(t, _)| !matches!(t, Target::Line(_))),
+            "lines were still clickable while the AI was thinking"
+        );
+        // ...and the buttons still are, so the player can start a new game.
+        assert!(is_visible_sized(&app, Target::NewGame, size));
+    }
+
+    #[test]
+    fn the_click_resolves_against_the_window_the_player_can_see() {
+        // `handle_mouse` hit-tests the frame at `self.size`, which `render`
+        // last set. Resizing and then clicking where a line now is must draw
+        // that line -- the fault this replaces was a click resolved against
+        // the 560x620 the app opened at, wherever the window had got to.
+        let big = (1280.0, 900.0);
+        let mut app = two_player_app();
+        app.render(big.0, big.1);
+        let line = LineId::vertical(1, 2);
+        let l = Layout::solve(big.0, big.1, app.grid_size());
+        let (cx, cy) = l.line_box(line).centre();
+        let out = app.handle_event(&Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(out, EventResult::Consumed);
+        assert!(app.board.is_line_drawn(line));
+    }
+
+    #[test]
+    fn a_new_game_keeps_the_window_the_player_resized_to() {
+        let big = (1280.0, 900.0);
+        let mut app = two_player_app();
+        app.render(big.0, big.1);
+        app.activate(Target::NewGame);
+        assert_eq!(
+            app.size, big,
+            "New reset the window back to the size the app opened at"
+        );
+        app.activate(Target::Size(5));
+        assert_eq!(app.size, big, "the size buttons reset the window");
+    }
+
+    // ── The buttons ────────────────────────────────────────────────
+
+    #[test]
+    fn every_footer_button_is_drawn_inside_the_footer() {
+        let app = test_app();
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, app.grid_size());
+            for (target, r) in hit_boxes(&app, (w, h)) {
+                if matches!(target, Target::Line(_)) {
+                    continue;
+                }
+                assert!(
+                    r.x >= l.footer.x - 0.01
+                        && r.y >= l.footer.y - 0.01
+                        && r.right() <= l.footer.right() + 0.01
+                        && r.bottom() <= l.footer.bottom() + 0.01,
+                    "{w}x{h}: {target:?} at {r:?} is outside the footer {:?}",
+                    l.footer
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_buttons_and_the_keys_do_the_same_thing() {
+        let size = (800.0, 700.0);
+        for (key, target) in [
+            (Key::N, Target::NewGame),
+            (Key::M, Target::Mode),
+            (Key::Num3, Target::Size(3)),
+            (Key::Num5, Target::Size(5)),
+        ] {
+            let mut by_key = DotsAndBoxes::with_config(4, GameMode::VsAi, 7);
+            let mut by_click = DotsAndBoxes::with_config(4, GameMode::VsAi, 7);
+            by_key.key_at(&press(key), size);
+            click_sized(&mut by_click, target, MouseButton::Left, size);
+            assert_eq!(
+                (by_key.grid_size(), by_key.mode),
+                (by_click.grid_size(), by_click.mode),
+                "{key:?} and {target:?} disagree"
             );
         }
     }
 
-    // ── Geometry helper ────────────────────────────────────────────
-
     #[test]
-    fn test_point_on_segment() {
-        let dist = point_to_segment_distance(5.0, 0.0, 0.0, 0.0, 10.0, 0.0);
-        assert!(dist < 0.01);
+    fn the_size_buttons_set_the_size_they_are_labelled_with() {
+        let size = (800.0, 700.0);
+        for n in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let mut app = test_app();
+            click_sized(&mut app, Target::Size(n), MouseButton::Left, size);
+            assert_eq!(
+                app.grid_size(),
+                n,
+                "the {n}x{n} button gave a different board"
+            );
+            assert_eq!(app.board.boxes.len(), n - 1);
+        }
     }
 
     #[test]
-    fn test_point_perpendicular_to_segment() {
-        let dist = point_to_segment_distance(5.0, 3.0, 0.0, 0.0, 10.0, 0.0);
-        assert!((dist - 3.0).abs() < 0.01);
+    fn the_mode_button_swaps_the_opponent_and_starts_over() {
+        let size = (800.0, 700.0);
+        let mut app = two_player_app();
+        assert!(app.try_place_line(LineId::horizontal(0, 0)));
+        click_sized(&mut app, Target::Mode, MouseButton::Left, size);
+        assert_eq!(app.mode, GameMode::VsAi);
+        assert_eq!(app.moves_made(), 0, "the mode button kept the old board");
+        click_sized(&mut app, Target::Mode, MouseButton::Left, size);
+        assert_eq!(app.mode, GameMode::TwoPlayer);
     }
 
     #[test]
-    fn test_point_beyond_segment_end() {
-        let dist = point_to_segment_distance(15.0, 0.0, 0.0, 0.0, 10.0, 0.0);
-        assert!((dist - 5.0).abs() < 0.01);
+    fn a_footer_too_narrow_for_a_button_leaves_it_out_rather_than_off_the_edge() {
+        // Five buttons and a help line do not fit in a 60px-wide footer.
+        // Whatever is drawn must still be whole and inside. (140px was the
+        // first width tried here and all five fit: at that width the type is
+        // small enough that "New", "vs AI" and three "NxN"s come to 100px.)
+        let app = test_app();
+        let size = (60.0, 900.0);
+        let l = Layout::solve(size.0, size.1, app.grid_size());
+        let buttons: Vec<(Target, Rect)> = hit_boxes(&app, size)
+            .into_iter()
+            .filter(|(t, _)| !matches!(t, Target::Line(_)))
+            .collect();
+        assert!(
+            buttons.len() < 5,
+            "all five buttons claimed to fit in 140px: {buttons:?}"
+        );
+        for (target, r) in buttons {
+            assert!(
+                r.right() <= l.footer.right() - l.pad + 0.01,
+                "{target:?} at {r:?} runs past the footer's right margin"
+            );
+        }
+    }
+
+    // ── The board ──────────────────────────────────────────────────
+
+    #[test]
+    fn a_board_has_the_lines_and_boxes_its_grid_size_calls_for() {
+        for n in MIN_GRID_SIZE..=MAX_GRID_SIZE {
+            let b = Board::new(n);
+            assert_eq!(b.grid_size, n);
+            assert_eq!(b.boxes_per_side(), n - 1);
+            assert_eq!(b.h_lines.len(), n, "{n}: horizontal rows");
+            assert_eq!(b.h_lines[0].len(), n - 1, "{n}: horizontal columns");
+            assert_eq!(b.v_lines.len(), n - 1, "{n}: vertical rows");
+            assert_eq!(b.v_lines[0].len(), n, "{n}: vertical columns");
+            assert_eq!(b.boxes.len(), n - 1);
+            assert_eq!(b.available_lines().len(), 2 * n * (n - 1));
+            assert_eq!(b.drawn_line_count(), 0);
+            assert!(!b.all_lines_drawn());
+        }
     }
 
     #[test]
-    fn test_point_before_segment_start() {
-        let dist = point_to_segment_distance(-3.0, 4.0, 0.0, 0.0, 10.0, 0.0);
-        // Distance from (-3, 4) to (0, 0) = 5.
-        assert!((dist - 5.0).abs() < 0.01);
+    fn a_line_is_drawn_once_and_only_the_lines_that_exist_are() {
+        let mut b = Board::new(4);
+        let line = LineId::horizontal(1, 2);
+        assert!(b.is_available(line));
+        assert_eq!(b.draw_line(line, Player::One), Some(0));
+        assert!(b.is_line_drawn(line));
+        assert_eq!(b.drawn_line_count(), 1);
+        // A refusal is `None`, not `Some(0)`: "there was no line to draw" and
+        // "the line completed no box" are the difference between passing the
+        // turn and keeping it, and they used to be the same answer.
+        assert!(!b.is_available(line));
+        assert_eq!(b.draw_line(line, Player::Two), None);
+        assert_eq!(b.drawn_line_count(), 1);
+        for bad in [
+            LineId::horizontal(0, 3),
+            LineId::horizontal(4, 0),
+            LineId::vertical(3, 0),
+            LineId::vertical(0, 4),
+        ] {
+            assert!(!b.is_valid_line(bad), "{bad:?} was accepted");
+            assert!(!b.is_available(bad), "{bad:?} was offered");
+            assert_eq!(b.draw_line(bad, Player::One), None, "{bad:?} was drawn");
+        }
+        assert_eq!(b.drawn_line_count(), 1);
+        // Every line the board does have is available on an empty board, and
+        // none of them is once it has been played.
+        let mut full = Board::new(4);
+        let all = full.available_lines();
+        assert_eq!(all.len(), 24, "a 4x4 board has 24 lines");
+        for line in &all {
+            assert!(full.is_available(*line), "{line:?} was not on offer");
+            assert!(
+                full.draw_line(*line, Player::One).is_some(),
+                "{line:?} was refused"
+            );
+            assert!(!full.is_available(*line), "{line:?} was still on offer");
+        }
+        assert!(full.available_lines().is_empty());
     }
 
     #[test]
-    fn test_degenerate_segment() {
-        let dist = point_to_segment_distance(3.0, 4.0, 0.0, 0.0, 0.0, 0.0);
-        assert!((dist - 5.0).abs() < 0.01);
-    }
-
-    // ── Orientation ────────────────────────────────────────────────
-
-    #[test]
-    fn test_orientation_equality() {
-        assert_eq!(Orientation::Horizontal, Orientation::Horizontal);
-        assert_ne!(Orientation::Horizontal, Orientation::Vertical);
-    }
-
-    // ── LineId ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_line_id_equality() {
-        let a = LineId::horizontal(0, 0);
-        let b = LineId::horizontal(0, 0);
-        assert_eq!(a, b);
-    }
-
-    #[test]
-    fn test_line_id_inequality() {
-        let a = LineId::horizontal(0, 0);
-        let b = LineId::vertical(0, 0);
-        assert_ne!(a, b);
+    fn a_box_is_complete_when_and_only_when_it_has_four_sides() {
+        let mut b = Board::new(3);
+        let sides = [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(1, 0),
+            LineId::vertical(0, 0),
+            LineId::vertical(0, 1),
+        ];
+        for (i, line) in sides.iter().enumerate() {
+            assert_eq!(b.box_side_count(0, 0), i, "before side {i}");
+            assert!(!b.is_box_complete(0, 0), "complete after {i} sides");
+            let completed = b.draw_line(*line, Player::One);
+            assert_eq!(
+                completed,
+                Some(usize::from(i == SIDES_PER_BOX - 1)),
+                "side {i} reported {completed:?} boxes"
+            );
+        }
+        assert_eq!(b.box_side_count(0, 0), SIDES_PER_BOX);
+        assert!(b.is_box_complete(0, 0));
+        assert_eq!(b.boxes[0][0], Some(Player::One));
+        assert_eq!(b.score(Player::One), 1);
+        assert_eq!(b.score(Player::Two), 0);
     }
 
     #[test]
-    fn test_line_id_constructors() {
-        let h = LineId::horizontal(1, 2);
-        assert_eq!(h.orientation, Orientation::Horizontal);
-        assert_eq!(h.row, 1);
-        assert_eq!(h.col, 2);
-
-        let v = LineId::vertical(3, 4);
-        assert_eq!(v.orientation, Orientation::Vertical);
-        assert_eq!(v.row, 3);
-        assert_eq!(v.col, 4);
+    fn a_box_off_the_board_has_no_sides_and_is_never_complete() {
+        // On an *empty* board every side reads false wherever you ask, so the
+        // bail that rejects an off-board box and the absence of it give the
+        // same answer and the test proves nothing (lesson 90). Every line is
+        // drawn here, so a box one past the edge borrows real sides from the
+        // rows and columns that do exist: (2, 0) would pick up the bottom
+        // wall and (0, 2) the right-hand one, and each counts 1 without it.
+        let mut b = Board::new(3);
+        for line in b.available_lines() {
+            set(&mut b, line);
+        }
+        assert!(b.all_lines_drawn());
+        assert_eq!(b.box_side_count(1, 1), SIDES_PER_BOX, "the last real box");
+        for (r, c) in [(2, 0), (0, 2), (2, 2), (9, 9)] {
+            assert_eq!(b.box_side_count(r, c), 0, "({r}, {c})");
+            assert!(!b.is_box_complete(r, c), "({r}, {c})");
+        }
     }
 
-    // ── Randomness, as the game uses it ────────────────────────────
-    //
-    // The three tests that were here checked that the private generator was
-    // deterministic, differed by seed, and stayed inside its bound. That is
-    // `randrange`'s contract now, tested there against the real hazards. These
-    // test what *this game* needs.
-
-    /// `new()` must take its seed from the system rather than a literal.
-    ///
-    /// Checked by *which* seed, not by variety: the host test toolchain has no
-    /// SlateOS kernel, so `seed_from_system` correctly returns the fallback and
-    /// two fresh games agree there -- exactly as they did under the old
-    /// hardcoded `42`. On real hardware the same line reaches the kernel.
     #[test]
-    #[cfg(not(unix))]
-    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
-        let mut fresh = DotsAndBoxes::new();
+    fn one_line_can_complete_two_boxes_at_once() {
+        // Both orientations, because a line's two boxes are found by two
+        // separate arms: a horizontal line looks above and below, a vertical
+        // one left and right. A test that plays only the vertical case calls
+        // the rule covered while never once entering the other arm -- which
+        // is how deleting "the box above a horizontal line" survived a sweep.
+        let mut vertical = Board::new(3);
+        // Both boxes of the top row, everything but the wall between them.
+        for line in [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(0, 1),
+            LineId::horizontal(1, 0),
+            LineId::horizontal(1, 1),
+            LineId::vertical(0, 0),
+            LineId::vertical(0, 2),
+        ] {
+            assert_eq!(vertical.draw_line(line, Player::One), Some(0), "{line:?}");
+        }
         assert_eq!(
-            fresh.rng.next_u64(),
-            SeededRng::new(FALLBACK_SEED).next_u64()
+            vertical.draw_line(LineId::vertical(0, 1), Player::Two),
+            Some(2)
+        );
+        assert_eq!(vertical.score(Player::Two), 2);
+
+        let mut horizontal = Board::new(3);
+        // Both boxes of the left column, everything but the floor between them.
+        for line in [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(2, 0),
+            LineId::vertical(0, 0),
+            LineId::vertical(0, 1),
+            LineId::vertical(1, 0),
+            LineId::vertical(1, 1),
+        ] {
+            assert_eq!(horizontal.draw_line(line, Player::One), Some(0), "{line:?}");
+        }
+        assert_eq!(
+            horizontal.draw_line(LineId::horizontal(1, 0), Player::Two),
+            Some(2)
+        );
+        assert_eq!(horizontal.score(Player::Two), 2);
+    }
+
+    #[test]
+    fn a_line_borders_the_boxes_on_either_side_of_it_and_no_others() {
+        let b = Board::new(4);
+        assert_eq!(b.adjacent_boxes(LineId::horizontal(0, 0)), vec![(0, 0)]);
+        assert_eq!(
+            b.adjacent_boxes(LineId::horizontal(1, 1)),
+            vec![(0, 1), (1, 1)]
+        );
+        assert_eq!(b.adjacent_boxes(LineId::horizontal(3, 2)), vec![(2, 2)]);
+        assert_eq!(b.adjacent_boxes(LineId::vertical(0, 0)), vec![(0, 0)]);
+        assert_eq!(
+            b.adjacent_boxes(LineId::vertical(1, 1)),
+            vec![(1, 0), (1, 1)]
+        );
+        assert_eq!(b.adjacent_boxes(LineId::vertical(2, 3)), vec![(2, 2)]);
+    }
+
+    #[test]
+    fn every_box_is_claimed_by_the_time_every_line_is_drawn() {
+        let mut app = two_player_app();
+        let lines: Vec<LineId> = app.all_lines().collect();
+        for line in lines {
+            app.try_place_line(line);
+        }
+        assert!(app.board.all_lines_drawn());
+        assert_eq!(app.phase, GamePhase::GameOver);
+        let boxes = app.boxes_per_side() * app.boxes_per_side();
+        assert_eq!(
+            app.score(Player::One) + app.score(Player::Two),
+            boxes,
+            "{} boxes went unclaimed",
+            boxes - app.score(Player::One) - app.score(Player::Two)
+        );
+    }
+
+    // ── Turns ──────────────────────────────────────────────────────
+
+    #[test]
+    fn a_move_that_completes_nothing_passes_the_turn() {
+        let mut app = two_player_app();
+        assert_eq!(app.current_player, Player::One);
+        assert!(app.try_place_line(LineId::horizontal(0, 0)));
+        assert_eq!(app.current_player, Player::Two);
+        assert!(app.try_place_line(LineId::horizontal(2, 2)));
+        assert_eq!(app.current_player, Player::One);
+    }
+
+    #[test]
+    fn a_move_that_completes_a_box_keeps_the_turn() {
+        let mut app = two_player_app();
+        for line in [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(2, 2),
+            LineId::horizontal(1, 0),
+            LineId::horizontal(2, 1),
+            LineId::vertical(0, 0),
+        ] {
+            app.try_place_line(line);
+        }
+        // Five moves in, whoever is to play completes the first box with the
+        // sixth. Which of the two that is depends on the count, so the claim
+        // is about the *mover* rather than about Player::One.
+        let mover = app.current_player;
+        assert!(app.try_place_line(LineId::vertical(0, 1)));
+        assert_eq!(app.score(mover), 1);
+        assert_eq!(
+            app.current_player, mover,
+            "completing a box handed the turn over"
+        );
+    }
+
+    #[test]
+    fn the_board_takes_no_moves_once_the_game_is_over() {
+        let mut app = two_player_app();
+        let lines: Vec<LineId> = app.all_lines().collect();
+        for line in &lines {
+            app.try_place_line(*line);
+        }
+        assert_eq!(app.phase, GamePhase::GameOver);
+        let mut fresh = two_player_app();
+        fresh.phase = GamePhase::GameOver;
+        assert!(!fresh.try_place_line(LineId::horizontal(0, 0)));
+        assert_eq!(fresh.moves_made(), 0);
+        assert!(!fresh.accepts_moves());
+    }
+
+    #[test]
+    fn the_winner_is_whoever_has_the_most_boxes() {
+        let mut app = two_player_app();
+        assert_eq!(app.winner(), None, "an empty board has a winner");
+        app.board.boxes[0][0] = Some(Player::One);
+        assert_eq!(app.winner(), Some(Player::One));
+        app.board.boxes[0][1] = Some(Player::Two);
+        app.board.boxes[1][0] = Some(Player::Two);
+        assert_eq!(app.winner(), Some(Player::Two));
+        app.board.boxes[1][1] = Some(Player::One);
+        assert_eq!(app.winner(), None, "two apiece is not a draw");
+    }
+
+    #[test]
+    fn the_readouts_are_the_board_and_not_a_second_copy_of_it() {
+        // `score_p1`, `score_p2` and `total_moves` were fields, raised by hand
+        // in two places. They are derived now, so a board reached by *any*
+        // route reports itself correctly -- including one edited directly,
+        // which no assignment site would ever have seen.
+        let mut app = two_player_app();
+        set(&mut app.board, LineId::horizontal(0, 0));
+        app.board.boxes[1][1] = Some(Player::Two);
+        assert_eq!(app.moves_made(), 1);
+        assert_eq!(app.score(Player::Two), 1);
+        assert_eq!(app.score(Player::One), 0);
+        // The move count is both grids added together, and a fixture that
+        // draws one horizontal line cannot tell that from either grid alone.
+        set(&mut app.board, LineId::vertical(0, 0));
+        assert_eq!(app.moves_made(), 2, "the vertical grid was not counted");
+        set(&mut app.board, LineId::vertical(1, 2));
+        set(&mut app.board, LineId::horizontal(2, 1));
+        assert_eq!(app.moves_made(), 4);
+        // Whatever has been drawn, drawn plus available is every line there is.
+        let total = app
+            .grid_size()
+            .saturating_mul(app.boxes_per_side())
+            .saturating_mul(2);
+        assert_eq!(
+            app.moves_made()
+                .saturating_add(app.board.available_lines().len()),
+            total
+        );
+    }
+
+    // ── The cursor ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_cursor_is_a_line_and_always_a_line_that_exists() {
+        let mut app = test_app();
+        assert_eq!(app.cursor, LineId::horizontal(0, 0));
+        // Walk it a long way in every direction and check it never leaves the
+        // board. The wrap and the orientation flip are the two places it could.
+        for key in [Key::Right, Key::Down, Key::Left, Key::Up] {
+            for _ in 0..40 {
+                app.move_cursor(key);
+                assert!(
+                    app.board.is_valid_line(app.cursor),
+                    "{key:?} walked the cursor to {:?}",
+                    app.cursor
+                );
+            }
+        }
+        for _ in 0..8 {
+            app.toggle_cursor_orientation();
+            assert!(app.board.is_valid_line(app.cursor));
+        }
+    }
+
+    #[test]
+    fn the_cursor_wraps_within_its_row_and_flips_between_the_two_grids() {
+        let mut app = test_app(); // 4 dots: h is 4x3, v is 3x4
+        app.cursor = LineId::horizontal(0, 2);
+        app.move_cursor(Key::Right);
+        assert_eq!(app.cursor, LineId::horizontal(0, 0), "right did not wrap");
+        app.move_cursor(Key::Left);
+        assert_eq!(app.cursor, LineId::horizontal(0, 2), "left did not wrap");
+        // Up off the top of the horizontal grid enters the vertical one at its
+        // bottom row, with the column clamped to what that grid has.
+        app.move_cursor(Key::Up);
+        assert_eq!(app.cursor, LineId::vertical(2, 2));
+        // ...and down off the bottom of the vertical grid re-enters the
+        // horizontal one at row 0.
+        app.move_cursor(Key::Down);
+        assert_eq!(app.cursor, LineId::horizontal(0, 2));
+        // The clamp on that flip only binds from the wider grid to the
+        // narrower one, and the walk above never visits a column the
+        // destination lacks: vertical is four columns wide and horizontal
+        // three, so the crossing has to start at vertical column 3 for the
+        // clamp to do anything at all.
+        app.cursor = LineId::vertical(2, 3);
+        app.move_cursor(Key::Down);
+        assert_eq!(
+            app.cursor,
+            LineId::horizontal(0, 2),
+            "the cursor kept a column the horizontal grid does not have"
+        );
+        assert!(app.board.is_valid_line(app.cursor));
+        app.cursor = LineId::vertical(0, 3);
+        app.move_cursor(Key::Up);
+        assert_eq!(app.cursor, LineId::horizontal(3, 2));
+        assert!(app.board.is_valid_line(app.cursor));
+    }
+
+    #[test]
+    fn a_toggle_clamps_the_cursor_into_the_grid_it_lands_in() {
+        let mut app = test_app();
+        // Horizontal row 3 exists; vertical row 3 does not.
+        app.cursor = LineId::horizontal(3, 0);
+        app.toggle_cursor_orientation();
+        assert_eq!(app.cursor, LineId::vertical(2, 0));
+        // Vertical column 3 exists; horizontal column 3 does not.
+        app.cursor = LineId::vertical(0, 3);
+        app.toggle_cursor_orientation();
+        assert_eq!(app.cursor, LineId::horizontal(0, 2));
+    }
+
+    #[test]
+    fn the_cursor_does_not_move_when_the_board_is_not_taking_moves() {
+        let size = (560.0, 620.0);
+        for freeze in [GamePhase::GameOver, GamePhase::Playing] {
+            let mut app = test_app();
+            app.phase = freeze;
+            app.ai_pending = freeze == GamePhase::Playing;
+            assert!(!app.accepts_moves());
+            let before = app.cursor;
+            for key in [Key::Right, Key::Down, Key::Tab, Key::Enter] {
+                assert_eq!(
+                    app.key_at(&press(key), size),
+                    EventResult::Ignored,
+                    "{key:?} was taken with the board frozen"
+                );
+            }
+            assert_eq!(app.cursor, before);
+            assert_eq!(app.moves_made(), 0);
+        }
+    }
+
+    #[test]
+    fn enter_and_space_draw_the_line_the_cursor_points_at() {
+        let size = (560.0, 620.0);
+        for key in [Key::Enter, Key::Space] {
+            let mut app = two_player_app();
+            app.cursor = LineId::vertical(1, 2);
+            assert_eq!(app.key_at(&press(key), size), EventResult::Consumed);
+            assert!(
+                app.board.is_line_drawn(LineId::vertical(1, 2)),
+                "{key:?} drew nothing"
+            );
+            // A second press on the same line changes nothing.
+            assert_eq!(app.key_at(&press(key), size), EventResult::Ignored);
+            assert_eq!(app.moves_made(), 1);
+        }
+    }
+
+    #[test]
+    fn a_key_release_is_not_a_key_press() {
+        let mut app = two_player_app();
+        let mut release = press(Key::Enter);
+        release.pressed = false;
+        assert_eq!(app.handle_event(&Event::Key(release)), EventResult::Ignored);
+        assert_eq!(app.moves_made(), 0);
+    }
+
+    // ── The AI ─────────────────────────────────────────────────────
+
+    #[test]
+    fn the_ai_takes_a_box_it_can_complete() {
+        let mut b = Board::new(3);
+        for line in [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(1, 0),
+            LineId::vertical(0, 0),
+        ] {
+            set(&mut b, line);
+        }
+        // Every seed, not one. Completing a box is also a *safe* move -- it
+        // takes a box to four sides, not to three -- so the line that captures
+        // is in the pool the fallback picks at random from, and an AI with no
+        // capture phase at all lands on it often enough that a single lucky
+        // seed reads exactly like a working one.
+        for seed in 0..30u64 {
+            let mut rng = SeededRng::new(seed);
+            assert_eq!(
+                ai_choose_line(&b, &mut rng),
+                Some(LineId::vertical(0, 1)),
+                "seed {seed}: the AI left a box on three sides"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ai_prefers_the_line_that_completes_two_boxes() {
+        let mut b = Board::new(3);
+        // Both top boxes on three sides, sharing the wall between them --
+        // and a *third* box on three sides of its own, so that there are two
+        // captures to choose between. With only the pair, the one line that
+        // captures anything is both the most and the least of them, and
+        // "prefers the larger" is a claim the position cannot test at all.
+        for line in [
+            LineId::horizontal(0, 0),
+            LineId::horizontal(0, 1),
+            LineId::horizontal(1, 0),
+            LineId::horizontal(1, 1),
+            LineId::vertical(0, 0),
+            LineId::vertical(0, 2),
+            LineId::vertical(1, 0),
+            LineId::vertical(1, 1),
+        ] {
+            set(&mut b, line);
+        }
+        let two = LineId::vertical(0, 1);
+        let one = LineId::horizontal(2, 0);
+        assert_eq!(b.box_side_count(0, 0), 3, "the first of the pair");
+        assert_eq!(b.box_side_count(0, 1), 3, "the second of the pair");
+        assert_eq!(b.box_side_count(1, 0), 3, "the single box");
+        for seed in 0..30u64 {
+            let mut rng = SeededRng::new(seed);
+            assert_eq!(
+                ai_choose_line(&b, &mut rng),
+                Some(two),
+                "seed {seed}: the AI took {one:?}, which is worth one box"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ai_does_not_hand_over_a_box_while_a_safe_line_is_left() {
+        let mut b = Board::new(4);
+        // Put one box on two sides. Its two remaining sides are the gift.
+        set(&mut b, LineId::horizontal(0, 0));
+        set(&mut b, LineId::vertical(0, 0));
+        let gifts = [LineId::horizontal(1, 0), LineId::vertical(0, 1)];
+        for seed in 0..20u64 {
+            let mut rng = SeededRng::new(seed);
+            let choice = ai_choose_line(&b, &mut rng).unwrap();
+            assert!(
+                !gifts.contains(&choice),
+                "seed {seed}: the AI played {choice:?}, handing over box (0, 0)"
+            );
+        }
+    }
+
+    #[test]
+    fn the_ai_has_nothing_to_say_about_a_board_with_no_lines_left() {
+        let mut b = Board::new(3);
+        let all: Vec<LineId> = {
+            let bps = b.boxes_per_side();
+            (0..b.grid_size)
+                .flat_map(|r| (0..bps).map(move |c| LineId::horizontal(r, c)))
+                .chain((0..bps).flat_map(|r| (0..b.grid_size).map(move |c| LineId::vertical(r, c))))
+                .collect()
+        };
+        for line in all {
+            set(&mut b, line);
+        }
+        let mut rng = SeededRng::new(5);
+        assert_eq!(ai_choose_line(&b, &mut rng), None);
+    }
+
+    #[test]
+    fn the_ai_waits_before_it_moves_so_that_thinking_is_a_frame_and_not_a_word() {
+        let mut app = test_app();
+        assert!(app.try_place_line(LineId::horizontal(0, 0)));
+        assert!(app.ai_pending);
+        assert_eq!(app.moves_made(), 1);
+        // Short of the delay, nothing happens.
+        assert_eq!(
+            app.handle_tick(AI_DELAY - 1),
+            EventResult::Ignored,
+            "the AI moved early"
+        );
+        assert_eq!(app.moves_made(), 1);
+        assert!(app.ai_pending, "the wait ended without a move");
+        // At the delay, it plays.
+        assert_eq!(app.handle_tick(1), EventResult::Consumed);
+        assert_eq!(app.moves_made(), 2);
+    }
+
+    #[test]
+    fn a_tick_with_no_ai_waiting_changes_nothing() {
+        let mut app = two_player_app();
+        assert_eq!(app.handle_tick(10_000), EventResult::Ignored);
+        assert_eq!(app.moves_made(), 0);
+        assert_eq!(app.current_player, Player::One);
+    }
+
+    #[test]
+    fn the_ai_keeps_playing_while_it_keeps_completing_boxes() {
+        let mut app = test_app();
+        // Leave box (0, 0) on three sides with the AI to move.
+        set(&mut app.board, LineId::horizontal(0, 0));
+        set(&mut app.board, LineId::horizontal(1, 0));
+        set(&mut app.board, LineId::vertical(0, 0));
+        app.current_player = Player::Two;
+        app.ai_pending = true;
+        assert_eq!(app.handle_tick(AI_DELAY), EventResult::Consumed);
+        assert_eq!(app.score(Player::Two), 1);
+        assert!(
+            app.ai_pending,
+            "the AI completed a box and handed the turn back anyway"
+        );
+    }
+
+    #[test]
+    fn a_whole_game_against_the_ai_ends_with_every_line_drawn() {
+        let mut app = test_app();
+        for _ in 0..500 {
+            if app.phase == GamePhase::GameOver {
+                break;
+            }
+            if app.ai_pending {
+                app.handle_tick(AI_DELAY);
+                continue;
+            }
+            let Some(line) = app.all_lines().find(|l| !app.board.is_line_drawn(*l)) else {
+                break;
+            };
+            app.try_place_line(line);
+        }
+        assert_eq!(app.phase, GamePhase::GameOver, "the game never finished");
+        assert!(app.board.all_lines_drawn());
+        assert_eq!(
+            app.score(Player::One) + app.score(Player::Two),
+            app.boxes_per_side() * app.boxes_per_side()
+        );
+    }
+
+    // ── The seed ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_fresh_game_is_seeded_by_the_system_and_not_by_a_literal() {
+        // The file used to carry its own LCG seeded with `42`, so every match
+        // against the computer played out identically from the same position.
+        //
+        // On a host with no kernel entropy source `seed_from_system` returns
+        // the fallback, so this cannot assert that two fresh games differ --
+        // it asserts the seed is the crate's fallback and *not* the literal
+        // this replaces.
+        let fresh = DotsAndBoxes::new().rng.next_u64();
+        assert_eq!(
+            fresh,
+            SeededRng::new(FALLBACK_SEED).next_u64(),
+            "a fresh game did not use the crate's fallback seed"
         );
         assert_ne!(
-            DotsAndBoxes::new().rng.next_u64(),
+            fresh,
             SeededRng::new(42).next_u64(),
-            "back on a hardcoded seed"
+            "a fresh game is still seeded by the old hardcoded literal"
         );
     }
 
-    /// The AI's tie-breaking must actually vary with the generator, which is
-    /// the property the fixed seed made unobservable.
+    #[test]
+    fn a_new_game_does_not_replay_the_last_one() {
+        // The claim is that *successive* games differ, which is not what
+        // "the new game differs from the old" asserts: seeding every new game
+        // from one constant satisfies the latter (the constant is not the
+        // seed the session started with) while making every game after the
+        // first identical, which is the exact bug being guarded against.
+        let mut app = test_app();
+        let mut seen = std::collections::BTreeSet::new();
+        seen.insert(app.rng.clone().next_u64());
+        for round in 0..5 {
+            app.new_game();
+            assert!(
+                seen.insert(app.rng.clone().next_u64()),
+                "new game {round} dealt a game already played"
+            );
+        }
+        // The size buttons deal too, and from the same stream.
+        for round in 0..3 {
+            app.new_game_with_size(MIN_GRID_SIZE);
+            assert!(
+                seen.insert(app.rng.clone().next_u64()),
+                "resize {round} dealt a game already played"
+            );
+        }
+    }
+
     #[test]
     fn the_ai_breaks_ties_differently_under_different_seeds() {
-        let board = Board::new(DEFAULT_GRID_SIZE);
-        let mut seen: Vec<LineId> = Vec::new();
-        for seed in 0..30 {
+        let b = Board::new(5);
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..30u64 {
             let mut rng = SeededRng::new(seed);
-            if let Some(line) = ai_choose_line(&board, &mut rng)
-                && !seen.contains(&line)
-            {
-                seen.push(line);
+            if let Some(line) = ai_choose_line(&b, &mut rng) {
+                seen.insert((
+                    line.orientation == Orientation::Vertical,
+                    line.row,
+                    line.col,
+                ));
             }
         }
         assert!(
             seen.len() > 1,
-            "the AI opened with one line under all 30 seeds"
+            "thirty seeds all opened with the same line: {seen:?}"
         );
     }
 
-    /// A new game must not replay the one before it. `new_game` reseeds from
-    /// the live generator, so consecutive games differ by construction.
+    // ── New game ───────────────────────────────────────────────────
+
     #[test]
-    fn a_new_game_does_not_replay_the_last_one() {
-        let mut game = DotsAndBoxes::with_config(DEFAULT_GRID_SIZE, GameMode::VsAi, 7);
-        let first = game.rng.next_u64();
-        game.new_game();
-        assert_ne!(first, game.rng.next_u64());
+    fn a_new_game_clears_the_board_and_keeps_the_settings() {
+        let mut app = two_player_app();
+        app.try_place_line(LineId::horizontal(0, 0));
+        app.phase = GamePhase::GameOver;
+        app.new_game();
+        assert_eq!(app.moves_made(), 0);
+        assert_eq!(app.score(Player::One), 0);
+        assert_eq!(app.phase, GamePhase::Playing);
+        assert_eq!(app.current_player, Player::One);
+        assert_eq!(app.grid_size(), 4, "New changed the board size");
+        assert_eq!(app.mode, GameMode::TwoPlayer, "New changed the opponent");
+        assert!(!app.ai_pending);
     }
 
-    // ── Full game simulation ───────────────────────────────────────
+    #[test]
+    fn the_grid_size_is_clamped_to_the_sizes_that_exist() {
+        assert_eq!(
+            DotsAndBoxes::with_config(1, GameMode::VsAi, 1).grid_size(),
+            MIN_GRID_SIZE
+        );
+        assert_eq!(
+            DotsAndBoxes::with_config(99, GameMode::VsAi, 1).grid_size(),
+            MAX_GRID_SIZE
+        );
+    }
+
+    // ── The end of the game ────────────────────────────────────────
 
     #[test]
-    fn test_full_game_two_player_3x3() {
-        let mut app = DotsAndBoxes::with_config(3, GameMode::TwoPlayer, 7);
-        let gs = app.grid_size();
-        let bps = app.boxes_per_side();
-        // Draw all horizontal then all vertical lines.
-        for row in 0..gs {
-            for col in 0..bps {
-                app.try_place_line(LineId::horizontal(row, col));
-            }
-        }
-        for row in 0..bps {
-            for col in 0..gs {
-                app.try_place_line(LineId::vertical(row, col));
-            }
+    fn the_game_over_card_fits_the_window_it_is_drawn_in() {
+        let mut app = small_app();
+        let lines: Vec<LineId> = app.all_lines().collect();
+        for line in lines {
+            app.try_place_line(line);
         }
         assert_eq!(app.phase, GamePhase::GameOver);
-        assert_eq!(app.score_p1 + app.score_p2, app.board.total_boxes());
-    }
-
-    #[test]
-    fn test_full_game_vs_ai() {
-        let mut app = DotsAndBoxes::with_config(3, GameMode::VsAi, 42);
-        // Simulate a game: player draws some lines, AI fills rest.
-        let mut max_turns = 100;
-        while app.phase != GamePhase::GameOver && max_turns > 0 {
-            if app.ai_pending {
-                app.handle_event(&make_tick(AI_DELAY + 50));
-            } else {
-                let available = app.board.available_lines();
-                if let Some(&line) = available.first() {
-                    app.try_place_line(line);
-                } else {
-                    break;
-                }
+        for (w, h) in SIZES {
+            for r in painted_rects(&app, (w, h)) {
+                assert!(
+                    r.x >= -0.01 && r.y >= -0.01 && r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
+                    "{w}x{h}: the end card painted {r:?} outside the window"
+                );
             }
-            max_turns -= 1;
         }
-        assert_eq!(app.phase, GamePhase::GameOver);
-        assert_eq!(app.score_p1 + app.score_p2, app.board.total_boxes());
-    }
-
-    // ── Edge cases ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_board_3x3_structure() {
-        let board = Board::new(3);
-        assert_eq!(board.h_lines.len(), 3);
-        assert_eq!(board.h_lines[0].len(), 2);
-        assert_eq!(board.v_lines.len(), 2);
-        assert_eq!(board.v_lines[0].len(), 3);
-        assert_eq!(board.boxes.len(), 2);
-        assert_eq!(board.boxes[0].len(), 2);
     }
 
     #[test]
-    fn test_board_5x5_structure() {
-        let board = Board::new(5);
-        assert_eq!(board.h_lines.len(), 5);
-        assert_eq!(board.h_lines[0].len(), 4);
-        assert_eq!(board.v_lines.len(), 4);
-        assert_eq!(board.v_lines[0].len(), 5);
-        assert_eq!(board.boxes.len(), 4);
-        assert_eq!(board.boxes[0].len(), 4);
+    fn the_end_card_says_who_won_in_the_words_of_the_mode_being_played() {
+        for (mode, one, two) in [
+            (GameMode::VsAi, "You win!", "AI wins!"),
+            (GameMode::TwoPlayer, "Player 1 wins!", "Player 2 wins!"),
+        ] {
+            for (winner, expected) in [(Player::One, one), (Player::Two, two)] {
+                let mut app = DotsAndBoxes::with_config(3, mode, 1);
+                app.phase = GamePhase::GameOver;
+                app.board.boxes[0][0] = Some(winner);
+                let said = app
+                    .draw((560.0, 620.0))
+                    .commands()
+                    .iter()
+                    .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == expected));
+                assert!(
+                    said,
+                    "{mode:?} with {winner:?} ahead did not say {expected:?}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn test_out_of_bounds_box_side_count() {
-        let board = Board::new(4);
-        assert_eq!(board.box_side_count(99, 99), 0);
+    fn a_claimed_box_is_labelled_in_the_words_of_the_mode_being_played() {
+        for (mode, one, two) in [(GameMode::VsAi, "Y", "A"), (GameMode::TwoPlayer, "1", "2")] {
+            let app = DotsAndBoxes::with_config(3, mode, 1);
+            assert_eq!(app.box_initial(Player::One), one);
+            assert_eq!(app.box_initial(Player::Two), two);
+        }
     }
 
     #[test]
-    fn test_out_of_bounds_is_box_complete() {
-        let board = Board::new(4);
-        assert!(!board.is_box_complete(99, 99));
+    fn the_two_players_are_told_apart_by_colour() {
+        assert_ne!(Player::One.color(), Player::Two.color());
+        assert_ne!(Player::One.box_color(), Player::Two.box_color());
+        assert_eq!(Player::One.other(), Player::Two);
+        assert_eq!(Player::Two.other(), Player::One);
+    }
+
+    // ── The window ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_app_opens_a_window_of_the_size_it_asks_for() {
+        let app = test_app();
+        assert_eq!(app.title(), TITLE);
+        assert_eq!(app.app_id(), "dots");
+        assert_eq!(
+            app.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        assert!(
+            app.tick_interval().is_some(),
+            "without a tick the AI never moves"
+        );
     }
 
     #[test]
-    fn test_place_line_while_ai_pending() {
+    fn a_close_request_closes_the_window() {
         let mut app = test_app();
-        app.ai_pending = true;
-        let result = app.try_place_line(LineId::horizontal(0, 0));
-        assert!(!result);
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
     }
 
     #[test]
-    fn test_cursor_not_movable_when_ai_pending() {
-        let mut app = test_app();
-        app.ai_pending = true;
-        let old_col = app.cursor.col;
-        app.handle_event(&make_key_event(Key::Right));
-        assert_eq!(app.cursor.col, old_col);
-    }
-
-    #[test]
-    fn test_cursor_not_movable_when_game_over() {
+    fn a_move_asks_for_a_redraw_and_a_dead_key_does_not() {
         let mut app = two_player_app();
-        app.phase = GamePhase::GameOver;
-        let old_col = app.cursor.col;
-        app.handle_event(&make_key_event(Key::Right));
-        assert_eq!(app.cursor.col, old_col);
+        assert!(matches!(
+            app.on_event(&Event::Key(press(Key::Enter))),
+            Response::Redraw
+        ));
+        assert!(matches!(
+            app.on_event(&Event::Key(press(Key::Q))),
+            Response::Idle
+        ));
     }
 
     #[test]
-    fn test_tick_no_ai_no_effect() {
-        let mut app = two_player_app();
-        app.handle_event(&make_tick(1000));
-        assert_eq!(app.board.drawn_line_count(), 0);
-    }
-
-    // ── Render cursor visibility ───────────────────────────────────
-
-    #[test]
-    fn test_render_no_cursor_when_ai_pending() {
+    fn render_records_the_window_it_was_given() {
         let mut app = test_app();
-        app.ai_pending = true;
-        let cmds = app.render(400.0, 400.0);
-        // Should still render, just without cursor highlight.
-        assert!(!cmds.is_empty());
-    }
-
-    #[test]
-    fn test_render_no_cursor_when_game_over() {
-        let mut app = test_app();
-        app.phase = GamePhase::GameOver;
-        let cmds = app.render(400.0, 400.0);
-        assert!(!cmds.is_empty());
-    }
-
-    // ── Do AI move directly ────────────────────────────────────────
-
-    #[test]
-    fn test_do_ai_move_draws_line() {
-        let mut app = DotsAndBoxes::with_config(4, GameMode::VsAi, 42);
-        app.current_player = Player::Two;
-        app.do_ai_move();
-        assert!(app.board.drawn_line_count() >= 1);
-    }
-
-    #[test]
-    fn test_do_ai_move_on_game_over_noop() {
-        let mut app = test_app();
-        app.phase = GamePhase::GameOver;
-        app.do_ai_move();
-        assert_eq!(app.board.drawn_line_count(), 0);
-    }
-
-    #[test]
-    fn test_ai_extra_turn_on_box_completion() {
-        let mut app = DotsAndBoxes::with_config(4, GameMode::VsAi, 42);
-        // Set up box (0,0) with 3 sides.
-        app.board.draw_line(LineId::horizontal(0, 0), Player::One);
-        app.board.draw_line(LineId::horizontal(1, 0), Player::One);
-        app.board.draw_line(LineId::vertical(0, 0), Player::One);
-        // AI should complete the box and get another turn.
-        app.current_player = Player::Two;
-        app.do_ai_move();
-        assert_eq!(app.score_p2, 1);
-        // AI completed a box, so ai_pending should be true for another move.
-        assert!(app.ai_pending);
-    }
-
-    // ── Board score ────────────────────────────────────────────────
-
-    #[test]
-    fn test_board_score_empty() {
-        let board = Board::new(4);
-        assert_eq!(board.score(Player::One), 0);
-        assert_eq!(board.score(Player::Two), 0);
-    }
-
-    #[test]
-    fn test_board_score_mixed() {
-        let mut board = Board::new(3);
-        // Complete box (0,0) for P1.
-        board.draw_line(LineId::horizontal(0, 0), Player::One);
-        board.draw_line(LineId::horizontal(1, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 0), Player::One);
-        board.draw_line(LineId::vertical(0, 1), Player::One);
-        // Complete box (0,1) for P2.
-        board.draw_line(LineId::horizontal(0, 1), Player::Two);
-        board.draw_line(LineId::horizontal(1, 1), Player::Two);
-        board.draw_line(LineId::vertical(0, 2), Player::Two);
-        // v(0,1) already drawn by P1's box completion.
-        assert_eq!(board.score(Player::One), 1);
-        assert_eq!(board.score(Player::Two), 1);
-    }
-
-    // ── Vertical cursor navigation ─────────────────────────────────
-
-    #[test]
-    fn test_vertical_cursor_move_left() {
-        let mut app = test_app();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.col = 1;
-        app.move_cursor(Key::Left);
-        assert_eq!(app.cursor.col, 0);
-    }
-
-    #[test]
-    fn test_vertical_cursor_move_right() {
-        let mut app = test_app();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.col = 0;
-        app.move_cursor(Key::Right);
-        assert_eq!(app.cursor.col, 1);
-    }
-
-    #[test]
-    fn test_vertical_cursor_move_down() {
-        let mut app = test_app();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.row = 0;
-        app.move_cursor(Key::Down);
-        assert_eq!(app.cursor.row, 1);
-    }
-
-    #[test]
-    fn test_vertical_cursor_up_wrap() {
-        let mut app = test_app();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.row = 0;
-        app.move_cursor(Key::Up);
-        // Should switch to horizontal.
-        assert_eq!(app.cursor.orientation, Orientation::Horizontal);
-    }
-
-    #[test]
-    fn test_vertical_cursor_down_wrap() {
-        let mut app = test_app();
-        let bps = app.boxes_per_side();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.row = bps - 1;
-        app.move_cursor(Key::Down);
-        assert_eq!(app.cursor.orientation, Orientation::Horizontal);
-    }
-
-    #[test]
-    fn test_vertical_cursor_left_wrap() {
-        let mut app = test_app();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.col = 0;
-        app.move_cursor(Key::Left);
-        assert_eq!(app.cursor.col, app.grid_size() - 1);
-    }
-
-    #[test]
-    fn test_vertical_cursor_right_wrap() {
-        let mut app = test_app();
-        let gs = app.grid_size();
-        app.cursor.orientation = Orientation::Vertical;
-        app.cursor.col = gs - 1;
-        app.move_cursor(Key::Right);
-        assert_eq!(app.cursor.col, 0);
+        let tree = app.render(1000.0, 700.0);
+        assert_eq!(app.size, (1000.0, 700.0));
+        assert!(!tree.commands.is_empty(), "the frame was empty");
     }
 }

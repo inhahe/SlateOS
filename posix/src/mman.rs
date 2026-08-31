@@ -150,6 +150,12 @@ pub extern "C" fn mmap(
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
+    // A file-backed mapping needs the file, which an `O_PATH` descriptor does
+    // not have: EBADF (measured on Linux 6.6).  `MAP_ANONYMOUS` ignores `fd`
+    // entirely, so it is not consulted there.
+    if (flags & MAP_ANONYMOUS) == 0 && crate::file::reject_path_fd(fd) {
+        return MAP_FAILED;
+    }
 
     let ret = syscall6(
         SYS_MMAP,

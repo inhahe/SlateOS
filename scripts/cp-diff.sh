@@ -63,13 +63,23 @@
 #
 # ## Cases that differ on purpose
 #
-# Two kinds. The family's two — `--help` omits the GNU project's `Report bugs
-# to:` block, and `--version` names SlateOS — and then one per option that GNU
-# has and this `cp` has not. That second group is an inventory, not a
-# permission: each entry names the option, and `xfail_case` reports an XPASS
-# the moment one starts agreeing, which is what will force it to be promoted to
-# a real case as the option lands. `cp.rs`'s module docs explain why those
-# options are *refused* rather than ignored.
+# Three kinds. The family's two — `--help` omits the GNU project's `Report bugs
+# to:` block, and `--version` names SlateOS — then one per option that GNU has
+# and this `cp` has not, and then the handful where the *reference* is the one
+# that cannot do the thing.
+#
+# The second group is an inventory, not a permission: each entry names the
+# option, and `xfail_case` reports an XPASS the moment one starts agreeing,
+# which is what will force it to be promoted to a real case as the option
+# lands. `cp.rs`'s module docs explain why those options are *refused* rather
+# than ignored.
+#
+# The third group is at present only `--preserve=xattr`, whose reason is in
+# section 17: the reference is built from source on a host with no libattr, so
+# its `cp` is compiled without extended-attribute support and refuses the word
+# outright. That one will not turn green by anything done here — it would take
+# a libattr on the build host — which is why it names the reference in its
+# reason rather than pretending to be an inventory entry.
 #
 # ## The reference is built, not found
 #
@@ -1636,13 +1646,85 @@ STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case -p --no-preserve=timestamps file.txt new.txt
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case --preserve=mode --no-preserve=mode,timestamps file.txt new.txt
-# `--no-preserve=all` turns off the four that exist and is accepted for the
-# three that do not: refusing a word there would be refusing an instruction the
+# `--no-preserve=all` turns off the five that exist and is accepted for the one
+# that does not: refusing a word there would be refusing an instruction the
 # program has already obeyed by never having done the thing.
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
 run_case -p --no-preserve=all file.txt new.txt
 STAMPS=1 TREE='mkstamped'
 run_case --no-preserve=links,xattr,context file.txt new.txt
+
+# `--preserve=xattr`, `--preserve=all` and `-a`.
+#
+# What these cases can pin is the *option surface* — that the spellings are
+# accepted, that each asks for the attributes GNU says it asks for, and that a
+# copy under them lands identically. What they cannot pin is an extended
+# attribute actually crossing, and the reason is the reference: `diff-wsl.sh`
+# builds coreutils with a plain `./configure`, this host has no libattr headers,
+# and so the built `cp` has `USE_XATTR` undefined and a `copy_attr` whose whole
+# body is `return true`. The host has no `setfattr` to seed an attribute with
+# either. That half is covered where it can be: `cp.rs`'s tests write and read
+# real attributes through the syscalls on a real filesystem.
+#
+# `--preserve=xattr` therefore differs on purpose, and *loudly*: a `cp` built
+# without xattr support does not ignore the word, it refuses the run —
+#
+#   #if !USE_XATTR
+#     if (x.require_preserve_xattr)
+#       error (EXIT_FAILURE, 0, _("cannot preserve extended attributes, cp is "
+#                                 "built without xattr support"));
+#   #endif                                                      (cp.c:1276)
+#
+# — which is a shortfall in the reference and not in us, and is why these three
+# are `xfail_case` rather than `missing`: the option is implemented, and it is
+# the comparison that cannot be made.
+#
+# That same `#if` is also the sharpest available confirmation of what
+# `require_preserve_xattr` means, because `--preserve=all` and `-a` walk
+# straight past it in the very same binary. GNU's `PRESERVE_ALL` sets
+# `preserve_xattr` and deliberately not `require_preserve_xattr`, so only the
+# word typed by hand insists. Those cases below are real, and they agree.
+NO_XATTR_REF='the built reference has USE_XATTR undefined and refuses the word'
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+xfail_case "$NO_XATTR_REF" --preserve=xattr file.txt new.txt
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+xfail_case "$NO_XATTR_REF" --preserve=mode,xattr file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+xfail_case "$NO_XATTR_REF" --preserve=xattr -r tree dst
+# `--preserve=all` is every word GNU has, `context` included; on a host without
+# SELinux the security-context line is guarded by `if (selinux_enabled)` and so
+# asks for nothing. That is why `all` works here and `context` alone does not.
+# On a tree with no extended attributes these read as ordinary `-p` cases, and
+# that is the point: asking for them must change nothing else.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case --preserve=all file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case --preserve=all -r tree dst
+STAMPS=1 TREE='mkstamped; chmod 500 tree'
+run_case --preserve=all -r tree dst
+# `-a` is `-dR --preserve=all` plus `reduce_diagnostics`, which is why it has
+# its own arm rather than desugaring. Nothing here can fail to be carried, so
+# what the cases see is the `-dR --preserve=all` part: the symlink in the tree
+# is copied as itself, and the times and modes come across.
+STAMPS=1 TREE='mkstamped'
+run_case -a tree dst
+STAMPS=1 TREE='mkstamped'
+run_case --archive tree dst
+STAMPS=1 TREE='mkstamped'
+run_case -a tree/link dst
+STAMPS=1 TREE='mkstamped; chmod 500 tree'
+run_case -a tree dst
+# And the pair it is nearly the same as, so that a difference between them
+# would show. Both succeed on this fixture; only a failed attribute separates
+# them, which needs a second user to arrange.
+STAMPS=1 TREE='mkstamped'
+run_case -dR --preserve=all tree dst
+# Turning a word back off after `-a` works, because `-a` sets the fields rather
+# than standing for a word list that is read later.
+STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
+run_case -a --no-preserve=mode file.txt new.txt
+STAMPS=1 TREE='mkstamped'
+run_case -a --no-preserve=timestamps -r tree dst
 
 # Words and lists that are refused, by both programs and in the same sentence.
 run_case --preserve=bogus file.txt new.txt
@@ -1806,8 +1888,6 @@ run_case -P --preserve=links file.txt new.txt
 # `cp.rs`'s module docs give the reason, which is that each one ignored
 # produces a destination that looks right and is not.
 
-missing -a tree dst
-missing --archive tree dst
 missing --attributes-only file.txt new.txt
 missing -b file.txt tree/a.txt
 missing --backup file.txt tree/a.txt
@@ -1817,15 +1897,12 @@ missing --debug file.txt new.txt
 missing -l file.txt new.txt
 missing --link file.txt new.txt
 missing --one-file-system -r tree dst
-# The two `--preserve` words this cp has not, refused one word at a time
-# rather than by the option — `--preserve=mode` is honoured in section 17 and
-# refusing it because `xattr` exists would be a lie. `--preserve=all` is
-# refused for containing `xattr`: GNU writes extended attributes under `all`
-# without saying so and without failing if it cannot, so a copy that silently
-# dropped an ACL would look exactly like one that had none to carry.
-missing --preserve=xattr file.txt new.txt
+# The one `--preserve` word this cp has not, refused a word at a time rather
+# than by the option — the other six are honoured in section 17, and refusing
+# `--preserve=mode` because `context` exists would be a lie. `--preserve=all`
+# is *not* here: GNU's own `PRESERVE_ALL` guards the security-context line
+# with `if (selinux_enabled)`, so `all` asks for nothing this cannot do.
 missing --preserve=context file.txt new.txt
-missing --preserve=all -r tree dst
 missing --parents tree/a.txt dir
 missing --path tree/a.txt dir
 missing --reflink=auto file.txt new.txt

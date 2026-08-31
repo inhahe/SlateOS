@@ -2,8 +2,13 @@
 name = "automator"
 version = "0.1.0"
 edition = "2024"
+
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window itself. Automator used to be a simulation with no window at all:
+# `main` built two demo macros, rendered one frame into a `Vec` and dropped it,
+# so nothing was ever shown and no click or key ever reached the program.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

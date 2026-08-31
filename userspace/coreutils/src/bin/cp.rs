@@ -136,8 +136,9 @@
 //!
 //! Everything except `-r`/`-R`/`--recursive`, `-t`/`--target-directory`,
 //! `-T`/`--no-target-directory`, `-v`/`--verbose`, the three symlink policies
-//! `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`, and the three
-//! overwrite policies `-f`/`--force`, `-n`/`--no-clobber` and
+//! `-P`/`--no-dereference`, `-H` and `-L`/`--dereference`, and the four
+//! overwrite policies `-f`/`--force`, `-n`/`--no-clobber`,
+//! `-i`/`--interactive` and
 //! `--remove-destination`. The rest are recognised and rejected with a message
 //! saying they are not implemented, rather than ignored, and they are listed in
 //! [`LONG_OPTIONS`] anyway because the table is what decides whether an
@@ -151,16 +152,24 @@
 //! that exists would turn two hard-linked sources into two independent copies
 //! without saying so.
 //!
-//! # The three overwrite policies are three different options
+//! # The four overwrite policies are four different options
 //!
 //! `-f`, `--remove-destination` and `-n` are routinely confused for two
-//! options, or one. They are three, and each does something the others do not:
+//! options, or one. They are three, and each does something the others do not
+//! — and `-i` is a fourth, which is not "`-n` but polite":
 //!
 //! | Option | When | What | `cp -v` order |
 //! |---|---|---|---|
 //! | `-f` | the open for writing **failed** | unlink and create a new file | `'a' -> 'b'` then `removed 'b'` |
 //! | `--remove-destination` | always | unlink before opening at all | `removed 'b'` then `'a' -> 'b'` |
 //! | `-n` | the destination exists | refuse, and **exit 1** | neither line |
+//! | `-i` | the destination exists | ask; a non-`y` answer is **exit 1**, silently | neither line, if declined |
+//!
+//! `-i` and `-n` are two values of *one* field — GNU's `x.interactive` — so
+//! the last of them on the command line wins and `cp -in` is `-n`. But they are
+//! not the same refusal: `-n` prints `not replacing 'b'`, `-i` prints nothing
+//! beyond the question, and `-n` also *suppresses* the "are the same file"
+//! check that `-i` still makes. See [`overwrite_allowed`] and [`overwrite_ok`].
 //!
 //! Three consequences that fall out of the table and are each measurable:
 //!
@@ -188,8 +197,9 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Opt, Program, Takes};
-use coreutils::quote::quoteaf_os;
+use coreutils::quote::{os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
+use coreutils::yesno::{Answers, StdinAnswers, yesno};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -297,12 +307,11 @@ enum Deref {
 
 /// What to do about a destination that is already there.
 ///
-/// GNU's `enum Interactive` (`copy.h:75`), which has four members. Two of them
-/// are here; the other two are `I_ALWAYS_YES` and `I_ASK_USER`, and both are
-/// reached only through options this `cp` does not have yet — `-i`, and
-/// `--update=none`, which is `I_ALWAYS_SKIP` and differs from `AlwaysNo` in
-/// exactly the two ways `copy.h`'s comments give: "Skip and fail" against
-/// "Skip and ignore".
+/// GNU's `enum Interactive` (`copy.h:75`), which has four members. Three of
+/// them are here; the fourth is `I_ALWAYS_SKIP`, reached only through
+/// `--update=none`, which this `cp` does not have yet and which differs from
+/// `AlwaysNo` in exactly the two ways `copy.h`'s comments give: "Skip and fail"
+/// against "Skip and ignore".
 ///
 /// An enum and not a `no_clobber: bool` because these are alternatives rather
 /// than independent switches: GNU stores one value and lets the last option
@@ -318,6 +327,10 @@ enum Interactive {
     /// `-n` / `--no-clobber`: leave an existing destination alone, and *fail*.
     /// GNU's `I_ALWAYS_NO`, whose comment is "Skip and fail".
     AlwaysNo,
+    /// `-i` / `--interactive`: ask, and take silence for no. GNU's
+    /// `I_ASK_USER`. See [`overwrite_ok`] for what is asked and
+    /// [`writable_destination`] for why there are three wordings of it.
+    AskUser,
 }
 
 #[derive(Default)]
@@ -436,11 +449,15 @@ fn run_main() -> ExitCode {
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
             let mut out = Stream::stdout();
             let mut err = Stream::stderr();
+            // Held for the whole run, not opened per prompt: `cp -i a b c d`
+            // asks three questions and reads three lines of one stream.
+            let mut answers = StdinAnswers::new();
             let earned = {
                 let mut job = Job {
                     flags: &flags,
                     out: &mut out,
                     err: &mut err,
+                    answers: &mut answers,
                 };
                 if copy_all(&mut job, &paths) {
                     ExitCode::SUCCESS
@@ -470,6 +487,8 @@ Copy SOURCE to DEST, or multiple SOURCE(s) to DIRECTORY.
   -f, --force           if an existing destination file cannot be
                           opened, remove it and try again
   -H                    follow command-line symbolic links in SOURCE
+  -i, --interactive     prompt before overwrite (overrides a previous -n
+                          option)
   -L, --dereference     always follow symbolic links in SOURCE
   -n, --no-clobber      do not overwrite an existing file (overrides a
                           previous -i option); exit status 1
@@ -561,11 +580,12 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             // Plain assignment again, and for the same reason as the symlink
             // policies: GNU keeps one `x.interactive` and lets the last option
             // win, so `cp -in` is `-n` and `cp -ni` is `-i` (measured against
-            // 9.4 — the second prompts). `-i` is not implemented, so only one
-            // value can be set here today; writing it as an assignment rather
-            // than a `= true` is what will keep that rule true when it is.
+            // 9.4 — the second prompts).
             Opt::Short(b'n', _) | Opt::Long("no-clobber", _) => {
                 flags.interactive = Interactive::AlwaysNo;
+            }
+            Opt::Short(b'i', _) | Opt::Long("interactive", _) => {
+                flags.interactive = Interactive::AskUser;
             }
             Opt::Long("help", _) => return Ok(Request::Help),
             Opt::Long("version", _) => return Ok(Request::Version),
@@ -620,6 +640,12 @@ struct Job<'a, O: Write, E: Write> {
     /// `printf`, so the line is on stdout and is *not* a diagnostic.
     out: &'a mut O,
     err: &'a mut E,
+    /// Where `-i`'s prompts are answered. See [`overwrite_ok`].
+    ///
+    /// `dyn` rather than a third generic parameter: eleven signatures name
+    /// `Job`, and none of them but [`overwrite_ok`] cares what the answers come
+    /// from. The one indirect call is per *prompt*, which is per human keypress.
+    answers: &'a mut dyn Answers,
 }
 
 /// `--verbose`'s one line about one copy: `'src' -> 'dst'`.
@@ -950,6 +976,188 @@ fn refuse_no_clobber<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O, E>)
     let _ = writeln!(job.err, "cp: not replacing {}", quoteaf_os(target));
 }
 
+#[cfg(unix)]
+unsafe extern "C" {
+    /// `euidaccess(path, mode)`, where mode 2 is `W_OK`. GNU asks this as
+    /// `faccessat (dst_dirfd, dst_relname, W_OK, AT_EACCESS)`, and `AT_EACCESS`
+    /// is the whole reason it is not plain `access(2)`: `access` answers about
+    /// the *real* uid, which for a setuid `cp` is a question nobody asked.
+    fn euidaccess(path: *const u8, mode: i32) -> i32;
+    fn geteuid() -> u32;
+}
+
+/// GNU's `can_write_any_file` (`lib/write-any-file.c`): whether the permission
+/// bits can be ignored, because in traditional Unix root's writes are never
+/// refused for want of a `w`.
+///
+/// Not cached, where upstream caches it in a `static`. The call happens once
+/// per `-i` prompt — that is, once per question put to a human — so a cache
+/// would be saving a syscall per keystroke, and glibc already answers `geteuid`
+/// from a cached value in any case.
+#[cfg(unix)]
+fn can_write_any_file() -> bool {
+    // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
+    // fail — POSIX gives it no error return.
+    unsafe { geteuid() == 0 }
+}
+
+/// GNU's `writable_destination` (`copy.c:1979`): whether `-i` asks the plain
+/// question or one of the two that quote the mode.
+///
+/// Three parts, in upstream's order and short-circuiting as upstream does:
+///
+/// * **A symlink destination is always "writable".** Its own mode is `0777` on
+///   every system that has modes at all, so testing it would say nothing; the
+///   permission that matters belongs to whatever it points at, which the
+///   `access` below is about to ask about anyway.
+/// * **Root can write anything.** See [`can_write_any_file`].
+/// * **Otherwise, `access(W_OK)` with the effective ids.** Not "does the mode
+///   have a `w` for me" computed from the bits: that reading gets ACLs,
+///   read-only mounts and immutable files all wrong, and each of those is a
+///   case where the prompt would promise a write that then fails.
+///
+/// Note what this is *not* used for: it changes only the wording of the
+/// question. Answering `y` to `unwritable … try anyway?` goes on to attempt the
+/// copy and — with no `-f` — to fail it with `Permission denied`, which is
+/// measured and is upstream's behaviour too. The prompt is a warning, not a
+/// gate.
+#[cfg(unix)]
+fn writable_destination(target: &Path, dest_meta: &fs::Metadata) -> bool {
+    if dest_meta.file_type().is_symlink() || can_write_any_file() {
+        return true;
+    }
+    let mut c_path = os_bytes(target.as_os_str()).into_owned();
+    if c_path.contains(&0) {
+        // A path with an interior NUL cannot be handed to a C function. It also
+        // cannot name a file, so the copy is about to fail anyway; say
+        // "writable" so the question asked is the plain one rather than one
+        // quoting a mode that was never read.
+        return true;
+    }
+    c_path.push(0);
+    // SAFETY: `c_path` is NUL-terminated, has no interior NUL, and outlives the
+    // call. `euidaccess` reads it and does not retain it.
+    unsafe { euidaccess(c_path.as_ptr(), 2) == 0 }
+}
+
+/// Off unix there are no modes to quote and no `euidaccess` to ask, so `-i`
+/// always puts the plain question. The host build is a test vehicle, not a
+/// shipping one.
+#[cfg(not(unix))]
+fn writable_destination(_target: &Path, _dest_meta: &fs::Metadata) -> bool {
+    true
+}
+
+/// The destination's `st_mode`. Only the permission bits are ever printed, but
+/// the whole word is what [`writable_destination`]'s symlink test needs and
+/// what GNU passes around.
+#[cfg(unix)]
+fn dest_mode(dest_meta: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    dest_meta.mode()
+}
+
+#[cfg(not(unix))]
+fn dest_mode(_dest_meta: &fs::Metadata) -> u32 {
+    0
+}
+
+/// GNU's `overwrite_ok` (`copy.c:1988`): `-i`'s question, and the answer.
+///
+/// Three wordings, all measured against 9.4:
+///
+/// ```text
+/// cp: overwrite 'b'?
+/// cp: unwritable 'b' (mode 0444, r--r--r--); try anyway?
+/// cp: replace 'b', overriding mode 0444 (r--r--r--)?
+/// ```
+///
+/// The second and third are the same condition — [`writable_destination`] said
+/// no — split by whether the destination is going to be *removed* rather than
+/// written through, which is `-f` or `--remove-destination` (upstream also
+/// counts `move_mode`, which is `mv`, not this program). That split is the
+/// difference between a warning that the copy will probably fail and a warning
+/// that it will probably succeed by destroying something the mode was
+/// protecting.
+///
+/// Four details that the obvious implementation gets wrong:
+///
+/// * **No trailing newline.** The cursor stays after the `? `, on the question's
+///   line, as upstream. Which is why the flush below is not optional: `Stream`
+///   buffers by line to a terminal, so an unflushed prompt would leave the user
+///   looking at nothing while `cp` waits for a keypress.
+/// * **It is on stderr**, not stdout — so `cp -i a b 2>/dev/null` asks
+///   invisibly and `cp -iv a b > log` puts the question and the `'a' -> 'b'`
+///   line in different places. Both measured.
+/// * **The mode is four octal digits including the setuid bits** (`%04lo` of
+///   `st_mode & CHMOD_MODE_BITS`, which is `07777`), and the `r--r--r--` beside
+///   it is `strmode` with its type letter dropped — GNU writes `&perms[1]`.
+/// * **Declining is failure, and is silent.** The caller returns `false`, which
+///   is exit 1, and prints nothing: upstream's `skip:` label prints `not
+///   replacing` only for `I_ALWAYS_NO`, and `skipped 'b'` only under `--debug`.
+fn overwrite_ok<O: Write, E: Write>(
+    target: &Path,
+    dest_meta: Option<&fs::Metadata>,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    let name = quoteaf_os(target);
+    // `None` is [`Dest::Opaque`]: something is there that could not be `stat`'d,
+    // so there is no mode to quote and the plain question is the only one that
+    // can be asked. GNU reaches this case with an *uninitialised* `dst_sb`
+    // (`copy.c:2209` declares it and the `ELOOP` arm at 2326 leaves it alone),
+    // and would print whatever was on its stack. That is not a behaviour worth
+    // reproducing.
+    let sentence = match dest_meta {
+        Some(m) if !writable_destination(target, m) => {
+            let mode = dest_mode(m) & 0o7777;
+            let perms = modechange::permission_string(mode);
+            if job.flags.force || job.flags.remove_destination {
+                format!("cp: replace {name}, overriding mode {mode:04o} ({perms})? ")
+            } else {
+                format!("cp: unwritable {name} (mode {mode:04o}, {perms}); try anyway? ")
+            }
+        }
+        _ => format!("cp: overwrite {name}? "),
+    };
+    let _ = job.err.write_all(sentence.as_bytes());
+    let _ = job.err.flush();
+    yesno(job.answers)
+}
+
+/// The whole of the "is this destination to be left alone" decision — GNU's
+/// one block at `copy.c:2421`, which handles `-n` and `-i` together because
+/// they are two values of one field.
+///
+/// Returns `true` when the copy should go ahead. The two refusals differ in
+/// what they print — `-n` says `not replacing 'b'`, `-i` says nothing at all
+/// beyond the question it already asked — but not in the status: both make the
+/// operand a failure, which is `copy.h`'s "Skip and fail" for `I_ALWAYS_NO` and
+/// `return_val = x->interactive == I_ALWAYS_SKIP` (false here) for
+/// `I_ASK_USER`.
+///
+/// A **directory** source is exempt from both, as GNU's `! S_ISDIR (src_mode)`
+/// makes it: `cp -rn tree dest` descends and refuses the files inside one at a
+/// time, and `cp -ri tree dest` asks about them one at a time, rather than
+/// either putting a single question about the tree.
+fn overwrite_allowed<O: Write, E: Write>(
+    src_meta: &fs::Metadata,
+    target: &Path,
+    dest: &Dest,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    if src_meta.is_dir() || !dest.exists() {
+        return true;
+    }
+    match job.flags.interactive {
+        Interactive::Unspecified => true,
+        Interactive::AlwaysNo => {
+            refuse_no_clobber(target, job);
+            false
+        }
+        Interactive::AskUser => overwrite_ok(target, dest.metadata(), job),
+    }
+}
+
 /// `--remove-destination`: unlink an existing destination before the copy is
 /// attempted at all.
 ///
@@ -1095,26 +1303,18 @@ fn copy_one<O: Write, E: Write>(
     };
 
     if let Some(dest_meta) = dest_state.metadata() {
-        // `-n`. Before every refusal below it, which is GNU's order and is
-        // visible in three of them at once: `cp -Tn a d` with `d` a directory
-        // says `not replacing 'd'` rather than `cannot overwrite directory`,
-        // `cp -n a link-to-a` says it rather than `are the same file`, and
-        // `cp -n a other/a d` says it rather than `will not overwrite
-        // just-created`. All three measured against 9.4.
-        //
-        // A *directory* source is exempt — GNU's condition is `! S_ISDIR
-        // (src_mode)` — so `cp -rn tree dest` still descends, and refuses the
-        // files inside it one at a time. That is what makes `-n` a merge
-        // rather than an all-or-nothing.
-        if flags.interactive == Interactive::AlwaysNo && !metadata.is_dir() {
-            refuse_no_clobber(&target, job);
-            return false;
-        }
-
         // Module docs, bug 7. `stat` results rather than strings, which is the
         // only comparison that catches every spelling; GNU's `same_file_ok`
         // makes the same one, at the same point in the same order. Asked only
         // when the destination exists, again as GNU asks it.
+        //
+        // **`-n` skips this question entirely**, and that is upstream's guard
+        // rather than an optimisation: `copy.c:2344` calls `same_file_ok` only
+        // when `x->interactive` is neither `I_ALWAYS_NO` nor `I_ALWAYS_SKIP`.
+        // So `cp -n a link-to-a` says `not replacing 'a'` and not `are the same
+        // file` — measured. `-i` is *not* in that guard, so `cp -i a
+        // link-to-a` does say `are the same file`, and never asks: there is
+        // nothing to ask about a copy that would destroy its own source.
         //
         // `--remove-destination` excuses a destination that is a *symlink*,
         // however it resolves: the link is unlinked below rather than written
@@ -1124,13 +1324,27 @@ fn copy_one<O: Write, E: Write>(
         // (`copy.c:1877`), and it is why `cp --remove-destination a self`
         // succeeds where plain `cp a self` says "are the same file".
         let link_replaced = flags.remove_destination && dest_meta.file_type().is_symlink();
-        if !link_replaced && is_same_file(src_path, &target, !flags.follow_operand()) {
+        if flags.interactive != Interactive::AlwaysNo
+            && !link_replaced
+            && is_same_file(src_path, &target, !flags.follow_operand())
+        {
             let _ = writeln!(
                 job.err,
                 "cp: {} and {} are the same file",
                 quoteaf_os(src),
                 quoteaf_os(&target)
             );
+            return false;
+        }
+
+        // `-n`'s refusal and `-i`'s question, which are one block upstream
+        // because they are two settings of one field. Before every refusal
+        // below, which is GNU's order and is visible in two of them at once:
+        // `cp -Tn a d` with `d` a directory says `not replacing 'd'` rather
+        // than `cannot overwrite directory`, and `cp -n a other/a d` says it
+        // rather than `will not overwrite just-created`. Both measured, and
+        // both go the same way for `-i`, which asks first and then refuses.
+        if !overwrite_allowed(&metadata, &target, &dest_state, job) {
             return false;
         }
 
@@ -1826,8 +2040,11 @@ fn copy_entry<O: Write, E: Write>(
             return false;
         }
     };
-    if dest_state.exists() && job.flags.interactive == Interactive::AlwaysNo && !meta.is_dir() {
-        refuse_no_clobber(&to, job);
+    // `-n`'s refusal and `-i`'s question, for an entry found by walking. The
+    // same-file check [`copy_one`] makes just before this one is not here and
+    // cannot fire: a tree is not being copied into itself, and if it were the
+    // walk would not terminate to reach this point.
+    if !overwrite_allowed(&meta, &to, &dest_state, job) {
         return false;
     }
     // The two kind mismatches, in [`copy_one`]'s order and with its wording,
@@ -2257,6 +2474,9 @@ fn clone_symlink(_src: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    /// The canned answer queue is shared with `rm`'s prompt tests; see
+    /// [`coreutils::yesno`].
+    use coreutils::yesno::Canned;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -2467,7 +2687,7 @@ mod tests {
             // `-d` is here and `-P` is not, though the two set the same
             // dereference policy: `-d` is also `--preserve=links`, which does
             // not exist yet. See the parse arm.
-            "-a", "-b", "-d", "-i", "-l", "-p", "-s", "-S.bak", "-u", "-x", "-Z",
+            "-a", "-b", "-d", "-l", "-p", "-s", "-S.bak", "-u", "-x", "-Z",
         ] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
@@ -2485,7 +2705,6 @@ mod tests {
             "--attributes-only",
             "--backup",
             "--copy-contents",
-            "--interactive",
             "--link",
             "--one-file-system",
             "--parents",
@@ -2525,6 +2744,8 @@ mod tests {
             ),
             ("-n", false, false, Interactive::AlwaysNo),
             ("--no-clobber", false, false, Interactive::AlwaysNo),
+            ("-i", false, false, Interactive::AskUser),
+            ("--interactive", false, false, Interactive::AskUser),
         ] {
             let (f, p) = run_parse(&[spelling, "a", "b"]);
             assert_eq!(f.force, force, "{spelling}");
@@ -2568,16 +2789,46 @@ mod tests {
     }
 
     /// `Interactive` is an enum rather than a bool because `-i` and `-n` are two
-    /// settings of one field and the last one wins. `-i` is not implemented, so
-    /// the only thing testable today is that `-n` does not become sticky: a
-    /// second `-n` is not an error and does not change the answer.
+    /// settings of one field and the last one wins. Repeating either is not an
+    /// error and does not change the answer.
     #[test]
-    fn repeating_no_clobber_is_not_an_error() {
+    fn repeating_an_overwrite_policy_is_not_an_error() {
         assert_eq!(
             run_parse(&["-n", "-n", "--no-clobber", "a", "b"])
                 .0
                 .interactive,
             Interactive::AlwaysNo
+        );
+        assert_eq!(
+            run_parse(&["-i", "-i", "--interactive", "a", "b"])
+                .0
+                .interactive,
+            Interactive::AskUser
+        );
+    }
+
+    /// The last of `-i` and `-n` wins, in both directions — GNU keeps one
+    /// `x.interactive` and each option assigns to it. Measured against 9.4:
+    /// `cp -in` refuses without asking and `cp -ni` asks.
+    #[test]
+    fn the_last_of_i_and_n_wins() {
+        for (argv, want) in [
+            (["-i", "-n"], Interactive::AlwaysNo),
+            (["-n", "-i"], Interactive::AskUser),
+            (["--interactive", "--no-clobber"], Interactive::AlwaysNo),
+            (["--no-clobber", "--interactive"], Interactive::AskUser),
+        ] {
+            let (f, _) = run_parse(&[argv[0], argv[1], "a", "b"]);
+            assert_eq!(f.interactive, want, "{argv:?}");
+        }
+        // And in one clustered argument, where the bytes are read left to right.
+        assert_eq!(
+            run_parse(&["-in", "a", "b"]).0.interactive,
+            Interactive::AlwaysNo
+        );
+        assert_eq!(
+            run_parse(&["-ni", "a", "b"]).0.interactive,
+            Interactive::AskUser
         );
     }
 
@@ -2851,6 +3102,13 @@ mod tests {
         verbose: true,
         ..OFF
     };
+    /// `-i`. Not verbose, unlike the three above: `-i`'s interesting output is
+    /// the question, which goes to stderr, and a `-v` line on stdout would only
+    /// be noise in the tests that assert stderr is *exactly* the question.
+    const ASK: CpFlags = CpFlags {
+        interactive: Interactive::AskUser,
+        ..OFF
+    };
 
     /// `copy_all` plus whatever it wrote to its error sink.
     ///
@@ -2869,14 +3127,33 @@ mod tests {
     /// line on stdout from the same text misdirected to stderr, and getting
     /// that wrong is exactly the bug worth catching — GNU's is a `printf`.
     fn cp_out(flags: &CpFlags, paths: &[&Path]) -> (bool, String, String) {
+        let (ok, out, err, _) = cp_answering(flags, paths, &[]);
+        (ok, out, err)
+    }
+
+    /// The same call with a queue of canned answers for `-i`'s prompts, and the
+    /// number of them consumed back: `(ok, stdout, stderr, prompts)`.
+    ///
+    /// The count is the fourth value because "did not ask" and "asked and was
+    /// declined" are two different behaviours that leave the same file on disk
+    /// and, for a declining answer, the same exit status. Only the count tells
+    /// them apart. An empty queue is end of input, which is a decline — so a
+    /// test that passes no answers is testing `cp -i </dev/null`.
+    fn cp_answering(
+        flags: &CpFlags,
+        paths: &[&Path],
+        answers: &[&str],
+    ) -> (bool, String, String, usize) {
         let owned: Vec<OsString> = paths.iter().map(|p| p.as_os_str().to_owned()).collect();
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
+        let mut canned = Canned::new(answers);
         let ok = {
             let mut job = Job {
                 flags,
                 out: &mut out,
                 err: &mut err,
+                answers: &mut canned,
             };
             copy_all(&mut job, &owned)
         };
@@ -2884,6 +3161,7 @@ mod tests {
             ok,
             String::from_utf8_lossy(&out).into_owned(),
             String::from_utf8_lossy(&err).into_owned(),
+            canned.consumed(),
         )
     }
 
@@ -3638,7 +3916,7 @@ mod tests {
         assert_eq!(flags.dereference, Deref::Never);
     }
 
-    // ------------------------------------------- the three overwrite policies --
+    // -------------------------------------------- the four overwrite policies --
 
     /// Read the whole file, as bytes, for a test that cares what landed there.
     fn body(p: &Path) -> Vec<u8> {
@@ -3986,6 +4264,261 @@ mod tests {
             b"new",
             "descending happened despite the refusal"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The question's exact text, and that a `y` gets on with it.
+    ///
+    /// `assert_eq!` on the whole of stderr rather than a `contains`, because the
+    /// two things most easily got wrong here are both invisible to a
+    /// `contains`: a trailing newline (GNU's `fprintf` has none — the cursor is
+    /// meant to sit after the space, where the person is about to type) and a
+    /// second line following it.
+    #[test]
+    fn a_yes_overwrites_and_the_question_is_the_whole_of_stderr() {
+        let dir = scratch("ask_yes");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"BBBB").unwrap();
+
+        let (ok, out, err, asked) = cp_answering(&ASK, &[&a, &b], &["y\n"]);
+        assert!(ok, "{err}");
+        assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
+        assert_eq!(out, "", "and nothing on stdout without -v");
+        assert_eq!(asked, 1);
+        assert_eq!(body(&b), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Declining is a **silent** exit 1: the question is the only thing
+    /// written, and in particular `-i` does not borrow `-n`'s `not replacing`.
+    /// End of input declines the same way, which is what a script piping a
+    /// short file — or nothing at all — into `cp -i` gets.
+    #[test]
+    fn a_no_and_an_empty_queue_both_decline_silently() {
+        let dir = scratch("ask_no");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"BBBB").unwrap();
+
+        for answers in [&["n\n"][..], &[][..]] {
+            let (ok, out, err, asked) = cp_answering(&ASK, &[&a, &b], answers);
+            assert!(!ok, "a decline is a failure, like -n's refusal");
+            assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
+            assert_eq!(out, "");
+            assert_eq!(
+                asked, 1,
+                "end of input is still an answer that was asked for"
+            );
+            assert_eq!(body(&b), b"BBBB");
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With nothing in the way there is nothing to ask about, and the queue is
+    /// untouched — the count is the only way to tell this from a `-i` that asked
+    /// and was told yes, since both copy and both succeed.
+    #[test]
+    fn nothing_to_clobber_is_not_worth_asking_about() {
+        let dir = scratch("ask_new");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+
+        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &b], &["n"]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(asked, 0);
+        assert_eq!(body(&b), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// One question per operand that needs one, answers taken in order, and a
+    /// decline that does not abandon the sources after it. Module docs, bug 6,
+    /// restated for `-i`.
+    #[test]
+    fn each_operand_gets_its_own_question_answered_in_order() {
+        let dir = scratch("ask_many");
+        let d = dir.join("d");
+        fs::create_dir(&d).unwrap();
+        for name in ["1", "2", "3"] {
+            fs::write(dir.join(name), name.as_bytes()).unwrap();
+            fs::write(d.join(name), b"old").unwrap();
+        }
+
+        let (ok, _out, err, asked) = cp_answering(
+            &ASK,
+            &[&dir.join("1"), &dir.join("2"), &dir.join("3"), &d],
+            &["y", "n", "y"],
+        );
+        assert!(!ok, "the middle decline is still a failure");
+        assert_eq!(asked, 3);
+        assert_eq!(
+            err,
+            format!(
+                "cp: overwrite {}? cp: overwrite {}? cp: overwrite {}? ",
+                quoteaf_os(d.join("1")),
+                quoteaf_os(d.join("2")),
+                quoteaf_os(d.join("3")),
+            ),
+            "three questions run together on one line, none of them ending in \
+             a newline — which is exactly what a person answering them sees"
+        );
+        assert_eq!(body(&d.join("1")), b"1");
+        assert_eq!(body(&d.join("2")), b"old", "the declined one");
+        assert_eq!(body(&d.join("3")), b"3", "the source after the decline");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-i` is asked per *entry* found by the walk, not once per operand, and
+    /// the directory itself is exempt for the same reason `-n` exempts it: a
+    /// question at the top would decide the whole tree in one keystroke.
+    #[test]
+    fn interactive_asks_per_entry_inside_a_recursive_copy() {
+        let dir = scratch("ask_r");
+        let src = dir.join("src");
+        let dst = dir.join("dst");
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("keep"), b"new").unwrap();
+        fs::write(src.join("add"), b"new").unwrap();
+        fs::create_dir_all(dst.join("src")).unwrap();
+        fs::write(dst.join("src").join("keep"), b"old").unwrap();
+
+        let (ok, _out, err, asked) = cp_answering(
+            &CpFlags {
+                recursive: true,
+                interactive: Interactive::AskUser,
+                ..OFF
+            },
+            &[&src, &dst],
+            &["n"],
+        );
+        assert!(!ok);
+        assert_eq!(
+            asked, 1,
+            "only `keep` exists at the destination; the directory is exempt"
+        );
+        assert_eq!(
+            err,
+            format!(
+                "cp: overwrite {}? ",
+                quoteaf_os(dst.join("src").join("keep"))
+            )
+        );
+        assert_eq!(body(&dst.join("src").join("keep")), b"old");
+        assert_eq!(
+            body(&dst.join("src").join("add")),
+            b"new",
+            "descending happened despite the decline"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The one place `-i` and `-n` see the world differently rather than merely
+    /// answering differently: GNU guards the same-file check with `interactive
+    /// != I_ALWAYS_NO` (`copy.c:2344`), so `cp -n a a` never gets as far as it
+    /// and says `not replacing`, while `cp -i a a` reaches it, says `are the
+    /// same file`, and asks nothing at all.
+    #[test]
+    fn interactive_reports_the_same_file_where_no_clobber_refuses() {
+        let dir = scratch("ask_same");
+        let a = dir.join("a");
+        fs::write(&a, b"A").unwrap();
+
+        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &a], &["y"]);
+        assert!(!ok);
+        assert!(err.contains("are the same file"), "{err}");
+        assert_eq!(asked, 0, "no question was put, so the `y` went unused");
+
+        let (ok, err) = cp(&NO_CLOBBER_V, &[&a, &a]);
+        assert!(!ok);
+        assert!(err.contains("not replacing"), "{err}");
+        assert_eq!(body(&a), b"A");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The other two wordings. A destination the effective uid cannot write
+    /// gets a question that quotes its mode, and `-f`/`--remove-destination`
+    /// change that question from "try anyway" to "replace, overriding" —
+    /// because with them `cp` means to unlink the file rather than write
+    /// through its permission bits, so it is not really asking the same thing.
+    #[cfg(unix)]
+    #[test]
+    fn an_unwritable_destination_gets_a_question_that_quotes_its_mode() {
+        if root() {
+            return;
+        }
+        let dir = scratch("ask_mode");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"BBBB").unwrap();
+        set_test_mode(&b, 0o444);
+
+        let (ok, _out, err, asked) = cp_answering(&ASK, &[&a, &b], &["n"]);
+        assert!(!ok);
+        assert_eq!(
+            err,
+            format!(
+                "cp: unwritable {} (mode 0444, r--r--r--); try anyway? ",
+                quoteaf_os(&b)
+            )
+        );
+        assert_eq!(asked, 1);
+
+        for flags in [
+            CpFlags {
+                interactive: Interactive::AskUser,
+                force: true,
+                ..OFF
+            },
+            CpFlags {
+                interactive: Interactive::AskUser,
+                remove_destination: true,
+                ..OFF
+            },
+        ] {
+            let (ok, _out, err, asked) = cp_answering(&flags, &[&a, &b], &["n"]);
+            assert!(!ok);
+            assert_eq!(
+                err,
+                format!(
+                    "cp: replace {}, overriding mode 0444 (r--r--r--)? ",
+                    quoteaf_os(&b)
+                )
+            );
+            assert_eq!(asked, 1);
+        }
+        assert_eq!(body(&b), b"BBBB", "every one of the three was declined");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `-iv` writes to both streams, and which text goes to which is the point:
+    /// the question must reach a terminal even when stdout is a pipe, and the
+    /// `->` line must reach the pipe rather than the terminal.
+    #[test]
+    fn the_question_is_on_stderr_and_the_verbose_line_on_stdout() {
+        let dir = scratch("ask_verbose");
+        let a = dir.join("a");
+        let b = dir.join("b");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&b, b"BBBB").unwrap();
+
+        let (ok, out, err, asked) = cp_answering(
+            &CpFlags {
+                interactive: Interactive::AskUser,
+                verbose: true,
+                ..OFF
+            },
+            &[&a, &b],
+            &["y"],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
+        assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
+        assert_eq!(asked, 1);
         let _ = fs::remove_dir_all(&dir);
     }
 

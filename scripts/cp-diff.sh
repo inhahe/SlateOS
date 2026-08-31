@@ -178,7 +178,13 @@ contents() {
 
 # Shell run inside the case directory to build the fixture.
 TREE=
-reset_knobs() { TREE='mktree'; }
+# What `cp` reads on standard input, for `-i`'s prompts. Empty is end of input
+# straight away, which is what every case before `-i` existed got -- `run_one`
+# redirected `</dev/null` unconditionally, and still does when this is empty.
+# Written with `$'\n'` escapes rather than real newlines so that a case's
+# answers stay on the case's own line and can be read next to its options.
+ANSWERS=
+reset_knobs() { TREE='mktree'; ANSWERS=''; }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -194,6 +200,10 @@ run_one() {
   local side=$1 dir=$2 out=$3 err=$4 rcf=$5; shift 5
   mkdir -p "$dir"
   ( cd "$dir" && eval "$TREE" ) >/dev/null 2>&1
+  # One file per side rather than one shared one: the two sides run one after
+  # the other and a shared file would be consumed by whichever ran first.
+  local answers=$dir.stdin
+  printf '%s' "$ANSWERS" >"$answers"
   (
     # `$out`/`$err` are absolute: they are opened after this `cd`.
     cd "$dir" || exit 1
@@ -206,7 +216,7 @@ run_one() {
     # Prepended rather than replacing `PATH`, so `timeout` is still findable.
     PATH="$bindir/$side:$PATH"
     diff_run timeout -k 2 30 cp "$@" >"$out" 2>"$err"
-  ) </dev/null
+  ) <"$answers"
   echo $? >"$rcf"
   return 0
 }
@@ -243,6 +253,7 @@ compare() {
   local o_err=$work/oe$case_no g_err=$work/ge$case_no
   local o_rc=$work/or$case_no g_rc=$work/gr$case_no
   local label="cp $*"
+  [ -z "$ANSWERS" ] || label="$label   [in: ${ANSWERS//$'\n'/\\n}]"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
@@ -944,12 +955,12 @@ run_case --dere -v tree/link dst
 run_case --d -v tree/link dst
 
 # =============================================================================
-# 16. The three overwrite policies: -f, --remove-destination, -n
+# 16. The four overwrite policies: -f, --remove-destination, -n, -i
 # =============================================================================
-# Three options that all sound like "about overwriting" and are not variants of
-# one another. They set three different fields, act at three different points,
-# and only one of them is ever reached on the ordinary path where the
-# destination opens for writing without complaint:
+# Four options that all sound like "about overwriting" and are not variants of
+# one another. They act at four different points, and only two of them are ever
+# reached on the ordinary path where the destination opens for writing without
+# complaint:
 #
 #   * `-f` acts *after* an open for writing has already failed, and only then.
 #     On an ordinary destination it changes nothing at all, which is why the
@@ -958,7 +969,12 @@ run_case --d -v tree/link dst
 #   * `--remove-destination` acts *before* any open is attempted, so it changes
 #     the ordinary path too -- it unlinks a perfectly writable destination and
 #     makes a new one.
-#   * `-n` is neither: it refuses, on stderr, and exits 1.
+#   * `-n` is none of that: it refuses, on stderr, and exits 1, before any of
+#     the above is attempted.
+#   * `-i` asks, in the same place `-n` refuses, and a non-`y` answer is `-n`'s
+#     outcome without `-n`'s message. `-n` and `-i` are two values of one
+#     field, so the last of the two given wins -- but they are not mirror
+#     images: `-n` also suppresses the same-file check and `-i` does not.
 #
 # The order the two verbose lines come out in is the sharpest way to tell the
 # first two apart, and is why every case here is `-v`: `-f` prints the arrow
@@ -984,8 +1000,14 @@ run_case --d -v tree/link dst
 # creating is what already failed. The self-loop row is the opposite surprise:
 # there the *stat* fails, not the open, and `-f` is consulted about that too.
 #
-# See `design-decisions.md` 727 and `cp.rs`'s "The three overwrite policies are
-# three different options".
+# `-i` reads its answers from standard input, which is what the `ANSWERS` knob
+# feeds; every case without it gets an empty file, which is end of input, which
+# declines. Its own questions are keyed on something different again -- not on
+# how the open fails but on whether the destination is *writable* at all, by
+# `euidaccess`, which is why the mode-400 row below has `-i` cases of its own.
+#
+# See `design-decisions.md` 727 and `cp.rs`'s "The four overwrite policies are
+# four different options".
 
 # --- -f, and what it does not do ---------------------------------------------
 # On a destination that opens, `-f` is dead weight; the pair is here so that a
@@ -1032,7 +1054,78 @@ run_case -nv file.txt dir
 TREE='mktree; printf x > dir/file.txt'
 run_case -nv file.txt dir
 
-# --- the same three against a destination that will not open -----------------
+# --- -i, which asks ----------------------------------------------------------
+# The prompt has no trailing newline, so a case with several of them puts them
+# all on one line of stderr -- which is why they are compared as raw text
+# rather than line by line, and is itself worth pinning: a stray `\n` here
+# would be invisible to a line-wise comparison and glaring to a person.
+#
+# The answer is `^[yY]` and nothing else (gnulib `rpmatch` under LC_ALL=C, which
+# `diff-wsl.sh` sets for both sides), so the accepting and declining spellings
+# below are the rule stated as cases.
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'\n'
+run_case -i file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='n'$'\n'
+run_case -i file.txt old.txt
+# No newline after the answer: `getline` returns it anyway at end of input.
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'
+run_case --interactive file.txt old.txt
+# The spellings that accept and the ones that do not. Only the first byte is
+# looked at, the match is anchored, and a leading space therefore declines.
+TREE='mktree; printf old > old.txt'
+ANSWERS='Y'$'\n'
+run_case -iv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='yeah, fine'$'\n'
+run_case -iv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS=' y'$'\n'
+run_case -iv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS=$'\n'
+run_case -iv file.txt old.txt
+# Nothing at all on stdin: end of input declines, and declining is a *silent*
+# exit 1 -- the question is the whole of stderr, with no `not replacing`.
+TREE='mktree; printf old > old.txt'
+run_case -iv file.txt old.txt
+# Nothing there to ask about, so it copies without reading the answer.
+ANSWERS='n'$'\n'
+run_case -iv file.txt new.txt
+# One question per operand, taken in order, and a decline that does not stop
+# the sources after it.
+TREE='mktree; printf 1 > s1; printf 2 > s2; printf 3 > s3
+      printf x > dir/s1; printf x > dir/s2; printf x > dir/s3'
+ANSWERS='y'$'\n''n'$'\n''y'$'\n'
+run_case -iv s1 s2 s3 dir
+# Fewer answers than questions: the queue runs out and the rest decline.
+TREE='mktree; printf 1 > s1; printf 2 > s2; printf 3 > s3
+      printf x > dir/s1; printf x > dir/s2; printf x > dir/s3'
+ANSWERS='y'$'\n'
+run_case -iv s1 s2 s3 dir
+# Into a directory, where the destination name in the question is the derived
+# one and not the operand.
+TREE='mktree; printf x > dir/file.txt'
+ANSWERS='y'$'\n'
+run_case -iv file.txt dir
+# `-i` and `-n` are one field with two values, so the last one given wins --
+# including when they are clustered into one argument.
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'\n'
+run_case -niv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'\n'
+run_case -inv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'\n'
+run_case -n -i -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'\n'
+run_case -i -n -v file.txt old.txt
+
+# --- the same four against a destination that will not open ------------------
 # Mode 400 denies only for a non-root copier, so these are guarded exactly as
 # section 11's are.
 if [ "$(id -u)" -ne 0 ]; then
@@ -1044,6 +1137,37 @@ if [ "$(id -u)" -ne 0 ]; then
   run_case --remove-destination -v file.txt ro.txt
   TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
   run_case -nv file.txt ro.txt
+  # `-i` is where a destination that will not open changes the *question*: the
+  # plain `overwrite 'x'?` becomes one that quotes the mode, and which of the
+  # two mode-quoting wordings comes out depends on whether `cp` means to write
+  # through the bits or to unlink the file first. All three wordings, and the
+  # `04lo` mode and the `rwx` string inside two of them, are pinned here.
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  ANSWERS='n'$'\n'
+  run_case -iv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  ANSWERS='y'$'\n'
+  run_case -iv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  ANSWERS='y'$'\n'
+  run_case -ifv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  ANSWERS='n'$'\n'
+  run_case -ifv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 400 ro.txt'
+  ANSWERS='y'$'\n'
+  run_case -i --remove-destination -v file.txt ro.txt
+  # A mode with more of the bits set, so that the `rwx` string in the question
+  # is not the same nine characters every time.
+  TREE='mktree; printf old > ro.txt; chmod 461 ro.txt'
+  ANSWERS='n'$'\n'
+  run_case -iv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 4451 ro.txt'
+  ANSWERS='n'$'\n'
+  run_case -iv file.txt ro.txt
+  TREE='mktree; printf old > ro.txt; chmod 2000 ro.txt'
+  ANSWERS='n'$'\n'
+  run_case -iv file.txt ro.txt
   # The mode of what `-f` leaves behind is the source's, not the destination's,
   # because the destination is gone -- the snapshot is where that shows.
   TREE='mktree; chmod 750 file.txt; printf old > ro.txt; chmod 400 ro.txt'
@@ -1069,6 +1193,24 @@ TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
 run_case --remove-destination -v file.txt lnk
 TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
 run_case -nv file.txt lnk
+# `-i` asks about the *link*, not about the target it will actually write, and
+# never quotes a mode: the writability short-circuit takes `S_ISLNK` as
+# writable outright, because the bits on a symlink mean nothing.
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+ANSWERS='y'$'
+'
+run_case -iv file.txt lnk
+TREE='mktree; printf B > b.txt; ln -s b.txt lnk'
+ANSWERS='n'$'
+'
+run_case -iv file.txt lnk
+# And still does not quote a mode when the target denies, for the same reason.
+if [ "$(id -u)" -ne 0 ]; then
+  TREE='mktree; printf B > b.txt; chmod 400 b.txt; ln -s b.txt lnk'
+  ANSWERS='n'$'
+'
+  run_case -iv file.txt lnk
+fi
 
 # A link that resolves to nothing. `-f` does not help; `--remove-destination`
 # does, because it never asks whether the link resolves.
@@ -1080,6 +1222,12 @@ TREE='mktree; ln -s nowhere dang'
 run_case --remove-destination -v file.txt dang
 TREE='mktree; ln -s nowhere dang'
 run_case -nv file.txt dang
+# Nothing is there as far as the follow-stat is concerned, so `-i` has nothing
+# to ask about and refuses on its own grounds instead.
+TREE='mktree; ln -s nowhere dang'
+ANSWERS='y'$'
+'
+run_case -iv file.txt dang
 
 # A link to the source. Plain `cp` calls it the same file;
 # `--remove-destination` is excused from that check, because after the unlink
@@ -1093,6 +1241,18 @@ TREE='mktree; ln -s file.txt self'
 run_case --remove-destination -v file.txt self
 TREE='mktree; ln -s file.txt self'
 run_case -nv file.txt self
+# The one place `-i` and `-n` disagree about the *order* rather than the
+# answer: GNU guards the same-file check with `interactive != I_ALWAYS_NO`, so
+# `-n` never reaches it and says `not replacing`, while `-i` reaches it, says
+# `are the same file`, and asks nothing -- the `y` below goes unread.
+TREE='mktree; ln -s file.txt self'
+ANSWERS='y'$'
+'
+run_case -iv file.txt self
+TREE='mktree; ln -s file.txt self'
+ANSWERS='y'$'
+'
+run_case -iv --remove-destination file.txt self
 
 # A link to itself, where it is the stat that fails rather than the open.
 TREE='mktree; ln -s loop loop'
@@ -1103,19 +1263,35 @@ TREE='mktree; ln -s loop loop'
 run_case --remove-destination -v file.txt loop
 TREE='mktree; ln -s loop loop'
 run_case -nv file.txt loop
+# The destination whose mode cannot be read at all. GNU's question here is
+# built from an uninitialised `struct stat`, so this case pins only that the
+# two agree about the *outcome*; see `overwrite_ok` in `cp.rs`.
+TREE='mktree; ln -s loop loop'
+ANSWERS='y'$'
+'
+run_case -iv file.txt loop
 
-# --- against a directory destination, which none of the three removes --------
+# --- against a directory destination, which none of the four removes ---------
 # `-T` is what makes the destination a name to be replaced rather than a place
 # to copy into, so it is the only way to aim these at a directory at all. None
 # of them unlinks it: `-f` and `--remove-destination` both stop at "is a
-# directory", and `-n` refuses first.
+# directory", `-n` refuses first, and `-i` asks first and then stops there too.
 run_case -Tv file.txt dir
 run_case -Tfv file.txt dir
 run_case -T --remove-destination -v file.txt dir
 run_case -Tnv file.txt dir
+# The question comes *before* the "cannot overwrite directory" refusal, so a
+# `y` gets both on one line of stderr and a `n` gets only the question. That
+# ordering is the point of the pair.
+ANSWERS='y'$'
+'
+run_case -Tiv file.txt dir
+ANSWERS='n'$'
+'
+run_case -Tiv file.txt dir
 
 # --- inside a recursive copy -------------------------------------------------
-# The walked entries go through the same three policies as the operands, which
+# The walked entries go through the same four policies as the operands, which
 # is only visible when the destination tree already has the names in it. The
 # pre-made `dst/tree` carries a symlink, and replacing an existing symlink is a
 # thing this `cp` used to fail at outright -- `known-issues.md` ->
@@ -1130,6 +1306,26 @@ TREE="mktree; $PRE"
 run_case -rfv tree dst
 TREE="mktree; $PRE"
 run_case -rv --remove-destination tree dst
+# `-i` is asked per entry the walk finds, not once for the operand, and the
+# directories themselves are exempt -- so the number of questions is the number
+# of non-directory names the destination already had.
+TREE="mktree; $PRE"
+ANSWERS='y'$'
+''y'$'
+''y'$'
+'
+run_case -riv tree dst
+TREE="mktree; $PRE"
+ANSWERS='n'$'
+''n'$'
+''n'$'
+'
+run_case -riv tree dst
+TREE="mktree; $PRE"
+ANSWERS='y'$'
+''n'$'
+'
+run_case -riv tree dst
 # The second copy of the same tree, which is the shape the symlink bug was
 # found in: everything already exists and every entry takes the overwrite path.
 TREE='mktree; mkdir -p dst2/tree/sub; printf a > dst2/tree/a.txt
@@ -1146,10 +1342,23 @@ TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
 run_case -rfv tree dst
 TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
 run_case -rv --remove-destination tree dst
+# The question again precedes the kind-mismatch refusal, in both directions.
+TREE='mktree; mkdir -p dst/tree; printf x > dst/tree/sub'
+ANSWERS='y'$'
+''y'$'
+'
+run_case -riv tree dst
+TREE='mktree; mkdir -p dst/tree/a.txt'
+ANSWERS='y'$'
+''y'$'
+'
+run_case -riv tree dst
 
-# --- the three together ------------------------------------------------------
+# --- the four together -------------------------------------------------------
 # They are not mutually exclusive and GNU does not reject any pairing; what it
-# does with each is measured rather than reasoned about.
+# does with each is measured rather than reasoned about. `-i` and `-n` are the
+# exception in that they are one field, so the last of *those two* wins while
+# `-f` and `--remove-destination` accumulate alongside whichever won.
 TREE='mktree; printf old > old.txt'
 run_case -fnv file.txt old.txt
 TREE='mktree; printf old > old.txt'
@@ -1160,6 +1369,22 @@ TREE='mktree; printf old > old.txt'
 run_case -n --remove-destination -v file.txt old.txt
 TREE='mktree; printf old > old.txt'
 run_case --remove-destination -nv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'
+'
+run_case -i --remove-destination -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='n'$'
+'
+run_case -i --remove-destination -v file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'
+'
+run_case -fiv file.txt old.txt
+TREE='mktree; printf old > old.txt'
+ANSWERS='y'$'
+'
+run_case -f --remove-destination -inv file.txt old.txt
 
 # =============================================================================
 # 17. Options GNU has and this cp has not
@@ -1182,8 +1407,6 @@ missing --debug file.txt new.txt
 # *and* `--preserve=links`, and honouring only the half that exists would turn
 # two hard-linked sources into two independent copies with nothing said.
 missing -d tree/link dst
-missing -i file.txt tree/a.txt
-missing --interactive file.txt tree/a.txt
 missing -l file.txt new.txt
 missing --link file.txt new.txt
 missing --no-preserve=mode file.txt new.txt

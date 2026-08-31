@@ -101242,3 +101242,59 @@ deletion to the unsafe route. And because `NotSupported` (-2) is ambiguous
 between "unregistered slot" and "this filesystem can't", the fallback latches
 off after the first call that answers with anything else — see
 `design-decisions.md` §730, decision 3.
+
+## B-READLINKAT-CANNOT-READ-A-SYMLINK-FD-BECAUSE-O_PATH-IS-UNIMPLEMENTED (lane B, 2026-08-30)
+
+**In short:** `open` accepts the `O_PATH` flag and then ignores it. Nothing
+reports this, and the flag's whole purpose is to get a descriptor for a *name*
+without opening what the name refers to — so ignoring it means we open the
+thing instead. Two calls behave differently from Linux as a result, and one of
+them is a `readlinkat` branch we cannot even reach.
+
+**Where:** `posix/src/file.rs` — `open` (the flag never reaches
+`translate_open_flags`, which maps only READ/WRITE/CREATE/TRUNCATE/APPEND/
+DIRECTORY/EXCL/NOFOLLOW), and `readlinkat`, whose comment points here.
+`O_PATH` itself is defined, correctly, in `posix/src/fcntl.rs` (0o10_000_000).
+
+**What diverges.** The Linux column is measured on 6.6; the "ours" column is
+read off `translate_open_flags`, which is where the flag is dropped.
+
+| call | Linux | ours |
+|---|---|---|
+| `open(link, O_PATH\|O_NOFOLLOW)` | fd naming the *symlink* | `ELOOP` — `O_NOFOLLOW` is the only one of the two bits that survives, and on its own it means "refuse a symlink" |
+| `readlinkat(that fd, "", buf, n)` | the link body | unreachable: the fd above cannot be obtained |
+| `readlinkat(fd_to_a_regular_file, "", buf, n)` | `ENOENT` | `ENOENT` ✓ |
+| `open(p, O_PATH)` | an fd that cannot read or write | an ordinary read-open of `p` |
+
+The third row is why `readlinkat` is *correct today* rather than merely
+untested: no descriptor a caller can obtain from this libc refers to a symlink,
+so `ENOENT` is the right answer for every fd that can actually be passed. The
+gap is latent, not live — but it becomes live the moment `O_PATH` works, and
+then `readlinkat`'s empty-path branch needs the other half written.
+
+**Why it matters beyond `readlinkat`.** `O_PATH` is the standard way to pin a
+directory for the `*at` family without holding it open for I/O — which is
+exactly the TOCTOU work in
+`B-THE-AT-FAMILY-IS-ONLY-PINNED-FOR-SINGLE-COMPONENT-UNLINK` above. A hardened
+`rm -r` or `chmod -R` opens each directory `O_PATH|O_NOFOLLOW|O_DIRECTORY` and
+walks with `*at` calls; ours would open them for read instead, which works but
+asks for more authority than the operation needs, and fails outright on a
+directory the caller may traverse but not read.
+
+**The proper fix**, in order:
+
+1. `open` must stop ignoring the flag. Today it silently does the wrong thing;
+   the file's own precedent for an unsupportable flag is `O_TMPFILE`, which
+   returns `EOPNOTSUPP` rather than quietly opening the directory path. Making
+   `O_PATH` `EOPNOTSUPP` is a one-line change that converts a silent divergence
+   into a loud one, and should be done even if nothing else here is.
+2. Real support needs a kernel-side concept: a handle that names a path without
+   an open file description behind it, on which `read`/`write` are `EBADF` and
+   `fchdir`/`*at`/`fstat`/`close` work. That is lane A's, and would want a
+   request filed against `kernel/src/fs`. It also needs the fd table to carry a
+   `HandleKind::Path` so `read` can refuse it before reaching the kernel.
+3. Only then: `readlinkat`'s empty-path branch grows the symlink case, and
+   `openat`'s `O_NOFOLLOW` stops being the only way to decline to follow.
+
+Until (2), the `*at` pinning work uses `SYS_FS_*_PINNED` handles from ordinary
+`open`, which is what §730 describes and is not blocked by this.

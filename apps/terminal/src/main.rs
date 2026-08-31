@@ -529,6 +529,13 @@ pub struct TerminalState {
     /// read it: the cursor was drawn on every frame regardless, so the setting
     /// was a field a user could change to no effect.
     blink_on: bool,
+    /// Whether the last tick changed anything the user can see.
+    ///
+    /// A field rather than a return value because a tick reaches the window
+    /// through `handle_event`, which answers with the bytes a *key* produced
+    /// and has nowhere to put a second answer. `on_event` reads it to decide
+    /// whether the frame is worth drawing.
+    tick_changed: bool,
 
     /// The pseudo-terminal the child runs on the far side of.
     ///
@@ -639,6 +646,7 @@ impl TerminalState {
             bell_flash_ms: 0,
             blink_ms: 0,
             blink_on: true,
+            tick_changed: false,
             size: (
                 usize_f32(cols) * config.cell_width + BAR_W,
                 usize_f32(rows) * config.cell_height,
@@ -1022,21 +1030,60 @@ impl TerminalState {
         changed
     }
 
-    /// Send bytes to the child.
+    /// Everything a tick does: age the clocks, then read the child.
     ///
-    /// Also the one place that decides what happens to them when there is no
-    /// child: they stay in `output_buffer`, which is what the tests read, so
-    /// the translation is observable either way.
+    /// One method rather than a step in `dispatch_event` and a second step in
+    /// `on_event`, because the two used to disagree. `on_event` answered a
+    /// tick itself -- it needed to know whether anything had changed before it
+    /// could say whether the frame was worth drawing -- and returned before
+    /// `dispatch_event` could run, so the read of the child never happened in
+    /// the one path the compositor actually uses. Under a real window the
+    /// terminal was write-only: the shell's prompt was produced and never
+    /// collected. Every test that caught the read called `handle_event`
+    /// directly, which is the path the compositor does not take.
+    fn on_tick(&mut self, elapsed_ms: u64) {
+        let aged = self.tick(elapsed_ms);
+        let read = self.drain_child();
+        self.tick_changed = aged || read;
+    }
+
+    /// Queue bytes for the child.
+    ///
+    /// Queued rather than written, so that everything the terminal has to say
+    /// leaves by one route -- see [`Self::flush_to_child`].
     pub fn to_child(&mut self, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
         self.output_buffer.extend_from_slice(bytes);
-        if let Some(pair) = self.pty.as_ref() {
-            // A short write is the channel being full, which is the child not
-            // keeping up rather than an error: the rest is dropped, exactly as
-            // a real terminal drops input a full tty cannot take.
-            let _ = pair.master.write(bytes);
+    }
+
+    /// Send everything queued for the child.
+    ///
+    /// The one place bytes leave the terminal, because they used to leave from
+    /// two and one of them was a dead end: keystrokes went straight to the PTY
+    /// from `to_child`, while the parser's *own* replies -- the cursor position
+    /// report, the device attributes answer, the status report -- were appended
+    /// to `output_buffer` and sent nowhere at all. A program that asked this
+    /// terminal where its cursor was waited for an answer that was sitting in a
+    /// `Vec`.
+    pub fn flush_to_child(&mut self) {
+        if self.output_buffer.is_empty() {
+            return;
+        }
+        let Some(pair) = self.pty.as_ref() else {
+            // Nothing to take them. They stay queued rather than being dropped:
+            // a terminal whose PTY failed to open should not also silently lose
+            // what was typed into it.
+            return;
+        };
+        // A short write is the channel being full, which is the child not
+        // keeping up rather than an error: what was taken leaves the queue and
+        // the rest waits for the next flush, which is the difference between
+        // input arriving late and input arriving truncated.
+        if let Ok(n) = pair.master.write(&self.output_buffer) {
+            let taken = n.min(self.output_buffer.len());
+            self.output_buffer.drain(..taken);
         }
     }
 
@@ -2624,8 +2671,19 @@ impl TerminalState {
     // Event handling
     // ========================================================================
 
-    /// Handle a guitk event. Returns bytes to send to the child process (if any).
+    /// Handle a guitk event. Returns the bytes the key translated to, if any.
+    ///
+    /// Every arm ends at the same flush, because a reply the *parser* produced
+    /// -- while feeding the child's own output back through it -- has to leave
+    /// by the same route a keystroke does, and there is no event that is
+    /// guaranteed to follow it.
     pub fn handle_event(&mut self, event: &Event) -> Vec<u8> {
+        let out = self.dispatch_event(event);
+        self.flush_to_child();
+        out
+    }
+
+    fn dispatch_event(&mut self, event: &Event) -> Vec<u8> {
         match event {
             Event::Key(key_event) => {
                 // Typing scrolls back to where the typing will appear. A key
@@ -2646,8 +2704,7 @@ impl TerminalState {
                 Vec::new()
             }
             Event::Tick { elapsed_ms, .. } => {
-                self.tick(*elapsed_ms);
-                self.drain_child();
+                self.on_tick(*elapsed_ms);
                 Vec::new()
             }
             _ => Vec::new(),
@@ -2865,18 +2922,19 @@ impl App for TerminalState {
         if matches!(event, Event::CloseRequested) {
             return Response::Exit;
         }
+        // Every event goes through the same dispatch, the tick included: the
+        // tick is what reads the child, and answering it here instead of
+        // passing it on left the terminal write-only. The bytes a key
+        // translated to are not queued again here either -- `handle_event`
+        // already put them in `output_buffer` on their way to the child, and
+        // appending the return value as well sent every keystroke twice.
+        self.handle_event(event);
         // A tick that changed nothing must not ask for a frame: the cursor
         // blinks five times a second and the loop runs twenty-five, so four
         // ticks in five have nothing to show.
-        if let Event::Tick { elapsed_ms, .. } = event {
-            return if self.tick(*elapsed_ms) {
-                Response::Redraw
-            } else {
-                Response::Idle
-            };
+        if matches!(event, Event::Tick { .. }) && !self.tick_changed {
+            return Response::Idle;
         }
-        let out = self.handle_event(event);
-        self.output_buffer.extend_from_slice(&out);
         Response::Redraw
     }
 
@@ -2942,8 +3000,13 @@ mod tests {
         clippy::arithmetic_side_effects
     )]
 
-    use super::{TerminalConfig, TerminalState};
-    use guitk::event::{MouseEvent, MouseEventKind};
+    use super::{
+        BAR_W, BELL_MS, BLINK_MS, CursorStyle, Layout, Rect, RenderCommand, Target, TerminalConfig,
+        TerminalState, cells_that_fit, ratio, scale, text, u32_f32,
+    };
+    use guitk::event::{Event, Key, MouseButton, MouseEvent, MouseEventKind};
+    use guitk::probe::{Probe, press, rect_of_sized, typing};
+    use oswindow::app::{App, Response};
 
     /// A terminal with `lines` lines already pushed off the top, so there is
     /// something to scroll back into.
@@ -2953,13 +3016,7 @@ mod tests {
             ..TerminalConfig::default()
         });
         for i in 0..lines {
-            term.feed(
-                format!(
-                    "line {i}
-"
-                )
-                .as_bytes(),
-            );
+            term.feed(format!("line {i}\r\n").as_bytes());
         }
         term
     }
@@ -3017,5 +3074,1200 @@ mod tests {
         assert_eq!(term.scroll_offset, 0);
         wheel(&mut term, 1.0);
         assert_eq!(term.scroll_offset, 3);
+    }
+
+    // =======================================================================
+    // The emulator in a window
+    // =======================================================================
+    //
+    // Everything below is about the terminal being a window rather than a
+    // simulation: that the grid is a quotient of the size the compositor hands
+    // it, that what the pointer reaches is what the painter painted, that the
+    // child on the other end of the PTY is really written to and really read
+    // back, and that the bell and the blink age on a clock rather than on how
+    // often the window happens to be redrawn.
+
+    /// The window widths every layout claim is checked at.
+    ///
+    /// A rule about `Layout::solve` is a rule at *every* size, so a handful of
+    /// sampled sizes tests a handful of points and nothing else. The sizes
+    /// that break a grid rule are the ones nobody would think to sample: 0 and
+    /// 3 wide, where not one column fits; 10 wide, exactly the bar's width, so
+    /// the quarter-cap is what keeps any grid at all; 8.4 and 16.8, one and
+    /// two cells with no room for the bar beside them.
+    const GRID_W: [f32; 8] = [0.0, 3.0, 8.4, 10.0, 16.8, 120.0, 682.0, 1600.0];
+    /// The window heights every layout claim is checked at.
+    const GRID_H: [f32; 6] = [0.0, 5.0, 18.0, 54.0, 432.0, 1000.0];
+
+    /// Every window size the layout claims sweep.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is the answer the
+    /// drawing pass gives for a bar in a window too small to hold one, and a
+    /// bar that was not drawn cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// A terminal with `lines` lines of output already behind it.
+    fn fed_terminal(lines: usize) -> TerminalState {
+        let mut term = TerminalState::new(TerminalConfig::default());
+        for i in 0..lines {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        term
+    }
+
+    /// A terminal scrolled back into its scrollback.
+    fn scrolled_back(lines: usize, up: usize) -> TerminalState {
+        let mut term = fed_terminal(lines);
+        term.scroll_viewport_up(up);
+        term
+    }
+
+    /// Every state the picture is drawn in.
+    ///
+    /// The states are the ones that change *what* is painted rather than only
+    /// its colour: an empty terminal paints no glyphs at all, a scrolled one
+    /// paints a thumb partway down its track and no cursor, an alt-screen one
+    /// paints no thumb however much scrollback is behind it.
+    fn states() -> Vec<(&'static str, TerminalState)> {
+        let mut selected = fed_terminal(40);
+        selected.selection_start(0.0, 0.0);
+        selected.selection_extend(400.0, 40.0);
+
+        let mut belling = fed_terminal(3);
+        belling.feed(b"\x07");
+
+        let mut alt = fed_terminal(40);
+        alt.feed(b"\x1b[?1049h");
+        alt.feed(b"a full-screen program");
+
+        let mut attrs = TerminalState::new(TerminalConfig::default());
+        attrs.feed(b"\x1b[1;4;7;9;3;2mattributes\x1b[0m\r\n");
+        attrs.feed(b"\x1b[38;5;208m256\x1b[48;2;10;20;30m truecolor\x1b[0m\r\n");
+
+        let mut barred = fed_terminal(3);
+        barred.cursor_style = CursorStyle::Bar;
+
+        let mut underlined = fed_terminal(3);
+        underlined.cursor_style = CursorStyle::Underline;
+
+        let mut dark = fed_terminal(3);
+        dark.blink_on = false;
+
+        let mut wide = TerminalState::new(TerminalConfig::default());
+        wide.feed(
+            "the quick brown fox jumps over the lazy dog "
+                .repeat(6)
+                .as_bytes(),
+        );
+
+        vec![
+            ("empty", TerminalState::new(TerminalConfig::default())),
+            ("fed", fed_terminal(3)),
+            ("scrollback", fed_terminal(400)),
+            ("scrolled to the top", scrolled_back(400, 10_000)),
+            ("scrolled partway", scrolled_back(400, 40)),
+            ("selected", selected),
+            ("belling", belling),
+            ("alt screen", alt),
+            ("attributes", attrs),
+            ("bar cursor", barred),
+            ("underline cursor", underlined),
+            ("dark half of the blink", dark),
+            ("a line longer than the grid", wide),
+        ]
+    }
+
+    #[test]
+    fn the_grid_and_the_bar_stay_inside_the_window() {
+        // The old program painted `80 * 8.4` by `24 * 18` pixels into whatever
+        // window it was given, so every window narrower than 682 or shorter
+        // than 432 had text drawn past its edge.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h, 8.4, 18.0);
+            let at = format!("{w}x{h}");
+            for (name, r) in [("grid", l.grid), ("bar", l.bar)] {
+                assert!(inside(l.window, r), "{name} escapes the window at {at}");
+                assert!(r.w >= -0.01 && r.h >= -0.01, "{name} is negative at {at}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_grid_is_a_whole_number_of_cells_and_never_reaches_the_bar() {
+        // The two halves of the same claim: the grid is `cols` by `rows` whole
+        // cells, and those cells stop where the bar starts. A grid computed
+        // from the window width rather than from the width left over would
+        // paint its last column underneath the bar.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h, 8.4, 18.0);
+            let at = format!("{w}x{h}");
+            assert!(
+                (l.grid.w - super::usize_f32(l.cols) * 8.4).abs() < 0.01,
+                "grid width {} is not {} whole cells at {at}",
+                l.grid.w,
+                l.cols
+            );
+            assert!(
+                (l.grid.h - super::usize_f32(l.rows) * 18.0).abs() < 0.01,
+                "grid height {} is not {} whole rows at {at}",
+                l.grid.h,
+                l.rows
+            );
+            assert!(
+                l.grid.right() <= l.bar.x + 0.01,
+                "the grid reaches {} and the bar starts at {} at {at}",
+                l.grid.right(),
+                l.bar.x
+            );
+        }
+    }
+
+    #[test]
+    fn the_bar_never_takes_more_than_a_quarter_of_the_window() {
+        // Reserved unconditionally, so a window narrower than the bar itself
+        // would otherwise be entirely furniture and no terminal at all.
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h, 8.4, 18.0);
+            assert!(
+                l.bar.w <= (w / 4.0) + 0.01 && l.bar.w <= BAR_W + 0.01,
+                "the bar is {} wide in a {w}x{h} window",
+                l.bar.w
+            );
+            assert!(
+                l.bar.right() <= w + 0.01 && (l.bar.right() - w).abs() < 0.01,
+                "the bar is not against the right edge of a {w}x{h} window"
+            );
+        }
+    }
+
+    #[test]
+    fn the_grid_grows_and_shrinks_with_the_window() {
+        // Monotonicity, which is the property that actually says the grid is a
+        // quotient of the window: a wider window never has fewer columns.
+        let mut last_cols = 0;
+        for w in [0.0_f32, 20.0, 100.0, 300.0, 682.0, 1600.0] {
+            let l = Layout::solve(w, 400.0, 8.4, 18.0);
+            assert!(
+                l.cols >= last_cols,
+                "{w} wide has {} columns, less than the {last_cols} of a narrower window",
+                l.cols
+            );
+            last_cols = l.cols;
+        }
+        let mut last_rows = 0;
+        for h in [0.0_f32, 10.0, 54.0, 432.0, 1000.0] {
+            let l = Layout::solve(800.0, h, 8.4, 18.0);
+            assert!(l.rows >= last_rows, "{h} tall lost rows");
+            last_rows = l.rows;
+        }
+    }
+
+    #[test]
+    fn a_nonsense_cell_size_yields_no_grid_rather_than_a_full_one() {
+        // `(span / cell) as usize` is a saturating cast: a NaN cell answers 0,
+        // which reads as an empty window, and a zero cell answers `usize::MAX`
+        // -- a loop over every column that never ends.
+        for cell in [0.0_f32, -8.4, f32::NAN, f32::INFINITY] {
+            assert_eq!(cells_that_fit(800.0, cell), 0, "cell size {cell}");
+        }
+        for span in [f32::NAN, f32::INFINITY, -1.0] {
+            assert_eq!(cells_that_fit(span, 8.4), 0, "span {span}");
+        }
+        assert_eq!(cells_that_fit(8.4, 8.4), 1, "one cell exactly");
+        // The hundredth of a pixel of slack in the loop is what makes this
+        // one hold: 8.4 is not a representable float, so two of them added
+        // together are a shade over 16.8 and an exact comparison would report
+        // a window of exactly two cells as holding one.
+        assert_eq!(cells_that_fit(16.8, 8.4), 2, "two cells exactly");
+        assert_eq!(cells_that_fit(16.5, 8.4), 1, "well under two cells");
+        assert_eq!(cells_that_fit(0.0, 8.4), 0, "no room at all");
+    }
+
+    // -----------------------------------------------------------------------
+    // What is painted
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        // A grid wider than its window is the ordinary state between a resize
+        // being asked for and the child agreeing to it. Without the clip, the
+        // surplus columns are painted over whatever is beside the terminal.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for c in term.frame(w, h).commands() {
+                    let r = match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        }
+                        | RenderCommand::StrokeRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        } => Rect::new(*x, *y, *width, *height),
+                        RenderCommand::Line { x1, y1, x2, y2, .. } => {
+                            Rect::new(x1.min(*x2), y1.min(*y2), (x2 - x1).abs(), (y2 - y1).abs())
+                        }
+                        _ => continue,
+                    };
+                    assert!(inside(window, r), "{name}: {r:?} escapes a {w}x{h} window");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_glyph_runs_off_the_window_it_is_drawn_in() {
+        // Every glyph is bounded to one cell's width, so a proportional font
+        // -- which is what the compositor falls back to when the monospace
+        // face is missing -- cannot walk a row's characters off the right edge
+        // one accumulated pixel at a time.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                for c in term.frame(w, h).commands() {
+                    let RenderCommand::Text {
+                        text: glyph_text,
+                        x,
+                        max_width,
+                        font_size,
+                        font_weight,
+                        ..
+                    } = c
+                    else {
+                        continue;
+                    };
+                    let bound = max_width
+                        .unwrap_or_else(|| text::measure(glyph_text, *font_size, *font_weight));
+                    assert!(
+                        *x >= -0.01,
+                        "{name}: {glyph_text:?} starts at {x} in a {w}x{h} window"
+                    );
+                    assert!(
+                        x + bound <= w + 0.01,
+                        "{name}: {glyph_text:?} runs off a {w}x{h} window: x {x} + {bound}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_balances_its_clips_at_every_size() {
+        // An unbalanced clip is a clip left on the stack for whatever the
+        // compositor draws next -- another window's problem, found nowhere
+        // near here.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                assert!(
+                    term.frame(w, h).is_balanced(),
+                    "{name}: unbalanced clips in a {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_window_is_filled_edge_to_edge_before_anything_else() {
+        // The grid is a whole number of cells and the window is not, so up to
+        // one cell of width and one of height is left over. Filling only the
+        // grid leaves that strip transparent -- a band of desktop showing
+        // through the bottom of the terminal.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                if w <= 0.0 || h <= 0.0 {
+                    continue;
+                }
+                let frame = term.frame(w, h);
+                let first = frame.commands().iter().find_map(|c| match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => Some(Rect::new(*x, *y, *width, *height)),
+                    _ => None,
+                });
+                let Some(back) = first else {
+                    panic!("{name}: nothing at all is painted in a {w}x{h} window");
+                };
+                assert!(
+                    back.w >= w - 0.01 && back.h >= h - 0.01,
+                    "{name}: the backdrop is {back:?} in a {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_is_inside_the_window_and_has_area() {
+        // A hit box outside the window can never be clicked, and one with no
+        // area is a control that is painted and unreachable.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for (target, rect) in term.frame(w, h).hits() {
+                    assert!(
+                        rect.w > 0.0 && rect.h > 0.0,
+                        "{name}: {target:?} has no area at {w}x{h}"
+                    );
+                    assert!(
+                        inside(window, *rect),
+                        "{name}: {target:?} is hit-boxed outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_has_ink_painted_at_exactly_that_rectangle() {
+        // A hit box is meant to be recorded by the pass that paints the thing
+        // it stands for, at the rectangle it painted. Nothing in the type
+        // system says so -- `f.hit` takes any rectangle at all -- and a thumb
+        // hit-boxed anywhere but where the thumb was drawn is a scrollbar you
+        // cannot grab.
+        //
+        // The grid is the exception and is checked separately below: it is a
+        // band of many cells rather than one filled rectangle, and most of
+        // those cells are the default background and are not painted at all.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                let frame = term.frame(w, h);
+                let fills: Vec<Rect> = frame
+                    .commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        } => Some(Rect::new(*x, *y, *width, *height)),
+                        _ => None,
+                    })
+                    .collect();
+                for (target, rect) in frame.hits() {
+                    if matches!(target, Target::Grid) {
+                        continue;
+                    }
+                    assert!(
+                        fills.iter().any(|f| (f.x - rect.x).abs() < 0.01
+                            && (f.y - rect.y).abs() < 0.01
+                            && (f.w - rect.w).abs() < 0.01
+                            && (f.h - rect.h).abs() < 0.01),
+                        "{name}: {target:?} is hit-boxed at {rect:?} in a {w}x{h} window, \
+                         where nothing was painted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_lies_in_the_band_that_owns_it() {
+        // "Stay in the window" is too weak to catch the mistake that matters:
+        // a grid hit box that reached under the bar, or a thumb outside its
+        // own track, is well inside the window and still wrong -- the first
+        // steals the bar's clicks, the second cannot be dragged.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                let l = Layout::solve(w, h, term.config.cell_width, term.config.cell_height);
+                for (target, rect) in term.frame(w, h).hits() {
+                    let (band, band_name) = match target {
+                        Target::Grid => (l.grid, "the grid"),
+                        Target::ScrollTrack => (l.bar, "the bar"),
+                        Target::ScrollThumb => (l.bar, "the bar"),
+                    };
+                    assert!(
+                        inside(band, *rect),
+                        "{name}: {target:?} is hit-boxed at {rect:?} in a {w}x{h} window, \
+                         outside {band_name} at {band:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_grids_hit_box_covers_every_cell_that_was_drawn() {
+        // The other half of the claim the exception above leaves out. The grid
+        // answers clicks by arithmetic on the position rather than by a hit
+        // box per cell, so the one box it does record has to cover all of
+        // them: a glyph painted outside it is a character that cannot be
+        // selected by clicking on it.
+        for (name, term) in states() {
+            for (w, h) in sizes() {
+                let frame = term.frame(w, h);
+                let Some(grid) = frame
+                    .hits()
+                    .iter()
+                    .find(|(t, _)| matches!(t, Target::Grid))
+                    .map(|(_, r)| *r)
+                else {
+                    continue;
+                };
+                for c in frame.commands() {
+                    let RenderCommand::Text { x, y, .. } = c else {
+                        continue;
+                    };
+                    assert!(
+                        grid.contains(*x + 0.1, *y + 0.1),
+                        "{name}: a glyph at ({x},{y}) in a {w}x{h} window is outside \
+                         the grid's hit box {grid:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // What the pointer reaches
+    // -----------------------------------------------------------------------
+
+    /// The size the pointer tests aim at: wide and tall enough for the whole
+    /// default grid, so a cell's coordinates are the obvious ones.
+    const AIM: (f32, f32) = (692.0, 432.0);
+
+    #[test]
+    fn a_click_in_the_grid_selects_the_character_it_landed_on() {
+        // The grid answers clicks by arithmetic rather than by a hit box per
+        // cell, so the arithmetic is the thing to pin: a click a third of the
+        // way across the fourth row must select the character a third of the
+        // way along that row.
+        let mut term = fed_terminal(3);
+        term.resize_to_window(AIM.0, AIM.1);
+        let grid = rect_of_sized(&term, Target::Grid, AIM).expect("the grid is hit-boxed");
+        assert!(grid.w > 0.0 && grid.h > 0.0);
+
+        term.click_at(8.4 * 4.5, 18.0 * 1.5, MouseButton::Left, AIM);
+        let sel = term.selection.as_ref().expect("a click starts a selection");
+        assert_eq!(sel.start_col, 4, "the fifth column");
+        assert_eq!(
+            sel.start_row,
+            term.buffer_row_of(1),
+            "the second row of the viewport, as a buffer row"
+        );
+        assert!(sel.active, "and the drag is live");
+    }
+
+    #[test]
+    fn a_selection_made_in_the_scrollback_copies_the_scrollback() {
+        // The fault this pins is the whole reason selection is expressed in
+        // buffer rows. Selection used to record a *screen* row and copy from
+        // `self.screen` with the same number, while the drawing pass painted
+        // from the scrollback: selecting a line of history highlighted the
+        // right text and copied whatever happened to be at that screen slot.
+        let mut term = fed_terminal(60);
+        term.resize_to_window(AIM.0, AIM.1);
+        term.scroll_viewport_up(20);
+        let top = term.viewport_top();
+        let expected = term
+            .line_at(top)
+            .expect("the top line of the viewport")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>();
+
+        term.selection_start(0.0, 0.0);
+        term.selection_extend(8.4 * 100.0, 0.0);
+        let copied = term.get_selection_text().expect("something was selected");
+        assert_eq!(
+            copied.trim_end(),
+            expected.trim_end(),
+            "the copy came from a different line than the one under the pointer"
+        );
+        assert!(
+            copied.starts_with("line "),
+            "a scrollback line, not a blank screen row: {copied:?}"
+        );
+    }
+
+    #[test]
+    fn the_highlight_and_the_copy_agree_on_which_row_is_selected() {
+        // Two readers of the same selection: `is_selected`, which decides what
+        // is painted, and `get_selection_text`, which decides what is copied.
+        // They agreed on nothing when one counted screen rows and the other
+        // buffer rows, and a highlight that copies its neighbour is a bug the
+        // user only finds after pasting.
+        let mut term = fed_terminal(60);
+        term.resize_to_window(AIM.0, AIM.1);
+        term.scroll_viewport_up(15);
+        term.selection_start(0.0, 18.0 * 2.0);
+        term.selection_extend(8.4 * 6.0, 18.0 * 2.0);
+
+        let row = term.buffer_row_of(2);
+        assert!(term.is_selected(row, 0), "the painted row is not selected");
+        assert!(
+            !term.is_selected(row + 1, 0),
+            "the row below is selected too"
+        );
+        let copied = term.get_selection_text().expect("something was selected");
+        let painted = term
+            .line_at(row)
+            .expect("the row under the pointer")
+            .cells
+            .iter()
+            .take(7)
+            .map(|c| c.ch)
+            .collect::<String>();
+        assert_eq!(copied, painted);
+    }
+
+    #[test]
+    fn a_press_in_the_bar_pages_towards_where_it_landed() {
+        // The bar is the only sign a terminal has that there *is* scrollback.
+        // A press in it that did nothing would be indistinguishable from a bar
+        // that is decoration.
+        let mut term = fed_terminal(400);
+        term.resize_to_window(AIM.0, AIM.1);
+        let before = term.scroll_offset;
+        term.click_at(AIM.0 - 2.0, 4.0, MouseButton::Left, AIM);
+        assert!(
+            term.scroll_offset > before,
+            "a press at the top of the track did not page back"
+        );
+        let up_there = term.scroll_offset;
+        term.click_at(AIM.0 - 2.0, AIM.1 - 4.0, MouseButton::Left, AIM);
+        assert!(
+            term.scroll_offset < up_there,
+            "a press at the bottom of the track did not page forward"
+        );
+    }
+
+    #[test]
+    fn a_press_in_the_bar_does_not_start_a_selection() {
+        // The bar sits over the right-hand edge of the window, where a click
+        // would otherwise be read as a click on the grid's last column: a drag
+        // of the scrollbar would select text.
+        let mut term = fed_terminal(400);
+        term.resize_to_window(AIM.0, AIM.1);
+        term.click_at(AIM.0 - 2.0, AIM.1 / 2.0, MouseButton::Left, AIM);
+        assert!(
+            term.selection.is_none(),
+            "dragging the scrollbar selected text"
+        );
+    }
+
+    #[test]
+    fn the_thumb_says_where_in_the_scrollback_the_viewport_is() {
+        // A thumb that does not move is a thumb that lies. Checked at three
+        // positions rather than one, because a thumb pinned to the top of its
+        // track passes any single-position test.
+        let mut term = fed_terminal(400);
+        term.resize_to_window(AIM.0, AIM.1);
+        let thumb = |t: &TerminalState| rect_of_sized(t, Target::ScrollThumb, AIM).map(|r| r.y);
+        let bottom = thumb(&term).expect("a thumb at the live end");
+        term.scroll_viewport_up(50);
+        let middle = thumb(&term).expect("a thumb partway back");
+        term.scroll_viewport_up(10_000);
+        let top = thumb(&term).expect("a thumb at the far end");
+        assert!(
+            top < middle && middle < bottom,
+            "the thumb is at {top}, {middle}, {bottom} for the top, middle and bottom \
+             of the scrollback"
+        );
+    }
+
+    #[test]
+    fn there_is_no_thumb_when_the_whole_buffer_is_on_screen() {
+        // A thumb that fills its track says nothing, and a thumb over an empty
+        // buffer says there is history where there is none.
+        let mut term = fed_terminal(2);
+        term.resize_to_window(AIM.0, AIM.1);
+        assert!(
+            rect_of_sized(&term, Target::ScrollThumb, AIM).is_none(),
+            "a terminal with nothing scrolled off drew a thumb"
+        );
+        assert!(
+            rect_of_sized(&term, Target::ScrollTrack, AIM).is_some(),
+            "and the track is there regardless, because the bar is reserved"
+        );
+    }
+
+    #[test]
+    fn the_thumb_is_always_thick_enough_to_aim_at() {
+        // A ten-thousand-line scrollback in a twenty-four-row window gives the
+        // thumb a quarter of a pixel, which is a scrollbar with no scrollbar
+        // in it.
+        let mut term = fed_terminal(5_000);
+        term.resize_to_window(AIM.0, AIM.1);
+        let thumb = rect_of_sized(&term, Target::ScrollThumb, AIM)
+            .expect("a thumb over five thousand lines");
+        assert!(thumb.h >= 4.0, "the thumb is {} tall", thumb.h);
+        let track = rect_of_sized(&term, Target::ScrollTrack, AIM).expect("a track under it");
+        assert!(inside(track, thumb), "{thumb:?} is outside {track:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // The scroll offset, from both ends and through every funnel
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_offset_never_passes_the_top_of_the_scrollback() {
+        let mut term = fed_terminal(40);
+        let history = term.scrollback.len();
+        term.scroll_viewport_up(10_000);
+        assert_eq!(
+            term.scroll_offset, history,
+            "scrolled past the oldest line there is"
+        );
+        assert_eq!(term.viewport_top(), 0, "and the viewport is at the top");
+    }
+
+    #[test]
+    fn the_offset_never_passes_the_live_end() {
+        // The other direction, which a one-sided clamp leaves open: an offset
+        // below zero is an underflow on a `usize`, not a small error.
+        let mut term = fed_terminal(40);
+        term.scroll_viewport_up(5);
+        term.scroll_viewport_down(10_000);
+        assert_eq!(term.scroll_offset, 0);
+        term.scroll_viewport_down(1);
+        assert_eq!(term.scroll_offset, 0, "and stays there");
+    }
+
+    #[test]
+    fn a_taller_window_does_not_leave_the_offset_above_the_buffer() {
+        // The clamp has to be reached from every path that can invalidate it,
+        // not only from the two scroll methods. Resizing is one such path: it
+        // pulls rows back out of the scrollback into the screen, so the offset
+        // that was exactly at the top before is past it afterwards.
+        let mut term = fed_terminal(40);
+        term.resize_to_window(692.0, 432.0);
+        term.scroll_viewport_up(10_000);
+        let scrolled = term.scroll_offset;
+        assert!(scrolled > 0, "the fixture did not actually scroll back");
+        term.resize_to_window(692.0, 1000.0);
+        assert!(
+            term.scroll_offset <= term.scrollback.len(),
+            "a taller window left the offset at {} over a {}-line scrollback",
+            term.scroll_offset,
+            term.scrollback.len()
+        );
+    }
+
+    #[test]
+    fn scrolling_back_and_returning_shows_the_same_rows_again() {
+        // A round trip, which is what says the offset means the same thing in
+        // both directions rather than merely staying in range.
+        let mut term = fed_terminal(40);
+        term.resize_to_window(692.0, 432.0);
+        let top_row = |t: &TerminalState| {
+            t.line_at(t.buffer_row_of(0))
+                .expect("a top row")
+                .cells
+                .iter()
+                .map(|c| c.ch)
+                .collect::<String>()
+        };
+        let live = top_row(&term);
+        term.scroll_viewport_up(7);
+        assert_ne!(top_row(&term), live, "scrolling back showed the same rows");
+        term.scroll_viewport_down(7);
+        assert_eq!(
+            top_row(&term),
+            live,
+            "and coming back showed different ones"
+        );
+    }
+
+    #[test]
+    fn typing_returns_to_the_live_end() {
+        // A key that goes to the child while the user is reading the
+        // scrollback otherwise has no visible effect at all: the echo lands
+        // ten screens below what is on screen.
+        let mut term = fed_terminal(40);
+        term.scroll_viewport_up(20);
+        term.key_at(&press(Key::A), AIM);
+        assert_eq!(term.scroll_offset, 0);
+    }
+
+    #[test]
+    fn a_line_falling_off_the_scrollback_does_not_move_the_selection() {
+        // Buffer rows index a run whose *front* moves. When the scrollback is
+        // full and the oldest line is dropped, every buffer row means one row
+        // less -- and a selection recorded before the drop silently slides one
+        // line down the screen for every line the child prints.
+        let mut term = TerminalState::new(TerminalConfig {
+            scrollback_limit: 8,
+            ..TerminalConfig::default()
+        });
+        for i in 0..40 {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let row = term.viewport_top();
+        let text_before = term
+            .line_at(row)
+            .expect("a row")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect::<String>();
+        term.selection_start(0.0, 0.0);
+        term.selection_extend(8.4 * 200.0, 0.0);
+        let copied_before = term.get_selection_text().expect("a selection");
+        assert_eq!(copied_before.trim_end(), text_before.trim_end());
+
+        for i in 40..48 {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        let copied_after = term.get_selection_text().expect("still a selection");
+        assert_eq!(
+            copied_after.trim_end(),
+            copied_before.trim_end(),
+            "the selection now names a different line than the one that was selected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The child on the other end
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_typed_line_reaches_the_child() {
+        // `pty.rs` was an entire PTY implementation with no caller. A terminal
+        // that translates a key correctly and then drops the bytes on the
+        // floor is a terminal you cannot type into.
+        //
+        // A *line*, because the PTY starts in cooked mode as a real tty does:
+        // the line discipline holds the characters until the return key, which
+        // is what makes a shell's backspace work before the command is run.
+        //
+        // Typed as *text* rather than as `Key::H`: a key code is a position on
+        // a keyboard and the character it produces is the layout's business,
+        // so a terminal that read the code would type `h` on a French one.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.handle_event(&Event::Key(typing("h")));
+        term.handle_event(&Event::Key(typing("i")));
+        term.handle_event(&Event::Key(press(Key::Enter)));
+        let pair = term.pty.as_ref().expect("a PTY was opened");
+        let mut buf = [0_u8; 16];
+        let n = pair.slave.read(&mut buf).expect("the slave side reads");
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]),
+            "hi\n",
+            "the child got {:?}",
+            &buf[..n]
+        );
+    }
+
+    #[test]
+    fn a_reply_the_parser_produced_reaches_the_child_too() {
+        // The fault the single flush exists to fix. Keystrokes went straight
+        // to the PTY while the parser's own answers -- the cursor position
+        // report here -- were appended to `output_buffer` and sent nowhere, so
+        // a full-screen program that asked this terminal where its cursor was
+        // waited forever for an answer sitting in a `Vec`.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            // Raw mode, as any program that asks this question is in: cooked
+            // mode would hold the reply back for a newline it does not have.
+            pair.slave.set_raw_mode();
+            pair.slave.write(b"\x1b[6n").expect("the child asks");
+        }
+        term.handle_event(&Event::Tick { elapsed_ms: 20 });
+        let pair = term.pty.as_ref().expect("a PTY was opened");
+        let mut buf = [0_u8; 32];
+        let n = pair.slave.read(&mut buf).expect("the slave side reads");
+        assert_eq!(
+            String::from_utf8_lossy(&buf[..n]),
+            "\x1b[1;1R",
+            "the child got {:?} instead of a cursor position report",
+            String::from_utf8_lossy(&buf[..n])
+        );
+        assert!(
+            term.output_buffer.is_empty(),
+            "the reply was sent and is still queued"
+        );
+    }
+
+    #[test]
+    fn a_keystroke_is_sent_once() {
+        // It was sent twice: `handle_event` queued the translated bytes on
+        // their way to the child, and `on_event` appended the same bytes it
+        // had just been handed back. Every character typed arrived doubled.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.on_event(&Event::Key(typing("x")));
+        term.on_event(&Event::Key(press(Key::Enter)));
+        let pair = term.pty.as_ref().expect("a PTY was opened");
+        let mut buf = [0_u8; 16];
+        let n = pair.slave.read(&mut buf).expect("the slave side reads");
+        assert_eq!(String::from_utf8_lossy(&buf[..n]), "x\n");
+    }
+
+    #[test]
+    fn what_the_child_writes_appears_on_the_screen() {
+        // The return leg. Without `drain_child` the terminal is write-only:
+        // the shell's prompt is produced and never read.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            pair.slave.write(b"hello\r\n").expect("the child writes");
+        }
+        assert!(term.drain_child(), "nothing was read back");
+        let row: String = term
+            .line_at(term.buffer_row_of(0))
+            .expect("the first row")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert_eq!(row.trim_end(), "hello");
+    }
+
+    #[test]
+    fn a_tick_is_what_reads_the_child() {
+        // The read has to be on the clock rather than on the keyboard: a
+        // program that prints without being typed at -- which is most of them
+        // -- would otherwise appear only when the user next pressed a key.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            pair.slave.write(b"unprompted").expect("the child writes");
+        }
+        term.handle_event(&Event::Tick { elapsed_ms: 20 });
+        let row: String = term
+            .line_at(term.buffer_row_of(0))
+            .expect("the first row")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert_eq!(row.trim_end(), "unprompted");
+    }
+
+    #[test]
+    fn the_child_is_told_how_big_the_window_is() {
+        // `PtyMaster::resize` is this tree's `TIOCSWINSZ` and had no caller
+        // either, so a shell under this terminal wrapped its prompt at eighty
+        // columns in a window twice that wide.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.resize_to_window(300.0, 200.0);
+        let l = term.layout();
+        let (cols, rows) = term.pty.as_ref().expect("a PTY").slave.get_size();
+        assert_eq!(usize::from(cols), l.cols, "the child's column count");
+        assert_eq!(usize::from(rows), l.rows, "the child's row count");
+        assert!(l.cols < 80, "the fixture did not actually shrink the grid");
+    }
+
+    #[test]
+    fn a_child_that_has_exited_is_said_so_once() {
+        // An empty read cannot tell "nothing yet" from "never again", so a
+        // terminal whose shell has exited otherwise sits at a dead prompt
+        // looking exactly like one waiting for output.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            pair.slave.close();
+        }
+        assert!(term.drain_child(), "the exit was not noticed");
+        assert!(!term.drain_child(), "and it was announced twice");
+        let said = (0..term.rows())
+            .filter_map(|r| term.line_at(term.buffer_row_of(r)))
+            .flat_map(|l| l.cells.iter().map(|c| c.ch).collect::<Vec<_>>())
+            .collect::<String>();
+        assert!(
+            said.contains("the child has exited"),
+            "nothing on screen says the child is gone"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The clock
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_bell_flash_ages_on_the_clock_rather_than_on_redraws() {
+        // The flash used to be a countdown of *frames*, so it lasted a tenth
+        // of a second at sixty of them a second, twice that at thirty, and for
+        // ever on a terminal with nothing else to redraw for -- which is the
+        // usual state of a terminal waiting at a prompt.
+        let mut term = fed_terminal(3);
+        term.feed(b"\x07");
+        assert!(term.bell_flash_ms > 0, "the bell did not light anything");
+        for _ in 0..100 {
+            let _ = term.frame(AIM.0, AIM.1);
+        }
+        assert!(
+            term.bell_flash_ms > 0,
+            "a hundred frames put the bell out without a millisecond passing"
+        );
+        term.tick(BELL_MS);
+        assert_eq!(term.bell_flash_ms, 0, "the clock did not put it out");
+    }
+
+    #[test]
+    fn the_bell_is_visible_while_it_is_lit() {
+        // A flash nothing paints is a countdown and not a bell.
+        let mut lit = fed_terminal(3);
+        lit.feed(b"\x07");
+        let quiet = fed_terminal(3);
+        let ink = |t: &TerminalState| format!("{:?}", t.frame(AIM.0, AIM.1).commands());
+        assert_ne!(
+            ink(&lit),
+            ink(&quiet),
+            "the belling terminal paints exactly what the quiet one does"
+        );
+        lit.tick(BELL_MS);
+        assert_eq!(
+            ink(&lit),
+            ink(&quiet),
+            "and goes on painting it after the bell has gone out"
+        );
+    }
+
+    #[test]
+    fn the_cursor_blinks_once_per_interval_however_the_ticks_arrive() {
+        // Ticks arrive when the loop next runs, not when they were asked for.
+        // A blink advanced by one half per tick blinks at the frame rate; one
+        // advanced by the elapsed time blinks at its own rate regardless.
+        let mut fast = TerminalState::new(TerminalConfig::default());
+        for _ in 0..10 {
+            fast.tick(BLINK_MS / 10);
+        }
+        let mut slow = TerminalState::new(TerminalConfig::default());
+        slow.tick(BLINK_MS);
+        assert_eq!(
+            fast.blink_on, slow.blink_on,
+            "ten short ticks and one long one of the same length disagree"
+        );
+        assert!(!slow.blink_on, "one interval did not put the cursor out");
+        slow.tick(BLINK_MS);
+        assert!(slow.blink_on, "and the second did not bring it back");
+    }
+
+    #[test]
+    fn a_tick_longer_than_several_blinks_lands_on_the_right_half() {
+        // The `while` rather than an `if`: a loop that fell behind by three
+        // intervals used to consume one and carry the rest, so the cursor
+        // blinked at whatever rate the machine was struggling at.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.tick(BLINK_MS * 3);
+        assert!(!term.blink_on, "three halves is the dark one");
+        assert!(
+            term.blink_ms < BLINK_MS,
+            "{}ms of blink is still owed after the tick",
+            term.blink_ms
+        );
+    }
+
+    #[test]
+    fn a_tick_that_changed_nothing_asks_for_no_frame() {
+        // The cursor blinks five times a second and the loop runs twenty-five:
+        // four ticks in five have nothing to show, and a terminal that redraws
+        // for all of them is a terminal that never lets the machine idle.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        assert!(
+            matches!(
+                term.on_event(&Event::Tick { elapsed_ms: 1 }),
+                Response::Idle
+            ),
+            "a millisecond of nothing asked for a frame"
+        );
+        assert!(
+            matches!(
+                term.on_event(&Event::Tick {
+                    elapsed_ms: BLINK_MS
+                }),
+                Response::Redraw
+            ),
+            "a whole blink did not ask for one"
+        );
+    }
+
+    #[test]
+    fn a_tick_is_what_reads_the_child_through_the_window_too() {
+        // The fault the tick funnel exists to fix, and the reason the direct
+        // `handle_event` test above did not catch it: `on_event` answered the
+        // tick itself -- it had to know whether anything changed before it
+        // could say whether the frame was worth drawing -- and returned before
+        // the dispatch that reads the child ever ran. Under a real window,
+        // which is the only place `on_event` is called, the shell's prompt was
+        // produced and never collected.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        {
+            let pair = term.pty.as_ref().expect("a PTY was opened");
+            pair.slave.write(b"prompt$ ").expect("the child writes");
+        }
+        let response = term.on_event(&Event::Tick { elapsed_ms: 20 });
+        assert!(
+            matches!(response, Response::Redraw),
+            "the child wrote and the window was not asked to redraw"
+        );
+        let row: String = term
+            .line_at(term.buffer_row_of(0))
+            .expect("the first row")
+            .cells
+            .iter()
+            .map(|c| c.ch)
+            .collect();
+        assert_eq!(row.trim_end(), "prompt$");
+    }
+
+    #[test]
+    fn the_clock_is_asked_for_only_while_something_is_moving() {
+        // A program that asks for a tick it does not need holds the whole
+        // desktop awake, and one that does not ask when it does need it stops
+        // dead: both halves, because either alone is passed by a constant.
+        let mut term = TerminalState::new(TerminalConfig {
+            cursor_blink: false,
+            ..TerminalConfig::default()
+        });
+        assert!(
+            term.tick_interval().is_none(),
+            "a terminal with nothing to age asked for a clock"
+        );
+        term.feed(b"\x07");
+        assert!(
+            term.tick_interval().is_some(),
+            "a ringing bell has to go out on its own"
+        );
+        term.tick(BELL_MS);
+        assert!(term.tick_interval().is_none(), "and then stop asking");
+
+        let blinking = TerminalState::new(TerminalConfig::default());
+        assert!(
+            blinking.tick_interval().is_some(),
+            "a blinking cursor has to be driven"
+        );
+    }
+
+    #[test]
+    fn a_hidden_cursor_needs_no_clock_and_is_not_left_dark() {
+        // `\x1b[?25l` is what every full-screen program sends on startup. A
+        // terminal that kept blinking an invisible cursor would tick for the
+        // whole session, and one whose cursor was hidden during the dark half
+        // of a blink would show nothing when it came back.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.tick(BLINK_MS);
+        assert!(!term.blink_on, "the fixture is not in the dark half");
+        term.feed(b"\x1b[?25l");
+        assert!(
+            term.tick_interval().is_none(),
+            "a hidden cursor still asked for a clock"
+        );
+        term.tick(20);
+        assert!(term.blink_on, "the cursor was left in the dark half");
+    }
+
+    // -----------------------------------------------------------------------
+    // The window the compositor drives
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_first_resize_is_what_sizes_the_grid() {
+        // The compositor sends a resize before the first frame, and the grid
+        // that answers it is the one the child is told about.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        term.on_event(&Event::Resize {
+            width: 300,
+            height: 200,
+        });
+        let l = term.layout();
+        assert_eq!(term.cols(), l.cols, "the grid did not follow the resize");
+        assert_eq!(term.rows(), l.rows);
+        assert!(l.cols < 80, "the fixture did not actually shrink the grid");
+    }
+
+    #[test]
+    fn drawing_a_frame_sizes_the_grid_as_well() {
+        // A frame is the one thing an application is guaranteed to be asked
+        // for. A grid that follows only the resize event disagrees with the
+        // window whenever one is missed, and a grid that disagrees with its
+        // window shows the wrong number of columns to the program under it.
+        let mut term = TerminalState::new(TerminalConfig::default());
+        let _ = term.render(300.0, 200.0);
+        assert!(
+            term.cols() < 80,
+            "{} columns in a 300-pixel window",
+            term.cols()
+        );
+        let _ = term.render(1600.0, 900.0);
+        assert!(
+            term.cols() > 80,
+            "{} columns in a 1600-pixel window",
+            term.cols()
+        );
+    }
+
+    #[test]
+    fn closing_the_window_ends_the_program() {
+        let mut term = TerminalState::new(TerminalConfig::default());
+        assert!(matches!(
+            term.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn the_window_opens_at_a_size_the_default_grid_fits_in() {
+        // The initial size and the default grid are two constants that have to
+        // agree: a window that opens one column short of its own grid resizes
+        // itself on the first frame, which the user sees as a flicker.
+        let term = TerminalState::new(TerminalConfig::default());
+        let (w, h) = term.initial_size();
+        let l = Layout::solve(
+            u32_f32(w),
+            u32_f32(h),
+            term.config.cell_width,
+            term.config.cell_height,
+        );
+        assert_eq!(l.cols, 80, "the default eighty columns do not fit");
+        assert_eq!(l.rows, 24, "the default twenty-four rows do not fit");
+    }
+
+    // -----------------------------------------------------------------------
+    // The two arithmetic helpers the bar is built on
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_fraction_of_nothing_is_nothing_rather_than_a_nan() {
+        // `part / whole` with a zero whole is the state of the scrollbar on an
+        // empty terminal, and a NaN there propagates into a thumb position,
+        // which paints nowhere at all rather than visibly wrongly.
+        assert!((ratio(0, 0) - 0.0).abs() < f32::EPSILON);
+        assert!((ratio(5, 0) - 0.0).abs() < f32::EPSILON);
+        assert!((ratio(1, 4) - 0.25).abs() < f32::EPSILON);
+        assert!(
+            (ratio(9, 4) - 1.0).abs() < f32::EPSILON,
+            "a part larger than the whole is a fraction over one"
+        );
+    }
+
+    #[test]
+    fn scaling_by_a_nonsense_fraction_yields_none_of_the_whole() {
+        // The inverse of the above, and the reason it is a loop rather than a
+        // cast: `(whole as f32 * fraction) as usize` is a saturating cast, so
+        // a NaN fraction answers zero but a negative one answers zero too
+        // *only by accident*, and an infinite one answers `usize::MAX`.
+        for fraction in [f32::NAN, f32::INFINITY, -1.0, -0.0] {
+            assert_eq!(scale(100, fraction), 0, "fraction {fraction}");
+        }
+        assert_eq!(scale(100, 1.0), 100, "the whole of it");
+        assert_eq!(scale(100, 2.0), 100, "and no more than the whole");
+        assert_eq!(scale(100, 0.5), 50);
+        assert_eq!(scale(0, 0.5), 0, "half of nothing");
+        assert_eq!(scale(3, 0.99), 2, "rounded down, not to the nearest");
     }
 }

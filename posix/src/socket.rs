@@ -4505,48 +4505,66 @@ pub const EAI_SOCKTYPE: i32 = 10;
 /// System error.
 pub const EAI_SYSTEM: i32 = 11;
 
-/// Static storage for a single getaddrinfo result.
+/// Byte offset of the `SockaddrIn` inside a result block from [`gai_alloc`].
 ///
-/// We only return one result (the first resolved IPv4 address).
-/// This avoids heap allocation in our no_std environment.
-static mut GAI_RESULT: Addrinfo = Addrinfo {
-    ai_flags: 0,
-    ai_family: 0,
-    ai_socktype: 0,
-    ai_protocol: 0,
-    ai_addrlen: 0,
-    ai_canonname: core::ptr::null_mut(),
-    ai_addr: core::ptr::null_mut(),
-    ai_next: core::ptr::null_mut(),
-};
+/// A result is one heap block laid out as an [`Addrinfo`] immediately followed
+/// by the `SockaddrIn` that its `ai_addr` points at, so that one `free` of the
+/// node pointer releases both.  `Addrinfo` is `#[repr(C)]` and pointer-aligned,
+/// so its size is a multiple of 8 and the trailing `SockaddrIn` (alignment 4)
+/// lands aligned; the assertion below is what keeps that true if either struct
+/// gains a field.
+const GAI_ADDR_OFFSET: usize = core::mem::size_of::<Addrinfo>();
 
-/// Second result for returning both SOCK_STREAM and SOCK_DGRAM.
-static mut GAI_RESULT2: Addrinfo = Addrinfo {
-    ai_flags: 0,
-    ai_family: 0,
-    ai_socktype: 0,
-    ai_protocol: 0,
-    ai_addrlen: 0,
-    ai_canonname: core::ptr::null_mut(),
-    ai_addr: core::ptr::null_mut(),
-    ai_next: core::ptr::null_mut(),
-};
+const _: () = assert!(
+    GAI_ADDR_OFFSET % core::mem::align_of::<SockaddrIn>() == 0,
+    "getaddrinfo's trailing SockaddrIn would be misaligned"
+);
 
-/// Static storage for the sockaddr_in in the getaddrinfo result.
-static mut GAI_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: 0,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0u8; 8],
-};
+/// Total size of one result block.
+const GAI_BLOCK_SIZE: usize = GAI_ADDR_OFFSET + core::mem::size_of::<SockaddrIn>();
 
-/// Second sockaddr_in for the second getaddrinfo result.
-static mut GAI_ADDR2: SockaddrIn = SockaddrIn {
-    sin_family: 0,
-    sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 },
-    sin_zero: [0u8; 8],
-};
+/// Allocate and fill one `getaddrinfo` result, or NULL if out of memory.
+///
+/// `ip` is in network byte order (as [`inet_pton`] and `gethostbyname` produce
+/// it); `port` is in host byte order and is converted here.
+///
+/// The returned node has `ai_next == NULL`; the caller links the list.
+fn gai_alloc(family: i32, socktype: i32, protocol: i32, ip: u32, port: u16) -> *mut Addrinfo {
+    let block = crate::malloc::malloc(GAI_BLOCK_SIZE);
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: `malloc` returned a live block of exactly `GAI_BLOCK_SIZE` bytes,
+    // aligned to a page (so to both structs), and `GAI_ADDR_OFFSET` is in
+    // bounds with a whole `SockaddrIn` behind it.  Nothing else holds a pointer
+    // into it yet, so these writes cannot race.
+    unsafe {
+        let addr = block.add(GAI_ADDR_OFFSET).cast::<SockaddrIn>();
+        addr.write(SockaddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: htons(port),
+            sin_addr: InAddr { s_addr: ip },
+            sin_zero: [0u8; 8],
+        });
+
+        let node = block.cast::<Addrinfo>();
+        node.write(Addrinfo {
+            ai_flags: 0,
+            ai_family: family,
+            ai_socktype: socktype,
+            ai_protocol: protocol,
+            ai_addrlen: core::mem::size_of::<SockaddrIn>() as SocklenT,
+            // Always NULL: we do not implement AI_CANONNAME.  If it is ever
+            // added, the name must live inside this same block (glibc does the
+            // same) — `freeaddrinfo` frees the node and nothing else.
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: addr.cast::<Sockaddr>(),
+            ai_next: core::ptr::null_mut(),
+        });
+        node
+    }
+}
 
 /// Resolve a hostname and/or service to a list of socket addresses.
 ///
@@ -4556,6 +4574,14 @@ static mut GAI_ADDR2: SockaddrIn = SockaddrIn {
 /// SOCK_DGRAM.  When a specific type is requested, returns one result.
 ///
 /// Returns 0 on success, non-zero EAI_* error code on failure.
+///
+/// **The result is heap-allocated and belongs to the caller**, who must release
+/// it with [`freeaddrinfo`].  This is not a detail: unlike `gethostbyname` and
+/// `getservbyname` — which POSIX *defines* as returning a pointer to static,
+/// per-process storage — `getaddrinfo` is specified to allocate, and callers
+/// are entitled to hold two results at once.  Ours used to hand back pointers
+/// into four `static mut` slots, so a second call (on any thread) rewrote the
+/// first caller's answer under it.
 ///
 /// # Safety
 ///
@@ -4678,65 +4704,41 @@ pub unsafe extern "C" fn getaddrinfo(
     } else {
         AF_INET
     };
-    let addr_size = core::mem::size_of::<SockaddrIn>() as SocklenT;
 
-    // SAFETY: Single-threaded access; getaddrinfo is not re-entrant (per POSIX).
-    unsafe {
-        // Fill first address.
-        let addr1 = core::ptr::addr_of_mut!(GAI_ADDR);
-        (*addr1).sin_family = AF_INET as u16;
-        (*addr1).sin_port = htons(port);
-        (*addr1).sin_addr.s_addr = ip;
-        (*addr1).sin_zero = [0u8; 8];
-
-        if want_socktype != 0 {
-            // Caller specified a socket type — return one result.
-            let protocol = match want_socktype {
-                SOCK_STREAM => IPPROTO_TCP,
-                SOCK_DGRAM => IPPROTO_UDP,
-                _ => 0,
-            };
-            let result = core::ptr::addr_of_mut!(GAI_RESULT);
-            (*result).ai_flags = 0;
-            (*result).ai_family = family;
-            (*result).ai_socktype = want_socktype;
-            (*result).ai_protocol = protocol;
-            (*result).ai_addrlen = addr_size;
-            (*result).ai_canonname = core::ptr::null_mut();
-            (*result).ai_addr = addr1.cast::<Sockaddr>();
-            (*result).ai_next = core::ptr::null_mut();
-            *res = result;
-        } else {
-            // No socket type specified — return TCP first, then UDP.
-            // This lets callers iterate the list to find either type.
-            let addr2 = core::ptr::addr_of_mut!(GAI_ADDR2);
-            (*addr2).sin_family = AF_INET as u16;
-            (*addr2).sin_port = htons(port);
-            (*addr2).sin_addr.s_addr = ip;
-            (*addr2).sin_zero = [0u8; 8];
-
-            // Second result: SOCK_DGRAM (UDP) — tail of the list.
-            let r2 = core::ptr::addr_of_mut!(GAI_RESULT2);
-            (*r2).ai_flags = 0;
-            (*r2).ai_family = family;
-            (*r2).ai_socktype = SOCK_DGRAM;
-            (*r2).ai_protocol = IPPROTO_UDP;
-            (*r2).ai_addrlen = addr_size;
-            (*r2).ai_canonname = core::ptr::null_mut();
-            (*r2).ai_addr = addr2.cast::<Sockaddr>();
-            (*r2).ai_next = core::ptr::null_mut();
-
-            // First result: SOCK_STREAM (TCP) — head of the list.
-            let r1 = core::ptr::addr_of_mut!(GAI_RESULT);
-            (*r1).ai_flags = 0;
-            (*r1).ai_family = family;
-            (*r1).ai_socktype = SOCK_STREAM;
-            (*r1).ai_protocol = IPPROTO_TCP;
-            (*r1).ai_addrlen = addr_size;
-            (*r1).ai_canonname = core::ptr::null_mut();
-            (*r1).ai_addr = addr1.cast::<Sockaddr>();
+    if want_socktype != 0 {
+        // Caller specified a socket type — return one result.
+        let protocol = match want_socktype {
+            SOCK_STREAM => IPPROTO_TCP,
+            SOCK_DGRAM => IPPROTO_UDP,
+            _ => 0,
+        };
+        let node = gai_alloc(family, want_socktype, protocol, ip, port);
+        if node.is_null() {
+            return EAI_MEMORY;
+        }
+        // SAFETY: `res` is non-null (checked at entry) and points at a caller
+        // -owned `*mut Addrinfo`.
+        unsafe { *res = node };
+    } else {
+        // No socket type specified — return TCP first, then UDP.
+        // This lets callers iterate the list to find either type.
+        let r1 = gai_alloc(family, SOCK_STREAM, IPPROTO_TCP, ip, port);
+        if r1.is_null() {
+            return EAI_MEMORY;
+        }
+        let r2 = gai_alloc(family, SOCK_DGRAM, IPPROTO_UDP, ip, port);
+        if r2.is_null() {
+            // Release the head rather than leaking it: a failed `getaddrinfo`
+            // leaves `*res` untouched, so the caller has no pointer to free.
+            // SAFETY: `r1` is a live block from `gai_alloc`, i.e. from
+            // `malloc`, and nothing else refers to it.
+            unsafe { crate::malloc::free(r1.cast::<u8>()) };
+            return EAI_MEMORY;
+        }
+        // SAFETY: both nodes are live and exclusively ours until `*res` is
+        // published below.
+        unsafe {
             (*r1).ai_next = r2;
-
             *res = r1;
         }
     }
@@ -4744,13 +4746,32 @@ pub unsafe extern "C" fn getaddrinfo(
     0 // Success.
 }
 
-/// Free an addrinfo result list.
+/// Free an addrinfo result list returned by [`getaddrinfo`].
 ///
-/// Since our getaddrinfo uses static storage (not heap allocation),
-/// this is a no-op.  Programs must still call it for POSIX compliance.
+/// Walks `ai_next` and releases every node, so `freeaddrinfo` may also be
+/// handed a *tail* of the list — which is what makes the per-node allocation
+/// worth its extra `malloc` over one block for the whole chain.
+///
+/// A NULL argument is a no-op.
+///
+/// # Safety
+///
+/// `res` must be NULL, or a pointer that [`getaddrinfo`] stored through its
+/// `res` argument (or one of the `ai_next` links reachable from it), and the
+/// nodes it reaches must not have been freed already.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn freeaddrinfo(_res: *mut Addrinfo) {
-    // No-op: we use static storage, not heap allocation.
+pub unsafe extern "C" fn freeaddrinfo(res: *mut Addrinfo) {
+    let mut node = res;
+    while !node.is_null() {
+        // SAFETY: by the contract above `node` is a live block from
+        // `gai_alloc`.  `ai_next` is read before the free, because after it the
+        // block is unmapped and the read would fault.
+        let next = unsafe { (*node).ai_next };
+        // SAFETY: `gai_alloc` obtained this pointer from `malloc` and the
+        // caller guarantees it has not been freed.
+        unsafe { crate::malloc::free(node.cast::<u8>()) };
+        node = next;
+    }
 }
 
 /// Return a string describing a getaddrinfo error code.
@@ -7814,8 +7835,7 @@ mod tests {
         // Address should be 192.168.1.1 in network byte order.
         assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([192, 168, 1, 1]));
 
-        // Clean up (no-op but good practice).
-        freeaddrinfo(res);
+        unsafe { freeaddrinfo(res) };
     }
 
     #[test]
@@ -7844,7 +7864,7 @@ mod tests {
         assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
         assert_eq!(sa.sin_port, 0); // No service specified.
 
-        freeaddrinfo(res);
+        unsafe { freeaddrinfo(res) };
     }
 
     #[test]
@@ -7869,7 +7889,7 @@ mod tests {
         assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_ANY));
         assert_eq!(ntohs(sa.sin_port), 8080);
 
-        freeaddrinfo(res);
+        unsafe { freeaddrinfo(res) };
     }
 
     #[test]
@@ -7894,7 +7914,7 @@ mod tests {
         assert_eq!(sa.sin_addr.s_addr, htonl(INADDR_LOOPBACK));
         assert_eq!(ntohs(sa.sin_port), 443);
 
-        freeaddrinfo(res);
+        unsafe { freeaddrinfo(res) };
     }
 
     #[test]
@@ -7944,7 +7964,7 @@ mod tests {
         assert_eq!(r2.ai_protocol, IPPROTO_UDP);
         assert!(r2.ai_next.is_null()); // End of list.
 
-        freeaddrinfo(res);
+        unsafe { freeaddrinfo(res) };
     }
 
     #[test]
@@ -7970,6 +7990,100 @@ mod tests {
             )
         };
         assert_eq!(ret, EAI_NONAME);
+    }
+
+    // -- getaddrinfo result ownership --
+    //
+    // These are the regression tests for the four `static mut` slots the
+    // results used to live in.  The defect showed itself as an *intermittent*
+    // failure of `test_getaddrinfo_numeric_loopback` — it asserts
+    // `ai_socktype == SOCK_DGRAM` and once read `SOCK_STREAM`, because a
+    // neighbouring test in the same process had overwritten `GAI_RESULT`
+    // between this test's call and its assertion.  A flake, in other words,
+    // whose cause was a real thread-safety bug in a public libc entry point.
+    //
+    // Neither test needs threads to show it: two *sequential* calls whose
+    // results are both still live is the same aliasing, and is deterministic.
+
+    /// Build a hints struct for the two tests below.
+    fn gai_hints(socktype: i32) -> Addrinfo {
+        Addrinfo {
+            ai_flags: AI_NUMERICHOST | AI_NUMERICSERV,
+            ai_family: AF_INET,
+            ai_socktype: socktype,
+            ai_protocol: 0,
+            ai_addrlen: 0,
+            ai_canonname: core::ptr::null_mut(),
+            ai_addr: core::ptr::null_mut(),
+            ai_next: core::ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn two_live_results_do_not_share_storage() {
+        let h1 = gai_hints(SOCK_STREAM);
+        let mut a: *mut Addrinfo = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { getaddrinfo(b"10.1.1.1\0".as_ptr(), b"80\0".as_ptr(), &h1, &mut a) },
+            0
+        );
+
+        // Second call, everything different, while the first is still held.
+        let h2 = gai_hints(SOCK_DGRAM);
+        let mut b: *mut Addrinfo = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { getaddrinfo(b"10.2.2.2\0".as_ptr(), b"53\0".as_ptr(), &h2, &mut b) },
+            0
+        );
+
+        assert_ne!(a, b, "two results shared one node");
+
+        // The first answer must still be the first answer.
+        let (ai, bi) = unsafe { (&*a, &*b) };
+        assert_ne!(ai.ai_addr, bi.ai_addr, "two results shared one sockaddr");
+        assert_eq!(ai.ai_socktype, SOCK_STREAM);
+        assert_eq!(ai.ai_protocol, IPPROTO_TCP);
+        assert_eq!(bi.ai_socktype, SOCK_DGRAM);
+        assert_eq!(bi.ai_protocol, IPPROTO_UDP);
+
+        let sa = unsafe { &*(ai.ai_addr.cast::<SockaddrIn>()) };
+        let sb = unsafe { &*(bi.ai_addr.cast::<SockaddrIn>()) };
+        assert_eq!(sa.sin_addr.s_addr, u32::from_ne_bytes([10, 1, 1, 1]));
+        assert_eq!(ntohs(sa.sin_port), 80);
+        assert_eq!(sb.sin_addr.s_addr, u32::from_ne_bytes([10, 2, 2, 2]));
+        assert_eq!(ntohs(sb.sin_port), 53);
+
+        unsafe {
+            freeaddrinfo(a);
+            freeaddrinfo(b);
+        }
+    }
+
+    #[test]
+    fn freeaddrinfo_releases_every_node_and_nothing_else() {
+        use crate::malloc::live_regions;
+
+        // A NULL list is a no-op, not a fault.
+        unsafe { freeaddrinfo(core::ptr::null_mut()) };
+
+        let before = live_regions::count();
+
+        // No socktype in hints → a two-node list, so this also proves the
+        // walk reaches past the head.
+        let hints = gai_hints(0);
+        let mut res: *mut Addrinfo = core::ptr::null_mut();
+        assert_eq!(
+            unsafe { getaddrinfo(b"10.3.3.3\0".as_ptr(), b"7\0".as_ptr(), &hints, &mut res) },
+            0
+        );
+        assert_eq!(
+            live_regions::count() - before,
+            2,
+            "expected one block per result node"
+        );
+
+        unsafe { freeaddrinfo(res) };
+        assert_eq!(live_regions::count(), before, "freeaddrinfo leaked a node");
     }
 
     // -- socketpair argument validation --
@@ -8029,11 +8143,11 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    // -- freeaddrinfo is no-op (should not crash) --
+    // -- freeaddrinfo tolerates NULL (should not crash) --
 
     #[test]
     fn test_freeaddrinfo_null_no_crash() {
-        freeaddrinfo(core::ptr::null_mut());
+        unsafe { freeaddrinfo(core::ptr::null_mut()) };
     }
 
     // -- ntohl / ntohs --

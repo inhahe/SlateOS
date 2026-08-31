@@ -133,14 +133,20 @@
 //!
 //! # Options this implementation does not have
 //!
-//! `-d`/`--date`, `-t`, and `-h`/`--no-dereference`. Each is blocked by
-//! something this crate genuinely lacks rather than by effort:
+//! `-d`/`--date`, `-t`, and `-h`/`--no-dereference`:
 //!
 //! | Option | What it needs that is not here |
 //! |---|---|
 //! | `-d STRING` | a full `parse_datetime` — `"next Thursday"`, `"2 hours ago"`, `"@1700000000"` |
 //! | `-t STAMP` | civil-time-to-epoch conversion in the *local* zone, including its history |
-//! | `-h` | `lutimes`/`AT_SYMLINK_NOFOLLOW`, which `std` does not expose |
+//! | `-h` | nothing any more — see below |
+//!
+//! The first two are blocked by something this crate genuinely lacks. `-h` was
+//! too, until `cp -P -p` needed the same thing and
+//! [`fsattr::Link::NoFollow`](coreutils::fsattr::Link::NoFollow) was written for
+//! it: `AT_SYMLINK_NOFOLLOW` is now one argument away, and this option is
+//! refused only because wiring it up is a change of its own rather than a rider
+//! on somebody else's.
 //!
 //! They are refused by name — `option -d is not implemented by this touch` —
 //! rather than ignored, because ignoring any of the three silently does the
@@ -166,7 +172,7 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::fsattr::{self, Times, When};
+use coreutils::fsattr::{self, Link, On, Times, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::quote::{os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
@@ -586,7 +592,7 @@ fn touch_one(flags: &TouchFlags, file: &OsStr, reference: Option<Stamp>) -> Resu
         }
     }
 
-    match fsattr::set_times(path, times) {
+    match fsattr::set_times(On::Path(path, Link::Follow), times) {
         Ok(()) => Ok(()),
         Err(e) => match open_error {
             Some(open) => Err(Failure::CannotTouch(open)),
@@ -1183,7 +1189,7 @@ mod tests {
         // Backdate the directory itself, through the same door the program uses,
         // so "it moved forward" cannot pass on clock granularity.
         fsattr::set_times(
-            &sub,
+            On::Path(&sub, Link::Follow),
             Times {
                 accessed: When::Set(old),
                 modified: When::Set(old),

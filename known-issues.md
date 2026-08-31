@@ -102344,6 +102344,119 @@ which way it fails until a user resizes a window. Prefer a swept grid for any
 claim that is a pure function of the window; keep `SIZES` for claims that need
 a *game* as well as a window, where building the fixture is the expensive part.
 
+### Lesson 98: a text-bounding fix applied site by site is not a fix; the claim belongs to the frame, not to the call site (lane C, 2026-08-31)
+
+**In short:** `spades` was wired with fault (7) of its roadmap entry -- every
+string drawn with `max_width: None`, so on a narrow window the text simply kept
+going past the edge -- and the rewrite fixed it by putting each string through a
+`bounded()` helper. The grid sweep then failed on `"Spades"` running off a 20x57
+window at `x 4 + 43.018066`. The fix had been applied at the sites the author
+was thinking about, and a frame has forty of them; the two the author was not
+thinking about were the header title and the card corners.
+
+**Why site-by-site loses.** `max_width: None` is the *default* shape of a text
+command, so every call site starts unbounded and must be individually converted.
+That makes the property "no text leaves the window" a conjunction over forty
+independent edits, and a conjunction over forty edits is not a property you can
+hold -- it is a property you can only re-audit, once per new string, for ever.
+Worse, the audit has no failing test to anchor it: the app's status-line test
+(`the_status_line_is_bounded_and_never_runs_off_the_edge`) passed the whole
+time, because it looked at the status line.
+
+**Two repairs, and both are needed.**
+
+*Make the claim whole-frame.* The test now walks **every** `RenderCommand::Text`
+in the frame, at all 42 grid sizes, and fails if any run's measured width takes
+it past the window edge. It was renamed to say so --
+`no_text_runs_off_the_window_it_is_drawn_in` -- and a narrower
+`the_status_line_is_elided_rather_than_cut_off` was kept beside it, so the
+whole-frame claim does not quietly become the only owner of the status line's
+own behaviour (lesson 96).
+
+*Make the helpers incapable of producing an unbounded run.* `centred` used to
+compute `x + (w - measured) / 2.0` and pass the string on with the caller's
+width. When `measured > w` that offset is **negative**, so an over-long run was
+centred by hanging off *both* edges at once -- a bound on the right does nothing
+about the left. It now clamps the offset at zero and bounds to the width it
+centres in, so a run too wide to centre starts at the left edge and is elided at
+the right one:
+
+```rust
+let measured = text::measure(s, size, weight);
+bounded(f, (x + ((w - measured) / 2.0).max(0.0), y), w, s, color, size, weight);
+```
+
+That converts "no text leaves the window" from forty facts into two: every
+string goes through `bounded` or `centred`, and both of those are correct.
+
+**Where else to look.** Every app in the wiring campaign. Two greps and one
+test: `max_width: None` and `RenderCommand::Text {` outside the helpers find the
+sites that bypassed the helper; the whole-frame assertion above is cheap to copy
+and is the only thing that keeps them from coming back. Note that the generic
+form of this lesson is not about text -- it is that a defect described as "every
+X is wrong" must be repaired by a change that makes a *wrong X unrepresentable*
+or by a test that quantifies over all X. Fixing the instances you can find is
+fixing the symptom; the roadmap entry for `spades` lists the same defect twice,
+as fault (7) and fault (15), for exactly that reason.
+
+### Lesson 99: a whole-frame invariant is only as wide as the states you draw; one fixture is a sample, not a sweep (lane C, 2026-08-31)
+
+**In short:** lesson 97 says a layout claim checked at six window sizes is
+untested, and the repair is to sweep a grid of sizes. Lesson 98 says a
+per-call-site fix is untested, and the repair is to quantify the claim over the
+whole frame. `spades` did both -- 42 sizes, every `RenderCommand::Text` in the
+frame -- and the mutation sweep still walked a broken `centred` straight past
+it, because the test drew **one game**. A playing hand draws no centred run at
+all: the three that exist are on the bid pad, the help card and the message
+across an empty felt, and the fixture was in none of those states.
+
+**The two faults that were hiding behind the single fixture.** Both are in the
+one helper the whole picture funnels through, so neither is obscure:
+
+| Fault | What it did | Why the frame sweep could not see it |
+|---|---|---|
+| the bound was the whole box, measured from the *centred* start | `centred(pad.x, pad.w, ...)` emitted `x = 144.6, max_width = 300.9` in a 360-pixel window -- a claim reaching 85 pixels past the pad's own right edge | no `centred` call happens in a playing hand |
+| the offset was not floored at zero | a run too wide to centre got a negative offset and hung off **both** edges | same, plus the right-edge check alone cannot see it: `x + w` lands level with the box either way |
+
+**Two repairs, and the second is the general one.**
+
+*Draw more than one state.* The test now builds four -- playing with an
+over-long status, bidding with the pad up, playing with the help card open, and
+a round played out so the felt carries a message -- and asserts over all 42
+sizes for each. That is 168 frames and it costs under two seconds.
+
+*Give the helper its own test.* A helper that every drawing site funnels
+through is the highest-leverage thing in the file and the easiest to test
+directly: `a_centred_run_stays_inside_the_box_it_is_centred_in` calls `centred`
+into a bare `Frame`, once with a run that fits and once with a run that cannot,
+and reads the command back. It owns both halves of the fault. A whole-frame
+assertion can only see a helper through whatever the application happens to
+ask it to draw; a direct test sees all of it.
+
+**The state dimension is exactly as adversarial as the size dimension.** Lesson
+97's rule was "solve the guard's own condition, then pick a window that
+satisfies it." The same question works here: *which application state reaches
+this code at all?* A drawing routine guarded by `if self.show_help`, by a phase
+match, or by `if trick.cards.is_empty()` is unreached by a fixture that is not
+in that state, and no amount of sweeping the window size will enter it.
+
+**The same sweep also found a clamp no window could reach.** `hand_h` was
+`(card_h * HAND_STRIP_SLACK).min(strip_h)` while `card_w` was already capped at
+`strip_h / (CARD_ASPECT * HAND_STRIP_SLACK)` -- so the `.min` was arithmetically
+unreachable, and striking it out changed nothing anywhere. It is lesson 94's
+unreachable branch wearing a `min`: a clamp that cannot bind is not a
+safeguard, it is a line that takes the credit for the cap that is actually
+holding the invariant, and it hides which one that is. It has been removed and
+the row now cuts the real guard.
+
+**Where else to look.** Every app in the wiring campaign whose whole-frame
+assertions use a single fixture -- which is most of them, because the fixture
+helper (`playing_game()`, `open_document()`, and so on) was written to build the
+*ordinary* state. Two questions per app: *which of my drawing routines are
+behind a state guard*, and *does any fixture enter it?* Prefer a list of
+fixtures over one, and prefer a direct test of a shared helper over inferring
+its behaviour from the pictures its callers happen to produce.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

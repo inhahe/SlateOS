@@ -100147,6 +100147,68 @@ inviting a check-then-use of its own.
 hypothetical question is one more thing to keep in step. **Trigger:** lane B
 asking, or the first userspace caller whose correctness depends on it.
 
+## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
+
+**Status:** OPEN 2026-08-30
+
+**In short:** Six self-test cases ask the mount table whether `/` is mounted
+read-write, find that it is not, record an honest SKIP, and return. They run
+at boot Steps 11 and 19; the root filesystem mounts at Step 20f. So the
+condition is not "sometimes false" — it is false on **every boot, always**,
+and these six cases have never executed a single time. They are green in the
+sense that nothing red is printed.
+
+**The six** (names as they appear in the serial log):
+
+| Subsystem | Case | Gate |
+|---|---|---|
+| `syscall` (dispatch.rs:991) | Native openat2 | `is_mounted_rw("/")` |
+| `syscall` (dispatch.rs:3861) | Dispatch FS roundtrip | `is_mounted_rw("/")` |
+| `syscall/linux` | mkdir/rmdir/unlink native-VFS round-trip | recorded skipped **twice** per boot |
+| `syscall/linux` | rename native-VFS round-trip | recorded skipped **twice** per boot |
+| `spawn` (spawn.rs:32078) | Spawn with fd_map | `is_mounted_rw("/")` |
+| `spawn` (spawn.rs:32401) | take_initial_fds one-shot | `is_mounted_rw("/")` |
+
+Reproduce against any boot log:
+
+    grep -n "SKIP.*not mounted read-write" build/serial-test.txt
+
+**Nothing here is dishonest, which is why nothing caught it.** Each skip is
+exactly what design-decisions.md §270 asks for — a fact the test *looked up*
+in the mount table rather than inferred from a failed `open`, so an open bug
+cannot silently switch the section off. `check-selftest-skips.py` enforces
+that honesty and passes. What no gate has a notion of is a skip that is
+honest and yet **unconditional in practice**: a predicate that is a constant
+at the point it is evaluated.
+
+**The fix pattern already exists in-tree, in three places.** A case that needs
+the filesystem is split into a second entry point called from `main.rs` after
+Step 20f:
+
+- `ipc::io_ring::self_test_fh()` — `main.rs:1577`, and its two cases are
+  visibly *passing* in the serial log rather than skipping.
+- `syscall::linux::self_test_rename_noreplace()` — `main.rs:1878`, with the
+  comment "which only sees a read-only root".
+- `syscall::linux::self_test_file_mmap()` — `main.rs:1934`, same shape.
+
+So the work is mechanical: move each of the six bodies behind a
+`self_test_*_fs()` entry point, call it from the post-mount block, and leave
+the pre-mount `self_test()` free of the case entirely — rather than leaving a
+skip behind that reports a condition which can no longer occur.
+
+**Then close the class, not just the instances.** Extend
+`scripts/check-selftest-skips.py` (or the boot-history machinery in
+`bench/boot-history.jsonl`, which already has the data) to fail when a named
+skip fires on 100% of recorded boots. A skip that has never once *not* fired
+is not a skip; it is a deletion with a log line.
+
+**Why this matters beyond the six.** `test_dispatch_openat2_native` is the
+test design-decisions.md §648 relies on for native `dirfd == 0` coverage, and
+it is one of the six. Adding cases to a test that provably never runs is the
+precise self-deception §648's own entry criticises elsewhere — so §648's
+test half is blocked on this, and any future "it is covered by a self-test"
+claim about these six subsystems is worth checking against the log first.
+
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 
 **In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only

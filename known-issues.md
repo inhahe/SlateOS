@@ -102453,3 +102453,68 @@ property of the design.
 
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
+
+## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A)
+
+**Status:** OPEN 2026-08-31
+
+`scripts/check-self-tests-wired.py` ends every run with a NOTE:
+
+> 6 self-test call site(s) in main.rs sit inside a conditional, so whether they
+> run depends on the boot path. Being reachable from main.rs is not the same as
+> being reached: a suite behind a condition that is false in CI has never run,
+> however green the boot test looks. **Check each against the serial log before
+> citing it as coverage.**
+
+The reasoning is exactly right, and it is the reasoning that catches the bug
+class that put `[mm] Zeroed frame allocation` in this file — a call site that
+exists, type-checks, and is reachable, but whose guard is false on every boot.
+The defect is that the gate **stops one step short**: it asks the reader to do
+the correlation by hand, on every boot, forever, and never does it itself.
+
+**The manual check is error-prone, and I have the failure to prove it.** Doing
+this by hand on 2026-08-31 I first concluded that two of the six —
+`self_test_userspace_netstack` and `self_test_netstack_dns_ipc` — had never run,
+because grepping the serial log for their names near the word "self-test"
+returned nothing. That was a **false negative**: both run, and print
+`[spawn] Running userspace netstack daemon (ring 3) integration test...` and
+`[spawn]   netstack DNS-over-IPC ...: OK` (serial lines 2786 and 2816). They say
+*integration test*, not *self-test*. The hand check fails on a phrasing mismatch
+between the function's name and the words it prints — which is precisely the
+kind of thing a script does not get wrong and a reader does.
+
+**Verified result, 2026-08-31 — all six do run.** Recorded so the next reader
+does not repeat the search:
+
+| Call site | Guard | Runs in CI? | Evidence in serial |
+|---|---|---|---|
+| `main.rs:1138` / `:1150` `acpi::self_test` | `if let Some(rsdp) = …` / `else` | yes — **cannot not** run | `[acpi] Self-test PASSED` (1727) |
+| `main.rs:1400` `mm::swap::self_test_disk` | `init_disk(...).is_ok()` | yes | `[swap] Disk backend self-test PASSED` (2006) |
+| `main.rs:1512` `fs::fat::self_test` | `if fat_ok` | yes | `[fat] Running mkfs/format self-test...` (2564) |
+| `main.rs:2043` `self_test_userspace_netstack` | `!net.userspace` | yes | `…integration test...` (2786) |
+| `main.rs:2054` `self_test_netstack_dns_ipc` | `!net.userspace` | yes | `…: OK — 104.20.23.154` (2816) |
+
+Two of those deserve a note. The `acpi` pair is reported as gated but is an
+`if`/`else` over the same test, so one arm always runs — the gate's nesting
+model does not know that two branches of one conditional are exhaustive, and
+counts both. And the netstack pair's guard is `!userspace_enabled()`, which
+reads as fragile but is presently safe because the `net.userspace` cutover
+switch defaults **off** (`[spawn]   net.userspace cutover switch: off`, 2842).
+That is a default, not an invariant: **the day the cutover flips on, those two
+self-tests silently stop running** and nothing says so. The code comment at
+`main.rs:2036` documents the skip as deliberate (they would contend for the
+exclusive raw-NIC claim, §64) — which makes it a correct decision with no
+tripwire, not an accident.
+
+**Proper fix.** Do the correlation in the harness rather than in the reader's
+head. The wiring gate runs *pre*-build so it has no serial log at that point;
+the natural home is a post-boot check beside `check-boot-skips.py`, which
+already reads the serial log for exactly this kind of question. Have
+`check-self-tests-wired.py` emit its gated-site list as machine-readable output
+(it already computes it for `--list-gated`), and have the post-boot step assert
+each gated site produced *some* output in the log. Keying that on a per-site
+declared marker — not on the function's name — is the whole point, since the
+name-to-output mismatch above is the failure mode.
+
+**Until then, the netstack pair is the one to watch**, because its guard is a
+flag someone will eventually flip on purpose.

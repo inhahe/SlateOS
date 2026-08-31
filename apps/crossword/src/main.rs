@@ -201,21 +201,48 @@ impl Layout {
         }
     }
 
-    /// The square a cell of the grid occupies.
+    /// Where the line between column `i - 1` and column `i` falls.
     ///
-    /// Cells tile exactly and `Rect::contains` is half-open, so two of them can
-    /// never both claim a pixel -- which is what makes recording the rectangle
-    /// as the cell is painted a complete answer to "what did I click".
+    /// One function for both sides of a boundary. A cell whose width was
+    /// `self.cell` in its own right would end a rounding step away from where
+    /// the next cell starts, because `grid.x + cell * n` and
+    /// `(grid.x + cell * (n - 1)) + cell` are the same number in arithmetic and
+    /// not always the same `f32`, and the sliver that leaves is a strip of the
+    /// picture two cells both claim. Taking both edges from here and the width
+    /// as their difference makes the boundary a single value, so there is
+    /// nothing to disagree.
     #[expect(
         clippy::cast_precision_loss,
         reason = "grid dimensions are single digits; exact in f32"
     )]
+    fn edge_x(&self, col: usize) -> f32 {
+        self.cell.mul_add(col as f32, self.grid.x)
+    }
+
+    /// Where the line between row `i - 1` and row `i` falls. See [`edge_x`].
+    ///
+    /// [`edge_x`]: Layout::edge_x
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "grid dimensions are single digits; exact in f32"
+    )]
+    fn edge_y(&self, row: usize) -> f32 {
+        self.cell.mul_add(row as f32, self.grid.y)
+    }
+
+    /// The square a cell of the grid occupies.
+    ///
+    /// Cells tile and `Rect::contains` is half-open, so two of them can never
+    /// both claim a pixel -- which is what makes recording the rectangle as the
+    /// cell is painted a complete answer to "what did I click".
     fn cell_rect(&self, row: usize, col: usize) -> Rect {
+        let x = self.edge_x(col);
+        let y = self.edge_y(row);
         Rect::new(
-            self.cell.mul_add(col as f32, self.grid.x),
-            self.cell.mul_add(row as f32, self.grid.y),
-            self.cell,
-            self.cell,
+            x,
+            y,
+            self.edge_x(col.saturating_add(1)) - x,
+            self.edge_y(row.saturating_add(1)) - y,
         )
     }
 
@@ -224,13 +251,17 @@ impl Layout {
         (self.small * 1.7).max(1.0)
     }
 
-    /// How many clue rows the panel can show whole.
+    /// How many rows of the clue panel fit on it whole.
+    ///
+    /// Rows, not clues: the direction headings are rows of the same list, so
+    /// the panel's capacity is measured in the units it is filled in. Counting
+    /// clues and then drawing a heading among them spends a row nothing
+    /// budgeted for, and the end of the list becomes unreachable.
     fn clue_rows_visible(&self) -> usize {
         if self.panel.is_empty() {
             return 0;
         }
-        // The heading takes the first row.
-        let usable = (self.panel.h - self.clue_row_h()).max(0.0);
+        let usable = self.panel.h.max(0.0);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
@@ -260,6 +291,19 @@ impl Direction {
         match self {
             Self::Across => "Across",
             Self::Down => "Down",
+        }
+    }
+
+    /// The letter that goes after a clue number: `7A`, `7D`.
+    ///
+    /// The panel scrolls, so the heading that says which half of the list a
+    /// row belongs to is often not on the screen with it. Two clues can share
+    /// a number -- one across, one down -- and without this the two rows read
+    /// the same.
+    fn initial(self) -> char {
+        match self {
+            Self::Across => 'A',
+            Self::Down => 'D',
         }
     }
 
@@ -333,6 +377,18 @@ struct Clue {
     row: usize,
     col: usize,
     len: usize,
+}
+
+/// One row of the scrolling clue panel.
+///
+/// A heading is a row like any other so that the scroll arithmetic and the
+/// drawing agree about how much list there is. See [`Crossword::panel_rows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelRow {
+    /// "Across" or "Down", above the clues that go that way.
+    Heading(Direction),
+    /// A clue, by its index into `clues`.
+    Clue(usize),
 }
 
 // ── Puzzle definitions ──────────────────────────────────────────────
@@ -943,16 +999,57 @@ impl Crossword {
         self.go_to_clue(next);
     }
 
+    /// Every row of the clue panel, in the order it is drawn -- the direction
+    /// headings among the clues, not beside them.
+    ///
+    /// The panel scrolls by rows, so a heading it draws has to be a row it
+    /// counts. It used to draw "Down" in the middle of the list out of a
+    /// budget that had only ever counted clues, which cost the list one row
+    /// of reach: at the bottom of the scroll the last clue was pushed off the
+    /// panel and no scroll position existed that would bring it back.
+    fn panel_rows(&self) -> Vec<PanelRow> {
+        let mut rows = Vec::with_capacity(self.clues.len().saturating_add(2));
+        let mut heading: Option<Direction> = None;
+        for (i, clue) in self.clues.iter().enumerate() {
+            if heading != Some(clue.direction) {
+                heading = Some(clue.direction);
+                rows.push(PanelRow::Heading(clue.direction));
+            }
+            rows.push(PanelRow::Clue(i));
+        }
+        rows
+    }
+
+    /// Which row of the panel clue `index` is drawn on.
+    fn row_of_clue(&self, index: usize) -> Option<usize> {
+        self.panel_rows()
+            .iter()
+            .position(|row| *row == PanelRow::Clue(index))
+    }
+
     /// Scroll the panel so that clue `index` is on it.
     fn show_clue(&mut self, index: usize) {
         let visible = self.layout().clue_rows_visible();
+        let Some(row) = self.row_of_clue(index) else {
+            return;
+        };
         if visible == 0 {
             return;
         }
-        if index < self.clue_scroll {
-            self.clue_scroll = index;
-        } else if index >= self.clue_scroll.saturating_add(visible) {
-            self.clue_scroll = index.saturating_sub(visible.saturating_sub(1));
+        if row < self.clue_scroll {
+            // Take the heading above it along when there is one: a clue
+            // scrolled to the very top of a panel whose heading is one row
+            // off it is a row that does not say which list it belongs to.
+            self.clue_scroll = if matches!(
+                self.panel_rows().get(row.saturating_sub(1)),
+                Some(PanelRow::Heading(_))
+            ) {
+                row.saturating_sub(1)
+            } else {
+                row
+            };
+        } else if row >= self.clue_scroll.saturating_add(visible) {
+            self.clue_scroll = row.saturating_sub(visible.saturating_sub(1));
         }
     }
 
@@ -960,7 +1057,7 @@ impl Crossword {
     /// clue rather than a screen of nothing.
     fn max_scroll(&self) -> usize {
         let visible = self.layout().clue_rows_visible();
-        self.clues.len().saturating_sub(visible)
+        self.panel_rows().len().saturating_sub(visible)
     }
 
     fn scroll_clues(&mut self, rows: isize) -> bool {
@@ -1482,55 +1579,50 @@ impl Crossword {
         let visible = l.clue_rows_visible();
         let current = self.current_clue();
 
+        // One list, one budget. The headings used to be drawn from a second
+        // copy of this code that ran before the loop, and again inside it when
+        // the direction changed, out of a row count that had never included
+        // them.
+        let rows = self.panel_rows();
         let first = self.clue_scroll.min(self.max_scroll());
-        let mut heading: Option<Direction> = None;
         let mut y = l.panel.y;
 
-        // The heading names whichever direction the first visible row is in,
-        // so a list scrolled into the down clues still says so.
-        if let Some(clue) = self.clues.get(first) {
-            heading = Some(clue.direction);
-            text_at(
-                f,
-                l.panel.x,
-                y,
-                clue.direction.label(),
-                LAVENDER,
-                l.small,
-                FontWeightHint::Bold,
-            );
-        }
-        y += row_h;
-
-        for (i, clue) in self.clues.iter().enumerate().skip(first).take(visible) {
-            if heading != Some(clue.direction) {
-                heading = Some(clue.direction);
-                text_at(
-                    f,
-                    l.panel.x,
-                    y,
-                    clue.direction.label(),
-                    LAVENDER,
-                    l.small,
-                    FontWeightHint::Bold,
-                );
-                y += row_h;
-                if y + row_h > l.panel.bottom() {
-                    break;
-                }
-            }
+        for row in rows.iter().skip(first).take(visible) {
             let r = Rect::new(l.panel.x, y, l.panel.w, row_h);
             if r.bottom() > l.panel.bottom() {
                 break;
             }
-            let on = current == Some(i);
+            y += row_h;
+            let index = match *row {
+                PanelRow::Heading(dir) => {
+                    text_at(
+                        f,
+                        r.x,
+                        r.y,
+                        dir.label(),
+                        LAVENDER,
+                        l.small,
+                        FontWeightHint::Bold,
+                    );
+                    continue;
+                }
+                PanelRow::Clue(index) => index,
+            };
+            let Some(clue) = self.clues.get(index) else {
+                continue;
+            };
+            let on = current == Some(index);
             if on {
                 fill(f, r, SURFACE0, l.small * 0.3);
             }
             f.push(RenderCommand::Text {
                 x: r.x + l.pad * 0.3,
                 y: r.y + (row_h - l.small) / 2.0,
-                text: format!("{}. {}", clue.number, clue.text),
+                // The direction goes in the label because the heading that
+                // would otherwise say it scrolls away: 7 Across and 7 Down are
+                // both "7", and a panel showing one of them without its
+                // heading would not say which.
+                text: format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text),
                 font_size: l.small,
                 color: if on { YELLOW } else { SUBTEXT0 },
                 font_weight: if on {
@@ -1546,8 +1638,7 @@ impl Crossword {
                 max_width: Some((r.w - l.pad * 0.6).max(0.0)),
                 overflow: TextOverflow::Ellipsis,
             });
-            f.hit(Target::ClueRow(i), r);
-            y += row_h;
+            f.hit(Target::ClueRow(index), r);
         }
     }
 
@@ -1865,4 +1956,1582 @@ impl Probe for Crossword {
 fn main() -> ExitCode {
     let mut app = Crossword::new();
     app::launch("crossword", &mut app)
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod tests {
+    // A test that indexes out of range should fail loudly and point at the
+    // line that did it -- that is the diagnosis. The defensive lints exist to
+    // keep panics out of code that runs on a user's data, which this is not.
+    #![expect(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp,
+        reason = "test code: a panic is a diagnosis"
+    )]
+
+    use super::*;
+    use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, shift};
+
+    // ── Fixtures ───────────────────────────────────────────────────
+
+    /// The windows every geometric claim is checked at.
+    ///
+    /// The grid is square, so the *shorter* side is the one that pays for it,
+    /// and a list of near-4:3 windows would let width and height take turns
+    /// being the binding constraint without ever making that visible. This
+    /// list spans both orders, both extremes and the degenerate cases: wider
+    /// than tall, taller than wide, exactly square, one so short the three
+    /// bars have already spent the height, and one so narrow the clue panel
+    /// cannot exist at all.
+    const SIZES: [(f32, f32); 12] = [
+        (860.0, 580.0),
+        (320.0, 240.0),
+        (240.0, 320.0),
+        (400.0, 400.0),
+        (1280.0, 800.0),
+        (800.0, 1280.0),
+        (1920.0, 1080.0),
+        (200.0, 900.0),
+        (900.0, 200.0),
+        (140.0, 140.0),
+        (900.0, 60.0),
+        (60.0, 900.0),
+    ];
+
+    /// An app with puzzle `index` open, driven to the size a probe uses.
+    fn playing(index: usize) -> Crossword {
+        let mut app = Crossword::new();
+        app.load_puzzle(index);
+        assert_eq!(
+            app.view,
+            View::Playing,
+            "the fixture failed to open puzzle {index}"
+        );
+        app
+    }
+
+    /// The answers each grid is supposed to spell, in grid order.
+    ///
+    /// This table is the test that the grids are crosswords. The three that
+    /// were here before were built from their across answers alone, and their
+    /// *columns* spelled `SAPETRE`, `HALLILA` and `FSIVRNA` -- nobody had ever
+    /// read them downwards, because nothing ever asked. Writing the intended
+    /// words down here means a grid that stops spelling them says so.
+    const ANSWERS: [(&str, &[&str], &[&str]); 3] = [
+        (
+            "Warm Up",
+            &["SPA", "TAR", "ELITE", "SEE", "END"],
+            &["STEAK", "PAL", "ARISE", "SPEED", "TEN"],
+        ),
+        (
+            "Centre Stage",
+            &["COG", "EAR", "DRAMA", "CAT", "EYE"],
+            &["CEDAR", "OAR", "GRACE", "PLATE", "MAY"],
+        ),
+        (
+            "Around the House",
+            &["BOW", "AIR", "SLIDE", "SUM", "TOE"],
+            &["BASIN", "OIL", "WRIST", "THEME", "DUO"],
+        ),
+    ];
+
+    /// The letters of the word a clue points at.
+    fn answer_of(app: &Crossword, clue: &Clue) -> String {
+        app.word_cells(clue.row, clue.col, clue.direction)
+            .into_iter()
+            .map(|(r, c)| app.cell(r, c).unwrap().solution)
+            .collect()
+    }
+
+    /// Every rectangle the frame filled.
+    fn painted_rects(app: &Crossword, size: (f32, f32)) -> Vec<Rect> {
+        app.draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every run of text the frame painted, with the width it was bounded to.
+    fn painted_text(app: &Crossword, size: (f32, f32)) -> Vec<(String, Option<f32>)> {
+        app.draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } => Some((text.clone(), *max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A shape of the app's state that two routes to the same action must
+    /// agree on, so "the button and the key do the same thing" is one
+    /// comparison rather than a list of fields somebody will forget to extend.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Snapshot {
+        view: View,
+        check_mode: bool,
+        show_help: bool,
+        cursor: (usize, usize),
+        entries: Vec<Option<char>>,
+        revealed: usize,
+    }
+
+    fn snapshot(app: &Crossword) -> Snapshot {
+        Snapshot {
+            view: app.view,
+            check_mode: app.check_mode,
+            show_help: app.show_help,
+            cursor: app.cursor,
+            entries: app
+                .cells
+                .iter()
+                .map(|c| c.as_ref().and_then(|c| c.entry))
+                .collect(),
+            revealed: app.revealed_count(),
+        }
+    }
+
+    // ── The layout follows the window ──────────────────────────────
+
+    #[test]
+    fn the_layout_follows_the_window_rather_than_a_constant() {
+        // Both windows have to sit in the band where the quantity compared is
+        // free to move, or the comparison is between two *clamped* values and
+        // passes against a program that ignores the window entirely. `font` is
+        // clamped to 9 below 342px tall and to 17 above 646, and `pad` to 4
+        // below 134px and to 18 above 600 on the shorter side.
+        let small = Layout::solve(400.0, 400.0, 5, 5);
+        let large = Layout::solve(560.0, 560.0, 5, 5);
+
+        assert!(
+            large.cell > small.cell,
+            "a bigger window has to draw a bigger cell: {} vs {}",
+            large.cell,
+            small.cell
+        );
+        assert!(
+            large.font > small.font,
+            "a bigger window has to use a bigger font: {} vs {}",
+            large.font,
+            small.font
+        );
+        assert!(
+            large.pad > small.pad,
+            "a bigger window has to leave a bigger margin: {} vs {}",
+            large.pad,
+            small.pad
+        );
+        assert!(
+            large.header.h > small.header.h,
+            "the header is a function of the window, not a constant"
+        );
+    }
+
+    #[test]
+    fn the_grid_fills_the_body_when_the_window_has_no_room_for_a_panel() {
+        // The old grid was 36 pixels a cell whatever the window was: a 5x5
+        // puzzle occupied 180 pixels of an 1920-pixel window and 180 of a
+        // 140-pixel one, which is to say it was drawn outside the second.
+        let wide = Layout::solve(1200.0, 700.0, 5, 5);
+        assert!(
+            !wide.panel.is_empty(),
+            "a 1200x700 window has room for a clue panel"
+        );
+
+        let narrow = Layout::solve(220.0, 700.0, 5, 5);
+        assert!(
+            narrow.panel.is_empty(),
+            "a 220-pixel window cannot hold a readable clue panel, so it \
+             should not pretend to: {:?}",
+            narrow.panel
+        );
+        assert!(
+            narrow.grid.w > wide.grid.w * 0.0,
+            "the grid has some width in a narrow window"
+        );
+        // Handing the panel's share back to the grid is the point of dropping
+        // it, so the grid must be wider than the share it would have had.
+        let shared = narrow.grid.w;
+        let reserved = (220.0 - narrow.pad * 2.0) * GRID_WIDTH_SHARE;
+        assert!(
+            shared > reserved,
+            "dropping the panel should give its width to the grid: \
+             grid {shared} vs reserved share {reserved}"
+        );
+    }
+
+    #[test]
+    fn the_grid_is_square_and_its_cells_tile_it_exactly() {
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h, 5, 5);
+            assert_eq!(l.grid.w, l.cell * 5.0, "grid width at {w}x{h}");
+            assert_eq!(l.grid.h, l.cell * 5.0, "grid height at {w}x{h}");
+            for row in 0..5 {
+                for col in 0..5 {
+                    let r = l.cell_rect(row, col);
+                    // Not `== l.cell`: the width is the distance between two
+                    // boundaries, and a boundary is what has to agree, not a
+                    // width computed twice. It is the next two assertions that
+                    // are exact.
+                    assert!(
+                        (r.w - l.cell).abs() < 0.01 && (r.h - l.cell).abs() < 0.01,
+                        "cell {row},{col} is {r:?}, not about {} square, at {w}x{h}",
+                        l.cell
+                    );
+                    if col > 0 {
+                        assert_eq!(
+                            l.cell_rect(row, col - 1).right(),
+                            r.x,
+                            "cell {row},{col} and its left neighbour must touch exactly at {w}x{h}"
+                        );
+                    }
+                    if row > 0 {
+                        assert_eq!(
+                            l.cell_rect(row - 1, col).bottom(),
+                            r.y,
+                            "cell {row},{col} and the one above must touch exactly at {w}x{h}"
+                        );
+                    }
+                }
+            }
+            let last = l.cell_rect(4, 4);
+            assert!(
+                (last.right() - l.grid.right()).abs() < 0.01
+                    && (last.bottom() - l.grid.bottom()).abs() < 0.01,
+                "the last cell has to end where the grid does at {w}x{h}: {last:?} in {:?}",
+                l.grid
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        for (w, h) in SIZES {
+            let window = Rect::new(0.0, 0.0, w, h);
+            let mut menu = Crossword::new();
+            menu.size = (w, h);
+            let mut game = playing(0);
+            game.size = (w, h);
+            let mut helped = playing(1);
+            helped.size = (w, h);
+            helped.show_help = true;
+            let mut done = playing(2);
+            done.size = (w, h);
+            done.view = View::Completed;
+
+            for (name, app) in [
+                ("menu", &menu),
+                ("playing", &game),
+                ("help", &helped),
+                ("completed", &done),
+            ] {
+                for r in painted_rects(app, (w, h)) {
+                    assert!(
+                        r.x >= window.x - 0.51
+                            && r.y >= window.y - 0.51
+                            && r.right() <= window.right() + 0.51
+                            && r.bottom() <= window.bottom() + 0.51,
+                        "{name} painted {r:?} outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_help_card_is_drawn_inside_the_window_that_needs_it() {
+        // It was a fixed 360x280 box at `width / 2.0 - 180.0`: in a 200-pixel
+        // window it started at -80 and ran to 280, which is to say the help
+        // was drawn entirely outside the window whose user had asked for it.
+        for (w, h) in SIZES {
+            let mut app = playing(0);
+            app.size = (w, h);
+            app.show_help = true;
+            let with_help = painted_rects(&app, (w, h));
+            app.show_help = false;
+            let without = painted_rects(&app, (w, h));
+            assert!(
+                with_help.len() > without.len(),
+                "the help card has to be painted at {w}x{h}"
+            );
+            for r in with_help {
+                assert!(
+                    r.right() <= w + 0.51 && r.bottom() <= h + 0.51 && r.x >= -0.51 && r.y >= -0.51,
+                    "the help card put {r:?} outside a {w}x{h} window"
+                );
+            }
+        }
+    }
+
+    // ── The click lands where the picture is ───────────────────────
+
+    #[test]
+    fn a_click_selects_the_cell_it_was_painted_in() {
+        // The fault this replaces: the drawing pass put the grid at
+        // `grid_y = 72.0` and the click pass looked for it at `grid_y = 60.0`,
+        // so a click was resolved against a grid twelve pixels above the one
+        // on the screen and the top third of every cell selected its
+        // neighbour. Clicking the *painted* box is the only thing that catches
+        // that, because a test that re-derives the coordinates re-derives the
+        // bug along with them.
+        for (w, h) in SIZES {
+            let mut app = playing(0);
+            app.size = (w, h);
+            let l = Layout::solve(w, h, app.width, app.height);
+            if l.cell < 8.0 {
+                continue;
+            }
+            for row in 0..app.height {
+                for col in 0..app.width {
+                    if !app.playable(row, col) {
+                        continue;
+                    }
+                    let r = l.cell_rect(row, col);
+                    // The top edge and the middle: the drift showed up first
+                    // at the top of a cell, which is why it is checked there.
+                    for (px, py) in [r.centre(), (r.x + r.w / 2.0, r.y + 1.0)] {
+                        app.cursor = (0, 0);
+                        app.direction = Direction::Across;
+                        app.click_at(px, py, MouseButton::Left, (w, h));
+                        assert_eq!(
+                            app.cursor,
+                            (row, col),
+                            "a click at ({px}, {py}) in a {w}x{h} window must \
+                             select the cell painted there"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_hit_boxes_claim_the_same_pixel() {
+        for (w, h) in SIZES {
+            let mut app = playing(0);
+            app.size = (w, h);
+            let hits = app.draw((w, h)).hits().to_vec();
+            for (i, (ta, ra)) in hits.iter().enumerate() {
+                for (tb, rb) in hits.iter().skip(i.saturating_add(1)) {
+                    assert!(
+                        ra.intersect(*rb).is_none(),
+                        "{ta:?} at {ra:?} and {tb:?} at {rb:?} overlap in a \
+                         {w}x{h} window, so a click on the overlap is \
+                         resolved by draw order rather than by aim"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clicking_the_cell_the_cursor_is_already_on_turns_the_word() {
+        let mut app = playing(0);
+        app.cursor = (2, 2);
+        app.direction = Direction::Across;
+        click_sized(
+            &mut app,
+            Target::Cell(2, 2),
+            MouseButton::Left,
+            Crossword::SIZE,
+        );
+        assert_eq!(app.direction, Direction::Down, "the second click turns");
+        click_sized(
+            &mut app,
+            Target::Cell(2, 2),
+            MouseButton::Left,
+            Crossword::SIZE,
+        );
+        assert_eq!(app.direction, Direction::Across, "and turns back");
+    }
+
+    #[test]
+    fn clicking_a_clue_moves_the_cursor_to_the_word_it_names() {
+        let mut app = playing(0);
+        app.size = SHORT;
+        for index in 0..app.clues.len() {
+            app.clue_scroll = 0;
+            app.show_clue(index);
+            assert!(
+                is_visible_sized(&app, Target::ClueRow(index), SHORT),
+                "clue {index} is on no screen the panel can reach"
+            );
+            click_sized(&mut app, Target::ClueRow(index), MouseButton::Left, SHORT);
+            let clue = &app.clues[index];
+            assert_eq!(
+                app.cursor,
+                (clue.row, clue.col),
+                "clicking clue {index} must put the cursor on its first cell"
+            );
+            assert_eq!(app.direction, clue.direction, "and face its direction");
+        }
+    }
+
+    #[test]
+    fn clicking_a_menu_row_opens_that_puzzle() {
+        for index in 0..PUZZLES.len() {
+            let mut app = Crossword::new();
+            click_sized(
+                &mut app,
+                Target::PuzzleRow(index),
+                MouseButton::Left,
+                Crossword::SIZE,
+            );
+            assert_eq!(app.view, View::Playing, "row {index} has to start a game");
+            assert_eq!(
+                app.puzzle_name(),
+                PUZZLES[index].name,
+                "row {index} has to open the puzzle it is labelled with"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_on_nothing_puts_the_help_away_and_otherwise_does_nothing() {
+        let mut app = playing(0);
+        app.show_help = true;
+        let before = app.cursor;
+        // A corner of the window with no control in it.
+        let outcome = app.click_at(
+            Crossword::SIZE.0 - 1.0,
+            Crossword::SIZE.1 - 1.0,
+            MouseButton::Left,
+            Crossword::SIZE,
+        );
+        assert_eq!(outcome, EventResult::Consumed);
+        assert!(!app.show_help, "a click off the card dismisses it");
+        assert_eq!(app.cursor, before, "and moves nothing else");
+
+        let outcome = app.click_at(
+            Crossword::SIZE.0 - 1.0,
+            Crossword::SIZE.1 - 1.0,
+            MouseButton::Left,
+            Crossword::SIZE,
+        );
+        assert_eq!(
+            outcome,
+            EventResult::Ignored,
+            "with no card up the same click is nothing at all"
+        );
+    }
+
+    // ── The puzzles are crosswords ─────────────────────────────────
+
+    #[test]
+    fn every_grid_spells_the_words_it_is_supposed_to() {
+        for (index, (name, across, down)) in ANSWERS.into_iter().enumerate() {
+            let app = playing(index);
+            assert_eq!(app.puzzle_name(), name, "puzzle {index} is out of order");
+
+            for dir in [Direction::Across, Direction::Down] {
+                let want: &[&str] = if dir == Direction::Across {
+                    across
+                } else {
+                    down
+                };
+                let got: Vec<String> = app
+                    .clues
+                    .iter()
+                    .filter(|c| c.direction == dir)
+                    .map(|c| answer_of(&app, c))
+                    .collect();
+                assert_eq!(
+                    got,
+                    want,
+                    "{name} {} answers, in grid order",
+                    dir.label().to_lowercase()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_run_of_two_or_more_cells_is_a_word_with_a_clue() {
+        // The columns of the old grids -- `SAPETRE`, `HALLILA`, `FSIVRNA` --
+        // existed because the down direction had no words in it at all: the
+        // grids were laid out from their across answers and nobody looked
+        // sideways. A word here is a maximal run of two or more playable
+        // cells, and every one of them must be a clue.
+        for index in 0..PUZZLES.len() {
+            let app = playing(index);
+            let name = app.puzzle_name();
+            for dir in [Direction::Across, Direction::Down] {
+                for row in 0..app.height {
+                    for col in 0..app.width {
+                        if !app.starts_word(row, col, dir) {
+                            continue;
+                        }
+                        let cells = app.word_cells(row, col, dir);
+                        assert!(
+                            cells.len() >= 2,
+                            "{name}: a one-cell run at ({row}, {col}) {dir:?} \
+                             was numbered as a word"
+                        );
+                        let clue = app
+                            .clues
+                            .iter()
+                            .find(|c| c.direction == dir && (c.row, c.col) == (row, col))
+                            .unwrap_or_else(|| {
+                                panic!("{name}: the {dir:?} word at ({row}, {col}) has no clue")
+                            });
+                        assert_eq!(
+                            clue.len,
+                            cells.len(),
+                            "{name}: the clue at ({row}, {col}) {dir:?} states \
+                             a length the grid does not have"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_word_in_every_puzzle_has_a_clue() {
+        // A clue list shorter than the grid's word count used to lose the
+        // extra words in silence -- eight per puzzle. `MISSING_CLUE` makes
+        // that visible in the panel, and this makes it a failure here.
+        for index in 0..PUZZLES.len() {
+            let app = playing(index);
+            for clue in &app.clues {
+                assert_ne!(
+                    clue.text,
+                    MISSING_CLUE,
+                    "{}: the {:?} word at ({}, {}) has no clue written for it",
+                    app.puzzle_name(),
+                    clue.direction,
+                    clue.row,
+                    clue.col
+                );
+            }
+            for dir in [Direction::Across, Direction::Down] {
+                let def = &PUZZLES[index];
+                let texts = if dir == Direction::Across {
+                    def.across
+                } else {
+                    def.down
+                };
+                let words = app.clues.iter().filter(|c| c.direction == dir).count();
+                assert_eq!(
+                    texts.len(),
+                    words,
+                    "{}: {} {dir:?} clues written for {words} words in the grid",
+                    def.name,
+                    texts.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_clue_number_is_the_number_on_the_cell_it_starts_at() {
+        // The definitions used to carry hand-written numbers which the program
+        // compared against numbering it derived from the grid; the two
+        // disagreed in all three puzzles. A clue's number is now read off the
+        // grid, and this is the statement of that.
+        for index in 0..PUZZLES.len() {
+            let app = playing(index);
+            for clue in &app.clues {
+                let cell = app.cell(clue.row, clue.col).unwrap();
+                assert_eq!(
+                    clue.number,
+                    cell.number,
+                    "{}: clue {:?} at ({}, {}) claims a number its cell does \
+                     not carry",
+                    app.puzzle_name(),
+                    clue.direction,
+                    clue.row,
+                    clue.col
+                );
+                assert!(clue.number > 0, "a word's first cell must be numbered");
+            }
+        }
+    }
+
+    #[test]
+    fn the_numbers_run_from_one_in_reading_order() {
+        for index in 0..PUZZLES.len() {
+            let app = playing(index);
+            let mut expected = 0u16;
+            for row in 0..app.height {
+                for col in 0..app.width {
+                    let starts = [Direction::Across, Direction::Down]
+                        .into_iter()
+                        .any(|d| app.starts_word(row, col, d));
+                    let number = app.cell(row, col).map_or(0, |c| c.number);
+                    if starts {
+                        expected = expected.saturating_add(1);
+                        assert_eq!(
+                            number,
+                            expected,
+                            "{}: ({row}, {col}) starts a word, so it is number \
+                             {expected}",
+                            app.puzzle_name()
+                        );
+                    } else {
+                        assert_eq!(
+                            number,
+                            0,
+                            "{}: ({row}, {col}) starts nothing and must carry \
+                             no number",
+                            app.puzzle_name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cell_that_starts_a_word_both_ways_carries_one_number() {
+        let app = playing(0);
+        let across = app.clues.iter().find(|c| (c.row, c.col) == (0, 0)).unwrap();
+        let down = app
+            .clues
+            .iter()
+            .find(|c| (c.row, c.col) == (0, 0) && c.direction == Direction::Down)
+            .unwrap();
+        assert_eq!(
+            across.number, down.number,
+            "1 Across and 1 Down start in the same square"
+        );
+        assert_eq!(across.number, 1, "and it is the first square numbered");
+    }
+
+    #[test]
+    fn every_grid_is_the_size_it_says_it_is() {
+        for def in PUZZLES {
+            assert_eq!(
+                def.grid.chars().count(),
+                def.width * def.height,
+                "{}: the grid string is not {}x{}",
+                def.name,
+                def.width,
+                def.height
+            );
+            for ch in def.grid.chars() {
+                assert!(
+                    ch == '#' || ch.is_ascii_uppercase(),
+                    "{}: {ch:?} is neither a black square nor a letter",
+                    def.name
+                );
+            }
+        }
+    }
+
+    // ── The clock ──────────────────────────────────────────────────
+
+    #[test]
+    fn the_clock_advances_while_the_puzzle_is_open() {
+        // It did not before. `load_puzzle` set `elapsed_secs = 0` and
+        // `timer_running = true`, and no line in the file ever added a second,
+        // so the readout was `00:00` for the whole puzzle and the end card
+        // congratulated every player on solving it instantly.
+        let mut app = playing(0);
+        assert_eq!(app.format_time(), "00:00", "a fresh puzzle starts at zero");
+        for _ in 0..5 {
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        }
+        assert_eq!(
+            app.elapsed_secs(),
+            5,
+            "five seconds of ticks is five seconds"
+        );
+        assert_eq!(app.format_time(), "00:05");
+        for _ in 0..115 {
+            app.handle_event(&Event::Tick { elapsed_ms: 1000 });
+        }
+        assert_eq!(app.format_time(), "02:00", "and it carries into minutes");
+    }
+
+    #[test]
+    fn the_clock_is_stopped_in_the_menu_and_on_the_end_card() {
+        for view in [View::PuzzleSelect, View::Completed] {
+            let mut app = playing(0);
+            app.view = view;
+            let outcome = app.handle_event(&Event::Tick { elapsed_ms: 5000 });
+            assert_eq!(app.elapsed_ms, 0, "the clock must not run in {view:?}");
+            assert_eq!(
+                outcome,
+                EventResult::Ignored,
+                "and a tick in {view:?} is not worth a repaint"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readout_shows_the_clock_rather_than_a_constant() {
+        let mut app = playing(0);
+        app.handle_event(&Event::Tick { elapsed_ms: 91_000 });
+        let drawn = painted_text(&app, Crossword::SIZE);
+        assert!(
+            drawn.iter().any(|(s, _)| s == "01:31"),
+            "the header has to print the time the clock holds; it printed {:?}",
+            drawn.iter().map(|(s, _)| s).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_app_asks_for_a_tick() {
+        // Without one the clock cannot move however well `handle_tick` works.
+        let app = playing(0);
+        assert_eq!(
+            app.tick_interval(),
+            Some(std::time::Duration::from_millis(TICK_MS)),
+            "an app with a clock in it has to ask to be ticked"
+        );
+    }
+
+    // ── Typing ─────────────────────────────────────────────────────
+
+    #[test]
+    fn typing_a_letter_fills_the_cell_and_moves_along_the_word() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+        app.key_at(&press(Key::S), Crossword::SIZE);
+        assert_eq!(app.cell(0, 0).unwrap().entry, Some('S'));
+        assert_eq!(app.cursor, (0, 1), "and the cursor moves on");
+    }
+
+    #[test]
+    fn typing_stops_at_the_end_of_a_word_rather_than_jumping_the_black_square() {
+        // `advance_cursor` used to scan for the next playable cell in the row,
+        // which stepped straight over the black square and carried on typing
+        // into a different word.
+        let mut app = playing(0);
+        app.cursor = (0, 2);
+        app.direction = Direction::Across;
+        assert!(
+            !app.playable(0, 3),
+            "the fixture needs a black square at (0, 3)"
+        );
+        assert!(app.playable(0, 4), "and a playable cell beyond it");
+        app.key_at(&press(Key::A), Crossword::SIZE);
+        assert_eq!(app.cell(0, 2).unwrap().entry, Some('A'));
+        assert_eq!(
+            app.cursor,
+            (0, 2),
+            "the last cell of a word is where typing stops"
+        );
+    }
+
+    #[test]
+    fn typing_over_a_letter_that_was_given_away_makes_it_the_players() {
+        // The old code left `revealed` set, so the end card went on counting a
+        // letter against the player long after they had typed it themselves.
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.reveal_letter();
+        assert_eq!(app.revealed_count(), 1);
+        app.cursor = (0, 0);
+        app.key_at(&press(Key::S), Crossword::SIZE);
+        assert_eq!(
+            app.revealed_count(),
+            0,
+            "a letter the player typed is the player's"
+        );
+    }
+
+    #[test]
+    fn backspace_clears_this_cell_then_steps_back() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+        app.key_at(&press(Key::S), Crossword::SIZE);
+        app.key_at(&press(Key::P), Crossword::SIZE);
+        assert_eq!(app.cursor, (0, 2));
+
+        app.key_at(&press(Key::Backspace), Crossword::SIZE);
+        assert_eq!(app.cursor, (0, 1), "an empty cell steps back");
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            None,
+            "and clears what it finds"
+        );
+
+        app.cursor = (0, 0);
+        app.key_at(&press(Key::Backspace), Crossword::SIZE);
+        assert_eq!(app.cell(0, 0).unwrap().entry, None, "a full cell empties");
+        assert_eq!(app.cursor, (0, 0), "without moving");
+    }
+
+    #[test]
+    fn a_letter_is_stored_upper_case_however_it_is_typed() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.key_at(&press(Key::S), Crossword::SIZE);
+        assert_eq!(app.cell(0, 0).unwrap().entry, Some('S'));
+    }
+
+    #[test]
+    fn a_key_that_types_nothing_is_not_treated_as_a_letter() {
+        // `key_to_char` used to answer `'\0'` for "not a letter", which every
+        // caller then had to remember to compare against.
+        assert_eq!(letter_of(Key::A), Some('A'));
+        assert_eq!(letter_of(Key::Z), Some('Z'));
+        for key in [Key::F5, Key::Home, Key::Enter, Key::Num1] {
+            assert_eq!(letter_of(key), None, "{key:?} types no letter");
+        }
+
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        let outcome = app.key_at(&press(Key::F5), Crossword::SIZE);
+        assert_eq!(outcome, EventResult::Ignored);
+        assert_eq!(app.cell(0, 0).unwrap().entry, None, "and fills nothing");
+    }
+
+    // ── The cursor ─────────────────────────────────────────────────
+
+    #[test]
+    fn the_four_arrows_are_the_same_code_and_each_undoes_the_other() {
+        // They were four hand-written loops, and `Key::Up`'s bounds guard was
+        // in the match arm while `Key::Down`'s was in the loop, so the two
+        // were not the same code in any sense a reader could check.
+        let mut app = playing(0);
+        for (there, back, from) in [
+            (Key::Right, Key::Left, (2, 0)),
+            (Key::Left, Key::Right, (2, 4)),
+            (Key::Down, Key::Up, (0, 0)),
+            (Key::Up, Key::Down, (4, 0)),
+        ] {
+            app.cursor = from;
+            app.key_at(&press(there), Crossword::SIZE);
+            assert_ne!(app.cursor, from, "{there:?} from {from:?} must move");
+            let moved = app.cursor;
+            app.key_at(&press(back), Crossword::SIZE);
+            assert_eq!(
+                app.cursor, from,
+                "{back:?} must undo {there:?}: {from:?} -> {moved:?} -> {:?}",
+                app.cursor
+            );
+        }
+    }
+
+    #[test]
+    fn an_arrow_crosses_a_black_square_where_typing_would_not() {
+        let mut app = playing(0);
+        app.cursor = (0, 2);
+        assert!(
+            !app.playable(0, 3),
+            "the fixture needs a black square at (0, 3)"
+        );
+        app.key_at(&press(Key::Right), Crossword::SIZE);
+        assert_eq!(app.cursor, (0, 4), "the arrows walk the grid, not the word");
+    }
+
+    #[test]
+    fn an_arrow_at_the_edge_stays_put_rather_than_wrapping() {
+        let mut app = playing(0);
+        for (key, at) in [
+            (Key::Left, (2, 0)),
+            (Key::Right, (2, 4)),
+            (Key::Up, (0, 0)),
+            (Key::Down, (4, 0)),
+        ] {
+            app.cursor = at;
+            let outcome = app.key_at(&press(key), Crossword::SIZE);
+            assert_eq!(
+                app.cursor, at,
+                "{key:?} at the edge {at:?} has nowhere to go"
+            );
+            assert_eq!(outcome, EventResult::Ignored, "and is not worth a repaint");
+        }
+    }
+
+    #[test]
+    fn an_arrow_faces_the_word_it_walks_along() {
+        let mut app = playing(0);
+        app.cursor = (2, 0);
+        app.direction = Direction::Down;
+        app.key_at(&press(Key::Right), Crossword::SIZE);
+        assert_eq!(app.cursor, (2, 1), "the step has to happen for the turn to");
+        assert_eq!(
+            app.direction,
+            Direction::Across,
+            "a sideways step reads across"
+        );
+
+        // Back to column 0, which is the only column with a cell below row 2:
+        // an arrow that cannot move changes nothing, including the direction,
+        // so a downward step aimed at a black square proves nothing at all.
+        app.cursor = (2, 0);
+        app.direction = Direction::Across;
+        app.key_at(&press(Key::Down), Crossword::SIZE);
+        assert_eq!(app.cursor, (3, 0), "the step has to happen here too");
+        assert_eq!(
+            app.direction,
+            Direction::Down,
+            "and a downward one reads down"
+        );
+    }
+
+    #[test]
+    fn space_turns_the_word_under_the_cursor() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+        app.key_at(&press(Key::Space), Crossword::SIZE);
+        assert_eq!(app.direction, Direction::Down);
+        app.key_at(&press(Key::Space), Crossword::SIZE);
+        assert_eq!(app.direction, Direction::Across);
+    }
+
+    // ── The clue list ──────────────────────────────────────────────
+
+    #[test]
+    fn tab_and_shift_tab_walk_the_clue_list_in_opposite_directions() {
+        // `move_to_next_clue(_reverse: bool)` took the argument and ignored
+        // it, so Shift+Tab was Tab.
+        let mut app = playing(0);
+        let n = app.clues.len();
+        assert!(n > 2, "the fixture needs a list worth cycling");
+
+        app.go_to_clue(0);
+        let mut seen = Vec::new();
+        for _ in 0..n {
+            seen.push(app.current_clue().unwrap());
+            app.key_at(&press(Key::Tab), Crossword::SIZE);
+        }
+        let mut sorted = seen.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n, "Tab must reach every clue exactly once");
+        assert_eq!(
+            app.current_clue(),
+            Some(0),
+            "and wrap back to where it started"
+        );
+
+        let mut backwards = Vec::new();
+        for _ in 0..n {
+            app.key_at(&shift(Key::Tab), Crossword::SIZE);
+            backwards.push(app.current_clue().unwrap());
+        }
+        seen.reverse();
+        assert_eq!(
+            backwards, seen,
+            "Shift+Tab must walk the list the other way"
+        );
+    }
+
+    /// A window with a clue panel too short for the whole list.
+    ///
+    /// The default 860x580 window shows all ten clues at once, so a scrolling
+    /// test written against it asserts nothing about scrolling: it passes
+    /// against a program whose wheel does nothing, because there is nothing
+    /// for the wheel to do (lesson 90). Everything about the scrollbar is
+    /// checked here instead, and `the_short_window_really_is_too_short` is
+    /// what keeps this size in the regime it was chosen for.
+    const SHORT: (f32, f32) = (900.0, 200.0);
+
+    #[test]
+    fn the_short_window_really_is_too_short_for_the_clue_list() {
+        let mut app = playing(0);
+        app.size = SHORT;
+        let l = Layout::solve(SHORT.0, SHORT.1, app.width, app.height);
+        assert!(
+            !l.panel.is_empty(),
+            "the fixture needs a panel, or there is nothing to scroll"
+        );
+        assert!(
+            l.clue_rows_visible() < app.panel_rows().len(),
+            "the fixture needs a panel shorter than the list: {} rows on the \
+             screen for a list of {}",
+            l.clue_rows_visible(),
+            app.panel_rows().len()
+        );
+        assert!(app.max_scroll() > 0);
+    }
+
+    #[test]
+    fn a_heading_is_a_row_of_the_list_it_heads() {
+        // The row budget counted clues and the drawing put a heading among
+        // them, so the list was one row longer than anything had scrolled for
+        // and its last clue could not be reached. The two headings are rows
+        // now, and this is what says so.
+        let app = playing(0);
+        let rows = app.panel_rows();
+        assert_eq!(
+            rows.len(),
+            app.clues.len().saturating_add(2),
+            "ten clues and an Across and a Down heading: {rows:?}"
+        );
+        assert_eq!(rows.first(), Some(&PanelRow::Heading(Direction::Across)));
+        assert!(
+            rows.contains(&PanelRow::Heading(Direction::Down)),
+            "the down clues need a heading too"
+        );
+        for (i, _) in app.clues.iter().enumerate() {
+            let row = app
+                .row_of_clue(i)
+                .unwrap_or_else(|| panic!("clue {i} is on no row"));
+            assert_eq!(rows[row], PanelRow::Clue(i));
+        }
+    }
+
+    #[test]
+    fn the_panel_draws_every_row_it_has_room_for_and_no_more() {
+        // The count on the screen is what the scroll arithmetic is computed
+        // from, so a panel that drew fewer rows than `clue_rows_visible` says
+        // would leave the end of the list unreachable however the limit was
+        // computed.
+        let mut app = playing(0);
+        app.size = SHORT;
+        let l = Layout::solve(SHORT.0, SHORT.1, app.width, app.height);
+        let visible = l.clue_rows_visible();
+        for scroll in 0..=app.max_scroll() {
+            app.clue_scroll = scroll;
+            let drawn = app
+                .draw(SHORT)
+                .hits()
+                .iter()
+                .filter(|(t, _)| matches!(t, Target::ClueRow(_)))
+                .count();
+            let headings = app
+                .panel_rows()
+                .iter()
+                .skip(scroll)
+                .take(visible)
+                .filter(|r| matches!(r, PanelRow::Heading(_)))
+                .count();
+            assert_eq!(
+                drawn.saturating_add(headings),
+                visible.min(app.panel_rows().len().saturating_sub(scroll)),
+                "at scroll {scroll} the panel drew {drawn} clues and \
+                 {headings} headings out of {visible} rows"
+            );
+        }
+    }
+
+    #[test]
+    fn every_clue_can_be_scrolled_onto_the_panel() {
+        // The panel drew `.take(8)` from a scroll offset no event ever
+        // changed, so a puzzle's ninth clue was simply not on the screen.
+        for index in 0..PUZZLES.len() {
+            let mut app = playing(index);
+            app.size = SHORT;
+            let mut reached = vec![false; app.clues.len()];
+            for scroll in 0..=app.max_scroll() {
+                app.clue_scroll = scroll;
+                for (target, _) in app.draw(SHORT).hits() {
+                    if let Target::ClueRow(i) = *target {
+                        reached[i] = true;
+                    }
+                }
+            }
+            for (i, ok) in reached.iter().enumerate() {
+                assert!(
+                    *ok,
+                    "{}: clue {i} is on no screen the panel can scroll to",
+                    app.puzzle_name()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_clue_list_and_stops_at_both_ends() {
+        let mut app = playing(0);
+        app.size = SHORT;
+        assert!(
+            app.max_scroll() > 0,
+            "the fixture needs a list longer than the panel"
+        );
+
+        // One notch away from the user scrolls towards the end of the list.
+        app.scroll_at(0.0, 0.0, -1.0, SHORT);
+        assert!(app.clue_scroll > 0, "one notch has to move the list");
+        for _ in 0..20 {
+            app.scroll_at(0.0, 0.0, -1.0, SHORT);
+        }
+        assert_eq!(
+            app.clue_scroll,
+            app.max_scroll(),
+            "the list stops at its last screen rather than scrolling into space"
+        );
+        for _ in 0..20 {
+            app.scroll_at(0.0, 0.0, 1.0, SHORT);
+        }
+        assert_eq!(app.clue_scroll, 0, "and at the top");
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_is_kept_rather_than_rounded_away() {
+        // A trackpad sends fractions of a notch. Rounding each event on its
+        // own throws them away and the list never moves at all.
+        let mut app = playing(0);
+        app.size = SHORT;
+        let tenth = -0.1;
+        for _ in 0..3 {
+            app.scroll_at(0.0, 0.0, tenth, SHORT);
+        }
+        assert_eq!(
+            app.clue_scroll, 0,
+            "three tenths of a notch is less than a row, so nothing moves yet"
+        );
+        for _ in 0..37 {
+            app.scroll_at(0.0, 0.0, tenth, SHORT);
+        }
+        assert!(
+            app.clue_scroll > 0,
+            "forty tenths of a notch have to add up to something"
+        );
+    }
+
+    #[test]
+    fn moving_the_cursor_scrolls_the_clue_it_lands_on_into_view() {
+        let mut app = playing(0);
+        app.size = SHORT;
+        let last = app.clues.len().saturating_sub(1);
+        app.clue_scroll = 0;
+        assert!(
+            !is_visible_sized(&app, Target::ClueRow(last), SHORT),
+            "the fixture needs a clue that starts off the screen"
+        );
+        app.go_to_clue(last);
+        assert!(
+            is_visible_sized(&app, Target::ClueRow(last), SHORT),
+            "the clue the cursor is in has to be on the screen"
+        );
+        app.go_to_clue(0);
+        assert!(
+            is_visible_sized(&app, Target::ClueRow(0), SHORT),
+            "and so does the one it comes back to"
+        );
+    }
+
+    // ── The buttons ────────────────────────────────────────────────
+
+    #[test]
+    fn the_buttons_and_the_keys_do_the_same_thing() {
+        // The footer used to be one line of text naming eight keystrokes,
+        // drawn in the one strip of the window that exists to be clicked. Now
+        // every verb has both routes, and this is what keeps them one verb.
+        for button in BUTTONS {
+            let mut clicked = playing(0);
+            clicked.cursor = (2, 1);
+            let mut typed = playing(0);
+            typed.cursor = (2, 1);
+
+            click_sized(
+                &mut clicked,
+                Target::Button(button),
+                MouseButton::Left,
+                Crossword::SIZE,
+            );
+
+            let event = match button {
+                Button::Check => ctrl(Key::C),
+                Button::Clear => ctrl(Key::U),
+                Button::RevealLetter => ctrl(Key::R),
+                Button::RevealWord => ctrl(Key::W),
+                Button::Help => press(Key::F1),
+                Button::Menu => press(Key::Escape),
+            };
+            typed.key_at(&event, Crossword::SIZE);
+
+            assert_eq!(
+                snapshot(&clicked),
+                snapshot(&typed),
+                "{button:?}: the button and {} must be one verb",
+                button.key_hint()
+            );
+        }
+    }
+
+    #[test]
+    fn every_button_is_drawn_where_a_click_can_reach_it() {
+        let app = playing(0);
+        let l = Layout::solve(Crossword::SIZE.0, Crossword::SIZE.1, app.width, app.height);
+        for button in BUTTONS {
+            let r = rect_of_sized(&app, Target::Button(button), Crossword::SIZE)
+                .unwrap_or_else(|| panic!("{button:?} is not on the screen at the default size"));
+            assert!(!r.is_empty(), "{button:?} has no area to click");
+            assert!(
+                l.footer.intersect(r).is_some(),
+                "{button:?} at {r:?} is not in the footer {:?}",
+                l.footer
+            );
+        }
+    }
+
+    #[test]
+    fn a_button_that_will_not_fit_is_left_out_rather_than_drawn_off_the_edge() {
+        let mut app = playing(0);
+        let narrow = (150.0, 600.0);
+        app.size = narrow;
+        let l = Layout::solve(narrow.0, narrow.1, app.width, app.height);
+        let drawn: Vec<Button> = app
+            .draw(narrow)
+            .hits()
+            .iter()
+            .filter_map(|(t, _)| match *t {
+                Target::Button(b) => Some(b),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            drawn.len() < BUTTONS.len(),
+            "a 150-pixel window cannot hold all six buttons"
+        );
+        assert_eq!(
+            drawn,
+            BUTTONS[..drawn.len()],
+            "the ones that fit are the first ones, in order"
+        );
+        for button in &drawn {
+            let r = rect_of_sized(&app, Target::Button(*button), narrow).unwrap();
+            assert!(
+                r.right() <= l.footer.right(),
+                "{button:?} at {r:?} runs past the footer {:?}",
+                l.footer
+            );
+        }
+    }
+
+    // ── Checking, revealing, finishing ─────────────────────────────
+
+    #[test]
+    fn check_marks_the_wrong_letters_and_nothing_else() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.key_at(&press(Key::S), Crossword::SIZE);
+        app.cursor = (0, 1);
+        app.key_at(&press(Key::Z), Crossword::SIZE);
+
+        assert!(!app.is_wrong(0, 1), "nothing is wrong before it is checked");
+        app.key_at(&ctrl(Key::C), Crossword::SIZE);
+        assert!(app.is_wrong(0, 1), "Z is not the letter that goes there");
+        assert!(!app.is_wrong(0, 0), "S is");
+        assert!(!app.is_wrong(2, 2), "an empty cell is not yet wrong");
+    }
+
+    #[test]
+    fn clearing_the_marks_leaves_the_letters_alone() {
+        // The mark used to be a `flagged_wrong` field on every cell, set by
+        // the check and cleared at four separate call sites, so it could
+        // disagree with the letter it was marking. It is derived now.
+        let mut app = playing(0);
+        app.cursor = (0, 1);
+        app.key_at(&press(Key::Z), Crossword::SIZE);
+        app.key_at(&ctrl(Key::C), Crossword::SIZE);
+        assert!(app.is_wrong(0, 1));
+
+        app.key_at(&ctrl(Key::U), Crossword::SIZE);
+        assert!(!app.is_wrong(0, 1), "the mark is gone");
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            Some('Z'),
+            "and the letter is not"
+        );
+    }
+
+    #[test]
+    fn a_mark_follows_the_letter_it_marks() {
+        let mut app = playing(0);
+        app.cursor = (0, 1);
+        app.key_at(&press(Key::Z), Crossword::SIZE);
+        app.key_at(&ctrl(Key::C), Crossword::SIZE);
+        assert!(app.is_wrong(0, 1));
+
+        app.cursor = (0, 1);
+        app.key_at(&press(Key::P), Crossword::SIZE);
+        assert!(
+            !app.is_wrong(0, 1),
+            "typing the right letter unmarks the cell without a second check"
+        );
+    }
+
+    #[test]
+    fn revealing_a_word_fills_all_of_it_and_only_it() {
+        let mut app = playing(0);
+        app.cursor = (2, 0);
+        app.direction = Direction::Across;
+        let word = app.current_word();
+        assert_eq!(word.len(), 5, "the fixture needs the long across word");
+        app.key_at(&ctrl(Key::W), Crossword::SIZE);
+        for (r, c) in &word {
+            let cell = app.cell(*r, *c).unwrap();
+            assert_eq!(cell.entry, Some(cell.solution), "({r}, {c}) is filled in");
+            assert!(cell.revealed, "and marked as given away");
+        }
+        assert_eq!(app.revealed_count(), word.len(), "and nothing else is");
+    }
+
+    #[test]
+    fn the_puzzle_ends_when_the_last_letter_goes_in_and_not_before() {
+        // The old test was `all_filled && all_correct`, and a board that
+        // distinguishes the two does not exist: a cell whose entry equals its
+        // solution has an entry. Deleting the first half changed nothing
+        // observable, which is a condition no test could reach (lesson 92).
+        let mut app = playing(0);
+        let cells: Vec<(usize, usize)> = (0..app.height)
+            .flat_map(|r| (0..app.width).map(move |c| (r, c)))
+            .filter(|&(r, c)| app.playable(r, c))
+            .collect();
+
+        for &(r, c) in cells.iter().take(cells.len().saturating_sub(1)) {
+            let solution = app.cell(r, c).unwrap().solution;
+            app.cursor = (r, c);
+            app.enter_letter(solution);
+        }
+        assert_eq!(
+            app.view,
+            View::Playing,
+            "one empty cell is not a finished puzzle"
+        );
+        assert!(!app.is_solved());
+
+        let (r, c) = cells[cells.len().saturating_sub(1)];
+        let solution = app.cell(r, c).unwrap().solution;
+        app.cursor = (r, c);
+        app.enter_letter(solution);
+        assert!(app.is_solved(), "every cell holds its answer");
+        assert_eq!(app.view, View::Completed, "so the puzzle is over");
+    }
+
+    #[test]
+    fn a_full_grid_of_wrong_letters_is_not_a_finished_puzzle() {
+        let mut app = playing(0);
+        for r in 0..app.height {
+            for c in 0..app.width {
+                if let Some(cell) = app.cell_mut(r, c) {
+                    // A letter that is never the solution anywhere in the grid.
+                    cell.entry = Some('Q');
+                }
+            }
+        }
+        app.settle();
+        assert!(!app.is_solved(), "filled is not solved");
+        assert_eq!(app.view, View::Playing);
+    }
+
+    #[test]
+    fn an_empty_board_is_not_a_solved_one() {
+        // `all(..)` over nothing is true, so a program with no puzzle loaded
+        // would otherwise open on its own congratulations card.
+        let app = Crossword::new();
+        assert!(app.cells.is_empty());
+        assert!(
+            !app.is_solved(),
+            "a program with no puzzle has solved nothing"
+        );
+    }
+
+    #[test]
+    fn escape_puts_the_help_away_before_it_leaves_the_puzzle() {
+        let mut app = playing(0);
+        app.show_help = true;
+        app.key_at(&press(Key::Escape), Crossword::SIZE);
+        assert!(!app.show_help);
+        assert_eq!(app.view, View::Playing, "the first Escape closes the card");
+        app.key_at(&press(Key::Escape), Crossword::SIZE);
+        assert_eq!(app.view, View::PuzzleSelect, "the second leaves the puzzle");
+    }
+
+    #[test]
+    fn the_end_card_is_a_way_back_to_the_menu_by_click_and_by_key() {
+        let mut clicked = playing(0);
+        clicked.view = View::Completed;
+        click_sized(
+            &mut clicked,
+            Target::Button(Button::Menu),
+            MouseButton::Left,
+            Crossword::SIZE,
+        );
+        assert_eq!(clicked.view, View::PuzzleSelect);
+
+        let mut typed = playing(0);
+        typed.view = View::Completed;
+        typed.key_at(&press(Key::Enter), Crossword::SIZE);
+        assert_eq!(typed.view, View::PuzzleSelect);
+    }
+
+    // ── The text ───────────────────────────────────────────────────
+
+    #[test]
+    fn a_clue_is_handed_to_the_renderer_whole_and_bounded_by_width() {
+        // The panel used to cut a clue at `(w / 7.0) - 3` *bytes*: a guessed
+        // advance, and a byte offset into a `&str`, which aborts the process
+        // the first time a clue holds an accented letter. The renderer is the
+        // only thing that knows how wide the text it draws will be, so it is
+        // the only thing that may cut it.
+        let app = playing(0);
+        let drawn = painted_text(&app, Crossword::SIZE);
+        for clue in &app.clues {
+            let want = format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text);
+            let Some((_, max)) = drawn.iter().find(|(s, _)| *s == want) else {
+                continue;
+            };
+            let bound = max.expect("a clue is bounded by the panel it is in");
+            assert!(
+                bound > 0.0,
+                "a clue bounded to nothing is a clue nobody reads"
+            );
+        }
+        assert!(
+            drawn.iter().any(|(s, _)| s.starts_with("1A. ")),
+            "the panel has to draw the first clue"
+        );
+    }
+
+    #[test]
+    fn a_clue_with_an_accent_in_it_is_drawn_rather_than_aborting() {
+        // The old byte-offset cut panicked on the first non-ASCII clue. This
+        // is the test that says the cut is the renderer's job now.
+        let mut app = playing(0);
+        app.clues[0].text = "Café frappé — a naïve piñata, 100 ½ Ω";
+        for (w, h) in SIZES {
+            app.size = (w, h);
+            let drawn = painted_text(&app, (w, h));
+            assert!(
+                drawn.iter().any(|(s, _)| s.contains("piñata"))
+                    || Layout::solve(w, h, app.width, app.height).panel.is_empty(),
+                "the accented clue has to reach the renderer whole at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_banner_names_the_word_the_cursor_is_in() {
+        let mut app = playing(0);
+        app.go_to_clue(0);
+        let clue = app.clues[0].clone();
+        let drawn = painted_text(&app, Crossword::SIZE);
+        let want = format!(
+            "{} {} ({}): {}",
+            clue.number,
+            clue.direction.label(),
+            clue.len,
+            clue.text
+        );
+        assert!(
+            drawn.iter().any(|(s, _)| *s == want),
+            "the banner should read {want:?}; it drew {:?}",
+            drawn.iter().map(|(s, _)| s).collect::<Vec<_>>()
+        );
+        let (_, bound) = drawn.iter().find(|(s, _)| *s == want).unwrap();
+        assert!(
+            bound.is_some(),
+            "a clue is arbitrary text, so the banner has to bound it"
+        );
+    }
+
+    #[test]
+    fn a_heading_is_centred_by_measuring_it_rather_than_by_a_literal() {
+        // Every heading used to be centred by subtracting half of one
+        // particular string at one particular size: `width / 2.0 - 100.0`,
+        // `cx - 60.0`, `bx + bw / 2.0 - 30.0`. Two windows whose widths differ
+        // by `d` must move the heading by `d / 2`, whatever the string is.
+        let mut narrow = Crossword::new();
+        narrow.size = (600.0, 600.0);
+        let mut wide = Crossword::new();
+        wide.size = (900.0, 600.0);
+
+        let x_of = |app: &Crossword, size: (f32, f32)| {
+            app.draw(size)
+                .commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text { x, text, .. } if text == "Crossword Puzzles" => Some(*x),
+                    _ => None,
+                })
+                .expect("the menu draws its heading")
+        };
+        let a = x_of(&narrow, (600.0, 600.0));
+        let b = x_of(&wide, (900.0, 600.0));
+        assert!(
+            (b - a - 150.0).abs() < 0.51,
+            "300 more pixels of window moves a centred heading 150 right: \
+             {a} then {b}"
+        );
+    }
+
+    // ── The menu ───────────────────────────────────────────────────
+
+    #[test]
+    fn the_menu_arrows_stay_inside_the_list() {
+        let mut app = Crossword::new();
+        app.key_at(&press(Key::Up), Crossword::SIZE);
+        assert_eq!(app.selected_puzzle, 0, "the first row has nothing above it");
+        for _ in 0..10 {
+            app.key_at(&press(Key::Down), Crossword::SIZE);
+        }
+        assert_eq!(
+            app.selected_puzzle,
+            PUZZLES.len().saturating_sub(1),
+            "and the last has nothing below it"
+        );
+        app.key_at(&press(Key::Enter), Crossword::SIZE);
+        assert_eq!(app.view, View::Playing);
+        assert_eq!(app.puzzle_name(), PUZZLES[PUZZLES.len() - 1].name);
+    }
+
+    #[test]
+    fn opening_a_puzzle_starts_it_from_the_beginning() {
+        let mut app = playing(0);
+        app.cursor = (2, 2);
+        app.handle_event(&Event::Tick { elapsed_ms: 9000 });
+        app.check_mode = true;
+        app.clue_scroll = 2;
+        app.cursor = (0, 0);
+        app.reveal_letter();
+
+        app.load_puzzle(1);
+        assert_eq!(app.elapsed_ms, 0, "a new puzzle starts a new clock");
+        assert!(!app.check_mode, "and no marks");
+        assert_eq!(app.clue_scroll, 0, "and the top of the clue list");
+        assert_eq!(app.revealed_count(), 0, "and nothing given away");
+        assert_eq!(app.direction, Direction::Across);
+        assert_eq!(
+            app.cursor,
+            (0, 0),
+            "and the cursor on the first playable cell"
+        );
+    }
+
+    #[test]
+    fn a_puzzle_that_does_not_exist_leaves_the_app_where_it_was() {
+        let mut app = Crossword::new();
+        app.load_puzzle(PUZZLES.len());
+        assert_eq!(
+            app.view,
+            View::PuzzleSelect,
+            "there is no fourth puzzle to open"
+        );
+        assert!(app.cells.is_empty());
+    }
+
+    #[test]
+    fn the_frame_survives_a_window_with_no_area_in_it() {
+        // `render` is handed whatever the compositor has, including a window
+        // mid-resize with a zero or negative dimension.
+        for (w, h) in [(0.0, 0.0), (0.0, 600.0), (600.0, 0.0), (-40.0, -40.0)] {
+            let mut app = playing(0);
+            app.size = (w, h);
+            let frame = app.draw((w, h));
+            for r in frame.hits() {
+                assert!(!r.1.is_empty(), "a hit box with no area: {:?}", r.1);
+            }
+        }
+    }
 }

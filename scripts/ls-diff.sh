@@ -161,13 +161,23 @@ mkdir -p w
 : > w/BBBB
 : > w/CCCC
 
-# A fourth tree holding the one character our width table and coreutils 9.5's
-# disagree about *in this fixture*: the soft hyphen, which gnulib calls zero
-# columns and glibc calls one. It is kept out of `w/` so that the divergence
-# fails two cases here rather than every column case there. The three plain
-# names are what make the width visible: with `shy` at three columns it sorts
-# below them, with `shy` at four it sorts among them by name.
-# See `open-questions.md` "Which width table should `charwidth` follow".
+# A fourth tree exercising the width table on the soft hyphen -- the character
+# gnulib's `uc_width` calls zero columns and glibc's `wcwidth` calls one. The
+# three plain names are what make the width visible: with `shy` at three
+# columns it sorts below them, with `shy` at four it sorts among them by name.
+#
+# The two cases below used to be marked "deliberately different" on the
+# prediction that we would print one layout and GNU another. Measured
+# 2026-08-30, once `ls-diff.sh` could actually run (see `known-issues.md`
+# B-LS-DIFF-HAS-BEEN-SKIPPING -- it had never executed a case): the prediction
+# is false. Our `ls`, the locally built pristine 9.5, *and* Ubuntu's 9.4 all
+# print the same thing for both cases. The Ubuntu binary is the control: an
+# independently built GNU agreeing rules out the agreement being an artifact
+# of how we configure the reference. So they are ordinary cases now.
+#
+# This does not close `open-questions.md` "Which width table should `charwidth`
+# follow" -- it only shows this fixture does not discriminate between the two
+# tables, because `ls` reaches the same layout either way here.
 mkdir -p y
 : > "$(printf 'y/shy\u00ad')"
 : > y/AAAA
@@ -486,9 +496,12 @@ TERM=xterm ls --color=always t
 TERM=dumb ls --color=always t
 COLORTERM=truecolor ls --color=always t
 
+# Soft-hyphen width. See the `y/` fixture above for why these agree despite
+# our width table and gnulib's disagreeing about U+00AD.
+ls --sort=width -1 y
+ls -C -w 22 y
+
 # --- deliberately different ---
-!our width table is bash's and 9.5's is gnulib's; open-questions "Which width table should charwidth follow"|ls --sort=width -1 y
-!same entry: the soft hyphen is zero columns to gnulib and one to glibc, so 22 columns hold one row of four for GNU and two rows of two for us|ls -C -w 22 y
 !--help text is ours|ls --help
 !--version text is ours|ls --version
 !hyperlinks are not implemented; known-issues TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT|ls --hyperlink=always t

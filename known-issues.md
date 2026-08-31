@@ -100243,8 +100243,10 @@ asking, or the first userspace caller whose correctness depends on it.
 
 **Status:** FIXED 2026-08-31 (the six instances). The *class* gate is **built**
 as of the same day — see "The class gate is now built" below — but it cannot
-return a verdict until ten boots have been recorded with the new field, and it
-has already named **four more instances** that are not fixed.
+return a verdict until ten boots have been recorded with the new field. Its
+first pass named four more instances, of which **one** survived being checked
+against the source; the other three were false positives and are written up
+below, because the way they were false is the more useful finding.
 
 **In short:** Six self-test cases ask the mount table whether `/` is mounted
 read-write, find that it is not, record an honest SKIP, and return. They run
@@ -100344,7 +100346,7 @@ test half was blocked on this (it is now unblocked), and any future "it is
 covered by a self-test" claim about these six subsystems is worth checking
 against the log first.
 
-### The class gate is now built — and it found four more the same day (lane A, 2026-08-31)
+### The class gate is now built — and three of its first four findings were wrong (lane A, 2026-08-31)
 
 **Status of the class:** the gate exists and is wired into `boot-test.sh`. It
 is **not yet able to fail**, and will not be for about ten more boots; see
@@ -100355,40 +100357,89 @@ oversight.
 
 | | |
 |---|---|
-| The names | `scripts/boot-history.py` → `parse_skips`, `Serial.skips`, and a `skips` field on every row of `bench/boot-history.jsonl` |
+| The names | `scripts/boot-history.py` → `partition_skips`, `Serial.skips` / `Serial.skips_covered`, and `skips` + `skips_covered` fields on every row of `bench/boot-history.jsonl` |
 | The verdict | `scripts/check-boot-skips.py` — fails when a named skip has fired on 100% of the last N ≥ 10 qualifying boots |
 | The gate | `scripts/boot-test.sh` → `check_boot_skips`, run before the build alongside the design-decisions band check |
-| The tests | `scripts/test-check-boot-skips.py`, 25 cases |
+| The tests | `scripts/test-check-boot-skips.py`, 32 cases |
 | Rationale | `design-decisions.md` §651 |
 
-**Four more instances, found by pointing the new parser at one green log.**
-These are the same defect as the six above — a precondition that is a constant
-at the point it is evaluated — and they are not fixed:
+**The first version recorded every SKIP line, and on the first real log that
+made three of its four findings wrong.** They are worth naming individually,
+because each was wrong in the same way and it is not a way that looks wrong:
 
-| Skip | Reason it prints | Why it is the same defect |
+| Claimed | Verdict | The line that refutes it |
 |---|---|---|
-| `[mm] Zeroed frame allocation` | `HHDM is not mapped yet (running before page_table::init)` | `mm::frame::self_test` runs before `page_table::init`, always. The HHDM is never mapped when this asks. |
-| `[mm] Zero-on-free` | same | same |
-| `[io_ring] File handle read/write` | `/tmp is not mounted yet (running before filesystem init)` | Literally the six's own wording, one subsystem over. |
-| `[io_ring] Positioned I/O (pread/pwrite)` | same | same |
+| `[io_ring] File handle read/write` | **false positive** | `[io_ring]   File handle read/write (1 entry): OK` — 1045 lines later in the same boot |
+| `[io_ring] Positioned I/O (pread/pwrite)` | **false positive** | `[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK` |
+| `[mm] Zero-on-free` | **false positive** | `[mm]   Zero-on-free: OK (counter=2, settled=false)` — 46,883 lines later |
+| `[mm] Zeroed frame allocation` | **genuine** | nothing; it really never runs |
 
-The `io_ring` pair is the sharper of the two, because **the fix pattern is
-already in the same file**: `ipc::io_ring::self_test_fh()` is cited three
-paragraphs above as one of the three post-mount entry points the six were
-modelled on. Two of its sibling cases were left behind in the pre-mount suite
-when it was created. The `mm` pair needs a post-`page_table::init` entry point
-that does not exist yet, which is the larger half.
+**The `io_ring` pair is a deliberate tripwire, and the source says so.** The
+comment above the pre-mount calls (`kernel/src/ipc/io_ring.rs:1290`):
 
-Not fixed in the same change on purpose, and for the reason §650 gives for
-splitting the gate off from the six: a gate landed together with the failures
-it finds is a gate whose first act is to be worked around.
+> The two file-handle sections cannot run here — this entry point is called
+> before /tmp exists — so their skips are expected. They are still reported,
+> because "expected" and "invisible" are different things: `self_test_fh` below
+> re-runs them once /tmp is mounted, and if *that* call ever stopped happening
+> the only evidence would be these two lines never being followed by an OK.
+
+So the gate as first written would have produced three **permanent** false
+positives — the exact failure `scripts/test-ki-dupes.py`'s docstring warns
+about ("a permanent false positive is worse than no check") — and the fix its
+own message invites, *move or delete the pre-mount call*, would have destroyed
+the tripwire that catches the case it was worried about.
+
+**The fix is not a suppression, it is the tripwire's own condition.**
+`partition_skips` splits each boot's skips into `uncovered` (no other line
+under that tag reports the section as having run) and `covered` (it ran
+elsewhere in the same boot). Only `uncovered` reaches the gate. "The only
+evidence would be these two lines never being followed by an OK" is *exactly*
+the condition being computed, so the day `self_test_fh` stops being called, the
+pair moves from `covered` to `uncovered` and starts accumulating against the
+gate by itself. The tripwire got a bell.
+
+Three matcher rules, each earned against the live log and each a bug that was
+present before it:
+
+- **Match the section only up to its first `(`.** The kernel spells a section's
+  parentheses differently between the skip and the result — `SKIP: Positioned
+  I/O (pread/pwrite)` vs `Positioned I/O (pread/pwrite preserve the cursor):
+  OK`. Whole-string matching found nothing and called a section dead two lines
+  from its sibling's proof. A `_MIN_COVER_KEY` floor keeps a short key like
+  `RX` from matching half a driver's output.
+- **Reject any line mentioning "skip" in any spelling.** `[hotplug]
+  Single-CPU: skipping offline/online cycle` and `[iso9660]   No ISO 9660
+  filesystem mounted — skipping integration test.` narrate the skip in prose on
+  the line *above* the machine-readable one. Read as ordinary lines they say the
+  section ran; they say the opposite. Both were wrongly marked `covered`.
+- **`FAIL:` counts as having run.** The question is whether the case executed.
+
+Where the matcher errs it errs toward `uncovered`, deliberately: a wrong
+`uncovered` becomes a visible accusation a human resolves with an allowlist
+entry, while a wrong `covered` excuses a section from the gate forever with
+nothing to see.
+
+**One row of `bench/boot-history.jsonl` was rewritten**, the single row written
+during the few hours the field held every skip. Its nine names are exactly the
+partition of its own serial log, so the correction is derived, not guessed —
+and leaving it would have left one row whose `skips` field meant something
+different from every row after it.
+
+**The one genuine instance is not fixed.** `[mm] Zeroed frame allocation` skips
+with `HHDM is not mapped yet (running before page_table::init)`, and
+`mm::frame::self_test` runs before `page_table::init` on every boot, always. It
+needs a post-`page_table::init` entry point that does not exist yet — the same
+shape as `io_ring::self_test_fh`, which is the pattern the six above were
+modelled on. Not fixed in the same change on purpose, and for the reason §650
+gives for splitting the gate off from the six: a gate landed together with the
+failures it finds is a gate whose first act is to be worked around.
 
 **The ten-boot wait, and why it is not a defect.** No row in
 `bench/boot-history.jsonl` written before today carries a `skips` field, and a
 row that predates the field is deliberately *not* counted — treating "this row
 does not say" as "this skip did not fire" would break the 100% streak of every
 genuine offender, which is failure in the direction that hides the bug. So the
-gate reports `0 qualifying boot(s) recorded, need 10 … -- no verdict` and exits
+gate reports `1 qualifying boot(s) recorded, need 10 … -- no verdict` and exits
 0 until ten green boots have accumulated. It prints the count rather than
 staying silent, because silence reads as "checked, nothing found".
 

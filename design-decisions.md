@@ -53356,9 +53356,60 @@ than inferred. Two rules keep it from becoming a dumping ground:
   nothing. Both are fixed by deleting a line, so the failure is cheap; a stale
   allowlist entry that nobody is forced to look at is not.
 
+### A skip is not the same thing as a section that did not run
+
+This is the decision the first version got wrong, and it cost three of its four
+findings.
+
+`ipc::io_ring` calls its two file-handle cases from `self_test()` before `/tmp`
+is mounted — where they skip — and again from `self_test_fh()` after the mount,
+where they pass. The pre-mount call is not an oversight; it is a **deliberate
+tripwire**, and the comment above it (`kernel/src/ipc/io_ring.rs:1290`) says so:
+
+> They are still reported, because "expected" and "invisible" are different
+> things: `self_test_fh` below re-runs them once /tmp is mounted, and if *that*
+> call ever stopped happening the only evidence would be these two lines never
+> being followed by an OK.
+
+`[mm] Zero-on-free` is a third case of the same shape. So a gate that counts
+every SKIP line would have produced three **permanent** false positives, and
+the fix its own message invites — move or delete the pre-mount call — would
+have destroyed the tripwire. A permanent false positive is worse than no check;
+`scripts/test-ki-dupes.py`'s docstring already says this about a different gate,
+and this is the second time the project has paid for learning it.
+
+**The decision: the recorder splits each boot's skips in two.**
+`partition_skips` in `boot-history.py` returns `uncovered` — the section
+announced SKIP and no other line under that tag reports it as having run — and
+`covered`, everything else. Only `uncovered` reaches the gate; both are stored,
+because "it skipped here and ran there" is a fact worth keeping.
+
+This is not a suppression list, which is the point. "The only evidence would be
+these two lines never being followed by an OK" is *literally* the condition
+`partition_skips` computes, so the day `self_test_fh` stops being called the
+pair moves from `covered` to `uncovered` and the gate begins accumulating
+against it unprompted. The tripwire acquired a bell it did not have before.
+
+*Alternative rejected:* allowlist the three. It reaches the same green build
+today and throws away the tripwire's whole purpose — an allowlisted skip is
+excused permanently, including on the day it becomes real.
+
+**Which way the matcher is allowed to be wrong.** A section counts as having
+run if some line carries the same tag, contains the section's key text, and
+mentions skipping in no spelling. All three clauses are scar tissue: the kernel
+spells a section's parentheses differently between its skip and its result
+(`Positioned I/O (pread/pwrite)` vs `Positioned I/O (pread/pwrite preserve the
+cursor): OK`), so only the text before the first `(` is common to both — with a
+length floor, or a key like `RX` matches half a driver's output; and two suites
+narrate the skip in *prose* on the line above the machine-readable one
+(`[hotplug]   Single-CPU: skipping offline/online cycle`), which a naive "not a
+SKIP line" test reads as proof the section ran. Where it errs it errs toward
+`uncovered`: a wrong `uncovered` becomes a visible accusation someone resolves,
+a wrong `covered` excuses a section forever with nothing to see.
+
 ### The parser is the part that fails silently, so it is the part with the tests
 
-Every one of the 25 tests in `scripts/test-check-boot-skips.py` exists because
+Every one of the 32 tests in `scripts/test-check-boot-skips.py` exists because
 a parser bug here is invisible and permanent: a skip *name* that carries
 anything run-specific is never equal to itself on the next boot, so the
 100%-of-N count can never accumulate and the gate reports "all clear" forever.
@@ -53387,24 +53438,47 @@ sites. Normalising in the parser rather than renaming the call sites: a rename
 to satisfy a parser is the tail wagging the dog, and the parser is where a
 reader looks when a name looks wrong anyway.
 
-### What it found immediately
+### What it found immediately: four claims, one instance
 
-Four more instances of §650's class, from one green log: `[mm] Zeroed frame
-allocation` and `[mm] Zero-on-free` (both "HHDM is not mapped yet"), and
-`[io_ring] File handle read/write` and `[io_ring] Positioned I/O` (both "/tmp
-is not mounted yet" — §650's own wording, one subsystem over, in a file that
-already contains the fix pattern). They are recorded in `known-issues.md` and
-deliberately **not** fixed in this change: a gate that lands together with the
+Pointed at one green log the first version named four sections. Checked against
+the source and against the rest of the same log, **one** was real:
+
+| Claim | Verdict |
+|---|---|
+| `[io_ring] File handle read/write` | ran 1045 lines later — the tripwire above |
+| `[io_ring] Positioned I/O (pread/pwrite)` | ran, same reason |
+| `[mm] Zero-on-free` | ran 46,883 lines later |
+| `[mm] Zeroed frame allocation` | **genuine**: `mm::frame::self_test` runs before `page_table::init` on every boot, so "HHDM is not mapped yet" is a constant |
+
+That ratio is the entry's most useful content. The gate's *design* was sound and
+its *evidence* was sound; what was wrong was an unexamined assumption sitting
+between them — that a SKIP line is a report about the boot, when it is only a
+report about one call site. Three of four is not a bad rate for a first pass;
+shipping it without reading the source for each finding would have been the
+error, and the near-miss is why every finding this gate produces should be
+checked against the log's later lines before it is believed.
+
+`[mm] Zeroed frame allocation` is recorded in `known-issues.md` and deliberately
+**not** fixed here — it needs a post-`page_table::init` entry point that does
+not exist — for the reason §650 gives: a gate that lands together with the
 failures it finds is a gate whose first act is to be worked around.
+
+One row of `bench/boot-history.jsonl` was rewritten rather than left alone: the
+single row written during the hours the field held every skip. Its nine names
+are exactly the partition of its own serial log, so the correction is derived
+rather than guessed, and the alternative was one row whose `skips` field means
+something different from every row after it — a silent mis-count later, in
+exchange for a purity about append-only files that nothing depends on.
 
 ### How to reverse it
 
 Delete `scripts/check-boot-skips.py`, its test suite, and `check_boot_skips` in
-`scripts/boot-test.sh`. Leave `parse_skips` and the `skips` field in
-`boot-history.py`: the field is cheap, is already merged across lanes, and is
-the only record that exists of which sections did not run on a given boot.
-Reversing costs the answer to "has this ever run?", which was unanswerable
-before today and is the question §650's six spent their whole lives evading.
+`scripts/boot-test.sh`. Leave `partition_skips` and the `skips` /
+`skips_covered` fields in `boot-history.py`: they are cheap, already merged
+across lanes, and the only record that exists of which sections did not run on a
+given boot. Reversing costs the answer to "has this ever run?", which was
+unanswerable before today and is the question §650's six spent their whole lives
+evading.
 
 ## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
 

@@ -202,7 +202,22 @@ class Serial:
     #: above, and for the same reason. `check-boot-skips.py` counts only rows
     #: that carry the key, so a pre-field row cannot be mistaken for a boot on
     #: which some skip did not fire.
+    #:
+    #: A section that skipped at one call site and *ran* at another is not here
+    #: -- it is in `skips_covered`. See `partition_skips` for why that split is
+    #: the difference between a gate and a permanent false positive.
     skips: tuple[str, ...] = ()
+    #: Sections that announced SKIP somewhere in this boot and also ran
+    #: somewhere else in it: `ipc::io_ring`'s two file-handle cases, which skip
+    #: before `/tmp` is mounted and pass after it, and `[mm] Zero-on-free`.
+    #:
+    #: Recorded rather than discarded because those pre-mount calls are
+    #: deliberate tripwires whose whole purpose is to be followed by an OK
+    #: later. Keeping them in a field of their own means the day one stops
+    #: being followed by an OK, it moves into `skips` and the gate starts
+    #: counting it -- which is the alarm the tripwire's own source comment
+    #: wishes for and could not have.
+    skips_covered: tuple[str, ...] = ()
 
     @property
     def last_line(self) -> str:
@@ -333,6 +348,24 @@ _SKIP_NAME_TRAILING = " \t:-\u2014\u2013."
 _SKIP_SUMMARY_RE = re.compile(
     r"\d+[ \t]*(?:further[ \t]*)?section\(s\)", re.IGNORECASE)
 
+#: Shortest section key [`partition_skips`] will accept as evidence a section
+#: ran. Below this the truncated key is dropped and the full section text is
+#: required instead.
+#:
+#: The truncation exists because the kernel spells a section's parentheses
+#: differently between its SKIP line and its result line, so only the text
+#: before the first `(` is reliably common to both. That is safe for
+#: `Positioned I/O (pread/pwrite)` and useless for a hypothetical
+#: `RX (queue 0)`, whose key `RX` occurs in half of a NIC driver's output and
+#: would mark the section as having run against an unrelated line.
+#:
+#: Eight characters is not a tuned number; it is "long enough that a match is
+#: unlikely to be an accident, short enough to keep every real section name in
+#: the current log". The shortest live one is `Zero-on-free` at 12. Erring high
+#: costs nothing but strictness, and strictness here errs toward `uncovered`,
+#: which is the recoverable direction -- see [`partition_skips`].
+_MIN_COVER_KEY = 8
+
 
 def _strip_trailing_paren(text: str) -> str:
     """Drop one balanced parenthesised group from the end of `text`.
@@ -394,13 +427,134 @@ def parse_skips(text: str) -> tuple[str, ...]:
     Deduplicated because a suite that runs twice in a boot (the ACPI self-test
     runs from either arm of an `if let`) would otherwise contribute the same
     name twice and make one boot look like two pieces of evidence.
+
+    Not used by `read_serial`, which wants the coverage split from
+    [`partition_skips`]. This is the *naming* half on its own, and it is kept
+    because `test-check-boot-skips.py` tests naming through it: a bug in how a
+    section is named then fails as a wrong name rather than surfacing three
+    functions away as a section that mysteriously stopped being covered.
+    Deleting it would not remove code, it would remove the ability to tell those
+    two failures apart.
     """
-    names = {
-        _skip_name(*m.groups())
-        for m in _SKIP_RE.finditer(text)
-        if not _SKIP_SUMMARY_RE.search(m.group(0))
-    }
-    return tuple(sorted(n for n in names if n))
+    return tuple(sorted(n for n, _, _ in _skip_triples(text)))
+
+
+def _skip_triples(text: str) -> set[tuple[str, str, str]]:
+    """`(name, tag, section)` for every skip announcement, deduplicated.
+
+    The tag and section are kept alongside the name because
+    [`partition_skips`] has to search the log for the *same* section reported
+    by some other line, and the joined name is not the shape that appears
+    there: the kernel prints `[io_ring]   SKIP: File handle read/write (...)`
+    in one place and `[io_ring]   File handle read/write (1 entry): OK` in
+    another, so the two halves have to be matched separately.
+    """
+    out = set()
+    for m in _SKIP_RE.finditer(text):
+        if _SKIP_SUMMARY_RE.search(m.group(0)):
+            continue
+        tag, before, after = m.groups()
+        name = _skip_name(tag, before, after)
+        if not name:
+            continue
+        out.add((name, tag, name[len(tag):].strip()))
+    return out
+
+
+def partition_skips(text: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split this boot's skips into the ones that mean something and the rest.
+
+    Returns `(uncovered, covered)`:
+
+      * **uncovered** -- the section announced SKIP and no other line in the
+        log reports that same section under the same tag. On this boot, it did
+        not run. This is the set the never-running-self-test gate counts.
+      * **covered** -- the section announced SKIP *here* and ran *there*. A
+        second call site picked it up later in the boot.
+
+    Why the split has to exist, and why it was not obvious
+    -----------------------------------------------------
+
+    The first version of this field recorded every SKIP line, and on the first
+    real log that made three of its four findings wrong. `ipc::io_ring` runs
+    its two file-handle cases from `self_test()` before `/tmp` is mounted --
+    where they skip -- and again from `self_test_fh()` after the mount, where
+    they pass. The pre-mount pair is not dead code; it is a **deliberate
+    tripwire**, and the source says so:
+
+        The two file-handle sections cannot run here [...] They are still
+        reported, because "expected" and "invisible" are different things:
+        `self_test_fh` below re-runs them once /tmp is mounted, and if *that*
+        call ever stopped happening the only evidence would be these two lines
+        never being followed by an OK.
+
+    A gate that flagged those would have been a permanent false positive, and
+    the "fix" its message invites -- delete the pre-mount call -- would have
+    destroyed the tripwire. `[mm] Zero-on-free` is a third instance of the same
+    shape. Only `[mm] Zeroed frame allocation` was a genuine never-run, which
+    is one finding out of four.
+
+    So this does not merely avoid the false positives: it turns the tripwire's
+    own stated wish into an alarm. "The only evidence would be these two lines
+    never being followed by an OK" is exactly the condition computed here, and
+    the day `self_test_fh` stops being called, the pair moves from `covered` to
+    `uncovered` and the gate starts counting it.
+
+    The matcher, and which way it is allowed to be wrong
+    ----------------------------------------------------
+
+    A section counts as having run if some line carries the same tag, contains
+    the section's key text, and does not mention skipping in any spelling.
+    Three rules, each earned against the live log:
+
+      * **Match on the section text up to its first `(`**, not the whole
+        section. The kernel spells a section's own parenthesis differently
+        between the skip and the result -- `SKIP: Positioned I/O
+        (pread/pwrite)` against `Positioned I/O (pread/pwrite preserve the
+        cursor): OK` -- so the full string matches nothing and the case reads
+        as never run when it demonstrably ran two lines from its sibling. The
+        key must still be substantial (>= `_MIN_COVER_KEY` characters) or the
+        full section is used, so a section named `RX` cannot match half the
+        subsystem's output.
+      * **Reject any line mentioning skip**, not just the `SKIP:`/`SKIPPED`
+        shapes this file parses. Two suites narrate the skip in prose on the
+        line *above* the machine-readable one -- `[hotplug]   Single-CPU:
+        skipping offline/online cycle` -- and a naive "not a SKIP line" test
+        reads that as evidence the section ran, which is the exact inversion of
+        what it says.
+      * **Anything else counts, including `FAIL:`.** The question is whether
+        the case executed, not whether it passed; a failure reddens the boot
+        through its own machinery, which is not this field's job.
+
+    Where it errs, it errs toward `uncovered`, deliberately. A wrong
+    `uncovered` eventually becomes a visible accusation that a human resolves
+    with an allowlist entry stating a reason. A wrong `covered` is a section
+    quietly excused from the gate forever, with nothing to see. Between a
+    recoverable error and an invisible one, take the recoverable.
+    """
+    triples = _skip_triples(text)
+    if not triples:
+        return (), ()
+
+    # One pass over the log, bucketed by tag, so nine skips do not each walk
+    # 47k lines. Only tags that actually skipped are collected.
+    tags = {tag for _, tag, _ in triples}
+    other: dict[str, list[str]] = {tag: [] for tag in tags}
+    for line in text.split("\n"):
+        if "skip" in line.lower():
+            continue
+        for tag in tags:
+            if line.startswith(tag):
+                other[tag].append(line)
+
+    uncovered, covered = [], []
+    for name, tag, section in triples:
+        key = section.split("(")[0].strip()
+        if len(key) < _MIN_COVER_KEY:
+            key = section
+        ran = bool(key) and any(key in line for line in other.get(tag, ()))
+        (covered if ran else uncovered).append(name)
+    return tuple(sorted(uncovered)), tuple(sorted(covered))
 
 
 def _can_be_fatal(exc: str) -> bool:
@@ -451,6 +605,7 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
     benign = tuple(e for e in all_exc if not _can_be_fatal(e))
     fatal = tuple(e for e in all_exc if _can_be_fatal(e))
     san_match = _SANITIZER_RE.search(text)
+    skips, skips_covered = partition_skips(text)
     return Serial(
         path=path,
         text=text,
@@ -465,7 +620,8 @@ def read_serial(path: str, marker: str = "BOOT_OK") -> Serial | None:
         has_panic=bool(_PANIC_RE.search(text)),
         sanitizer=san_match.group(1) if san_match else None,
         accel=_parse_accel(path),
-        skips=parse_skips(text),
+        skips=skips,
+        skips_covered=skips_covered,
     )
 
 
@@ -1005,6 +1161,11 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
         # fire, which would make the 100%-of-N test unfalsifiable in the
         # direction that hides the bug.
         rec["skips"] = list(serial.skips)
+        # The tripwires: skipped at one call site, ran at another. Kept out of
+        # `skips` so the gate does not accuse them, and kept in the file so the
+        # day one stops being covered is visible as a name moving between the
+        # two lists rather than as a new accusation with no history.
+        rec["skips_covered"] = list(serial.skips_covered)
         fps = fingerprints_for(serial, verdict)
         if fps:
             rec["fingerprints"] = fps

@@ -29,6 +29,22 @@ is not covering what its name says it covers, and either the call site is wrong
 (sec 650's six) or the precondition belongs in an allowlist entry that says so
 out loud.
 
+A skip is not the same thing as a section that did not run
+-----------------------------------------------------------
+
+The `skips` field this reads is **not** every SKIP line in the log; it is the
+ones no other line in that boot reports as having run. That distinction is the
+whole reason the first version of this gate was wrong on three of its four
+findings. `ipc::io_ring` calls its two file-handle cases once before `/tmp` is
+mounted -- where they skip -- and again after, where they pass. The pre-mount
+call is a **deliberate tripwire**, and its source comment says why: if the
+later call ever stopped happening, "the only evidence would be these two lines
+never being followed by an OK". Flagging it would have been a permanent false
+positive whose suggested fix -- delete the pre-mount call -- destroys the
+tripwire. `boot-history.py`'s `partition_skips` computes the tripwire's own
+stated condition, so a covered skip is silent here *until the day its coverage
+disappears*, at which point it moves into this gate's evidence by itself.
+
 The allowlist, and why it is not a dumping ground
 -------------------------------------------------
 
@@ -154,7 +170,10 @@ def qualifying(records: list[dict]) -> list[dict]:
 
       * `"skips" in rec` -- a row written before the field existed says nothing
         about which skips fired, and counting it as "this skip did not fire"
-        would break the 100% streak of every genuine offender.
+        would break the 100% streak of every genuine offender. (The field holds
+        the *uncovered* skips only. Exactly one row was written during the few
+        hours the field held every skip; it was recomputed from its own serial
+        log when the split landed, so no row in the file means the older thing.)
       * `boot_ok` -- a boot that died early never reached most suites, so their
         skips could not fire. Counting it has the same effect as the above.
       * not an experiment -- a probe runs the kernel under conditions no

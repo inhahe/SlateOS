@@ -78,6 +78,11 @@ def check_true(label, got):
 #: Verbatim from a green boot, with the surrounding lines that made the first
 #: draft go wrong. Do not tidy this: the blank-looking gaps and the ordinary
 #: log lines between skips are the fixture.
+#:
+#: Three of these skips are *covered* -- the section skips at one call site and
+#: runs at a later one -- and the lines that prove it are here too, thousands
+#: of lines apart in the real log. Deleting them would not make this fixture
+#: tidier, it would delete the case that broke the first version of the gate.
 REAL_LOG = """\
 [mm] Running frame allocator self-test...
 [mm]   SKIP: Zeroed frame allocation (HHDM is not mapped yet (running before page_table::init))
@@ -87,10 +92,17 @@ REAL_LOG = """\
 [selftest]   SKIP: suffix rendering (exercising the singular path)
 [io_ring]   SKIP: File handle read/write (/tmp is not mounted yet (running before filesystem init))
 [io_ring]   SKIP: Positioned I/O (pread/pwrite) (/tmp is not mounted yet (running before filesystem init))
+[io_ring]   File handle read/write (1 entry): OK
+[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): OK
+[iso9660]   parent_path: ok
+[iso9660]   No ISO 9660 filesystem mounted \u2014 skipping integration test.
 [iso9660]   SKIP: integration test (no ISO 9660 filesystem mounted)
 [iso9660] Self-test passed (6 tests) \u2014 1 section(s) SKIPPED.
+[hotplug]   Stats: OK (online=1, total=1)
+[hotplug]   Single-CPU: skipping offline/online cycle
 [hotplug]   SKIP: offline/online cycle (single-CPU system)
 [hotplug] Self-test PASSED \u2014 1 section(s) SKIPPED
+[mm]   Zero-on-free: OK (counter=2, settled=false)
 BOOT_OK
 """
 
@@ -189,6 +201,99 @@ def test_record_carries_skips_as_a_list(tmpdir):
     check("skips reach the record as a JSON list",
           json.loads(json.dumps(list(serial.skips)))[:1],
           ["[hotplug] offline/online cycle"])
+
+
+def test_record_carries_the_covered_half_too(tmpdir):
+    # Both halves are recorded. `skips` alone would answer "did it skip" but
+    # not "was it picked up elsewhere", and the second question is the one that
+    # separates a tripwire from a defect.
+    path = os.path.join(tmpdir, "serial.txt")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(REAL_LOG)
+    serial = bh.read_serial(path)
+    check("read_serial splits the skips in two",
+          (list(serial.skips), list(serial.skips_covered)),
+          (["[hotplug] offline/online cycle",
+            "[iso9660] integration test",
+            "[mm] Zeroed frame allocation",
+            "[selftest] suffix rendering"],
+           ["[io_ring] File handle read/write",
+            "[io_ring] Positioned I/O (pread/pwrite)",
+            "[mm] Zero-on-free"]))
+
+
+# --------------------------------------------------------------------------
+# The coverage split
+#
+# Every test here is a false positive the gate would otherwise have shipped.
+# Three of the first version's four findings were wrong in exactly these ways,
+# and the "fix" its message invited -- delete the pre-mount call -- would have
+# destroyed a deliberate tripwire in `ipc::io_ring`.
+# --------------------------------------------------------------------------
+
+def test_a_skip_that_runs_later_is_covered():
+    # The io_ring tripwire: skipped before /tmp is mounted, run after.
+    unc, cov = bh.partition_skips(REAL_LOG)
+    check("a section that skips at one call site and runs at another is "
+          "covered, not uncovered",
+          ("[io_ring] File handle read/write" in cov,
+           "[io_ring] File handle read/write" in unc),
+          (True, False))
+
+
+def test_coverage_survives_a_differently_spelled_paren():
+    # The skip says `Positioned I/O (pread/pwrite)`; the result says
+    # `Positioned I/O (pread/pwrite preserve the cursor)`. Matching the whole
+    # section text finds nothing and calls a section that plainly ran dead.
+    log = ("[io_ring]   SKIP: Positioned I/O (pread/pwrite) (/tmp is not "
+           "mounted yet)\n"
+           "[io_ring]   Positioned I/O (pread/pwrite preserve the cursor): "
+           "OK\n")
+    check("the section is matched up to its first paren",
+          bh.partition_skips(log),
+          ((), ("[io_ring] Positioned I/O (pread/pwrite)",)))
+
+
+def test_a_prose_skip_line_is_not_evidence_the_section_ran():
+    # `[hotplug]   Single-CPU: skipping offline/online cycle` names the section
+    # and carries the same tag. Read as an ordinary line it says the section
+    # ran; it says the exact opposite.
+    log = ("[hotplug]   Single-CPU: skipping offline/online cycle\n"
+           "[hotplug]   SKIP: offline/online cycle (single-CPU system)\n")
+    check("a line that narrates the skip does not excuse it",
+          bh.partition_skips(log),
+          (("[hotplug] offline/online cycle",), ()))
+
+
+def test_a_failed_section_still_counts_as_having_run():
+    # The question is whether the case executed. A failure is loud on its own
+    # and reddens the boot through machinery that is not this field's.
+    log = ("[fs]   SKIP: journal replay (no journal on this device)\n"
+           "[fs]   journal replay: FAIL: checksum mismatch\n")
+    check("FAIL is evidence of execution, not of a skip",
+          bh.partition_skips(log), ((), ("[fs] journal replay",)))
+
+
+def test_a_short_section_key_must_match_in_full():
+    # `RX (queue 0)` truncates to the key `RX`, which occurs in half a NIC
+    # driver's output. Below `_MIN_COVER_KEY` the truncation is discarded and
+    # the full section text is required, so the accident cannot excuse it.
+    log = ("[e1000]   SKIP: RX (queue 0) (no link)\n"
+           "[e1000]   RX/TX ring sizes: OK\n")
+    check("a two-character key cannot match its way to covered",
+          bh.partition_skips(log), (("[e1000] RX (queue 0)",), ()))
+    check_true("the floor is high enough to be doing work",
+               bh._MIN_COVER_KEY >= 4)
+
+
+def test_coverage_does_not_cross_tags():
+    # A section name is only unique within its subsystem. `[a] self-test` must
+    # not be excused by `[b] self-test: OK`.
+    log = ("[a]   SKIP: ring buffer wraparound (no buffer)\n"
+           "[b]   ring buffer wraparound: OK\n")
+    check("another subsystem's success is not this one's coverage",
+          bh.partition_skips(log),
+          (("[a] ring buffer wraparound",), ()))
 
 
 # --------------------------------------------------------------------------
@@ -300,9 +405,9 @@ def test_main_missing_history_is_exit_two(tmpdir):
 def main():
     tests = [(n, f) for n, f in sorted(globals().items())
              if n.startswith("test_") and callable(f)]
-    if len(tests) < 20:
+    if len(tests) < 30:
         print(f"FATAL: test discovery found only {len(tests)} tests; the suite "
-              f"has at least 20. Discovery is broken, not the code.")
+              f"has at least 30. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

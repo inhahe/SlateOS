@@ -131,6 +131,7 @@ use coreutils::errmsg::strerror;
 use coreutils::getopt::{self, Program, Takes};
 use coreutils::quote::quoteaf_os;
 use coreutils::stdfd::{self, Stream};
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -470,9 +471,15 @@ fn copy_all<W: Write>(flags: &CpFlags, paths: &[OsString], err: &mut W) -> bool 
         return false;
     }
 
+    // Both "named twice" problems need two operands to exist at all, so GNU
+    // builds the tables only in that case and this follows it — not to save the
+    // allocation, but because the tables also decide whether a *repeat* is
+    // possible, and with one source it never is.
+    let mut seen = (sources.len() > 1).then(Seen::default);
+
     let mut ok = true;
     for src in sources {
-        if !copy_one(flags, src, dest_path, dest_is_dir, err) {
+        if !copy_one(flags, src, dest_path, dest_is_dir, seen.as_mut(), err) {
             ok = false;
         }
     }
@@ -496,12 +503,70 @@ fn dest_directory_error(dest: &Path) -> Option<io::Error> {
     }
 }
 
+/// What this command has already copied, and where it put it.
+///
+/// Three of GNU's refusals need it, and all three exist to stop one operand
+/// destroying the result of an earlier one in the same command — `cp a
+/// other/a d` would otherwise leave `d/a` holding `other/a`, and the copy of
+/// `a` the user asked for would be gone with nothing said. GNU keeps two hash
+/// tables for this (`copy.c`'s `src_info` and `dest_info`, plus the
+/// `remember_copied` table); the three fields below are the same information.
+///
+/// Only *command-line* sources go in. A file reached by recursing into a
+/// directory cannot be named twice on one command line, so recording it would
+/// be work spent on a question that cannot arise.
+#[derive(Default)]
+struct Seen {
+    /// Non-directory sources already copied. Keyed on the file's identity
+    /// *and* the entry that named it, which is GNU's `triple_compare`: `cp a
+    /// ./a d` is one file named twice, while `cp a hard-link-to-a d` is two
+    /// entries that happen to share an inode and is a legitimate request.
+    sources: HashSet<(FileId, EntryId)>,
+    /// Directory sources already copied, and which entry each was written to.
+    /// The destination is part of the answer here and not for files, because
+    /// GNU's directory rule asks a different question — see [`copy_one`].
+    dirs: HashMap<FileId, EntryId>,
+    /// Destinations this command created, by path *and* identity. Both halves
+    /// are needed: the path is what a later operand would collide with, and
+    /// the identity is what says the thing at that path is still the one we
+    /// made.
+    dests: HashSet<(PathBuf, FileId)>,
+}
+
+impl Seen {
+    /// Records a non-directory source and reports whether it was already
+    /// there. Recorded even when the copy goes on to fail, which is GNU's
+    /// behaviour and the reason `cp f f d` with `d/f` a directory reports the
+    /// refusal once and the repeat once rather than the refusal twice.
+    fn saw_source(&mut self, id: FileId, entry: EntryId) -> bool {
+        !self.sources.insert((id, entry))
+    }
+
+    /// Whether `target` is a destination this command created and which is
+    /// still the same file.
+    fn made(&self, target: &Path, id: FileId) -> bool {
+        self.dests.contains(&(target.to_path_buf(), id))
+    }
+
+    /// Remember a destination just written. `lstat`, as GNU does: what is
+    /// wanted is the identity of the *entry*, so that a symbolic link just
+    /// created is recognised as itself rather than as whatever it points at.
+    fn record_dest(&mut self, target: &Path) {
+        if let Ok(m) = fs::symlink_metadata(target)
+            && let Some(id) = file_id(target, &m)
+        {
+            self.dests.insert((target.to_path_buf(), id));
+        }
+    }
+}
+
 /// Copy one source. Returns `false` if it should count against the exit status.
 fn copy_one<W: Write>(
     flags: &CpFlags,
     src: &OsString,
     dest: &Path,
     dest_is_dir: bool,
+    mut seen: Option<&mut Seen>,
     err: &mut W,
 ) -> bool {
     let src_path = Path::new(src);
@@ -540,6 +605,30 @@ fn copy_one<W: Write>(
             quoteaf_os(src)
         );
         return false;
+    }
+
+    // A non-directory named twice is asked about here, before the destination
+    // is worked out at all, and GNU asks it in the same place: `cp f f d` where
+    // `d/f` is a directory prints the refusal for the first `f` and this
+    // warning for the second, which only happens if the source is recorded
+    // even when its copy failed. The repeat is *not* an error — the user asked
+    // for a file that is already there, and it is.
+    //
+    // Identity, not spelling: `cp a ./a d` is the same request twice. But two
+    // hard links to one inode are two entries, and copying both is a
+    // legitimate thing to ask for, so [`same_entry`] separates them.
+    if !metadata.is_dir()
+        && let Some(seen) = seen.as_deref_mut()
+        && let Some(id) = file_id(src_path, &metadata)
+        && let Some(entry) = entry_id(src_path)
+        && seen.saw_source(id, entry)
+    {
+        let _ = writeln!(
+            err,
+            "cp: warning: source file {} specified more than once",
+            quoteaf_os(src)
+        );
+        return true;
     }
 
     let target = match compute_target(src_path, dest, dest_is_dir) {
@@ -610,6 +699,27 @@ fn copy_one<W: Write>(
             );
             return false;
         }
+        // After the refusal above and before the one below, which is where GNU
+        // asks it — inside the "destination is not a directory" arm.
+        //
+        // This is the one that stops `cp a other/a d` silently throwing away
+        // the copy of `a` it made a moment ago. Nothing about the two operands
+        // is wrong on its own; what is wrong is the pair, and only a record of
+        // what this command already wrote can see it.
+        if !dest_meta.is_dir()
+            && let Some(seen) = seen.as_deref_mut()
+            && let Some(id) = file_id(&target, dest_meta)
+            && seen.made(&target, id)
+        {
+            let _ = writeln!(
+                err,
+                "cp: will not overwrite just-created {} with {}",
+                quoteaf_os(&target),
+                quoteaf_os(src)
+            );
+            return false;
+        }
+
         if !metadata.is_dir() && dest_meta.is_dir() {
             let _ = writeln!(
                 err,
@@ -620,30 +730,104 @@ fn copy_one<W: Write>(
         }
     }
 
+    // The same guard again, for the case the one above cannot see. A regular
+    // source stats its destination *followed*, so when that destination is a
+    // symlink this command just created, the identity compared above is the
+    // link's target rather than the link — and writing through it would
+    // clobber whatever the link points at. GNU asks this separately for the
+    // same reason, with its own `lstat`.
+    if let Some(seen) = seen.as_deref_mut()
+        && let Ok(link_meta) = fs::symlink_metadata(&target)
+        && link_meta.file_type().is_symlink()
+        && let Some(id) = file_id(&target, &link_meta)
+        && seen.made(&target, id)
+    {
+        let _ = writeln!(
+            err,
+            "cp: will not copy {} through just-created symlink {}",
+            quoteaf_os(src),
+            quoteaf_os(&target)
+        );
+        return false;
+    }
+
+    // A directory named twice is asked about here, not up with the file case:
+    // GNU reaches it only after the two refusals above, so `cp -r t t d` with
+    // `d/t` a plain file reports "cannot overwrite non-directory" for *both*
+    // operands rather than warning about the second.
+    //
+    // And the question asked is a different one. Two operands naming one
+    // directory are a repeat only if they were also going to the same place;
+    // where they are not, GNU refuses with a message about hard links instead,
+    // which this `cp` has no equivalent of yet.
+    if metadata.is_dir()
+        && let Some(seen) = seen.as_deref_mut()
+        && let Some(id) = file_id(src_path, &metadata)
+        && let Some(entry) = entry_id(&target)
+    {
+        match seen.dirs.get(&id) {
+            Some(earlier) if *earlier == entry => {
+                let _ = writeln!(
+                    err,
+                    "cp: warning: source directory {} specified more than once",
+                    quoteaf_os(src)
+                );
+                return true;
+            }
+            Some(_) => {}
+            None => {
+                seen.dirs.insert(id, entry);
+            }
+        }
+    }
+
+    let ok = place_source(src, src_path, &metadata, &target, dest_meta.is_some(), err);
+
+    // One recording site, reached however the copy was done, and only on
+    // success — a destination that was never written is not one a later
+    // operand can be accused of overwriting. GNU records in the same single
+    // place and under the same condition.
+    if ok && let Some(seen) = seen {
+        seen.record_dest(&target);
+    }
+    ok
+}
+
+/// Make the copy, now that the destination path is settled and every refusal
+/// has been made. Split out of [`copy_one`] so that it has one place to record
+/// what it created rather than one per kind of source.
+fn place_source<W: Write>(
+    src: &OsString,
+    src_path: &Path,
+    metadata: &fs::Metadata,
+    target: &Path,
+    dest_exists: bool,
+    err: &mut W,
+) -> bool {
     if metadata.file_type().is_symlink() {
-        // Only reachable under `-r`; see the stat above.
+        // Only reachable under `-r`; see the stat in [`copy_one`].
         //
         // An existing destination is removed first. `symlinkat` has no
         // "replace", and refusing instead would leave `cp -r` unable to update
         // a tree it had already copied once — so GNU unlinks, under exactly
         // this condition (`copy.c`: `dereference == DEREF_NEVER` and the source
         // is not a regular file).
-        if dest_meta.is_some()
-            && let Err(e) = fs::remove_file(&target)
+        if dest_exists
+            && let Err(e) = fs::remove_file(target)
             && e.kind() != io::ErrorKind::NotFound
         {
             let why = strerror(&e);
-            let _ = writeln!(err, "cp: cannot remove {}: {why}", quoteaf_os(&target));
+            let _ = writeln!(err, "cp: cannot remove {}: {why}", quoteaf_os(target));
             return false;
         }
-        return match clone_symlink(src_path, &target) {
+        return match clone_symlink(src_path, target) {
             Ok(()) => true,
             Err(e) => {
                 let why = strerror(&e);
                 let _ = writeln!(
                     err,
                     "cp: cannot create symbolic link {}: {why}",
-                    quoteaf_os(&target)
+                    quoteaf_os(target)
                 );
                 false
             }
@@ -651,22 +835,22 @@ fn copy_one<W: Write>(
     }
 
     if !metadata.is_dir() {
-        return copy_regular_file(src_path, &metadata, &target, err);
+        return copy_regular_file(src_path, metadata, target, err);
     }
 
     // Module docs, bug 2: without this, `cp -r a a` and `cp -r a .` copy what
     // they have just written, for ever.
-    if is_inside(&target, src_path) {
+    if is_inside(target, src_path) {
         let _ = writeln!(
             err,
             "cp: cannot copy a directory, {}, into itself, {}",
             quoteaf_os(src),
-            quoteaf_os(&target)
+            quoteaf_os(target)
         );
         return false;
     }
 
-    copy_tree(src_path, permission_bits(&metadata), &target, err)
+    copy_tree(src_path, permission_bits(metadata), target, err)
 }
 
 /// Would copying `src` to `dst` write over `src` itself?
@@ -745,6 +929,124 @@ fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> Result<PathBuf,
 /// makes `cp -r a .` (target `./a`) and `cp -r a a` (target `a/a`) both
 /// recognisable as the same directory reached by a different spelling, which a
 /// textual comparison would miss.
+/// What tells one file from another, for [`Seen`]'s three questions.
+///
+/// The `(device, inode)` pair, which is the only answer that survives the file
+/// being reached by a different name — and reaching it by a different name is
+/// exactly what the three questions are about.
+#[cfg(unix)]
+type FileId = (u64, u64);
+
+/// The portable stand-in: a host with no inode numbers has no cheaper answer
+/// than the resolved path. It agrees with the pair above on every question
+/// except hard links, which such a host does not have either.
+#[cfg(not(unix))]
+type FileId = PathBuf;
+
+#[cfg(unix)]
+fn file_id(_path: &Path, meta: &fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt;
+    Some((meta.dev(), meta.ino()))
+}
+
+#[cfg(not(unix))]
+fn file_id(path: &Path, _meta: &fs::Metadata) -> Option<FileId> {
+    fs::canonicalize(path).ok()
+}
+
+/// What tells one *directory entry* from another: which directory it is in,
+/// and the final component of the name.
+///
+/// Distinct from [`FileId`], and both are needed. Two hard links to one file
+/// share a `FileId` and have different `EntryId`s, and `cp a hard-a d` is a
+/// request for two copies rather than a repeat — GNU's `same_nameat` draws the
+/// line in the same place. Conversely `a` and `./a` are two spellings of one
+/// entry, and `cp a ./a d` is a repeat.
+type EntryId = (FileId, OsString);
+
+/// The entry `path` names, or `None` if the directory holding it cannot be
+/// identified. `None` means "cannot answer", and every caller treats that as
+/// "not the same entry" — the same conclusion GNU reaches when its `stat` of
+/// the parent fails.
+fn entry_id(path: &Path) -> Option<EntryId> {
+    let (dir, name) = split_entry(path);
+    let meta = fs::metadata(&dir).ok()?;
+    Some((file_id(&dir, &meta)?, name))
+}
+
+/// A path's directory and final component, GNU's `dir_name`/`base_name` pair.
+///
+/// Trailing slashes belong to neither — `tree/` names the entry `tree` — and a
+/// path with no slash at all names an entry in the current directory. Done on
+/// the bytes rather than through `Path::file_name`, which answers `None` for a
+/// name ending in `.` or `..` and so would make `cp -r a/. b/.. d` look like
+/// one entry named twice.
+#[cfg(unix)]
+fn split_entry(path: &Path) -> (PathBuf, OsString) {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    // Everything after the last byte that is not a separator is decoration.
+    let end = bytes
+        .iter()
+        .rposition(|&b| b != b'/')
+        .map_or(bytes.len(), |i| i + 1);
+    let head = bytes.get(..end).unwrap_or(bytes);
+    match head.iter().rposition(|&b| b == b'/') {
+        Some(cut) => {
+            // An empty directory half means the name was rooted: `/etc` is the
+            // entry `etc` in `/`, not in the current directory.
+            let dir = head.get(..cut).filter(|d| !d.is_empty()).unwrap_or(b"/");
+            let name = head.get(cut.saturating_add(1)..).unwrap_or_default();
+            (
+                PathBuf::from(OsStr::from_bytes(dir)),
+                OsStr::from_bytes(name).to_os_string(),
+            )
+        }
+        None => (PathBuf::from("."), OsStr::from_bytes(head).to_os_string()),
+    }
+}
+
+/// The same split for the only non-POSIX host this builds on, Windows, where
+/// it exists so that `cargo test` on the development machine exercises the
+/// same code shape rather than a weaker stand-in. `OsStr` is not bytes there,
+/// so the units are UTF-16 and both separators count.
+#[cfg(not(unix))]
+fn split_entry(path: &Path) -> (PathBuf, OsString) {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    // `b'/' as u16` in a pattern position is not const-evaluable, and the two
+    // code units are fixed by ASCII, so they are written out.
+    const SLASH: u16 = 0x2F;
+    const BACKSLASH: u16 = 0x5C;
+    let sep = |c: u16| c == SLASH || c == BACKSLASH;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    let end = wide
+        .iter()
+        .rposition(|&c| !sep(c))
+        .map_or(wide.len(), |i| i + 1);
+    let head = wide.get(..end).unwrap_or(&wide);
+    match head.iter().rposition(|&c| sep(c)) {
+        Some(cut) => {
+            // An empty directory half means the name was rooted, and the
+            // separator itself is then the directory.
+            let dir = if cut == 0 {
+                head.get(..1)
+            } else {
+                head.get(..cut)
+            };
+            let name = head.get(cut.saturating_add(1)..).unwrap_or_default();
+            (
+                PathBuf::from(OsString::from_wide(dir.unwrap_or_default())),
+                OsString::from_wide(name),
+            )
+        }
+        None => (PathBuf::from("."), OsString::from_wide(head)),
+    }
+}
+
 fn is_inside(target: &Path, root: &Path) -> bool {
     match (
         resolve_as_far_as_exists(root),
@@ -1770,6 +2072,136 @@ mod tests {
         assert!(ok, "{e}");
         assert_eq!(fs::read(&file).unwrap(), b"kept", "the target is untouched");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ------------------------------------------- one operand against another --
+    //
+    // Three refusals that no single operand can be judged by: what is wrong is
+    // the *pair*, and only a record of what the command already wrote can see
+    // it. The data-loss one is `cp a other/a d` — without the guard, `d/a`
+    // ends up holding `other/a` and the copy of `a` the user asked for is gone
+    // with nothing printed.
+
+    #[test]
+    fn a_second_source_will_not_overwrite_the_copy_the_first_just_made() {
+        let dir = scratch("just_created");
+        let other = dir.join("other");
+        let dest = dir.join("dest");
+        fs::create_dir(&other).unwrap();
+        fs::create_dir(&dest).unwrap();
+        let first = dir.join("f");
+        let second = other.join("f");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        let (ok, e) = cp(&PLAIN, &[&first, &second, &dest]);
+        assert!(!ok, "the pair must count against the exit status");
+        // Not asserted against a whole quoted path: the scratch directory is
+        // absolute and its spelling differs by host.
+        assert!(e.contains("will not overwrite just-created"), "{e}");
+        assert_eq!(
+            fs::read(dest.join("f")).unwrap(),
+            b"first",
+            "the copy that was asked for first survives"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The same guard, for the case the first cannot see. A regular source
+    /// stats its destination *followed*, so a destination that is a symlink
+    /// this command just made compares as whatever it points at; without a
+    /// second look at the link itself the copy goes through it.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_source_will_not_be_written_through_a_just_created_symlink() {
+        let dir = scratch("through_link");
+        let other = dir.join("other");
+        let dest = dir.join("dest");
+        fs::create_dir(&other).unwrap();
+        fs::create_dir(&dest).unwrap();
+        let pointee = dir.join("pointee");
+        fs::write(&pointee, b"untouched").unwrap();
+        let link = dir.join("l");
+        std::os::unix::fs::symlink(&pointee, &link).unwrap();
+        let plain = other.join("l");
+        fs::write(&plain, b"second").unwrap();
+
+        let (ok, e) = cp(&RECURSIVE, &[&link, &plain, &dest]);
+        assert!(!ok, "{e}");
+        assert!(e.contains("through just-created symlink"), "{e}");
+        assert_eq!(
+            fs::read(&pointee).unwrap(),
+            b"untouched",
+            "what the link points at is not written to"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_source_named_twice_is_a_warning_and_not_a_failure() {
+        let dir = scratch("named_twice");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let f = dir.join("f");
+        fs::write(&f, b"body").unwrap();
+        let dotted = dir.join(".").join("f");
+
+        let (ok, e) = cp(&PLAIN, &[&f, &dotted, &dest]);
+        assert!(ok, "a repeat is not an error: {e}");
+        assert!(e.contains("specified more than once"), "{e}");
+        assert_eq!(fs::read(dest.join("f")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The line the repeat rule draws. Two hard links share an inode but are
+    /// two entries, and asking for a copy of each is a legitimate request —
+    /// which is why the rule needs [`entry_id`] and not just [`file_id`].
+    #[cfg(unix)]
+    #[test]
+    fn two_hard_links_to_one_file_are_not_one_source_named_twice() {
+        let dir = scratch("two_hard");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let one = dir.join("one");
+        let two = dir.join("two");
+        fs::write(&one, b"body").unwrap();
+        fs::hard_link(&one, &two).unwrap();
+
+        let (ok, e) = cp(&PLAIN, &[&one, &two, &dest]);
+        assert!(ok, "{e}");
+        assert_eq!(e, "", "nothing to warn about");
+        assert_eq!(fs::read(dest.join("one")).unwrap(), b"body");
+        assert_eq!(fs::read(dest.join("two")).unwrap(), b"body");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// With one source there is no pair, so the tables are never built. This
+    /// asserts the case that would otherwise be caught by them wrongly: a
+    /// single source copied onto a destination the *previous* run made.
+    #[test]
+    fn a_lone_source_is_never_a_repeat_of_itself() {
+        let dir = scratch("lone");
+        let dest = dir.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let f = dir.join("f");
+        fs::write(&f, b"body").unwrap();
+
+        assert!(cp(&PLAIN, &[&f, &dest]).0);
+        let (ok, e) = cp(&PLAIN, &[&f, &dest]);
+        assert!(ok, "{e}");
+        assert_eq!(e, "");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn split_entry_keeps_dot_and_dotdot_apart() {
+        assert_eq!(split_entry(Path::new("a/.")).1, OsString::from("."));
+        assert_eq!(split_entry(Path::new("a/..")).1, OsString::from(".."));
+        assert_eq!(split_entry(Path::new("a/b/")).1, OsString::from("b"));
+        assert_eq!(
+            split_entry(Path::new("b")),
+            (PathBuf::from("."), "b".into())
+        );
     }
 
     // ------------------------------------------------- modes, module docs 8 --

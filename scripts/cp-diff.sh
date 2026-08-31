@@ -392,10 +392,52 @@ run_case file.txt tree/a.txt file.txt
 run_case nosuch file.txt dir
 run_case file.txt nosuch tree/a.txt dir
 run_case nosuch alsonosuch dir
-# Two sources with the same basename into one directory: the second overwrites
-# the first, silently, on both sides.
+# Two sources with the same basename into one directory. The second would land
+# on the copy the first just made, so the copy the user asked for would be gone
+# with nothing said: both sides refuse, and the exit status is 1. The variants
+# pin *where* the check sits — it is asked once per pair, so a third operand
+# repeating the first is caught too, and a source named twice is a different
+# complaint again.
 TREE='mktree; mkdir other; printf other > other/file.txt'
 run_case file.txt other/file.txt dir
+TREE='mktree; mkdir other; printf other > other/file.txt'
+run_case other/file.txt file.txt dir
+TREE='mktree; mkdir other; printf other > other/file.txt'
+run_case file.txt other/file.txt file.txt dir
+TREE='mktree; mkdir other; printf other > other/file.txt'
+run_case file.txt file.txt other/file.txt dir
+# The destination just created is a *symlink*, and the second source is not.
+# The check above stats the destination followed, so it cannot see this one:
+# without a second check on the link itself, the copy is written through the
+# link and lands on whatever it points at.
+TREE='mktree; mkdir other; printf plain > other/link'
+run_case -r tree/link other/link dir
+# One source named twice. Not an error on either side — the user asked for a
+# file that is already there, and it is — but it is warned about and the second
+# copy is skipped. `./` and a trailing slash are the same request spelled
+# differently; a hard link is *not*, because two entries sharing an inode are
+# two files as far as this question goes.
+run_case file.txt file.txt dir
+run_case file.txt ./file.txt dir
+run_case ./file.txt file.txt dir
+TREE='mktree; ln file.txt hard.txt'
+run_case file.txt hard.txt dir
+TREE='mktree; ln -s file.txt soft.txt'
+run_case file.txt soft.txt dir
+run_case -r tree tree dir
+run_case -r tree ./tree dir
+run_case -r tree tree/ dir
+# The repeat is recorded even when the copy it belonged to failed, so the
+# second operand is warned about rather than refused a second time. Directories
+# are the other way round: their check sits *after* the refusal, so both
+# operands are refused.
+TREE='mktree; mkdir dir/file.txt'
+run_case file.txt file.txt dir
+TREE='mktree; printf x > dir/tree'
+run_case -r tree tree dir
+# Three sources, one repeated and one colliding: both complaints appear.
+TREE='mktree; mkdir other; printf other > other/file.txt'
+run_case file.txt file.txt other/file.txt dir
 
 # =============================================================================
 # 6. A directory without -r

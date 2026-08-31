@@ -59,11 +59,35 @@
 # a real case as the option lands. `cp.rs`'s module docs explain why those
 # options are *refused* rather than ignored.
 #
+# ## The reference is built, not found
+#
+# `DIFF_GNU_SOURCE=9.4` below makes `diff-wsl.sh` fetch and build coreutils
+# 9.4 rather than compare against `/usr/bin/cp`. This program is the reason
+# that machinery exists. Ubuntu's coreutils carries
+# `debian/patches/cp-n.diff`, which makes `cp -n` a silent success on an
+# existing destination; upstream prints `cp: not replacing 'b'` and exits 1.
+# Certifying `-n` against the installed binary would certify us into Debian's
+# behaviour and away from the specification, and it would look green while
+# doing it. See `diff-wsl.sh`'s "Why a built reference" and
+# `design-decisions.md` §726.
+#
+# The version is the *same* one Ubuntu ships, on purpose. Pinning to 9.4
+# rather than the newest release means that when a case's result changes, the
+# de-patching is the only thing it can be attributable to -- upstream
+# behaviour drift between releases is held constant. (`ls-diff.sh` pins 9.5
+# instead, because its cases were written against 9.5's manual from the
+# start.) Raising this later is a deliberate act with its own diff.
+#
 # Run `OURS=/usr/bin/cp ./scripts/cp-diff.sh` to confirm the harness still
 # discriminates: it should report every xfail as XPASS and nothing else.
+# Note that with a built reference that check now compares Ubuntu's `cp`
+# against upstream's, so `-n` cases -- once they exist -- will legitimately
+# differ rather than XPASS.
 set -u
 
 DIFF_PROG='cp'
+# Not `/usr/bin/cp`; see "The reference is built, not found" above.
+DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

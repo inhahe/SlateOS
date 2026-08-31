@@ -381,6 +381,29 @@ impl Layout {
         let foot = Rect::new(panel.x, panel.bottom() - foot_h, panel.w, foot_h);
         (head, body, foot)
     }
+
+    /// The macro library's heading, its rows, and its New/Delete bar.
+    fn sidebar_split(&self) -> (Rect, Rect, Rect) {
+        Self::split(self.sidebar, self.row, self.button + self.pad)
+    }
+
+    /// The action list's heading, its rows, and its Up/Down/Delete bar.
+    fn list_split(&self) -> (Rect, Rect, Rect) {
+        Self::split(self.list, self.row, self.button + self.pad)
+    }
+
+    /// The properties panel's heading, its rows, and the strip reserved for
+    /// the speed and repeat pads.
+    ///
+    /// The three bands are methods rather than three `Layout::split` calls
+    /// spelled out at the drawing sites, because a band a test measures and a
+    /// band the drawing paints have to be the same band. While the heights
+    /// lived at the call sites, the only way to write "the rows stay above the
+    /// pads" was to copy `l.row * 4.0` into the test -- where it would go on
+    /// agreeing with a drawing pass that had changed underneath it.
+    fn props_split(&self) -> (Rect, Rect, Rect) {
+        Self::split(self.props, self.row, self.row * 4.0)
+    }
 }
 
 // ============================================================================
@@ -2136,7 +2159,7 @@ impl AutomatorApp {
             return;
         }
         fill(f, panel, MANTLE, CornerRadii::ZERO);
-        let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
+        let (head, body, foot) = l.sidebar_split();
 
         fill(f, head, CRUST, CornerRadii::ZERO);
         bounded(
@@ -2283,7 +2306,7 @@ impl AutomatorApp {
             return;
         }
         fill(f, panel, BASE, CornerRadii::ZERO);
-        let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
+        let (head, body, foot) = l.list_split();
 
         fill(f, head, SURFACE0, CornerRadii::ZERO);
         bounded(
@@ -2564,7 +2587,7 @@ impl AutomatorApp {
         // selected action wrote its last rows straight over the heading; and
         // the repeat buttons, at `speed_section_y + 80.0` and 24 tall, ended
         // four pixels *below* the content area, in the status bar.
-        let (head, body, pads) = Layout::split(panel, l.row, l.row * 4.0);
+        let (head, body, pads) = l.props_split();
 
         fill(f, head, CRUST, CornerRadii::ZERO);
         bounded(
@@ -2909,7 +2932,19 @@ impl AutomatorApp {
     }
 
     /// Do what a click on `target` means.
+    ///
+    /// Every click passes through here, which is why the offsets are put back
+    /// in range here: clicking a macro changes what the action list contains,
+    /// and `select_macro_by_index` has no idea the list it just replaced was
+    /// scrolled. `press` clamps for the buttons and the keys; before this, a
+    /// click was the one way in that did not.
     fn click(&mut self, target: Target) -> EventResult {
+        let result = self.click_inner(target);
+        self.clamp_scrolls();
+        result
+    }
+
+    fn click_inner(&mut self, target: Target) -> EventResult {
         match target {
             Target::Help => {
                 self.show_help = false;
@@ -3082,6 +3117,39 @@ impl AutomatorApp {
             && i < self.sidebar_scroll
         {
             self.sidebar_scroll = i;
+        }
+
+        // A selection has to be *visible*, which means the offset follows it
+        // down as well as up. Following it up alone -- which is all this did --
+        // is enough to pass a test that only ever walks the selection upwards,
+        // and leaves a user holding Down watching a list that does not move
+        // while the selection walks off the bottom of it.
+        let l = Layout::solve(self.size.0, self.size.1);
+        let (_, list_body, _) = l.list_split();
+        let (_, side_body, _) = l.sidebar_split();
+        let list_rows = rows_that_fit(list_body.h, l.row);
+        let side_rows = rows_that_fit(side_body.h, l.row);
+        //
+        // `first_offset_showing` rather than the `i + 1 - rows` this reads as:
+        // that spelling underflows on its way to an answer that is in range,
+        // whenever the selection is nearer the top of the list than a windowful.
+        if let Some(i) = self.selected_action_idx
+            && list_rows > 0
+        {
+            let first = first_offset_showing(i, list_rows);
+            if first > self.action_scroll {
+                self.action_scroll = first;
+            }
+        }
+        if let Some(i) = self
+            .selected_macro_id
+            .and_then(|id| self.library.list().iter().position(|m| m.id == id))
+            && side_rows > 0
+        {
+            let first = first_offset_showing(i, side_rows);
+            if first > self.sidebar_scroll {
+                self.sidebar_scroll = first;
+            }
         }
     }
 }
@@ -3392,6 +3460,34 @@ fn shift(current: usize, rows: isize, n: usize) -> usize {
         current.saturating_add(rows.unsigned_abs())
     };
     moved.min(n.saturating_sub(1))
+}
+
+/// How many whole rows of `row_h` fit in a body `body_h` tall.
+///
+/// Counted rather than divided-and-cast: the answer is at most a window's
+/// height over fourteen pixels, so the loop is bounded by the low tens, and it
+/// needs neither a truncating cast nor an allow to justify one.
+fn rows_that_fit(body_h: f32, row_h: f32) -> usize {
+    if row_h <= 0.0 {
+        return 0;
+    }
+    let mut n = 0_usize;
+    let mut y = row_h;
+    while y <= body_h + 0.01 {
+        n = n.saturating_add(1);
+        y += row_h;
+    }
+    n
+}
+
+/// The largest scroll offset that still shows row `i`, given `rows` visible rows.
+///
+/// It is `i + 1 - rows` clamped at zero, written so the clamp happens before the
+/// subtraction rather than after: a selection nearer the top of the list than one
+/// windowful makes `i + 1 - rows` underflow on its way to an answer that would
+/// have been in range, which on a `usize` is not a small error.
+fn first_offset_showing(i: usize, rows: usize) -> usize {
+    i.saturating_sub(rows.saturating_sub(1))
 }
 
 /// `usize` as `f32`, saturating rather than wrapping.
@@ -4757,8 +4853,11 @@ mod tests {
         for (w, h) in sizes() {
             let l = Layout::solve(w, h);
             let at = format!("{w}x{h}");
-            for panel in [l.sidebar, l.list, l.props] {
-                let (head, body, foot) = Layout::split(panel, l.row, l.button + l.pad);
+            for (panel, (head, body, foot)) in [
+                (l.sidebar, l.sidebar_split()),
+                (l.list, l.list_split()),
+                (l.props, l.props_split()),
+            ] {
                 assert!(inside(panel, head), "head escapes at {at}");
                 assert!(inside(panel, body), "body escapes at {at}");
                 assert!(inside(panel, foot), "foot escapes at {at}");
@@ -4947,6 +5046,86 @@ mod tests {
                     assert!(
                         inside(window, *rect),
                         "{name}: {target:?} is hit-boxed outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_has_ink_painted_at_exactly_that_rectangle() {
+        // A hit box is meant to be recorded by the pass that paints the
+        // control, at the rectangle it painted. Nothing in the type system
+        // says so: `f.hit(target, rect)` will take any rectangle at all, and a
+        // hit box a row's height above its own row is a control that answers
+        // for its neighbour -- every click landing on the wrong macro, and no
+        // test noticing, because a click aimed *at the hit box* still reaches
+        // the target the hit box names. So the claim has to be made against
+        // the ink: every control in this program is a filled rectangle, and
+        // the hit box must be that same filled rectangle.
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let frame = app.frame(w, h);
+                let fills: Vec<Rect> = frame
+                    .commands()
+                    .iter()
+                    .filter_map(|c| match c {
+                        RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        } => Some(Rect::new(*x, *y, *width, *height)),
+                        _ => None,
+                    })
+                    .collect();
+                for (target, rect) in frame.hits() {
+                    assert!(
+                        fills.iter().any(|f| (f.x - rect.x).abs() < 0.01
+                            && (f.y - rect.y).abs() < 0.01
+                            && (f.w - rect.w).abs() < 0.01
+                            && (f.h - rect.h).abs() < 0.01),
+                        "{name}: {target:?} is hit-boxed at {rect:?} in a {w}x{h} window, \
+                         where nothing was painted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_hit_box_lies_in_the_band_of_the_pane_that_owns_it() {
+        // A row drawn where only half of it fits is a row half under the
+        // footer, and two controls claiming the same pixels. The rule that
+        // stops it is not "stay in the window" -- a half-covered row is well
+        // inside the window -- but "stay in the band you are listed in": the
+        // library's rows in the library's body, the pads in the strip reserved
+        // for the pads, the footer's buttons in the footer.
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let l = Layout::solve(w, h);
+                let (_, side_body, side_foot) = l.sidebar_split();
+                let (_, list_body, list_foot) = l.list_split();
+                let (_, _, pads) = l.props_split();
+                for (target, rect) in app.frame(w, h).hits() {
+                    let (bands, band_name): (Vec<Rect>, &str) = match target {
+                        Target::Macro(_) => (vec![side_body], "the library's rows"),
+                        Target::Action(_) => (vec![list_body], "the action list's rows"),
+                        Target::Speed(_) | Target::Repeat(_) => {
+                            (vec![pads], "the strip reserved for the pads")
+                        }
+                        Target::Tab(_) => (vec![l.header], "the header"),
+                        Target::Button(_) => (
+                            vec![l.toolbar, side_foot, list_foot],
+                            "the toolbar or a panel footer",
+                        ),
+                        Target::Help => (vec![l.window], "the window"),
+                    };
+                    assert!(
+                        bands.iter().any(|b| inside(*b, *rect)),
+                        "{name}: {target:?} is hit-boxed at {rect:?} in a {w}x{h} window, \
+                         outside {band_name}"
                     );
                 }
             }
@@ -5462,6 +5641,23 @@ mod tests {
             "the selection at {selected} is above the first visible row {}",
             app.action_scroll
         );
+        // The list is forty rows long and the window holds nowhere near forty,
+        // so a selection at row 40 that is genuinely on screen is a list that
+        // has scrolled. Without this the claim above is satisfied by an offset
+        // of zero -- which is what it was, for a list that followed the
+        // selection up and never down.
+        let (_, body, _) = Layout::solve(app.size.0, app.size.1).list_split();
+        let fits = rows_that_fit(body.h, Layout::solve(app.size.0, app.size.1).row);
+        assert!(fits > 0 && fits < 40, "the window holds {fits} of 60 rows");
+        assert!(
+            selected < app.action_scroll + fits,
+            "the selection at {selected} is below the last visible row {}",
+            app.action_scroll + fits
+        );
+        assert!(
+            app.action_scroll > 0,
+            "the list never followed the selection down"
+        );
         for _ in 0..40 {
             assert_eq!(app.handle_key(&press(Key::Up)), EventResult::Consumed);
         }
@@ -5469,6 +5665,116 @@ mod tests {
         assert_eq!(
             app.action_scroll, 0,
             "the list did not follow the selection back"
+        );
+    }
+
+    #[test]
+    fn the_property_rows_stay_clear_of_the_strip_the_pads_are_in() {
+        // The pads are a *reserved* strip, and the rows above stop at its top
+        // edge. The old panel put the speed section at `content_y + content_h
+        // - 100.0` and grew the property rows down from the top with no idea
+        // it was there, so a macro with a selected action wrote its last rows
+        // straight over the pads. The rule cannot be "stay in the window" --
+        // a row written over the pads is well inside the window -- so it is
+        // stated where it belongs: nothing but the pads is written in the
+        // pads' own strip.
+        let mut pad_words: Vec<String> = vec!["Playback Speed".into(), "Repeat Mode".into()];
+        for s in PlaybackSpeed::all() {
+            pad_words.push(s.label().to_string());
+        }
+        for m in [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever] {
+            pad_words.push(m.label());
+        }
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let (_, _, pads) = Layout::solve(w, h).props_split();
+                if pads.is_empty() {
+                    continue;
+                }
+                for said in said_in(&app, w, h, pads) {
+                    assert!(
+                        pad_words.contains(&said),
+                        "{name}: {said:?} is written in the pads' own strip in a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_list_that_shrinks_under_its_offset_pulls_the_offset_back() {
+        // While a macro is selected the offset is pulled back by the selection
+        // -- a selected row is a row that exists, so an offset above it is an
+        // offset in range. The shrink is therefore only visible with nothing
+        // selected, which is exactly the state the defence is for: a library
+        // scrolled to its end and then emptied under the offset.
+        let mut app = demo_app();
+        for i in 0..40 {
+            app.new_macro(&format!("Macro {i}"));
+        }
+        app.scroll_sidebar(30);
+        assert!(app.sidebar_scroll > 2, "the library did not scroll");
+        app.selected_macro_id = None;
+        app.selected_action_idx = None;
+        while app.library.count() > 2 {
+            let Some(id) = app.library.list().first().map(|m| m.id) else {
+                break;
+            };
+            assert!(app.library.remove(id), "the macro was not removed");
+        }
+        // Any event at all re-clamps; this one touches neither offset.
+        app.press(Button::Help);
+        assert!(
+            app.sidebar_scroll < app.library.count(),
+            "the library offset is row {} of {}",
+            app.sidebar_scroll,
+            app.library.count()
+        );
+    }
+
+    /// Where the library currently lists the macro with this id.
+    fn index_of(app: &AutomatorApp, id: u64) -> usize {
+        app.library
+            .list()
+            .iter()
+            .position(|m| m.id == id)
+            .expect("the macro is in the library")
+    }
+
+    #[test]
+    fn an_action_offset_survives_the_macro_changing_under_it() {
+        // The action list belongs to whichever macro is selected, so selecting
+        // a shorter one shrinks the list without touching the offset. The
+        // wheel's own clamp cannot help: it clamped against the macro that was
+        // selected at the time it was turned.
+        let mut app = demo_app();
+        let long = app.library.create_macro("long", 0);
+        for i in 0..40 {
+            if let Some(m) = app.library.get_mut(long) {
+                m.actions.push(TimedAction {
+                    action: MacroAction::Delay { ms: i },
+                    delay_ms: 0,
+                });
+            }
+        }
+        let short = app.library.create_macro("short", 0);
+        if let Some(m) = app.library.get_mut(short) {
+            m.actions.push(TimedAction {
+                action: MacroAction::Delay { ms: 1 },
+                delay_ms: 0,
+            });
+        }
+        let long_idx = index_of(&app, long);
+        let short_idx = index_of(&app, short);
+        app.click(Target::Macro(long_idx));
+        app.scroll_actions(30);
+        assert!(app.action_scroll > 2, "the action list did not scroll");
+        app.selected_action_idx = None;
+        app.click(Target::Macro(short_idx));
+        assert!(
+            app.action_scroll < 1,
+            "the action offset is row {} of a macro with one action",
+            app.action_scroll
         );
     }
 

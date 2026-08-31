@@ -3294,10 +3294,12 @@ impl Vfs {
         // `Metadata`, because that is exactly what this reads. The caller is
         // usually `allocate_dir_handle`, which has already gated the open --
         // but "my caller checked" is the assumption the gate exists to refuse,
-        // and `pin_dir` is `pub`, reachable from `pinned_dir_arg` for a cwd
-        // that was never opened through this path at all. Without it, the
-        // entry-type and inode of any path are readable by a caller who may
-        // not stat it, which is a disclosure however small.
+        // and `pin_dir` is `pub`, so a future caller need not have gated
+        // anything. (Until §648 that caller already existed: `pinned_dir_arg`
+        // pinned a cwd that was never opened through this path at all. That
+        // branch is gone, which removes the instance and not the reason.)
+        // Without this check, the entry-type and inode of any path are readable
+        // by a caller who may not stat it, which is a disclosure however small.
         check_path_access(path, PathAccess::Metadata)?;
         let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
         let meta = fs.lock().lmetadata(&relative)?;

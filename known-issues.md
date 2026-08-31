@@ -16271,6 +16271,61 @@ gone, replaced rather than inverted: they cannot become "must succeed" on a
 host that cannot open. `IN_ROOT` and `CACHED` keep their end-to-end differential
 tests unchanged.
 
+**The `dirfd == 0` route into this entry's failure mode is closed, 2026-08-31
+(lane A) — `0` no longer means the cwd.** The bullet three paragraphs up
+("`dirfd == 0` is not usable for a relative path") described the native ABI as
+reading handle `0` as "the process working directory". It no longer does: `0`
+now means **no base supplied**, and is legal only in the one shape where the
+base is provably never read. Rationale in `design-decisions.md` §648; lane B's
+report is `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-
+directories.md`, answered in place.
+
+Why this belongs on *this* entry rather than only on §648: the fail-open mode
+this entry exists to document — *a containment check against the wrong base
+does not fail, it succeeds, on the wrong directory, and returns a valid
+descriptor that looks exactly like working confinement* — had `dirfd == 0` as
+a live route into it, on a base the caller never named. That route is gone
+structurally, not by discipline. For `SYS_FS_OPENAT2` (661):
+
+| `resolve` | fragment | `dirfd == 0` |
+|---|---|---|
+| none | absolute | **allowed**, unchanged — the base is never read |
+| none | relative | `InvalidArgument` (was: the kernel's cwd) |
+| `RESOLVE_BENEATH` | absolute | `CrossDevice`, already, before the base is looked at |
+| `RESOLVE_BENEATH` | relative | `InvalidArgument` |
+
+So under containment `0` is now *always* an error, which is what containment
+wants. `SYS_FS_UNLINKAT_PINNED`/`FSTATAT_PINNED`/`GETDENTS_PINNED` (662/663/664)
+lose the branch outright rather than narrowing it — they take a single-component
+name, never an absolute path, so no shape lets them proceed with no base; `0`
+falls through to the ordinary handle lookup and returns `InvalidHandle`, the
+honest answer since handle `0` does not exist.
+
+Two things worth keeping:
+
+- **The decisive argument was not cost.** Lane B recommended this outcome from
+  the cost of keeping two cwds in step across `fork`/`exec`/`spawn`, which is a
+  real cost and therefore re-litigable by someone who finds it affordable. The
+  non-negotiable argument is `CLAUDE.md`'s *"Every kernel object accessed via
+  unforgeable handles. **No ambient authority.**"* — `dirfd == 0` was a base the
+  caller did not name, could not have been denied, and could not delegate. The
+  alternative (a native `SYS_FS_SET_CWD` so the two cwds agree) would have added
+  a syscall whose purpose is to move the ambient base around.
+- **Lane B's stated trigger fired twice, not once.** They wrote that the trigger
+  to revisit was "the first native syscall that resolves a *relative* path
+  against `pcb::get_cwd`. Today `SYS_FS_OPENAT2` is the only one." It was two:
+  `pinned_dir_arg` (the 662/663/664 helper, landed the same day, §647) carried
+  the identical branch and was not visible from their side. Both are gone, so the
+  count is zero and the trigger is retired.
+
+Covered by `test_dispatch_openat2_native` cases (f)/(g)/(h) — absolute-with-`0`
+(reading the byte back, so a refuse-everything implementation cannot pass),
+relative-with-`0`, and relative-with-`0`-under-`BENEATH`. That test's own doc
+comment previously claimed `dirfd == 0` was "covered from ring 3 rather than
+here"; the ring-3 coverage it pointed at goes through the **Linux** ABI's
+`AT_FDCWD`, a different mechanism, so native `0` was covered nowhere. It is
+testable from kernel context precisely because it no longer depends on a cwd.
+
 ### D-NETSTACK-TCP-MINIMAL. Userspace `netstack` TCP client is minimal (slirp-only correctness) — DEBT 2026-07-14
 
 **Where:** `services/netstack/src/main.rs` — `tcp_fetch` / `send_tcp` /
@@ -24406,6 +24461,43 @@ twenty lines, not about the check. It was re-run as
 that can be saturated by benign output is not a check; recording the *reassurance*
 ("the repo stayed responsive") instead of the *result* would have been worse
 still, since it is evidence of nothing at all.
+
+**Update 2026-08-31 (lane A) — the 20 GiB floor is now unreachable by anything a
+lane can do, and the reason is that its premise no longer describes the
+machine.** `D:` is at **11.4 GiB free of 1.9 T, 100% used**. The floor was sized
+on 2026-08-15 against "138 GB of build output across four worktrees (59.1 / 40.4
+/ 35.0 / 3.5)". Today there is **exactly one `target/` on the volume** —
+`os-lane-a/target`, ~6.9 GiB — and none in `os`, `os-lane-b` or `os-lane-c`.
+`reclaim-space.py --need 20` finds that one candidate and reports it would reach
+18.4 GiB: still under the floor, and only by spending the very cache the run
+about to happen needs, so a cold rebuild puts the volume straight back where it
+started. The elastic part the prescription above counted on has already been
+squeezed out; the remaining 1.8 T is the operator's own data (Dropbox, Hyper-V,
+IDriveLocal, backups) and is not ours to delete.
+
+**What was done for the run at `c50b8e234`:** committed and pushed everything
+first, then `--min-free-gb=8` for one run. That is defensible on the floor's own
+stated terms and not a way around them — the floor exists "to leave enough room
+that the *editor* and git keep working while a build is refused", because
+"losing an uncommitted file costs the work", and against a clean, pushed tree
+there is no uncommitted file to lose. The other half of the floor's rationale (a
+link step dying part-way and leaving a stale-but-plausible kernel image in the
+ESP for a later `--no-build` to boot) is unaffected by the lowering: 8 GiB is
+still far more than a link step needs, and the run was not `--no-build`.
+
+**This is not a fix, and it should not become the habit.** The override is only
+sound while the tree is clean; running it with edits in flight reinstates
+precisely the 2026-08-15 failure. The two structural prescriptions above still
+stand and neither has been done:
+
+- **[operator] the shared `CARGO_TARGET_DIR` question** — now with a stronger
+  argument than in August, since the redundancy it would remove is currently
+  being paid for by refusing to boot-test at all.
+- **[A/operator] the floor needs to be a function of what is actually on the
+  volume**, not a constant sized against a four-worktree world that no longer
+  exists. A floor no run can ever clear stops being a guard and becomes a step
+  every run learns to skip — which is worse than a lower floor honestly set,
+  because a skipped guard protects nothing on the day the tree *is* dirty.
 
 ### [A] B-BENCH-RUN-CONTAMINATED-BY-ANOTHER-LANE-PRUNING-ITS-TARGET-DIR — 2026-08-15 — attribution recorded
 
@@ -82372,8 +82464,59 @@ working at all.
 
 ---
 
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **91 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **84 of 800 remain**
 
+> **Burn-down log.** 2026-08-30 (forty-fourth batch): **the guesses whose value
+> was the widest one its space has.** 91 → 84 across 91 → 84 functions;
+> `cmd_fwsettings`, `cmd_namespace`, `cmd_autostart`, `cmd_pidns`,
+> `cmd_taskmon`, `cmd_audiomux` and `cmd_sshd` left the ledger. Pinned by
+> self-test rung 112.
+>
+> Every entry left in the ledger is a single site, so from here on a batch is
+> chosen by what the guess *means* rather than by how many of them a function
+> has. This one is the set where the substituted number is not an arbitrary
+> placeholder but the value that means *all of it* or *the top of the tree* — so
+> the guess did not narrow the thing the operand named, it **opened** it:
+>
+> | Command | Guessed | What that value means there |
+> |---|---|---|
+> | `firewall add … <port> …` | `0` | the `list` arm renders port `0` as `*` — **every port** |
+> | `autostart add … [uid]` | `0` | root, and the item runs at boot |
+> | `namespace create … [PARENT_ID]` | `ROOT_NAMESPACE` | outside the container it was to nest in |
+> | `pidns create [parent]` | `0` | the root PID namespace, then printed back as `(parent: 0)` |
+> | `tmon register … [parent_pid]` | `0` | the top of the task tree |
+> | `amux stream … [pid]` | `0` | a real and important process (batch 34's harm) |
+>
+> `firewall add web in tcp 8O allow` is the one to remember: it did not add a
+> rule for the wrong port, it added an **allow rule for all 65536**, and printed
+> `port 0` in a success line that reads as confirmation.
+>
+> **Three more §645 word catch-alls went with it, all in that same arm**, and
+> all three widening: `_ => Both`, `_ => Any`, `_ => Allow`. Because the arm is
+> gated on `parts.len() >= 6`, every operand is required — so none of the three
+> was ever standing in for an *absent* word; each existed solely to absorb a
+> misspelled one. `blcok` produced an **allow** rule and said "allow". As in
+> batch 43a these were invisible to the gate (no `.parse()` in a `match` on a
+> `&str`) and were found by reading around a flagged site.
+>
+> **`cmd_sshd` is the batch's counter-example and was included for it.** Its
+> guess was already being caught — `0` is not a listening port and the range
+> check below rejected it — so the fix is not a refusal that was missing but a
+> *message* that could not say which word was wrong: `Invalid port` answered
+> `sshd port 0` and `sshd port 8O22` identically. Worth recording because it is
+> the shape a burn-down is most likely to skip as "already fine".
+>
+> **`cmd_audiomux` also carried the D2 shape next door**: `[output_id]` was
+> `and_then(|s| s.parse().ok())` into an `Option`, where an unreadable word is
+> indistinguishable from an omitted one, so `amux stream foo 5 1O` routed the
+> stream to the default output and reported success.
+>
+> Rung 112 asserts the converse as well as the refusals — `pidns create 99`
+> reaches `pidns::create` and is rejected *there*, by a different message —
+> because a rung made only of refusals would pass just as well against a helper
+> that refused everything, which is the failure mode a burn-down batch is most
+> likely to introduce.
+>
 > **Burn-down log.** 2026-08-30 (forty-third batch, part b): **the expression
 > evaluator**. 95 → 91 across 93 → 91 functions; `eval_test` and
 > `tokenize_arith` left the ledger, and **every entry that remains is now a
@@ -100503,6 +100646,109 @@ inviting a check-then-use of its own.
 hypothetical question is one more thing to keep in step. **Trigger:** lane B
 asking, or the first userspace caller whose correctness depends on it.
 
+## A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN (lane A)
+
+**Status:** FIXED 2026-08-31 (the six instances). The *class* gate remains
+open — see "Then close the class" below.
+
+**In short:** Six self-test cases ask the mount table whether `/` is mounted
+read-write, find that it is not, record an honest SKIP, and return. They run
+at boot Steps 11 and 19; the root filesystem mounts at Step 20f. So the
+condition is not "sometimes false" — it is false on **every boot, always**,
+and these six cases have never executed a single time. They are green in the
+sense that nothing red is printed.
+
+**The six** (names as they appear in the serial log):
+
+| Subsystem | Case | Gate |
+|---|---|---|
+| `syscall` (dispatch.rs:991) | Native openat2 | `is_mounted_rw("/")` |
+| `syscall` (dispatch.rs:3861) | Dispatch FS roundtrip | `is_mounted_rw("/")` |
+| `syscall/linux` (linux.rs:72597) | mkdir/rmdir/unlink native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
+| `syscall/linux` (linux.rs:72925) | rename native-VFS round-trip | `is_mounted_rw("/")`, inline inside `self_test` |
+| `spawn` (spawn.rs:32078) | Spawn with fd_map | `is_mounted_rw("/")` |
+| `spawn` (spawn.rs:32401) | take_initial_fds one-shot | `is_mounted_rw("/")` |
+
+Reproduce against any boot log:
+
+    grep -n "SKIP.*not mounted read-write" build/serial-test.txt
+
+**Nothing here is dishonest, which is why nothing caught it.** Each skip is
+exactly what design-decisions.md §270 asks for — a fact the test *looked up*
+in the mount table rather than inferred from a failed `open`, so an open bug
+cannot silently switch the section off. `check-selftest-skips.py` enforces
+that honesty and passes. What no gate has a notion of is a skip that is
+honest and yet **unconditional in practice**: a predicate that is a constant
+at the point it is evaluated.
+
+**The fix pattern already exists in-tree, in three places.** A case that needs
+the filesystem is split into a second entry point called from `main.rs` after
+Step 20f:
+
+- `ipc::io_ring::self_test_fh()` — `main.rs:1577`, and its two cases are
+  visibly *passing* in the serial log rather than skipping.
+- `syscall::linux::self_test_rename_noreplace()` — `main.rs:1878`, with the
+  comment "which only sees a read-only root".
+- `syscall::linux::self_test_file_mmap()` — `main.rs:1934`, same shape.
+
+So the work is mechanical: move each of the six bodies behind a
+`self_test_*_fs()` entry point, call it from the post-mount block, and leave
+the pre-mount `self_test()` free of the case entirely — rather than leaving a
+skip behind that reports a condition which can no longer occur.
+
+Four of the six were already standalone `fn`s and moved by relocating one
+call. The two in `syscall/linux` were **inline blocks inside `pub fn
+self_test()`**, which spans some 15,000 lines; they had to be lifted into
+functions of their own first. That was the larger half of the work and the
+reason they were listed separately above.
+
+**What was done (2026-08-31).** Three new post-mount entry points, all called
+from the `main.rs` block that already hosts `io_ring::self_test_fh`:
+
+| New entry point | Cases moved |
+|---|---|
+| `syscall::dispatch::self_test_fs` | Dispatch FS roundtrip, Native openat2 |
+| `proc::spawn::self_test_fs` | Spawn with fd_map, take_initial_fds one-shot |
+| `syscall::linux::self_test_fs` | `test_linux_mkdir_rmdir_unlink_roundtrip`, `test_linux_rename_roundtrip` |
+
+Three further changes fell out of the move and are worth naming, because each
+was a second way the same six cases could have gone unnoticed:
+
+- **The guards became assertions.** Each case still calls `is_mounted_rw("/")`,
+  but a `false` now prints FAIL and returns `InternalError` instead of
+  recording a SKIP. Before the mount, "root is not writable yet" is a fact
+  about the boot stage; after it, it is a defect, and answering a defect with a
+  SKIP is how these six came to spend their whole lives unrun.
+- **The `Skips` recorders were deleted**, not left idle. With no case in
+  `dispatch::self_test`, `spawn::self_test` or `linux::self_test` able to skip,
+  a recorder there could only ever report zero — machinery that can no longer
+  record anything is one more thing for a reader to mistake for coverage.
+- **Two swallowed-error sub-gates became hard failures.** Inside the two
+  `syscall/linux` bodies, `if Vfs::write_file(..).is_ok() { .. }` wrapped three
+  assertions in the mkdir case and the whole `RENAME_NOREPLACE`/EEXIST leg in
+  the rename case. A failing write dropped those assertions and the section
+  still printed OK — the same defect as the outer skip, one level down and with
+  no log line at all. Both now fail loudly.
+
+The calls are FATAL rather than WARNING, matching the halves of the same
+suites that still run at Steps 11 and 19 and halt the boot on failure.
+Demoting them would have moved the six cases from never running to running and
+not mattering.
+
+**Then close the class, not just the instances.** Still open. Extend
+`scripts/check-selftest-skips.py` (or the boot-history machinery in
+`bench/boot-history.jsonl`, which already has the data) to fail when a named
+skip fires on 100% of recorded boots. A skip that has never once *not* fired
+is not a skip; it is a deletion with a log line.
+
+**Why this matters beyond the six.** `test_dispatch_openat2_native` is the
+test design-decisions.md §648 relies on for native `dirfd == 0` coverage, and
+it is one of the six. Adding cases to a test that provably never runs is the
+precise self-deception §648's own entry criticises elsewhere — so §648's
+test half was blocked on this (it is now unblocked), and any future "it is
+covered by a self-test" claim about these six subsystems is worth checking
+against the log first.
+
 ### Lesson 81 addendum: the inventory is 55 sites in 20 apps, not seven (lane C, 2026-08-30)
 
 **In short:** Lesson 81's "where else to look" said "the seven `is_some()`-only
@@ -100860,6 +101106,85 @@ test was written. The systematic check is cheap and does not need a full
 sweep: for each such test, find the rule's threshold, find the fixture's
 value, and confirm the fixture is on the far side. Where it is not, the test
 is green today for a reason unrelated to the rule it names.
+
+**Postscript (lane C, 2026-08-31): the fixture is often a *list*, and a list
+is no safer than the single size it replaced.** `hangman`'s wiring sized its
+keyboard `by_width.min(by_height)` -- the key is the smaller of what the
+width can pay for and what the height can. The mutation sweep replaced that
+with `by_width` alone and *nothing failed*, in a suite with nine window
+sizes, a containment test that checks every band is inside the window, and
+an overlap test that checks no two bands touch.
+
+The nine sizes were 320x240, 640x480, 740x560, 1280x800 and five more, and
+every one of them is roughly four-by-three. The height term only binds when
+the window is much wider than it is tall, so across the whole list
+`min(by_width, by_height)` *is* `by_width` -- the mutation changed no
+arithmetic that any fixture performed. Worse, the two tests that look like
+they would catch it cannot: a keyboard that has eaten the window is still
+*inside* the window, and its keys still do not overlap each other. In a
+1200x200 window the width offers 116-pixel keys and the height offers 18,
+so the unmutated program draws an 18-pixel keyboard and the mutant draws one
+five times the height of the window it is in -- and every assertion in the
+suite is about the parts being contained and disjoint, which a keyboard that
+has eaten everything else satisfies perfectly.
+
+Two things generalise from it:
+
+- **A list of fixtures samples one axis of variation, usually the one whose
+  name is in the variable.** `SIZES` varies *size* -- and a rule about aspect
+  ratio is invisible to every entry in it, because they were all chosen to
+  look like windows people use. The question from the main lesson still
+  applies, but it has to be asked of the *quantity the rule turns on*: here
+  `w/h`, which ranged over 1.25-1.6 in a fixture that needed 6.0. When a
+  rule is a `min` or a `max` of two terms, the threshold is the crossover,
+  and a fixture on one side of it tests one term.
+- **"Contained and disjoint" is not "laid out".** Those two properties are
+  what a layout test naturally asserts and they are jointly satisfied by
+  degenerate layouts -- one band taking everything, bands stacked
+  left-aligned, a band pushed to zero. Each needs its own assertion about
+  *proportion*: `hangman` now asserts the keyboard takes at most 36% of the
+  window height, that each key row's left margin equals its right, and that
+  the word row ends above the keys.
+
+**Second postscript (lane C, 2026-08-31): a clamp has two flat ends, and a
+fixture pair can sit on one of them without either value looking extreme.**
+`dots`' very first wiring test -- `the_layout_follows_the_window_rather_than_
+a_constant`, whose whole job is to prove the board is no longer drawn from a
+constant -- solved the layout at 400x400 and at 1200x1200 and asserted the
+second board was wider. It failed, and the failure message was the lesson in
+one line: *"a window three times as wide drew a board 291.6 wide against
+291.6."* The dot spacing is `min(fit, MAX_SPACING)` with `MAX_SPACING = 90`,
+and both windows are far above the crossover, so tripling the window changed
+nothing the rule computed. Retrying with 200 against 400 failed the same way
+-- 400 still saturates.
+
+Two things about it are worth keeping, and neither is in the main lesson:
+
+- **The saturated end does not announce itself.** 400x400 is an unremarkable
+  window; nothing about writing it down suggests "this is the flat part of a
+  clamp." The only way to know is to compute the threshold and compare. The
+  fix was to make the test say so out loud: the pair is 150x150 against
+  300x300 now, and the test *asserts* both spacings are strictly below
+  `MAX_SPACING` before it compares them. A fixture that has to prove it is in
+  the regime cannot silently leave it when a constant is retuned later.
+- **Two clamps in one layout can have disjoint interiors, and then one pair
+  cannot serve both.** The same test also wanted to prove the font follows
+  the window, but the font is clamped to `9..18` and is *already at its
+  ceiling* by the time a window is big enough to be below the spacing cap --
+  the interiors do not overlap. The test is two explicitly-guarded pairs now,
+  150x150/300x300 for the board and 400x340/400x600 for the font, with a
+  comment recording that no single pair can exercise both. When a layout has
+  several clamped quantities, "one representative window" is not a fixture;
+  it is a coincidence about which clamp happens to be loose.
+
+The same trap bit a second dots fixture the same hour, in its milder form:
+`a_window_too_small_for_a_board_draws_none_and_offers_no_lines` listed 900x60
+among its "too small" windows. The program draws a real 8.65-pixel lattice
+there with 1.6x1.07 hit boxes -- 900x60 is *small*, not *absent*, and the
+threshold the test was named after does not exist at that size. The fixture
+is 30x30, 10x10 and 0x0 now, and a comment records that 900x60 was removed
+because asserting emptiness there would be asserting a threshold the program
+does not have.
 
 ### Lesson 91: a needle the frame says twice cannot tell you which band said it (lane C, 2026-08-30)
 
@@ -101320,3 +101645,186 @@ for the `*at` family, as an argument to `fstat`, and as an argument to
 
 Until (1), the `*at` pinning work uses `SYS_FS_*_PINNED` handles from ordinary
 `open`, which is what §730 describes and is not blocked by this.
+### Lesson 93: a box sized by measuring one string and filled with another is a box that fits nothing (lane C, 2026-08-31)
+
+**In short:** `chess`'s layout decided whether an information panel was worth
+drawing by measuring the widest line it would hold. The widest line it
+measured was `"Arrows/Enter: Navigate"`. The widest line it drew was
+`"Arrows/Enter: Move"`. Six characters of column that no text ever occupied,
+and -- had the two been the other way round -- a hint clipped in exactly the
+narrow window the measurement exists to protect. Nothing failed. The panel
+looked right at every size anyone tried, because the error is in the *slack*,
+and slack is invisible until it runs out.
+
+**The shape of it:**
+
+```rust
+// in Layout::solve
+let panel_w_min = text::measure("Arrows/Enter: Navigate", label, Regular)
+    .max(...)
+    + pad * 2.0;
+```
+
+```rust
+// in draw_panel, forty lines away
+for hint in ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"] {
+    text_at(f, hint, ...);
+}
+```
+
+The two lists were written months apart by the same author. The drawn one was
+edited when the keyboard handling changed; the measured one was not, because
+nothing points from one to the other. A literal in a `measure` call and a
+literal in a `text_at` call are two unrelated facts as far as the compiler,
+the tests and the reader are concerned.
+
+**Why the tests did not catch it.** The obvious test -- "the panel is wide
+enough for the lines it holds" -- is the one that would have, and it existed
+in spirit: the wiring campaign writes exactly that test for every app with
+chrome. But writing it against `Layout::solve`'s own constant reproduces the
+bug in the test, and writing it against the drawn strings requires the drawn
+strings to be *reachable from the test*, which they were not: they were
+literals inside a `for` loop in a private drawing method.
+
+**The repair is to make the two lists one list, at module scope:**
+
+```rust
+/// The key hints printed at the foot of the panel.
+///
+/// Named, because the layout has to measure them to decide whether a panel is
+/// worth drawing at all, and a string measured in one place and drawn in
+/// another is a column sized for a line that is not the line it holds.
+const CONTROLS: [&str; 3] = ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"];
+```
+
+`Layout::solve` folds `text::measure` over `CONTROLS`; `draw_panel` iterates
+`CONTROLS`; the test iterates `CONTROLS`. Editing a hint now moves all three
+together, and the test is no longer a restatement of the layout's arithmetic
+but a genuine question put to it.
+
+**Test it at every width, not at the default one.** The first version of the
+test asked the question of `ChessApp::SIZE` alone and a mutation that replaced
+the whole measurement with `let panel_w_min = 20.0;` survived it -- at 900 px
+the panel is 28% of the window and comfortably wide either way. The
+measurement only decides anything in the windows near the limit, which are
+precisely the windows a single-size test does not visit. The test now sweeps
+280..=1600 in steps of 20 at three heights, skips the sizes that drop the
+panel, and asserts it checked more than fifty of them. That last assertion
+matters: without it a layout change that dropped the panel everywhere would
+turn the test into a loop that runs zero times and passes.
+
+**Where else to look.** Any `text::measure` whose argument is a literal. The
+question to ask is not "is this the right width" but "is this literal the
+same object as the one that gets drawn". Sites where the answer is "there is
+only one literal, and the layout reads it" are fine; sites where the answer
+requires comparing two files are the fault. A grep for `measure("` across
+`gui/` and `apps/` finds them; run on 2026-08-31 it returns about twenty
+production sites, and the first one checked was already wrong:
+
+`gomoku` (`apps/gomoku/src/main.rs:135`) sizes its panel from
+
+```rust
+let panel_w_min =
+    text::measure("Draws: 88", font, FontWeightHint::Regular).max(font * 6.0) + pad * 2.0;
+```
+
+and the panel draws `"\u{25CF} Black: {n}"`, `"\u{25CB} White: {n}"`,
+`"Draws: {n}"`, `"New game (N)"` and `"Undo (Z)"`. `"New game (N)"` is wider
+than `"Draws: 88"`, so the line that decides the width is not the line that
+was measured; the `.max(font * 6.0)` is a fudge factor standing in for the
+measurement that was not taken. `"Draws: 88"` also caps the draw count at two
+digits. Same repair as above: one named list, measured and drawn from it,
+tested across widths.
+
+Filed as its own task -- **audit the `measure("` sites in every wired app** --
+rather than fixed in passing, because the fix is per-app and each one wants
+its own width-swept test. The rest of the audit is written up in `todo.txt`,
+and it sharpens the rule worth carrying forward: **the fault appears when the
+`measure` and the `text_at` are in different functions.** Where the two
+literals sit a few lines apart in one body -- `life`, `defrag`, `sokoban`,
+`yahtzee`, `speedtest`, `renamer` -- a reader edits them together and every
+such pair in the tree agrees today. Where they are a layout function and a
+drawing function, as in `chess` and `gomoku`, they drift. `snake` and
+`stickynotes` are in the second shape and merely happen to be right.
+
+**Postscript (same day): the fudge factor beside the wrong string was what
+made the wrong string harmless, and that is not a reason to leave either.**
+All four sites are repaired now -- `gomoku` has `PANEL_HEADINGS`,
+`PANEL_LINES` and `PANEL_BUTTONS` measured at the size *and weight* each is
+drawn at, `snake` has `STATS_HEADING`, `stickynotes` has `PIN_PREFIX` -- and
+`gomoku`'s repair taught something `chess`'s did not. Its shipped line was
+`measure("Draws: 88", font, Regular).max(font * 6.0)`, and a mutation that
+restores the whole of it *survives* the new width-swept test. Measured: the
+fudge is `6.00 * font`, the widest line the panel really draws is
+`5.31 * font`, and `"Draws: 88"` is `4.27 * font`. So the `.max` won at every
+window and the panel was never actually too narrow -- one wrong number was
+covering for another. The mutation that *is* caught is that measurement with
+the fudge removed, which leaves the widest line 17 px short of the column at
+280x400 and at 400x640.
+
+Two things follow. First, a site like this cannot be found by testing, only
+by reading -- which is why the grep is the tool here and the suite is not.
+Second, and this is the part worth arguing with: "the fudge happens to be big
+enough" is no defence of leaving it, because *nothing holds it there*. It is
+a number tuned against a set of strings, sitting forty lines from those
+strings, with no test able to notice when they change and no reader able to
+see that it should. That is the same fault as the wrong literal, one level
+up: a measurement replaced by a constant that agreed with it once. The repair
+is the same either way -- measure the strings you draw -- and the surviving
+row stays in the mutation table carrying its reason, rather than being
+deleted (lesson 94).
+
+### Lesson 94: a branch the current constant makes unreachable is a landmine, not dead code (lane C, 2026-08-31)
+
+**In short:** `chess`'s minimax scored a leaf position from White's point of
+view when it was White's turn to choose and from Black's when it was Black's
+-- while the checkmate scores twelve lines below it were White-relative in
+both cases. Two different scales, compared against each other. The program
+nonetheless played correct chess for its whole life, because the only caller
+searches an even number of plies from a maximising root, so every leaf it
+reaches is a maximising one and the wrong arm is never taken. Change
+`AI_DEPTH` from 3 to 4 and the engine starts preferring blunders.
+
+**The code:**
+
+```rust
+fn minimax(board: &Board, depth: i32, ..., maximizing: bool) -> i32 {
+    if depth <= 0 {
+        let eval = evaluate(board);          // always White-relative
+        return if maximizing { eval } else { eval.saturating_neg() };
+    }
+    ...
+            return if maximizing {           // and these are not negated
+                KING_VALUE.saturating_add(depth).saturating_neg()
+            } else {
+                KING_VALUE.saturating_add(depth)
+            };
+```
+
+This is half a negamax bolted onto a minimax. Either convention is fine; the
+two together are not, and the tell is that the two `if maximizing` blocks in
+one function disagree about what the returned number means.
+
+**How it surfaced.** Only through mutation. A row that deleted the negation
+entirely -- `return eval;` -- survived the full suite, which is the sweep's
+way of saying *no input to this program can tell the two apart*. That is the
+same signal as lesson 92's duplicated condition and it deserves the same
+response: do not shrug and delete the row. Ask why the code cannot be reached,
+and the answer here was a parity relationship between a constant and a root
+flag, holding by luck across two functions that do not mention each other.
+
+**The repair is to remove the negation, not to test it.** The leaf now returns
+`evaluate(board)` unconditionally, which is what the mate scores already
+assumed, and the doc comment says so in the first line: *"Every score this
+returns is from White's point of view; `maximizing` says which side is
+choosing at this node, not which side the number is about."* A test asserts
+`minimax(board, 0, .., true) == minimax(board, 0, .., false) == evaluate(board)`
+so the two conventions cannot drift apart again.
+
+**Where else to look.** Search-like code where a flag and a depth constant
+interact: anything of the form `if maximizing`/`if color`/`side_sign` inside a
+function whose recursion alternates the flag. The question is whether *every*
+value of the flag is reachable at *every* return site, and the cheapest way to
+find out is to mutate each arm and see whether anything notices. More
+generally: when a mutation survives, the finding is never "the sweep row was
+bad" until you have established that the branch is reachable at all.

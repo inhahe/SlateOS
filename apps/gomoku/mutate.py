@@ -37,6 +37,47 @@ MUTATIONS = [
         ["the_board_is_square_and_fits_the_window"],
     ),
     (
+        # The program shipped with
+        #     text::measure("Draws: 88", font, Regular).max(font * 6.0)
+        # -- a string the panel never draws, beside a fudge factor standing in
+        # for the measurement that was not taken.  Restoring the whole of that
+        # line is NOT a mutation this suite can catch, and the reason is worth
+        # recording: the fudge is 6.00 * font while the widest line the panel
+        # really draws is 5.31 * font, so the fudge won at every window and the
+        # column was never actually too narrow.  The wrong string was harmless
+        # because a second wrong number covered for it -- which is why it had
+        # to be replaced by the measurement rather than left alone.  What IS
+        # catchable is that measurement without its fudge: "Draws: 88" is
+        # 4.27 * font, leaving the widest line 17 px short of the column at
+        # 280x400 and at 400x640.
+        "the panel is sized by measuring a line it does not draw",
+        "        let mut widest: f32 = 0.0;\n"
+        "        for heading in PANEL_HEADINGS {\n"
+        "            widest = widest.max(text::measure(heading, font, FontWeightHint::Bold));\n"
+        "        }\n"
+        "        for (stem, tail) in PANEL_LINES {\n"
+        "            let mut line = String::from(stem);\n"
+        "            line.push_str(tail);\n"
+        "            widest = widest.max(text::measure(&line, font, FontWeightHint::Regular));\n"
+        "        }\n"
+        "        for button in PANEL_BUTTONS {\n"
+        "            widest = widest.max(text::measure(button, small, FontWeightHint::Regular));\n"
+        "        }\n"
+        "        let panel_w_min = widest + pad * 2.0;",
+        '        let panel_w_min =\n'
+        '            text::measure("Draws: 88", font, FontWeightHint::Regular) + pad * 2.0;',
+        ["the_panel_is_wide_enough_for_the_lines_it_holds"],
+    ),
+    (
+        # A subtler drift than dropping the measurement: the stems are measured
+        # without the numbers that follow them, which is the width of a line the
+        # panel draws only before the first move.
+        "the counted lines are measured without their counts",
+        "            let mut line = String::from(stem);\n            line.push_str(tail);",
+        "            let mut line = String::from(stem);\n            line.push_str(\"\");",
+        ["the_panel_is_wide_enough_for_the_lines_it_holds"],
+    ),
+    (
         "the cell is the old 36 px constant again",
         "        let cell = grid / (BOARD_SIZE - 1) as f32;",
         "        let cell = 36.0;",
@@ -527,20 +568,20 @@ MUTATIONS = [
     ),
     (
         "the panel counts the pairs instead of the stones",
-        '            format!("Moves: {}", self.move_count),',
-        '            format!("Moves: {}", self.move_count / 2),',
+        '            format!("{MOVES_STEM}{}", self.move_count),',
+        '            format!("{MOVES_STEM}{}", self.move_count / 2),',
         ["the_panel_counts_the_moves_and_the_scores"],
     ),
     (
         "the panel reads the scores off by one column",
-        '            (format!("\\u{25CF} Black: {}", self.scores.0), TEXT_COLOR),',
-        '            (format!("\\u{25CF} Black: {}", self.scores.1), TEXT_COLOR),',
+        '            (format!("{BLACK_SCORE_STEM}{}", self.scores.0), TEXT_COLOR),',
+        '            (format!("{BLACK_SCORE_STEM}{}", self.scores.1), TEXT_COLOR),',
         ["the_panel_counts_the_moves_and_the_scores"],
     ),
     (
         "Undo is clickable with nothing to undo",
-        '            ("Undo (Z)", Target::Undo, !self.move_history.is_empty()),',
-        '            ("Undo (Z)", Target::Undo, true),',
+        '            (UNDO_LABEL, Target::Undo, !self.move_history.is_empty()),',
+        '            (UNDO_LABEL, Target::Undo, true),',
         ["undo_is_not_clickable_with_nothing_to_undo"],
     ),
     (

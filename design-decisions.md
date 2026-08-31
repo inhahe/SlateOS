@@ -52913,6 +52913,376 @@ points are untouched and still behave exactly as before, which is deliberate:
 this adds a correct route rather than altering the existing one, so the
 migration of each `*at` caller is a separate, individually revertible step.
 
+---
+
+## 648. The kernel's working directory is a Linux-ABI concept, so `dirfd == 0` means *no base supplied* — not "wherever I happen to be"
+
+**Date:** 2026-08-30
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+**Answers:** `requests/b-a-the-kernels-cwd-and-libcs-cwd-are-two-different-directories.md`
+
+**In short:** several new file syscalls let a program say "open `notes.txt`
+inside *that* folder", where *that folder* is named by a number the program
+already holds. Passing `0` for that number used to mean something different:
+"inside whatever folder my program is currently sitting in". Lane B found that
+the kernel and the C library each keep their **own idea** of what folder a
+program is currently sitting in, and the two are not the same folder — a
+SlateOS-native program that changes directory moves the library's idea and not
+the kernel's. So `0` meant a directory that was very likely wrong, and a
+security check made against the wrong folder does not fail: it *passes*, on the
+wrong folder, and returns a perfectly valid handle. The decision is to stop
+having `0` mean a folder at all. It now means "I am not supplying a folder",
+which is legal exactly where no folder is needed (the path is already a
+complete one, starting at `/`) and refused everywhere else.
+
+### The decision
+
+`0` is not a directory. In `SYS_FS_OPENAT2` (661) it means **no base
+supplied**:
+
+| `resolve` | fragment | `dirfd == 0` |
+|---|---|---|
+| none | absolute (`/etc/hosts`) | **allowed** — the base is never read; POSIX `openat(2)` ignores it for an absolute path |
+| none | relative (`hosts`) | `InvalidArgument` — a base is needed and none was given |
+| `RESOLVE_BENEATH` | absolute | `CrossDevice`, already, from `beneath_fragment_ok` before the base is looked at |
+| `RESOLVE_BENEATH` | relative | `InvalidArgument` |
+
+So under containment, `dirfd == 0` is **always** an error — which is what
+containment wants, since "confine this walk beneath a directory I did not name"
+is not a request that can be honoured.
+
+In `SYS_FS_UNLINKAT_PINNED` / `SYS_FS_FSTATAT_PINNED` / `SYS_FS_GETDENTS_PINNED`
+(662/663/664) the branch is deleted outright rather than narrowed: all three
+take a single-component name, never an absolute path, so there is no shape in
+which they can proceed without a base. `0` falls through to the ordinary handle
+lookup and comes back `InvalidHandle`, which is the honest answer — handle `0`
+does not exist.
+
+### Why, and why this is not the coin-flip lane B thought it was
+
+Lane B laid out two coherent options and preferred (b) — drop the cwd meaning —
+weakly, arguing from the cost of keeping two copies of a cwd in step across
+`fork`/`exec`/`spawn`. That argument is correct but it is a cost argument, and
+cost arguments are the kind that get re-litigated.
+
+There is a stronger one that is not a preference at all. `CLAUDE.md` lists as
+non-negotiable: *"Capability-based security from day one. Every kernel object
+accessed via unforgeable handles. **No ambient authority.**"* Ambient authority
+is permission you get by *being* you rather than by holding a token. `dirfd ==
+0` → "resolve against the directory this process happens to be in" is exactly
+that: a base the caller did not name, could not have been denied, and cannot
+pass to anyone else. Option (a) — adding `SYS_FS_SET_CWD` so the native ABI has
+a first-class cwd — would not fix that; it would *entrench* it, and make a
+second syscall whose whole purpose is to move the ambient base around.
+
+So (b) is not the cheaper of two defensible designs. It is the only one of the
+two that the architecture permits.
+
+### Why "no base supplied" rather than "always an error"
+
+The first draft of this change made `dirfd == 0` an outright error. Reading
+`posix/src/file.rs::openat2_forward` showed that would have broken libc, which
+passes `0` today — deliberately, for absolute paths, with the reasoning written
+in the code: *"0 is safe for an absolute path, and only for an absolute path,
+because the base is then never read."*
+
+That is not libc exploiting a loophole; it is the correct reading of what `0`
+means once it stops meaning a directory. An absolute fragment is the complete
+answer, so there is no base to be right or wrong about. Making that shape an
+error would have forced libc to open, pass and close a handle it provably never
+uses, on every absolute-path `openat2` — pure ceremony. So `0` keeps a meaning,
+just a much smaller one, and lane B's side needs no change at all.
+
+### What this costs
+
+One `open`+`close` per confined `AT_FDCWD` call — which libc already pays
+today, because it could not use `0` for a relative path anyway (that is the
+whole content of lane B's report). The native ABI becomes slightly less
+convenient for a caller with no libc: a bare kernel task. The old code already
+refused `dirfd == 0` for those (`caller_pid()` is `None`), so that population is
+zero.
+
+The kernel's `pcb` cwd stays exactly where it is, serving the Linux ABI's
+`chdir`/`fchdir` in `kernel/src/syscall/linux.rs` — its only two writers. What
+changes is that no *native* call reads it any more, which makes the divergence
+lane B documented (`TD-B-THE-KERNEL-HAS-A-WORKING-DIRECTORY-AND-LIBC-NEVER-TELLS-IT-ANYTHING`)
+harmless rather than latent: two copies that disagree only matter if something
+reads both.
+
+### The test this unblocks
+
+`test_dispatch_openat2_native` previously said, in its own doc comment,
+*"Kernel context … there is no cwd — `dirfd == 0` is therefore covered from
+ring 3 rather than here."* That was true and unsatisfying: the ring-3 coverage
+it pointed at (`self_test_openat2_beneath`) goes through the **Linux** ABI's
+`AT_FDCWD`, which is a different mechanism entirely, so native `dirfd == 0` was
+in fact covered nowhere.
+
+Once `0` no longer depends on a cwd, it can be tested from kernel context, and
+now is — cases (f), (g) and (h): absolute fragment with no base succeeds and
+reads the right byte; relative fragment with no base is `InvalidArgument`;
+`RESOLVE_BENEATH` with no base is refused rather than confined to something.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **(a) Make the cwd part of the native ABI** — add `SYS_FS_SET_CWD`, have libc's `chdir` call it | Entrenches ambient authority, which `CLAUDE.md` forbids outright. Also, as lane B noted, the sync bug it invites lands in `fork`/`exec`/`spawn`, not in `chdir` where anyone would look for it. |
+| **Keep `dirfd == 0` but document it as "the Linux cwd, use at your own risk"** | A documented trap is still a trap, and this one fails *open*: the wrong base returns a valid handle that looks like working containment. That is `TD-OPENAT2-BENEATH-INROOT`'s failure mode, reintroduced by a footnote. |
+| **An explicit `AT_FDCWD`-style sentinel** (e.g. `u64::MAX`) instead of `0` | Lane B was offered this and declined it: the problem is not that `0` is a confusing spelling, it is that the *thing being spelled* should not exist in this ABI. A better-named sentinel for ambient authority is still ambient authority. |
+| **Make `dirfd == 0` an error in all cases**, including absolute fragments | Breaks libc's current, correct use, and buys nothing: it forces a handle to be opened and closed for a base that is provably never read. |
+
+### How to reverse it
+
+Restore the `pcb::get_cwd` branch in `sys_fs_openat2` and in `pinned_dir_arg`,
+and drop cases (f)–(h) from `test_dispatch_openat2_native`. Note what reversing
+reinstates: not a missing feature but a base nobody named — and a
+`RESOLVE_BENEATH` walk that succeeds, with a valid descriptor, confined to a
+directory the caller did not ask for.
+
+## 649. An operand noun whose article English picks by *sound* states its own article, and a static gate enforces it for the open class only
+
+**Date:** 2026-08-30
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+
+**In short:** The shell refuses a bad operand with a sentence like "`1OOO' is
+not a user id". The "a" versus "an" is chosen by a helper that looks at the
+first *letter*, so a noun spelled with a vowel but pronounced with a consonant
+— "user", which sounds like *yoo*-zer — came out as "an user id". Seven call
+sites in `kshell.rs` were saying that; six had been saying it for some time and
+nobody had noticed, because the only thing that reads a refusal's exact wording
+is a self-test assertion, and six of the seven had none. All seven now write
+their own article into the noun (`"a user id"`), which `article_for` already
+supports and prints verbatim, and a new static gate,
+`scripts/check-shell-noun-article.py`, refuses any future noun in the same
+class that does not.
+
+### What went wrong
+
+`kshell.rs`'s operand helpers (`required_num`, `optional_num`, `readable_num`,
+`readable_hex`, `required_hex`, `optional_hex`, `required_key`) build their
+refusal as `is not {article}{noun}`, and `article_for` picks the article by
+spelling: a leading vowel *letter* gets `"an "`, anything else gets `"a "`.
+That rule exists for a good reason — it is right for the large majority of the
+284 distinct nouns in the file, and before it the shell said "is not a element
+id" and "is not a inode ratio".
+
+`article_for`'s own doc comment already named the flaw and the escape hatch: a
+noun that begins with `"a "` or `"an "` is printed as-is, "which keeps the
+exception at the one call site that needs it instead of in a table here that
+the next noun would fall off the end of." Four sites were using it (`"a UID"`).
+Eleven `u`-initial nouns were not thinking about it at all, and seven of those
+were wrong.
+
+The failure surfaced in the worst possible place. Batch 44 of the §600
+burn-down added a self-test rung asserting the *correct* English for a new
+`autostart add` refusal, and the rung failed — in QEMU, at the end of an
+eleven-minute boot, with a kernel panic:
+
+```
+!! `an unreadable uid is named, not read as root`: output lacked text it must contain
+   expected: `1OOO' is not a user id
+   actual:   autostart: add: `1OOO' is not an user id
+```
+
+Worth recording plainly, because it is the part that generalises: I had chosen
+the noun `"user id"` over `"uid"` *specifically* to avoid `article_for` printing
+"an uid" — and walked straight into "an user id", because `u` is a vowel letter
+either way. Reasoning about the rule without running it produced a wrong answer
+that looked careful.
+
+### Why this needs a gate and not just a fix
+
+A rule about the text of a string literal should not cost a boot cycle to
+check, and this one could only be checked that way. The two gates that might
+have caught it structurally cannot:
+
+- `check-selftest-wording.py` resolves the fragments a rung asserts against
+  text the command can print. The article is not in the format string — it is
+  the return value of a function call, so there is nothing in the source for it
+  to match against.
+- The rung itself only catches a site that *has* a rung. Six of the seven wrong
+  sites did not, which is exactly why they had survived.
+
+So the gate is static, runs in under a second, and was proved non-vacuous
+before being trusted: reverting the one repaired site reproduced the QEMU
+failure as `kshell.rs:49653  'user id' would print "is not an user id"`, exit
+1. It also carries a 14-case `--self-test` fixture, following
+`check-shell-message-names.py`'s convention, so that a gate whose parser has
+quietly collapsed cannot report a clean tree in the same words as a working
+one — the file itself is expected to be clean, so agreement with the tree
+proves nothing on its own.
+
+### What is enforced, and why not more
+
+The enforced class is `u`, `eu` and `one` — the "yoo"/"wun" onset. That line
+was drawn from a survey of all 284 distinct nouns in the file, not from
+intuition:
+
+| Class | Sites | Finding |
+|---|---|---|
+| `u` | 7 | **all seven wrong.** Three *other* `u` nouns ("an uncompressed size", "an upload limit", "an utterance id") were right, so the letter genuinely splits both ways |
+| `eu`, `one` | 0 | none yet, but the same open, productive class |
+| `h` | 11 | **all eleven right** — handler, hard, height, high, horizontal, hotspot, hue. Every one a hard `h` |
+
+`h` is deliberately excluded. The distinction that decides it is
+**open versus closed**: English keeps making new "yoo" words (user, unit, uid,
+URL, unicast, usable) and they are indistinguishable by spelling from the "uh"
+ones (unreadable, update, upper), so a caller writing a new `u` noun genuinely
+has to stop and decide. Silent `h` is a closed set inherited from French —
+hour, honest, honour, heir and their derivatives — four words, none of which
+appears here. Demanding an explicit article on eleven correct call sites to
+guard four words nobody has written is noise, and noise in a gate is how a gate
+stops being read.
+
+If an `h` noun from that closed set ever does appear, the right fix is a
+four-entry table inside `article_for`, not an extension of this gate. A closed
+set is precisely the thing a table handles without "the next noun falling off
+the end of it", which is `article_for`'s own stated objection to tabulating the
+open case.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| **Fix only the site that panicked** | The panic named one line; the survey found seven, six of them pre-existing and none of them covered by a rung. Fixing one and leaving six is how the class stays alive. |
+| **Teach `article_for` a pronunciation table** | For the *open* class this is the table its own doc rejects: it is never finished, and its failure mode is silent — a new noun that is not in it gets the wrong article with no diagnostic anywhere. |
+| **Rely on self-test rungs to assert the wording** | That is the status quo that let six sites be wrong indefinitely, and it charges an eleven-minute boot for a fact about a string literal. |
+| **Enforce `h` as well, for symmetry** | Eleven correct sites would each have to restate an article to guard a four-word closed set with no members in the tree. |
+| **Make it a `clippy` lint or a `const` assertion** | The nouns are runtime `&str` arguments to generic helpers; nothing in the type system distinguishes the noun from the command name. A textual gate over the call's last string literal is the shape the data actually has. |
+
+### How to reverse it
+
+Delete `scripts/check-shell-noun-article.py` and its two-step call in
+`scripts/boot-test.sh`. The nouns themselves need no reversal — an explicit
+`"a user id"` is correct English with or without the gate. What reversing
+costs is the guarantee that the next `u`-initial noun is noticed at all: it
+would be caught by a self-test rung if one exists, in QEMU, or by nobody.
+
+## 650. A precondition that is a constant is not a precondition: the six self-tests that skipped on it move past the mount and assert instead
+
+**Date:** 2026-08-31
+**Lane:** A
+**Decided by:** Claude (autonomous), lane A
+
+**In short:** Six of the kernel's boot self-tests began by asking "is the main
+disk mounted and writable yet?", found that it was not, printed a polite
+"skipping this test" line, and returned. That question always had the same
+answer, because those tests run at boot step 11 and step 19 and the disk is
+not mounted until step 20 — so those six tests had never actually run, not
+once, on any boot the project has ever taken. Nothing looked wrong: the boot
+log said the suites passed. The decision was what to do about it. The six
+tests now run *after* the mount, and if the disk turns out not to be writable
+at that point they fail the boot rather than excusing themselves.
+
+### What went wrong
+
+The skips were **honest**. design-decisions.md §270 says a self-test may skip,
+but only on a fact it *looked up* — not on an inference from a failed
+operation, because inferring lets the very bug the test exists to catch switch
+the test off. All six obeyed that: each called
+`crate::fs::selftest::is_mounted_rw("/")`, a mount-table lookup, and each
+recorded the reason into a `Skips` summary so the closing PASSED line named
+them. `scripts/check-selftest-skips.py` enforces exactly that honesty, and it
+passed all six.
+
+What no rule covered is a skip that is honest **and unconditional in
+practice** — a predicate that is a *constant* at the point it is evaluated.
+`is_mounted_rw("/")` is a genuine runtime question in general; it simply is
+not one at boot step 11. The six cases were:
+
+| Subsystem | Case |
+|---|---|
+| `syscall` (dispatch.rs) | Dispatch FS roundtrip; Native openat2 |
+| `syscall/linux` (linux.rs) | mkdir/rmdir/unlink native-VFS round-trip; rename native-VFS round-trip |
+| `proc/spawn` (spawn.rs) | Spawn with fd_map; take_initial_fds one-shot |
+
+This was not found by a gate. It was found by reading a boot log while looking
+for something else, and noticing that the same four words appeared six times.
+
+### The decision, in three parts
+
+**(1) Move, don't relax.** The alternative that suggests itself is to mount
+earlier, or to give the pre-mount suites a scratch filesystem. Both change
+boot ordering to suit a test. The fix pattern already existed in-tree three
+times over — `ipc::io_ring::self_test_fh`,
+`syscall::linux::self_test_rename_noreplace`, `syscall::linux::self_test_file_mmap`
+are all second entry points called from `main.rs` after step 20f for precisely
+this reason — so the six join them: `syscall::dispatch::self_test_fs`,
+`proc::spawn::self_test_fs`, `syscall::linux::self_test_fs`.
+
+**(2) The guard becomes an assertion, and does not remain as a skip.** Each
+case still calls `is_mounted_rw("/")`. A `false` now prints FAIL and returns
+`InternalError`. The reasoning: *before* the mount, "root is not writable yet"
+is a fact about the boot stage; *after* it, the same words describe a defect.
+Answering a defect with a SKIP is the mechanism that gave these six their
+entire unrun lifetime, so leaving a skip behind — reporting a condition that
+can no longer legitimately occur — would reproduce the bug in the fix.
+
+**(3) FATAL, not WARNING.** `main.rs`'s post-mount block is mixed: some calls
+there warn and continue. These three halt the boot. The other halves of the
+same three suites already run at steps 11 and 19 and halt on failure; a case
+does not become less important for having moved down the file. Demoting them
+would take the six from *never running* to *running and not mattering*, which
+is the same outcome reached by a longer route.
+
+### Two things the move exposed
+
+Neither was the reported bug; both are the same defect at a different scale,
+and both are why the entry is worth writing down.
+
+- **The `Skips` recorders had to be deleted, not left idle.** Once no case in
+  `dispatch::self_test`, `spawn::self_test` or `linux::self_test` could skip,
+  each recorder could only ever report zero. Keeping it is not neutral: a
+  reader who sees `Skips::new()` at the top of a suite reasonably infers that
+  the suite has cases that may not run. Machinery that can no longer record
+  anything is a false signal, so it goes. (`Skips` itself stays — some twenty
+  other suites still use it legitimately.)
+- **Two swallowed-error sub-gates, one level down, with no log line at all.**
+  Inside the two `syscall/linux` bodies,
+  `if crate::fs::Vfs::write_file(..).is_ok() { .. }` wrapped three assertions
+  in the mkdir case and the entire `RENAME_NOREPLACE`/EEXIST leg in the rename
+  case. A failing write dropped those assertions and the section still printed
+  `OK`. That is the outer bug exactly — a failure deciding whether to test —
+  except that the outer one at least printed `SKIP`. Both are now hard
+  failures. This is also a §270 violation in its own right, and it survived
+  because §270's checker looks for skips, and these did not print one.
+
+### Alternatives considered
+
+| Option | Why not |
+|---|---|
+| Leave the skips; they are honest | They are, and that is the problem: honesty is not the property that was missing. A skip that has never once *not* fired is a deletion with a log line. |
+| Mount the root earlier so step 11 passes | Reorders boot to suit a test, and would silently change what every other step-11..20 case sees. |
+| Give the pre-mount suites a scratch memfs | The cases test the *native* VFS round-trip specifically; a memfs would test a different thing under the same name. |
+| Keep a post-mount skip "just in case" | Reproduces the bug: it is a predicate that should now be a constant in the other direction, and if it ever is not, that is exactly the news worth halting on. |
+| WARNING instead of FATAL in `main.rs` | Moves the six from never running to running and not mattering. |
+| Fix all six, and also write the class gate now | The gate is real work (see below) and gating it on the same commit would keep six known-broken tests unrun for longer. Split deliberately; tracked in `known-issues.md`. |
+
+### What is *not* done
+
+The **class** is still open. Six instances were found by eye, and eye-finding
+does not scale to the next one. The intended gate is dynamic rather than
+static: `bench/boot-history.jsonl` already records a row per boot, so extend it
+to carry the *names* of skips that fired and fail when a named skip has fired
+on 100% of the last N ≥ 10 recorded boots. A purely static check was considered
+and rejected — deciding "is this function reachable only from a pre-mount call
+site?" needs cross-module call-graph resolution over a 100k-line file, which is
+exactly the kind of gate that becomes unreliable and then gets ignored. Tracked
+in `known-issues.md`
+`A-SIX-SELF-TESTS-SKIP-ON-EVERY-BOOT-AND-HAVE-NEVER-ONCE-RUN`.
+
+### How to reverse it
+
+Move the six bodies back into the pre-mount `self_test()` functions, restore
+the `is_mounted_rw` guards and the `Skips` recorders, and drop the three calls
+from `main.rs`. The boot log goes back to reporting six skips and the suites go
+back to passing without testing anything. The only reason to do this is if the
+post-mount block itself is found to run before the mount — in which case the
+right fix is to move the *call*, not to restore the skip.
+
 ## 712. `tar`'s record size is one setting with two spellings, and a record reaches the stream only when the *next* write needs the room
 
 **Date:** 2026-08-30

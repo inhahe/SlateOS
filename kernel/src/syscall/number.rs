@@ -3201,9 +3201,26 @@ pub const SYS_FS_OPEN_MODE: u64 = 659;
 ///   [`SYS_FS_OPEN_MODE`], but see the width note below.
 /// `arg4`: resolve restrictions ([`RESOLVE_NO_SYMLINKS`],
 ///   [`RESOLVE_BENEATH`]); any other bit set is `InvalidArgument`.
-/// `arg5`: directory handle the path is resolved against, or `0` for the
-///   process's current working directory.  Native file handle 0 is never
-///   valid, so this is not an invented in-band sentinel.
+/// `arg5`: directory handle the path is resolved against, or `0` for **no
+///   base supplied**.  Native file handle 0 is never valid, so this is not
+///   an invented in-band sentinel.
+///
+/// **`0` is not the working directory.**  It once was, and that was ambient
+/// authority — a base the caller did not name and could not have been denied —
+/// which `CLAUDE.md` forbids; worse, the cwd it read belonged to the *Linux*
+/// ABI, which a SlateOS-native `chdir` never updates, so a `RESOLVE_BENEATH`
+/// walk could be confined to the wrong directory and still return a valid
+/// handle.  `0` now means only that no base was given, which is legal exactly
+/// where no base is read:
+///
+/// | `resolve` | fragment | `dirfd == 0` |
+/// |---|---|---|
+/// | none | absolute | allowed — the base is never read, as POSIX `openat(2)` specifies |
+/// | none | relative | `InvalidArgument` — a base is needed and none was given |
+/// | [`RESOLVE_BENEATH`] | absolute | `CrossDevice`, before the base is looked at |
+/// | [`RESOLVE_BENEATH`] | relative | `InvalidArgument` |
+///
+/// See `design-decisions.md` §648.
 ///
 /// The first four arguments are [`SYS_FS_OPEN_MODE`]'s, in its order and
 /// positions, so a caller forwarding to this reads line for line against
@@ -3251,9 +3268,12 @@ pub const RESOLVE_NO_SYMLINKS: u64 = 1 << 16;
 /// directory named by `dirfd` — no `..` above it, no absolute path, no
 /// symlink escaping it.
 ///
-/// Requires a real `dirfd`; combining it with `dirfd == 0` (cwd) is
-/// accepted and confines to the cwd.  `1 << 17` rather than Linux's
-/// `0x08` for the reason given on [`RESOLVE_NO_SYMLINKS`].
+/// Requires a real `dirfd`: combined with `dirfd == 0` it is always an
+/// error, because "confine this walk beneath a directory I did not name" is
+/// not a request that can be honoured.  A relative fragment gives
+/// `InvalidArgument`; an absolute one is already `CrossDevice`, refused
+/// before the base is looked at.  `1 << 17` rather than Linux's `0x08` for
+/// the reason given on [`RESOLVE_NO_SYMLINKS`].
 pub const RESOLVE_BENEATH: u64 = 1 << 17;
 
 /// Every `resolve` bit [`SYS_FS_OPENAT2`] understands.
@@ -3293,7 +3313,8 @@ pub const AT_SYMLINK_NOFOLLOW_PINNED: u64 = 0x100;
 
 /// Remove `name` from the directory a handle was opened on.
 ///
-/// `arg0`: directory handle (0 = the process working directory).
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
 /// `arg1`: name pointer.  `arg2`: name length.
 /// `arg3`: flags — [`AT_REMOVEDIR_PINNED`] selects `rmdir` over `unlink`.
 ///
@@ -3307,7 +3328,8 @@ pub const SYS_FS_UNLINKAT_PINNED: u64 = 662;
 
 /// Stat `name` within the directory a handle was opened on.
 ///
-/// `arg0`: directory handle (0 = the process working directory).
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
 /// `arg1`: name pointer.  `arg2`: name length.
 /// `arg3`: flags — [`AT_SYMLINK_NOFOLLOW_PINNED`] selects `lstat`.
 /// `arg4`: output buffer, [`FS_META_SIZE`] bytes, in the same layout
@@ -3320,7 +3342,8 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 
 /// List the directory a handle was opened on, resolving *the handle*.
 ///
-/// `arg0`: directory handle (0 = the process working directory).
+/// `arg0`: directory handle; `0` is not the cwd and is rejected as
+/// `InvalidHandle` (§648).
 /// `arg1`: output buffer.  `arg2`: output buffer capacity.
 ///
 /// Entries are packed as `[u8 type][u32 name_len][name bytes][u64 size]`,

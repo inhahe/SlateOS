@@ -55289,3 +55289,108 @@ meaningful; do not "fix" these:
 `stickynotes:4572` is worth a second look for its name alone: `test_` is a
 prefix from a suite written before this campaign's naming convention, and it is
 the only one left in the tree.
+
+## Task (lane C, 2026-08-31): audit the `measure("` sites in every wired app
+
+Chess's twelfth fault was `Layout::solve` measuring "Arrows/Enter: Navigate"
+to size a panel that draws "Arrows/Enter: Move" -- a column sized for a line
+it does not contain. Written up as known-issues lesson 93.
+
+The check is a grep for `measure("` across `gui/` and `apps/`, and the
+question at each site is not "is this the right width" but "is this literal
+the same object as the one that gets drawn". About twenty production sites
+come back. The first one checked was already wrong:
+
+  apps/gomoku/src/main.rs:135 measures "Draws: 88" and the panel draws
+  "New game (N)", which is wider. The `.max(font * 6.0)` beside it is a
+  fudge factor standing in for the measurement that was not taken, and
+  "Draws: 88" caps the draw count at two digits besides.
+
+The other production sites were then checked, one at a time, 2026-08-31.
+The result sharpens the rule: **the fault appears when the `measure` and the
+`text_at` are in different functions.** Where the two literals sit a few
+lines apart in one function a reader edits them together, and every such
+pair in the tree currently agrees. Verdicts:
+
+  MEASURES A STRING IT DOES NOT DRAW -- fix these
+    gomoku:135        "Draws: 88" measured, "New game (N)" is the widest
+                      line drawn. Detailed above.
+
+  MEASURED AND DRAWN IN DIFFERENT FUNCTIONS -- correct today, but this is
+  the shape that goes wrong; hoist the literal to a named constant
+    snake:1270        "Stats" measured in `stats_width`, drawn ~190 lines
+                      away at 1462.
+    gomoku:1053       "Gomoku" measured to place the turn indicator, drawn
+                      at 1042 -- same function, but the app also returns it
+                      from `title()` at 1443, so it is three literals.
+    stickynotes:1758  "[P] " measured at 1758 and again at 3466, drawn at
+                      2330 -- three literals in three functions.
+
+  MEASURED AND DRAWN WITHIN A FEW LINES, LITERALS AGREE -- a smell, not a
+  fault; worth hoisting only if the file is being touched anyway
+    life:1157/1162 "Game of Life"   defrag:3363/3384 "+ Add"
+    sokoban:1427/1429 "done"        renamer:155 (the format frame matches)
+    yahtzee:1073/1078 "Yahtzee", 1226/1230 "HELD", 1216 "5" (a digit width)
+    speedtest:318/1726, 1977/1981, 2308/2312, 2469/2473
+
+  NOT A PRODUCTION SITE
+    game2048:3956 is inside a test, and a correct one: it finds the drawn
+    string in the frame first and measures *that*, which is the pattern
+    the rest of these should be tested by.
+
+The repair for the first two groups: hoist the strings to a module-scope
+named list, measure and draw and test from that one list, and sweep the
+test across widths -- a single-size test does not visit the windows the
+measurement decides anything in. Chess's
+`the_panel_is_wide_enough_for_the_lines_it_holds` is the pattern to copy,
+including its assertion that the sweep actually checked more than fifty
+sizes.
+
+DONE (lane C, 2026-08-31). All four sites in the first two groups are
+repaired; the third group was left alone deliberately, since hoisting a
+pair of literals a reader can see together buys nothing.
+
+  gomoku      `PANEL_HEADINGS`, `PANEL_LINES` (each a stem plus the widest
+              tail the column is sized for) and `PANEL_BUTTONS` at module
+              scope. `Layout::solve` folds `text::measure` over all three
+              -- at the size *and weight* each is drawn at, which the old
+              line did not do either -- and `draw_panel` draws from the
+              same constants. The `.max(font * 6.0)` fudge is gone. The
+              `clamp` beneath it grew a `panel_w_min.max(220.0)` high
+              bound: a real measurement can exceed 220 where the old
+              constant could not, and `clamp` panics when its low bound is
+              above its high one. New test
+              `the_panel_is_wide_enough_for_the_lines_it_holds` sweeps
+              280..=1600 by 20 at three heights (79 tests, was 78), and
+              two rows were added to `apps/gomoku/mutate.py`: one restores
+              the shipped `"Draws: 88"` line, one measures the stems
+              without their counts.
+              `"Gomoku"` is `TITLE_TEXT`, used by the header, by the
+              measurement that places the turn indicator past it, and by
+              `title()`.
+  snake       `"Stats"` is `STATS_HEADING`, measured by `stats_width` and
+              drawn by `draw_stats`. The rows themselves already came
+              from one `stats_rows()`, which is why only the heading was
+              two literals. 111 tests still pass.
+  stickynotes `"[P] "` is `PIN_PREFIX`, used by the four sites that must
+              agree: the renderer that prepends it, the sidebar that
+              prepends it, and the two -- `column_in_title` and the title
+              caret -- that *measure* it to shift a column by its width.
+              Getting those two out of step would land a click four
+              glyphs from where it was aimed. 129 tests still pass.
+
+One finding is worth carrying: gomoku's shipped line was never actually
+producing a panel too narrow, because the `.max(font * 6.0)` beside the
+wrong string was 6.00 * font while the widest line the panel draws is
+5.31 * font. The fudge covered for the wrong literal at every window, so
+a mutation that restores the whole shipped line survives the new test.
+The row stays in `apps/gomoku/mutate.py` carrying that reason rather
+than being deleted (lesson 94), and the row that IS caught removes the
+fudge and leaves the measurement: "Draws: 88" is 4.27 * font, 17 px
+short of the column at 280x400 and at 400x640. A site of this shape is
+findable by reading and not by testing, which is why the grep is the
+tool and the suite is not.
+
+The rule the audit produced is in known-issues lesson 93: the fault
+appears when the `measure` and the `text_at` are in different functions.
+Re-run the grep when a new app is wired.

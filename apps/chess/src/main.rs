@@ -1,44 +1,50 @@
-#![allow(dead_code)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::fn_params_excessive_bools)]
-#![allow(unused_imports)]
-
-//! Slate OS Chess — a full chess game with AI opponent.
+//! Slate OS Chess -- a full chess game against a minimax opponent, in a real
+//! window.
 //!
-//! Features a complete chess engine with legal move generation (including
-//! castling, en passant, pawn promotion), check/checkmate/stalemate detection,
-//! a minimax AI with alpha-beta pruning, move history in algebraic notation,
-//! captured pieces display, and a Catppuccin Mocha themed board.
+//! A complete engine: legal move generation including castling, en passant and
+//! promotion, check/checkmate/stalemate detection, alpha-beta search, algebraic
+//! notation, captured pieces.
+//!
+//! Two things about it are worth stating up front, because both were wrong
+//! before it was wired to a window.
+//!
+//! [`Layout`] is solved from the size the compositor gave us, and owns both the
+//! mapping from a square to its rectangle and the inverse. The board used to be
+//! drawn from `SQUARE_SIZE = 64.0` and two offset constants and clicked through
+//! a free function of the same three, so the arithmetic agreed with itself in
+//! every window and with the picture in exactly one. The drawing pass also
+//! records a hit box on every square it draws, so a click is answered by the
+//! picture rather than by arithmetic the picture may not have been drawn from.
+//!
+//! The opponent searches on a clock rather than inside the click handler.
+//! `click_square` used to call `ai_turn` directly, which ran an alpha-beta
+//! search to depth three before the handler returned: the window was frozen for
+//! the duration and "Black is thinking" was a state no frame could be drawn in.
+//! Black's reply now arrives on an [`Event::Tick`], and the phase in between is
+//! a phase [`ChessApp::frame`] can paint.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
+use guitk::text;
+use oswindow::app::{self, App, Response};
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
-const MANTLE: Color = Color::from_hex(0x181825);
-const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
-const SURFACE1: Color = Color::from_hex(0x45475A);
-const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
-const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
 // ── Board colors ────────────────────────────────────────────────────
@@ -49,63 +55,187 @@ const LEGAL_MOVE_DOT: Color = Color::rgba(166, 227, 161, 140);
 const LAST_MOVE_HIGHLIGHT: Color = Color::rgba(250, 179, 135, 80);
 const CHECK_HIGHLIGHT: Color = Color::rgba(243, 139, 168, 120);
 
-// ── Layout constants ────────────────────────────────────────────────
-const SQUARE_SIZE: f32 = 64.0;
-const BOARD_OFFSET_X: f32 = 40.0;
-const BOARD_OFFSET_Y: f32 = 60.0;
-const BOARD_SIZE: f32 = SQUARE_SIZE * 8.0;
-const PANEL_X: f32 = BOARD_OFFSET_X + BOARD_SIZE + 20.0;
-const PIECE_FONT_SIZE: f32 = 38.0;
-const LABEL_FONT_SIZE: f32 = 14.0;
-const TITLE_FONT_SIZE: f32 = 22.0;
-const INFO_FONT_SIZE: f32 = 16.0;
-const MOVE_FONT_SIZE: f32 = 13.0;
-const DOT_RADIUS: f32 = 8.0;
+/// The window the program asks for, and the size its tests draw at.
+const WINDOW_WIDTH: f32 = 900.0;
+const WINDOW_HEIGHT: f32 = 660.0;
 
-// ── Board geometry ──────────────────────────────────────────────────
-//
-// Where a square is drawn and which square a click lands on are the same
-// question asked from two directions, so they are answered in one place. Both
-// used to be spelled out at each site -- the square's origin five times, the
-// board's far edge four -- with nothing but care keeping the board a player
-// sees and the board a click resolves against in the same position.
-
-/// Screen coordinates of the top-left corner of `pos`.
+/// The key hints printed at the foot of the panel.
 ///
-/// Row 0 is White's back rank and belongs at the *bottom* of the window, so the
-/// row is flipped on the way to the screen. This flip is the reason the mapping
-/// is worth naming: it is the one part a reader cannot check by inspection, and
-/// the one part an inverse has to undo.
-fn square_origin(pos: Pos) -> (f32, f32) {
-    let screen_row = 7 - pos.row;
-    (
-        BOARD_OFFSET_X + f32::from(pos.col) * SQUARE_SIZE,
-        BOARD_OFFSET_Y + f32::from(screen_row) * SQUARE_SIZE,
-    )
+/// Named, because the layout has to measure them to decide whether a panel is
+/// worth drawing at all, and a string measured in one place and drawn in
+/// another is a column sized for a line that is not the line it holds.
+const CONTROLS: [&str; 3] = ["Ctrl+N: New game", "Arrows/Enter: Move", "Esc: Deselect"];
+
+/// The headings above the two lists of captured pieces. Bold, and the widest
+/// thing in the panel that is not a control.
+const CAPTURED_HEADINGS: [&str; 2] = ["Captured by White:", "Captured by Black:"];
+
+/// What the pointer can land on.
+///
+/// The drawing pass records one of these for every square it draws and for the
+/// New game button, so a click is answered by the picture rather than by
+/// arithmetic over constants the picture may not have been drawn from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// A square, by rank row and file column, in board coordinates -- row 0 is
+    /// White's back rank, as everywhere else in this program.
+    Square(i8, i8),
+    NewGame,
 }
 
-/// Screen coordinates of the centre of `pos`.
-fn square_center(pos: Pos) -> (f32, f32) {
-    let (x, y) = square_origin(pos);
-    (x + SQUARE_SIZE / 2.0, y + SQUARE_SIZE / 2.0)
+/// Every rectangle and type size the frame is drawn from, solved from the
+/// window the compositor gave us.
+///
+/// This replaced eleven constants -- `SQUARE_SIZE = 64.0`, `BOARD_OFFSET_X`,
+/// `BOARD_OFFSET_Y`, `PANEL_X` and five font sizes among them. `render` took no
+/// width and no height at all, so the program drew the same 852x612 picture into
+/// whatever window it was given, and `square_at` resolved the click from the
+/// same constants: in any other window the board was drawn in one place and
+/// clicked in another.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    window: Rect,
+    /// The title and the status message.
+    header: Rect,
+    /// The square the board occupies, including the margins the rank and file
+    /// labels need outside the grid.
+    board: Rect,
+    /// The information column beside the board. Zero-width when dropped.
+    panel: Rect,
+    /// The New game button at the foot of the panel. Empty when there is no
+    /// panel to put it in.
+    new_game: Rect,
+    /// Top-left corner of the grid itself, inside the label margins.
+    origin: (f32, f32),
+    square: f32,
+    /// The width of the rank-label column, which is also the height of the
+    /// file-label row.
+    margin: f32,
+    pad: f32,
+    title: f32,
+    font: f32,
+    label: f32,
+    small: f32,
+    piece: f32,
+    dot: f32,
 }
 
-/// The square a screen point falls on, or `None` if it is off the board.
-///
-/// The bounds are checked before the cast rather than after: a float-to-integer
-/// cast in Rust saturates, so a point to the left of the board would otherwise
-/// come out as column 0 instead of as no square at all.
-fn square_at(x: f32, y: f32) -> Option<Pos> {
-    let bx = x - BOARD_OFFSET_X;
-    let by = y - BOARD_OFFSET_Y;
-    if bx < 0.0 || by < 0.0 || bx >= BOARD_SIZE || by >= BOARD_SIZE {
-        return None;
+impl Layout {
+    /// Solve the layout for a window of `w` by `h`.
+    ///
+    /// The board is square and takes whatever the header and the panel leave,
+    /// so a window of any shape gets a playable board rather than eight ranks
+    /// of 64 px squares drawn off the bottom of a short one. The panel is
+    /// dropped whole rather than drawn illegibly narrow when the window cannot
+    /// pay for it, which is the rule the other wired apps use for their chrome.
+    fn solve(w: f32, h: f32) -> Self {
+        let window = Rect::new(0.0, 0.0, w.max(0.0), h.max(0.0));
+        let font = (h / 36.0).clamp(9.0, 17.0);
+        let title = (font * 1.5).clamp(13.0, 26.0);
+        let label = (font - 2.0).max(7.0);
+        let small = (font - 4.0).max(6.0);
+        let pad = (w.min(h) * 0.025).clamp(3.0, 16.0);
+
+        let hdr_h = (h * 0.09).clamp(0.0, 46.0);
+        let header = Rect::new(0.0, 0.0, w, hdr_h);
+
+        // The panel is worth having only if it can hold its widest line. Below
+        // that it is dropped and the board takes the whole width, rather than
+        // squeezing the board to make room for a column too narrow to read.
+        let widest = |lines: &[&str], weight| {
+            lines
+                .iter()
+                .map(|s| text::measure(s, label, weight))
+                .fold(0.0f32, f32::max)
+        };
+        let panel_w_min = widest(&CONTROLS, FontWeightHint::Regular)
+            .max(widest(&CAPTURED_HEADINGS, FontWeightHint::Bold))
+            + pad * 2.0;
+        let want_panel = (w * 0.28).clamp(panel_w_min, 260.0);
+        let panel_w = if w - want_panel >= h * 0.45 && want_panel <= w * 0.4 {
+            want_panel
+        } else {
+            0.0
+        };
+
+        let free_w = (w - panel_w).max(0.0);
+        let free_h = (h - header.bottom()).max(0.0);
+        let side = free_w.min(free_h).max(0.0);
+        let board = Rect::new(
+            ((free_w - side) / 2.0).max(0.0),
+            header.bottom() + ((free_h - side) / 2.0).max(0.0),
+            side,
+            side,
+        );
+        let panel = Rect::new(free_w, header.bottom(), panel_w, free_h);
+
+        // Ranks are labelled down the left and files along the bottom, so one
+        // margin's worth comes off each of those two edges and the grid is what
+        // is left. Only two edges, unlike gomoku, because a chess label names a
+        // rank or a file rather than an intersection's coordinate.
+        let margin = (label * 1.8).min(side / 6.0);
+        let grid = (side - margin).max(0.0);
+        let square = grid / 8.0;
+        let origin = (board.x + margin, board.y);
+
+        // The button sits at the foot of the panel, above nothing, so a game
+        // that has ended can be restarted with the pointer. It used to be
+        // `Ctrl+N` and nothing else, which is keyboard-only at exactly the
+        // moment a player reaches for the mouse.
+        let btn_h = (font * 2.0).min(free_h);
+        let new_game = if panel_w > 0.0 {
+            Rect::new(
+                panel.x + pad,
+                (panel.bottom() - pad - btn_h).max(panel.y),
+                (panel_w - pad * 2.0).max(0.0),
+                btn_h,
+            )
+        } else {
+            Rect::EMPTY
+        };
+
+        Self {
+            window,
+            header,
+            board,
+            panel,
+            new_game,
+            origin,
+            square,
+            margin,
+            pad,
+            title,
+            font,
+            label,
+            small,
+            piece: square * 0.62,
+            dot: square * 0.13,
+        }
     }
-    // Truncation is the intent -- the fraction is the position within the
-    // square -- and the guard above is what makes the cast safe.
-    let col = (bx / SQUARE_SIZE) as i8;
-    let screen_row = (by / SQUARE_SIZE) as i8;
-    Some(Pos::new(7 - screen_row, col))
+
+    /// The rectangle the square `pos` is drawn in, which is also the hit box
+    /// the drawing pass records for it.
+    ///
+    /// Row 0 is White's back rank and belongs at the *bottom* of the window, so
+    /// the row is flipped on the way to the screen. There is no inverse of this
+    /// function: a click is answered by the hit box the drawing pass recorded,
+    /// so the flip is written once and a board painted wrongly cannot be
+    /// clicked rightly.
+    fn square_rect(&self, pos: Pos) -> Rect {
+        // Row 0 is drawn at the bottom, so the screen row counts down.
+        let screen_row = f32::from(7i8.saturating_sub(pos.row));
+        Rect::new(
+            self.origin.0 + f32::from(pos.col) * self.square,
+            self.origin.1 + screen_row * self.square,
+            self.square,
+            self.square,
+        )
+    }
+
+    /// Screen coordinates of the centre of `pos`.
+    fn square_centre(&self, pos: Pos) -> (f32, f32) {
+        self.square_rect(pos).centre()
+    }
 }
 
 // ── Piece values for AI evaluation ─────────────────────────────────
@@ -267,24 +397,82 @@ impl Pos {
     }
 
     fn is_valid(self) -> bool {
-        self.row >= 0 && self.row < 8 && self.col >= 0 && self.col < 8
+        (0..8).contains(&self.row) && (0..8).contains(&self.col)
+    }
+
+    /// The square `(d_row, d_col)` away, or `None` if that step leaves the
+    /// board.
+    ///
+    /// Every move generator walks the board by a delta, and each of them used
+    /// to write `Pos::new(pos.row + dr, pos.col + dc)` and rely on a later
+    /// `is_valid` to catch what the addition produced. That is a bounds check
+    /// after the fact rather than instead of the fault, and it made "did the
+    /// step leave the board" a question answered at fourteen separate sites.
+    /// It is answered here now, once, and the sum is checked rather than
+    /// assumed.
+    fn offset(self, d_row: i8, d_col: i8) -> Option<Self> {
+        let p = Self {
+            row: self.row.checked_add(d_row)?,
+            col: self.col.checked_add(d_col)?,
+        };
+        p.is_valid().then_some(p)
+    }
+
+    /// The squares in direction `(d_row, d_col)`, nearest first, stopping at
+    /// the edge of the board.
+    ///
+    /// Every sliding piece and every sliding attack walks one of these, and
+    /// each of the five places that did so wrote its own `r += dr; c += dc`
+    /// loop with its own copy of the bounds test.
+    fn ray(self, d_row: i8, d_col: i8) -> impl Iterator<Item = Self> {
+        std::iter::successors(self.offset(d_row, d_col), move |p| p.offset(d_row, d_col))
+    }
+
+    /// The letter this square's file is called, or `None` off the board.
+    ///
+    /// `b'a' + col as u8` was written at five sites -- here, three times in
+    /// `move_to_algebraic`, and once more in the file labels along the bottom
+    /// of the board -- each of them able to name a square that does not exist.
+    fn file_char(self) -> Option<char> {
+        u8::try_from(self.col)
+            .ok()
+            .filter(|c| *c < 8)
+            .and_then(|c| b'a'.checked_add(c))
+            .map(char::from)
+    }
+
+    /// The digit this square's rank is called, or `None` off the board.
+    fn rank_char(self) -> Option<char> {
+        u8::try_from(self.row)
+            .ok()
+            .filter(|r| *r < 8)
+            .and_then(|r| b'1'.checked_add(r))
+            .map(char::from)
     }
 
     /// Convert to algebraic notation (e.g. "e4").
+    ///
+    /// Off-board squares have no name, so they get an empty one rather than a
+    /// character read off the end of the alphabet.
     fn to_algebraic(self) -> String {
-        let file = (b'a' + self.col as u8) as char;
-        let rank = (b'1' + self.row as u8) as char;
-        format!("{file}{rank}")
+        match (self.file_char(), self.rank_char()) {
+            (Some(file), Some(rank)) => format!("{file}{rank}"),
+            _ => String::new(),
+        }
     }
 
-    /// Index into a 64-element array (row * 8 + col).
-    fn index(self) -> usize {
-        (self.row as usize) * 8 + self.col as usize
+    /// Index into a 64-element array (row * 8 + col), or `None` off the board.
+    fn index(self) -> Option<usize> {
+        self.is_valid().then(|| {
+            usize::from(self.row.unsigned_abs())
+                .saturating_mul(8)
+                .saturating_add(usize::from(self.col.unsigned_abs()))
+        })
     }
 
     /// Mirror index for black piece-square tables (flip rank).
-    fn mirror_index(self) -> usize {
-        ((7 - self.row) as usize) * 8 + self.col as usize
+    fn mirror_index(self) -> Option<usize> {
+        Self::new(7i8.checked_sub(self.row)?, self.col).index()
     }
 }
 
@@ -370,15 +558,6 @@ enum GameResult {
     Draw,
 }
 
-// ── Move record for history ─────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-struct MoveRecord {
-    mv: Move,
-    notation: String,
-    captured: Option<Piece>,
-}
-
 // ── Board ───────────────────────────────────────────────────────────
 
 /// The chess board state.
@@ -436,6 +615,7 @@ impl Board {
     }
 
     /// Create an empty board (for testing).
+    #[cfg(test)]
     fn empty() -> Self {
         Self {
             squares: [[None; 8]; 8],
@@ -452,124 +632,83 @@ impl Board {
         }
     }
 
+    /// What stands on `pos`, or `None` if nothing does -- or if `pos` is not
+    /// a square.
+    ///
+    /// "Off the board" is an answer the move generators need rather than a
+    /// fault to be guarded against: a ray walks until it leaves the board on
+    /// purpose. So the bounds live in the accessor and are expressed by
+    /// `slice::get`, rather than in an `is_valid` test in front of an index
+    /// that would panic without it.
     fn get(&self, pos: Pos) -> Option<Piece> {
-        if pos.is_valid() {
-            self.squares[pos.row as usize][pos.col as usize]
-        } else {
-            None
-        }
+        let row = usize::try_from(pos.row).ok()?;
+        let col = usize::try_from(pos.col).ok()?;
+        self.squares
+            .get(row)
+            .and_then(|r| r.get(col))
+            .copied()
+            .flatten()
     }
 
     fn set(&mut self, pos: Pos, piece: Option<Piece>) {
-        if pos.is_valid() {
-            self.squares[pos.row as usize][pos.col as usize] = piece;
+        if let Ok(row) = usize::try_from(pos.row)
+            && let Ok(col) = usize::try_from(pos.col)
+            && let Some(square) = self.squares.get_mut(row).and_then(|r| r.get_mut(col))
+        {
+            *square = piece;
         }
     }
 
     /// Find the king position for the given side.
     fn find_king(&self, side: Side) -> Option<Pos> {
-        for row in 0..8 {
-            for col in 0..8 {
-                if let Some(p) = self.squares[row][col]
-                    && p.side == side
-                    && p.kind == PieceKind::King
-                {
-                    return Some(Pos::new(row as i8, col as i8));
+        // Iterated rather than indexed: the bounds are the array's own, so
+        // there is no arithmetic here that a check would have to rescue.
+        self.squares.iter().enumerate().find_map(|(row, rank)| {
+            rank.iter().enumerate().find_map(|(col, square)| {
+                let p = (*square)?;
+                if p.side != side || p.kind != PieceKind::King {
+                    return None;
                 }
-            }
-        }
-        None
+                Some(Pos::new(i8::try_from(row).ok()?, i8::try_from(col).ok()?))
+            })
+        })
     }
 
     /// Check if a square is attacked by any piece of the given side.
     fn is_attacked_by(&self, pos: Pos, attacker: Side) -> bool {
-        // Check knight attacks
-        for &(dr, dc) in &[
-            (-2, -1),
-            (-2, 1),
-            (-1, -2),
-            (-1, 2),
-            (1, -2),
-            (1, 2),
-            (2, -1),
-            (2, 1),
-        ] {
-            let p = Pos::new(pos.row + dr, pos.col + dc);
-            if let Some(piece) = self.get(p)
-                && piece.side == attacker
-                && piece.kind == PieceKind::Knight
-            {
-                return true;
-            }
-        }
+        // A step from `pos` that lands on one of `kinds` belonging to the
+        // attacker.  Every clause below is that same question, so it is asked
+        // in one place rather than spelled out four times with four copies of
+        // the side-and-kind test.
+        let steps_to = |deltas: &[(i8, i8)], kinds: &[PieceKind]| {
+            deltas.iter().any(|&(dr, dc)| {
+                pos.offset(dr, dc)
+                    .and_then(|p| self.get(p))
+                    .is_some_and(|piece| piece.side == attacker && kinds.contains(&piece.kind))
+            })
+        };
+        // The first piece along each ray, if any -- what is behind it is
+        // blocked and does not attack `pos`.
+        let slides_to = |dirs: &[(i8, i8)], kinds: &[PieceKind]| {
+            dirs.iter().any(|&(dr, dc)| {
+                pos.ray(dr, dc)
+                    .find_map(|p| self.get(p))
+                    .is_some_and(|piece| piece.side == attacker && kinds.contains(&piece.kind))
+            })
+        };
 
-        // Check king attacks (adjacent squares)
-        for dr in -1..=1 {
-            for dc in -1..=1 {
-                if dr == 0 && dc == 0 {
-                    continue;
-                }
-                let p = Pos::new(pos.row + dr, pos.col + dc);
-                if let Some(piece) = self.get(p)
-                    && piece.side == attacker
-                    && piece.kind == PieceKind::King
-                {
-                    return true;
-                }
-            }
-        }
-
-        // Check pawn attacks
+        // A pawn captures toward its own far rank, so from `pos` the pawns
+        // that attack it lie in the direction they came from.
         let pawn_dir: i8 = if attacker == Side::White { -1 } else { 1 };
-        for &dc in &[-1i8, 1] {
-            let p = Pos::new(pos.row + pawn_dir, pos.col + dc);
-            if let Some(piece) = self.get(p)
-                && piece.side == attacker
-                && piece.kind == PieceKind::Pawn
-            {
-                return true;
-            }
-        }
 
-        // Check sliding piece attacks (rook/queen on ranks/files)
-        for &(dr, dc) in &[(0, 1), (0, -1), (1, 0), (-1, 0)] {
-            let mut r = pos.row + dr;
-            let mut c = pos.col + dc;
-            while (0..8).contains(&r) && (0..8).contains(&c) {
-                let p = Pos::new(r, c);
-                if let Some(piece) = self.get(p) {
-                    if piece.side == attacker
-                        && (piece.kind == PieceKind::Rook || piece.kind == PieceKind::Queen)
-                    {
-                        return true;
-                    }
-                    break; // blocked
-                }
-                r += dr;
-                c += dc;
-            }
-        }
-
-        // Check sliding piece attacks (bishop/queen on diagonals)
-        for &(dr, dc) in &[(1, 1), (1, -1), (-1, 1), (-1, -1)] {
-            let mut r = pos.row + dr;
-            let mut c = pos.col + dc;
-            while (0..8).contains(&r) && (0..8).contains(&c) {
-                let p = Pos::new(r, c);
-                if let Some(piece) = self.get(p) {
-                    if piece.side == attacker
-                        && (piece.kind == PieceKind::Bishop || piece.kind == PieceKind::Queen)
-                    {
-                        return true;
-                    }
-                    break; // blocked
-                }
-                r += dr;
-                c += dc;
-            }
-        }
-
-        false
+        steps_to(&KNIGHT_DELTAS, &[PieceKind::Knight])
+            // The eight queen directions at one step are exactly the eight
+            // squares adjacent to `pos`, which is where an enemy king attacks
+            // from.
+            || steps_to(&QUEEN_DIRS, &[PieceKind::King])
+            || steps_to(&[(pawn_dir, -1), (pawn_dir, 1)], &[PieceKind::Pawn])
+            || slides_to(&ROOK_DIRS, &[PieceKind::Rook, PieceKind::Queen])
+            || slides_to(&BISHOP_DIRS, &[PieceKind::Bishop, PieceKind::Queen])
     }
 
     /// Check if the current side's king is in check.
@@ -636,78 +775,53 @@ impl Board {
         let start_rank = if side == Side::White { 1 } else { 6 };
         let promo_rank = if side == Side::White { 7 } else { 0 };
 
-        // Single push
-        let one_ahead = Pos::new(pos.row + dir, pos.col);
-        if one_ahead.is_valid() && self.get(one_ahead).is_none() {
-            if one_ahead.row == promo_rank {
-                for &kind in &[
-                    PieceKind::Queen,
-                    PieceKind::Rook,
-                    PieceKind::Bishop,
-                    PieceKind::Knight,
-                ] {
-                    moves.push(Move::promotion(pos, one_ahead, kind));
+        // A pawn reaching the far rank promotes, and it may promote to any
+        // of four pieces, so "record this pawn move" is not one push.
+        let record = |to: Pos, moves: &mut Vec<Move>| {
+            if to.row == promo_rank {
+                for kind in PROMOTION_KINDS {
+                    moves.push(Move::promotion(pos, to, kind));
                 }
             } else {
-                moves.push(Move::normal(pos, one_ahead));
+                moves.push(Move::normal(pos, to));
             }
+        };
 
-            // Double push from starting rank
-            if pos.row == start_rank {
-                let two_ahead = Pos::new(pos.row + 2 * dir, pos.col);
-                if two_ahead.is_valid() && self.get(two_ahead).is_none() {
-                    moves.push(Move::normal(pos, two_ahead));
-                }
+        // Single push, and the double push that only follows a clear single
+        // one.
+        if let Some(one) = pos.offset(dir, 0)
+            && self.get(one).is_none()
+        {
+            record(one, moves);
+            if pos.row == start_rank
+                && let Some(two) = one.offset(dir, 0)
+                && self.get(two).is_none()
+            {
+                moves.push(Move::normal(pos, two));
             }
         }
 
-        // Captures (including en passant)
-        for &dc in &[-1i8, 1] {
-            let cap_pos = Pos::new(pos.row + dir, pos.col + dc);
-            if !cap_pos.is_valid() {
+        // Captures, including en passant.
+        for dc in [-1i8, 1] {
+            let Some(cap) = pos.offset(dir, dc) else {
                 continue;
-            }
-
-            if let Some(target) = self.get(cap_pos) {
-                if target.side != side {
-                    if cap_pos.row == promo_rank {
-                        for &kind in &[
-                            PieceKind::Queen,
-                            PieceKind::Rook,
-                            PieceKind::Bishop,
-                            PieceKind::Knight,
-                        ] {
-                            moves.push(Move::promotion(pos, cap_pos, kind));
-                        }
-                    } else {
-                        moves.push(Move::normal(pos, cap_pos));
-                    }
-                }
-            } else if self.en_passant == Some(cap_pos) {
-                moves.push(Move::en_passant(pos, cap_pos));
+            };
+            match self.get(cap) {
+                Some(target) if target.side != side => record(cap, moves),
+                Some(_) => {}
+                None if self.en_passant == Some(cap) => moves.push(Move::en_passant(pos, cap)),
+                None => {}
             }
         }
     }
 
     fn generate_knight_moves(&self, pos: Pos, side: Side, moves: &mut Vec<Move>) {
-        for &(dr, dc) in &[
-            (-2, -1),
-            (-2, 1),
-            (-1, -2),
-            (-1, 2),
-            (1, -2),
-            (1, 2),
-            (2, -1),
-            (2, 1),
-        ] {
-            let to = Pos::new(pos.row + dr, pos.col + dc);
-            if !to.is_valid() {
+        for (dr, dc) in KNIGHT_DELTAS {
+            let Some(to) = pos.offset(dr, dc) else {
                 continue;
-            }
-            match self.get(to) {
-                None => moves.push(Move::normal(pos, to)),
-                Some(p) if p.side != side => moves.push(Move::normal(pos, to)),
-                _ => {}
+            };
+            if self.get(to).is_none_or(|p| p.side != side) {
+                moves.push(Move::normal(pos, to));
             }
         }
     }
@@ -720,42 +834,30 @@ impl Board {
         moves: &mut Vec<Move>,
     ) {
         for &(dr, dc) in dirs {
-            let mut r = pos.row + dr;
-            let mut c = pos.col + dc;
-            while (0..8).contains(&r) && (0..8).contains(&c) {
-                let to = Pos::new(r, c);
+            for to in pos.ray(dr, dc) {
                 match self.get(to) {
-                    None => {
-                        moves.push(Move::normal(pos, to));
-                    }
-                    Some(p) if p.side != side => {
-                        moves.push(Move::normal(pos, to));
+                    None => moves.push(Move::normal(pos, to)),
+                    Some(p) => {
+                        // The first piece in the way ends the ray; it can be
+                        // captured only if it is not one of ours.
+                        if p.side != side {
+                            moves.push(Move::normal(pos, to));
+                        }
                         break;
                     }
-                    _ => break,
                 }
-                r += dr;
-                c += dc;
             }
         }
     }
 
     fn generate_king_moves(&self, pos: Pos, side: Side, moves: &mut Vec<Move>) {
         // Normal king moves
-        for dr in -1..=1i8 {
-            for dc in -1..=1i8 {
-                if dr == 0 && dc == 0 {
-                    continue;
-                }
-                let to = Pos::new(pos.row + dr, pos.col + dc);
-                if !to.is_valid() {
-                    continue;
-                }
-                match self.get(to) {
-                    None => moves.push(Move::normal(pos, to)),
-                    Some(p) if p.side != side => moves.push(Move::normal(pos, to)),
-                    _ => {}
-                }
+        for (dr, dc) in QUEEN_DIRS {
+            let Some(to) = pos.offset(dr, dc) else {
+                continue;
+            };
+            if self.get(to).is_none_or(|p| p.side != side) {
+                moves.push(Move::normal(pos, to));
             }
         }
 
@@ -825,8 +927,9 @@ impl Board {
 
         // Handle en passant capture
         if mv.is_en_passant {
-            let captured_row = mv.from.row; // The captured pawn is on the same rank as the capturing pawn
-            self.set(Pos::new(captured_row, mv.to.col), None);
+            // The captured pawn is on the capturing pawn's own rank, beside
+            // rather than on the square being moved to.
+            self.set(Pos::new(mv.from.row, mv.to.col), None);
         }
 
         // Move the piece
@@ -857,11 +960,13 @@ impl Board {
 
         // Update en passant target
         self.en_passant = None;
-        if piece.kind == PieceKind::Pawn {
-            let diff = mv.to.row - mv.from.row;
-            if diff == 2 || diff == -2 {
-                self.en_passant = Some(Pos::new((mv.from.row + mv.to.row) / 2, mv.from.col));
-            }
+        if piece.kind == PieceKind::Pawn
+            && let Some(diff) = mv.to.row.checked_sub(mv.from.row)
+            && diff.abs() == 2
+        {
+            // The square passed over: one step back from where the pawn
+            // landed, in the direction it came from.
+            self.en_passant = mv.to.offset(diff.signum().saturating_neg(), 0);
         }
 
         // Update castling rights
@@ -901,17 +1006,40 @@ impl Board {
         if piece.kind == PieceKind::Pawn || mv.is_en_passant {
             self.halfmove_clock = 0;
         } else {
-            self.halfmove_clock += 1;
+            self.halfmove_clock = self.halfmove_clock.saturating_add(1);
         }
 
         // Update fullmove number
         if self.side_to_move == Side::Black {
-            self.fullmove_number += 1;
+            self.fullmove_number = self.fullmove_number.saturating_add(1);
         }
 
         self.side_to_move = self.side_to_move.opponent();
     }
 }
+
+/// The eight squares a knight reaches, as (rank, file) deltas.
+const KNIGHT_DELTAS: [(i8, i8); 8] = [
+    (-2, -1),
+    (-2, 1),
+    (-1, -2),
+    (-1, 2),
+    (1, -2),
+    (1, 2),
+    (2, -1),
+    (2, 1),
+];
+
+/// What a pawn reaching the far rank may become. Written out once: the pawn
+/// generator needs it for a push and again for a capture, and a list that
+/// differs between the two is a promotion the player can make one way and not
+/// the other.
+const PROMOTION_KINDS: [PieceKind; 4] = [
+    PieceKind::Queen,
+    PieceKind::Rook,
+    PieceKind::Bishop,
+    PieceKind::Knight,
+];
 
 const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
@@ -939,11 +1067,11 @@ fn evaluate(board: &Board) -> i32 {
             if let Some(piece) = board.get(pos) {
                 let material = piece.kind.value();
                 let positional = piece_square_value(piece, pos);
-                let total = material + positional;
-                match piece.side {
-                    Side::White => score += total,
-                    Side::Black => score -= total,
-                }
+                let total = material.saturating_add(positional);
+                score = match piece.side {
+                    Side::White => score.saturating_add(total),
+                    Side::Black => score.saturating_sub(total),
+                };
             }
         }
     }
@@ -953,31 +1081,44 @@ fn evaluate(board: &Board) -> i32 {
 
 /// Get piece-square table bonus for a piece at a given position.
 fn piece_square_value(piece: Piece, pos: Pos) -> i32 {
+    // Black reads the tables through a mirrored index, because they are
+    // written from White's side of the board. An off-board square has no
+    // index, and so no bonus -- which is what the `if idx >= 64` guard below
+    // used to say after the fact, having already computed the index.
     let idx = match piece.side {
         Side::White => pos.index(),
         Side::Black => pos.mirror_index(),
     };
-    // Bounds check for safety
-    if idx >= 64 {
+    let Some(idx) = idx else {
         return 0;
-    }
-    match piece.kind {
-        PieceKind::Pawn => PAWN_TABLE[idx],
-        PieceKind::Knight => KNIGHT_TABLE[idx],
-        PieceKind::Bishop => BISHOP_TABLE[idx],
-        PieceKind::Rook => ROOK_TABLE[idx],
-        PieceKind::Queen => QUEEN_TABLE[idx],
-        PieceKind::King => KING_MIDDLEGAME_TABLE[idx],
-    }
+    };
+    let table = match piece.kind {
+        PieceKind::Pawn => &PAWN_TABLE,
+        PieceKind::Knight => &KNIGHT_TABLE,
+        PieceKind::Bishop => &BISHOP_TABLE,
+        PieceKind::Rook => &ROOK_TABLE,
+        PieceKind::Queen => &QUEEN_TABLE,
+        PieceKind::King => &KING_MIDDLEGAME_TABLE,
+    };
+    table.get(idx).copied().unwrap_or(0)
 }
 
 /// Minimax with alpha-beta pruning.
-/// Returns the evaluation score from the perspective of the side to move
-/// at the root call.
+///
+/// Every score this returns is from **White's** point of view, which is the
+/// side [`evaluate`] counts for: `maximizing` says which side is choosing at
+/// this node, not which side the number is about.
+///
+/// The leaf used to negate its evaluation when `!maximizing`, which said the
+/// opposite -- and disagreed with the mate scores three lines below, which are
+/// White-relative in both arms. It could not be caught by playing: the only
+/// caller searches [`AI_DEPTH`] - 1 = 2 ply from a `maximizing` root, so every
+/// leaf it reaches is a maximising one and the negated arm was never taken.
+/// Raising `AI_DEPTH` by one would have started comparing negated leaves with
+/// un-negated mates.
 fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing: bool) -> i32 {
-    if depth == 0 {
-        let eval = evaluate(board);
-        return if maximizing { eval } else { -eval };
+    if depth <= 0 {
+        return evaluate(board);
     }
 
     let moves = board.generate_legal_moves();
@@ -985,10 +1126,12 @@ fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing:
     if moves.is_empty() {
         if board.is_in_check(board.side_to_move) {
             // Checkmate — worst for the side to move
+            // Deeper mates are worth less, so a mate in one is preferred
+            // over a mate in three.
             return if maximizing {
-                -KING_VALUE - depth
+                KING_VALUE.saturating_add(depth).saturating_neg()
             } else {
-                KING_VALUE + depth
+                KING_VALUE.saturating_add(depth)
             };
         }
         // Stalemate
@@ -1000,7 +1143,7 @@ fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing:
         for mv in moves {
             let mut child = board.clone();
             child.make_move_unchecked(mv);
-            let score = minimax(&child, depth - 1, alpha, beta, false);
+            let score = minimax(&child, depth.saturating_sub(1), alpha, beta, false);
             if score > best {
                 best = score;
             }
@@ -1017,7 +1160,7 @@ fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing:
         for mv in moves {
             let mut child = board.clone();
             child.make_move_unchecked(mv);
-            let score = minimax(&child, depth - 1, alpha, beta, true);
+            let score = minimax(&child, depth.saturating_sub(1), alpha, beta, true);
             if score < best {
                 best = score;
             }
@@ -1034,12 +1177,11 @@ fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing:
 
 /// Choose the best move for the AI (Black).
 fn ai_choose_move(board: &Board) -> Option<Move> {
+    // No separate emptiness test: "there is a first move" and "the list is
+    // not empty" are the same question, and asking it twice leaves one copy
+    // no test can reach.
     let moves = board.generate_legal_moves();
-    if moves.is_empty() {
-        return None;
-    }
-
-    let mut best_move = moves[0];
+    let mut best_move = *moves.first()?;
     let mut best_score = i32::MAX; // Black wants to minimize
 
     for mv in &moves {
@@ -1094,13 +1236,15 @@ fn move_to_algebraic(board: &Board, mv: Move) -> String {
         if !same_dest.is_empty() {
             let same_col = same_dest.iter().any(|m| m.from.col == mv.from.col);
             let same_row = same_dest.iter().any(|m| m.from.row == mv.from.row);
+            // A file letter is enough when no other candidate shares the
+            // file; a rank digit when none shares the rank; both otherwise.
             if !same_col {
-                notation.push((b'a' + mv.from.col as u8) as char);
+                notation.extend(mv.from.file_char());
             } else if !same_row {
-                notation.push((b'1' + mv.from.row as u8) as char);
+                notation.extend(mv.from.rank_char());
             } else {
-                notation.push((b'a' + mv.from.col as u8) as char);
-                notation.push((b'1' + mv.from.row as u8) as char);
+                notation.extend(mv.from.file_char());
+                notation.extend(mv.from.rank_char());
             }
         }
     }
@@ -1109,7 +1253,7 @@ fn move_to_algebraic(board: &Board, mv: Move) -> String {
     let is_capture = board.get(mv.to).is_some() || mv.is_en_passant;
     if is_capture {
         if piece.kind == PieceKind::Pawn {
-            notation.push((b'a' + mv.from.col as u8) as char);
+            notation.extend(mv.from.file_char());
         }
         notation.push('x');
     }
@@ -1146,13 +1290,31 @@ struct ChessApp {
     selected: Option<Pos>,
     legal_moves_for_selected: Vec<Move>,
     last_move: Option<Move>,
-    move_history: Vec<MoveRecord>,
+    /// The moves so far, in algebraic notation, which is the only form
+    /// anything reads them in.
+    ///
+    /// This was a `Vec<MoveRecord>` carrying the `Move` and the captured piece
+    /// beside the notation, and nothing ever read either: the last move is kept
+    /// in `last_move` and the captures in `captured_white`/`captured_black`.
+    /// `#![allow(dead_code)]` is what let two unread fields sit here.
+    move_history: Vec<String>,
     captured_white: Vec<Piece>, // White pieces captured by Black
     captured_black: Vec<Piece>, // Black pieces captured by White
     game_result: GameResult,
     status_message: String,
     /// Cursor position for keyboard navigation (row, col).
     cursor: Pos,
+    /// True while Black owes a reply and the search has not run yet.
+    ///
+    /// `click_square` used to call `ai_turn()` inline, so an alpha-beta search
+    /// to [`AI_DEPTH`] ran to completion before the click handler returned: the
+    /// window did not repaint for its duration, and "Black is thinking" was a
+    /// string no frame could ever show. The search runs on a tick now, and this
+    /// flag is what a frame drawn in between paints.
+    thinking: bool,
+    /// The size the last frame was drawn at, which is the size the next click
+    /// is read against.
+    size: (f32, f32),
 }
 
 impl ChessApp {
@@ -1168,49 +1330,64 @@ impl ChessApp {
             game_result: GameResult::Ongoing,
             status_message: "White to move".to_string(),
             cursor: Pos::new(0, 0),
+            thinking: false,
+            size: (WINDOW_WIDTH, WINDOW_HEIGHT),
         }
     }
 
     /// Reset to a new game.
+    ///
+    /// Built from [`ChessApp::new`] rather than by clearing eleven fields by
+    /// hand, which is what it used to do: a field added to the struct and not
+    /// to that list is a piece of the finished game that survives into the next
+    /// one, and `thinking` -- added when the search moved onto a tick -- would
+    /// have been exactly that. The window size is the one thing carried over,
+    /// because it describes the window rather than the game.
     fn new_game(&mut self) {
-        self.board = Board::new();
-        self.selected = None;
-        self.legal_moves_for_selected.clear();
-        self.last_move = None;
-        self.move_history.clear();
-        self.captured_white.clear();
-        self.captured_black.clear();
-        self.game_result = GameResult::Ongoing;
-        self.status_message = "White to move".to_string();
-        self.cursor = Pos::new(0, 0);
+        let size = self.size;
+        *self = Self::new();
+        self.size = size;
+    }
+
+    /// Remember the size the frame was last drawn at.
+    fn resize(&mut self, width: f32, height: f32) {
+        self.size = (width, height);
     }
 
     /// Handle a click on a board square.
-    fn click_square(&mut self, pos: Pos) {
-        if self.game_result != GameResult::Ongoing {
-            return;
-        }
-        // Only allow input when it's White's turn (human player)
-        if self.board.side_to_move != Side::White {
-            return;
+    ///
+    /// Returns whether the click changed anything, which is what the pointer
+    /// and the keyboard are both answered with: a click on a square that
+    /// selects nothing and deselects nothing has not been acted on, and saying
+    /// it was consumed would ask the compositor for a repaint that draws the
+    /// same picture.
+    fn click_square(&mut self, pos: Pos) -> bool {
+        // The human plays White, so the board is White's to touch exactly when
+        // the game is live and the move is White's.
+        //
+        // This guard used to read `game_result != Ongoing || self.thinking ||
+        // side_to_move != White`, and `self.thinking` was a third copy of the
+        // clause beside it: `update_game_state` derives `thinking` as `result
+        // == Ongoing && side_to_move == Black`, so past the first clause it
+        // says precisely what the third says. No mutation of it could be
+        // caught, because no test could reach a state that told the two apart
+        // (known-issues lesson 92).
+        if self.game_result != GameResult::Ongoing || self.board.side_to_move != Side::White {
+            return false;
         }
 
-        if let Some(sel) = self.selected {
-            // Try to make a move from selected to clicked square
-            if let Some(mv) = self.find_legal_move(sel, pos) {
-                self.execute_move(mv);
-                // AI responds
-                if self.game_result == GameResult::Ongoing {
-                    self.ai_turn();
-                }
-                return;
-            }
+        if let Some(sel) = self.selected
+            && let Some(mv) = self.find_legal_move(sel, pos)
+        {
+            self.execute_move(mv);
+            return true;
         }
 
         // Select a piece (must be own piece)
         if let Some(piece) = self.board.get(pos)
             && piece.side == Side::White
         {
+            let already = self.selected == Some(pos);
             self.selected = Some(pos);
             self.legal_moves_for_selected = self
                 .board
@@ -1218,12 +1395,19 @@ impl ChessApp {
                 .into_iter()
                 .filter(|m| m.from == pos)
                 .collect();
-            return;
+            return !already;
         }
 
-        // Clicked empty square or opponent piece without selection
+        // Clicked empty square or opponent piece without selection.
+        self.deselect()
+    }
+
+    /// Drop the selection, reporting whether there was one to drop.
+    fn deselect(&mut self) -> bool {
+        let had = self.selected.is_some();
         self.selected = None;
         self.legal_moves_for_selected.clear();
+        had
     }
 
     /// Find a legal move from `from` to `to`, preferring queen promotion.
@@ -1265,11 +1449,7 @@ impl ChessApp {
             self.board.halfmove_clock = 0;
         }
 
-        self.move_history.push(MoveRecord {
-            mv,
-            notation,
-            captured,
-        });
+        self.move_history.push(notation);
 
         self.board.make_move_unchecked(mv);
         self.last_move = Some(mv);
@@ -1279,14 +1459,36 @@ impl ChessApp {
         self.update_game_state();
     }
 
-    /// Let the AI (Black) make a move.
-    fn ai_turn(&mut self) {
-        if self.board.side_to_move != Side::Black {
-            return;
+    /// Run Black's search if one is owed, and report whether it ran.
+    ///
+    /// This is the only place the search is called from, and the only place
+    /// `thinking` is tested. It used to be called `ai_turn` and invoked
+    /// directly from `click_square`, which meant an alpha-beta search to
+    /// [`AI_DEPTH`] ran inside the click handler and no frame was ever drawn
+    /// while it was running.
+    ///
+    /// The `Event::Tick` arm is answered by the value returned rather than by
+    /// asking `self.thinking` a second time: a condition written down in a
+    /// caller and again in the callee has one copy no test can reach (see
+    /// known-issues lesson 92).
+    fn think(&mut self) -> bool {
+        if !self.thinking {
+            return false;
         }
+        // `thinking` is not cleared here: both arms below end in
+        // `update_game_state`, which derives it afresh from the position. A
+        // second place that decides it is a second place that can decide it
+        // wrongly.
         if let Some(mv) = ai_choose_move(&self.board) {
             self.execute_move(mv);
+        } else {
+            // No legal reply: the position is mate or stalemate, and it is
+            // `update_game_state` that says which. Reaching here without it
+            // having said so would leave the status stuck on "Black is
+            // thinking" forever.
+            self.update_game_state();
         }
+        true
     }
 
     /// Update game state after a move (check, checkmate, stalemate).
@@ -1327,89 +1529,153 @@ impl ChessApp {
             };
             self.status_message = format!("{side_name} to move");
         }
+
+        // Black owes a reply exactly when the game is live and the move is
+        // Black's. Derived here, once, from the state the branches above have
+        // just settled -- rather than set at each place a move can be made,
+        // which is how the score came to be credited twice over in gomoku.
+        self.thinking =
+            self.game_result == GameResult::Ongoing && self.board.side_to_move == Side::Black;
+        if self.thinking {
+            self.status_message = "Black is thinking".to_string();
+        }
+    }
+
+    /// Move the keyboard cursor by `(d_row, d_col)`, reporting whether it
+    /// moved.
+    ///
+    /// A cursor already against the edge does not move, and saying the key was
+    /// consumed would ask for a repaint of an identical picture.
+    fn step_cursor(&mut self, d_row: i8, d_col: i8) -> bool {
+        let row = self.cursor.row.saturating_add(d_row).clamp(0, 7);
+        let col = self.cursor.col.saturating_add(d_col).clamp(0, 7);
+        let moved = (row, col) != (self.cursor.row, self.cursor.col);
+        self.cursor = Pos::new(row, col);
+        moved
     }
 
     /// Handle a keyboard event.
-    fn handle_key(&mut self, event: &KeyEvent) {
+    fn handle_key(&mut self, event: &KeyEvent) -> EventResult {
         if !event.pressed {
-            return;
+            return EventResult::Ignored;
         }
 
-        match event.key {
+        let acted = match event.key {
             Key::N if event.modifiers.ctrl => {
                 self.new_game();
+                true
             }
-            Key::Left => {
-                self.cursor.col = (self.cursor.col - 1).max(0);
-            }
-            Key::Right => {
-                self.cursor.col = (self.cursor.col + 1).min(7);
-            }
-            Key::Up => {
-                self.cursor.row = (self.cursor.row + 1).min(7);
-            }
-            Key::Down => {
-                self.cursor.row = (self.cursor.row - 1).max(0);
-            }
-            Key::Enter | Key::Space => {
-                self.click_square(self.cursor);
-            }
-            Key::Escape => {
-                self.selected = None;
-                self.legal_moves_for_selected.clear();
-            }
-            _ => {}
+            Key::Left => self.step_cursor(0, -1),
+            Key::Right => self.step_cursor(0, 1),
+            // Row 0 is White's back rank, drawn at the *bottom*, so Up walks
+            // toward rank 8 and away from the bottom of the window.
+            Key::Up => self.step_cursor(1, 0),
+            Key::Down => self.step_cursor(-1, 0),
+            Key::Enter | Key::Space => self.click_square(self.cursor),
+            Key::Escape => self.deselect(),
+            _ => false,
+        };
+        if acted {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
     /// Handle a mouse click event.
-    fn handle_mouse(&mut self, event: &MouseEvent) {
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            if let Some(pos) = square_at(event.x, event.y) {
-                self.click_square(pos);
+    ///
+    /// The square is read out of the frame's hit boxes rather than computed
+    /// from the layout a second time, so a square that was not drawn cannot be
+    /// clicked and a square that was drawn is clickable exactly where its ink
+    /// is.
+    fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
+        let MouseEventKind::Press(MouseButton::Left) = event.kind else {
+            return EventResult::Ignored;
+        };
+        let acted = match self
+            .frame(self.size.0, self.size.1)
+            .hit_test(event.x, event.y)
+        {
+            Some(Target::Square(row, col)) => self.click_square(Pos::new(row, col)),
+            Some(Target::NewGame) => {
+                self.new_game();
+                true
             }
+            // Off the board and off the button. The selection survives, which
+            // is what it did before there was a frame to ask.
+            None => false,
+        };
+        if acted {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
     /// Handle an event.
-    fn handle_event(&mut self, event: &Event) {
+    fn handle_event(&mut self, event: &Event) -> EventResult {
         match event {
             Event::Key(ke) => self.handle_key(ke),
             Event::Mouse(me) => self.handle_mouse(me),
-            _ => {}
+            // The tick is answered by whether a search actually ran, rather
+            // than by re-deciding here whether one should have.
+            Event::Tick { .. } if self.think() => EventResult::Consumed,
+            _ => EventResult::Ignored,
         }
     }
 
-    /// Render the entire UI into a list of render commands.
-    fn render(&self) -> Vec<RenderCommand> {
-        let mut commands = Vec::with_capacity(256);
-
-        // Background
-        commands.push(RenderCommand::FillRect {
+    /// Draw the whole window into a frame sized to it.
+    ///
+    /// Every rectangle comes from `l`, which was solved from `width` and
+    /// `height`, and every square records the hit box the click handler reads
+    /// back. `render(&self) -> Vec<RenderCommand>` took no size at all and
+    /// painted a fixed 852x612 picture into whatever window it was given.
+    fn frame(&self, width: f32, height: f32) -> Frame<Target> {
+        let l = Layout::solve(width, height);
+        let mut f = Frame::new(width, height);
+        f.push(RenderCommand::FillRect {
             x: 0.0,
             y: 0.0,
-            width: PANEL_X + 250.0,
-            height: BOARD_OFFSET_Y + BOARD_SIZE + 80.0,
+            width: l.window.w,
+            height: l.window.h,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
+        self.draw_header(&mut f, &l);
+        self.draw_board(&mut f, &l);
+        self.draw_labels(&mut f, &l);
+        self.draw_panel(&mut f, &l);
+        f
+    }
 
-        // Title
-        commands.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X,
-            y: 20.0,
-            text: "Chess".to_string(),
-            color: LAVENDER,
-            font_size: TITLE_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The title, and the one line that says what the game is doing.
+    fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.header.is_empty() {
+            return;
+        }
+        let name = "Chess";
+        let name_w = text::measure(name, l.title, FontWeightHint::Bold);
+        let baseline = l.header.y + (l.header.h - l.title).max(0.0) / 2.0;
+        text_at(
+            f,
+            name,
+            l.pad,
+            baseline,
+            l.title,
+            FontWeightHint::Bold,
+            LAVENDER,
+            Some((l.header.w - l.pad * 2.0).max(0.0)),
+        );
 
-        // Status
+        // The status shares the header with the title, so its column starts
+        // where the title's ink ends rather than at a constant offset that was
+        // only wide enough for one type size.
+        let sx = l.pad + name_w + l.pad * 2.0;
         let status_color = match self.game_result {
             GameResult::Ongoing => {
-                if self.board.is_in_check(self.board.side_to_move) {
+                if self.thinking {
+                    BLUE
+                } else if self.board.is_in_check(self.board.side_to_move) {
                     RED
                 } else {
                     SUBTEXT0
@@ -1419,344 +1685,473 @@ impl ChessApp {
             GameResult::BlackWins => RED,
             GameResult::Stalemate | GameResult::Draw => YELLOW,
         };
-        commands.push(RenderCommand::Text {
-            x: BOARD_OFFSET_X + 80.0,
-            y: 24.0,
-            text: self.status_message.clone(),
-            color: status_color,
-            font_size: INFO_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        // Draw the chess board
-        self.render_board(&mut commands);
-
-        // Rank labels (1-8 on left)
-        for rank in 0..8i8 {
-            let (_, cy) = square_center(Pos::new(rank, 0));
-            commands.push(RenderCommand::Text {
-                x: BOARD_OFFSET_X - 16.0,
-                y: cy - 6.0,
-                text: format!("{}", rank + 1),
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // File labels (a-h on bottom)
-        for file in 0..8i8 {
-            let (cx, _) = square_center(Pos::new(0, file));
-            commands.push(RenderCommand::Text {
-                x: cx - 4.0,
-                y: BOARD_OFFSET_Y + BOARD_SIZE + 8.0,
-                text: format!("{}", (b'a' + file as u8) as char),
-                color: SUBTEXT0,
-                font_size: LABEL_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-
-        // Side panel
-        self.render_panel(&mut commands);
-
-        commands
+        text_at(
+            f,
+            &self.status_message,
+            sx,
+            l.header.y + (l.header.h - l.font).max(0.0) / 2.0,
+            l.font,
+            FontWeightHint::Regular,
+            status_color,
+            Some((l.header.right() - l.pad - sx).max(0.0)),
+        );
     }
 
-    /// Render the chess board squares and pieces.
-    fn render_board(&self, commands: &mut Vec<RenderCommand>) {
+    /// The sixty-four squares, what stands on them, and what may be done to
+    /// them.
+    fn draw_board(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.square <= 0.0 {
+            return;
+        }
         let king_pos = self.board.find_king(self.board.side_to_move);
         let in_check = self.board.is_in_check(self.board.side_to_move);
 
         for row in 0..8i8 {
             for col in 0..8i8 {
                 let pos = Pos::new(row, col);
-                let (sx, sy) = square_origin(pos);
+                let r = l.square_rect(pos);
 
-                // Base square color
-                let is_light = (row + col) % 2 != 0;
-                let base_color = if is_light { LIGHT_SQUARE } else { DARK_SQUARE };
-
-                commands.push(RenderCommand::FillRect {
-                    x: sx,
-                    y: sy,
-                    width: SQUARE_SIZE,
-                    height: SQUARE_SIZE,
+                // A light square is the one whose coordinates differ in parity,
+                // which puts a dark square in each player's lower left -- the
+                // rule a chess board is checked against.
+                let base_color = if row.saturating_add(col) % 2 != 0 {
+                    LIGHT_SQUARE
+                } else {
+                    DARK_SQUARE
+                };
+                f.push(RenderCommand::FillRect {
+                    x: r.x,
+                    y: r.y,
+                    width: r.w,
+                    height: r.h,
                     color: base_color,
                     corner_radii: CornerRadii::ZERO,
                 });
 
-                // Last move highlight
                 if let Some(last) = self.last_move
                     && (pos == last.from || pos == last.to)
                 {
-                    commands.push(RenderCommand::FillRect {
-                        x: sx,
-                        y: sy,
-                        width: SQUARE_SIZE,
-                        height: SQUARE_SIZE,
+                    f.push(RenderCommand::FillRect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.w,
+                        height: r.h,
                         color: LAST_MOVE_HIGHLIGHT,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Check highlight on king
                 if in_check && king_pos == Some(pos) {
-                    commands.push(RenderCommand::FillRect {
-                        x: sx,
-                        y: sy,
-                        width: SQUARE_SIZE,
-                        height: SQUARE_SIZE,
+                    f.push(RenderCommand::FillRect {
+                        x: r.x,
+                        y: r.y,
+                        width: r.w,
+                        height: r.h,
                         color: CHECK_HIGHLIGHT,
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Selected square highlight
                 if self.selected == Some(pos) {
-                    commands.push(RenderCommand::StrokeRect {
-                        x: sx + 2.0,
-                        y: sy + 2.0,
-                        width: SQUARE_SIZE - 4.0,
-                        height: SQUARE_SIZE - 4.0,
+                    let inset = (l.square * 0.04).max(1.0);
+                    f.push(RenderCommand::StrokeRect {
+                        x: r.x + inset,
+                        y: r.y + inset,
+                        width: (r.w - inset * 2.0).max(0.0),
+                        height: (r.h - inset * 2.0).max(0.0),
                         color: SELECTED_SQUARE,
-                        line_width: 3.0,
+                        line_width: (l.square * 0.05).max(1.0),
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Keyboard cursor highlight
                 if self.cursor == pos && self.selected.is_none() {
-                    commands.push(RenderCommand::StrokeRect {
-                        x: sx + 1.0,
-                        y: sy + 1.0,
-                        width: SQUARE_SIZE - 2.0,
-                        height: SQUARE_SIZE - 2.0,
+                    let inset = (l.square * 0.02).max(1.0);
+                    f.push(RenderCommand::StrokeRect {
+                        x: r.x + inset,
+                        y: r.y + inset,
+                        width: (r.w - inset * 2.0).max(0.0),
+                        height: (r.h - inset * 2.0).max(0.0),
                         color: MAUVE,
-                        line_width: 2.0,
+                        line_width: (l.square * 0.035).max(1.0),
                         corner_radii: CornerRadii::ZERO,
                     });
                 }
 
-                // Draw piece
                 if let Some(piece) = self.board.get(pos) {
-                    commands.push(RenderCommand::Text {
-                        x: sx + SQUARE_SIZE / 2.0 - PIECE_FONT_SIZE / 2.0 + 2.0,
-                        y: sy + SQUARE_SIZE / 2.0 - PIECE_FONT_SIZE / 2.0 + 2.0,
-                        text: piece.unicode().to_string(),
-                        color: TEXT_COLOR,
-                        font_size: PIECE_FONT_SIZE,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
+                    let glyph = piece.unicode();
+                    let w = text::measure(glyph, l.piece, FontWeightHint::Regular);
+                    text_at(
+                        f,
+                        glyph,
+                        r.x + (r.w - w) / 2.0,
+                        r.y + (r.h - l.piece) / 2.0,
+                        l.piece,
+                        FontWeightHint::Regular,
+                        TEXT_COLOR,
+                        None,
+                    );
                 }
+
+                // Recorded last, so the box covers everything drawn in the
+                // square rather than whatever happened to be pushed after it.
+                f.hit(Target::Square(row, col), r);
             }
         }
 
-        // Legal move indicators (dots on target squares)
+        // Where the selected piece may go.
         for mv in &self.legal_moves_for_selected {
-            let (sx, sy) = square_origin(mv.to);
-            let (cx, cy) = square_center(mv.to);
-
-            // Use a small filled circle (approximated with a rounded rect)
-            let has_piece = self.board.get(mv.to).is_some();
-            if has_piece {
-                // Capture indicator: ring around the square
-                commands.push(RenderCommand::StrokeRect {
-                    x: sx + 3.0,
-                    y: sy + 3.0,
-                    width: SQUARE_SIZE - 6.0,
-                    height: SQUARE_SIZE - 6.0,
+            let r = l.square_rect(mv.to);
+            if self.board.get(mv.to).is_some() {
+                // A capture is ringed rather than dotted, because a dot in the
+                // middle of an occupied square lands on the piece.
+                let inset = (l.square * 0.05).max(1.0);
+                f.push(RenderCommand::StrokeRect {
+                    x: r.x + inset,
+                    y: r.y + inset,
+                    width: (r.w - inset * 2.0).max(0.0),
+                    height: (r.h - inset * 2.0).max(0.0),
                     color: LEGAL_MOVE_DOT,
-                    line_width: 3.0,
-                    corner_radii: CornerRadii::all(4.0),
+                    line_width: (l.square * 0.05).max(1.0),
+                    corner_radii: CornerRadii::all(l.square * 0.06),
                 });
             } else {
-                // Empty square: small dot in center
-                commands.push(RenderCommand::FillRect {
-                    x: cx - DOT_RADIUS,
-                    y: cy - DOT_RADIUS,
-                    width: DOT_RADIUS * 2.0,
-                    height: DOT_RADIUS * 2.0,
+                let (cx, cy) = l.square_centre(mv.to);
+                f.push(RenderCommand::FillRect {
+                    x: cx - l.dot,
+                    y: cy - l.dot,
+                    width: l.dot * 2.0,
+                    height: l.dot * 2.0,
                     color: LEGAL_MOVE_DOT,
-                    corner_radii: CornerRadii::all(DOT_RADIUS),
+                    corner_radii: CornerRadii::all(l.dot),
                 });
             }
         }
     }
 
-    /// Render the side panel (captured pieces, move history, controls).
-    fn render_panel(&self, commands: &mut Vec<RenderCommand>) {
-        let px = PANEL_X;
-        let mut py = BOARD_OFFSET_Y;
-
-        // Captured by White (Black pieces captured)
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: "Captured by White:".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        py += 20.0;
-
-        let captured_text: String = self
-            .captured_black
-            .iter()
-            .map(|p| p.unicode())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !captured_text.is_empty() {
-            commands.push(RenderCommand::Text {
-                x: px,
-                y: py,
-                text: captured_text,
-                color: TEXT_COLOR,
-                font_size: INFO_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(230.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+    /// Rank numbers down the left of the grid and file letters along the
+    /// bottom, each centred on the rank or file it names.
+    ///
+    /// They are dropped whole when the margin the layout could spare is too
+    /// small to hold them, rather than drawn overlapping the board.
+    fn draw_labels(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.square <= 0.0 || l.margin < l.label {
+            return;
         }
-        py += 24.0;
-
-        // Captured by Black (White pieces captured)
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: "Captured by Black:".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        py += 20.0;
-
-        let captured_text: String = self
-            .captured_white
-            .iter()
-            .map(|p| p.unicode())
-            .collect::<Vec<_>>()
-            .join(" ");
-        if !captured_text.is_empty() {
-            commands.push(RenderCommand::Text {
-                x: px,
-                y: py,
-                text: captured_text,
-                color: TEXT_COLOR,
-                font_size: INFO_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(230.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        for rank in 0..8i8 {
+            let r = l.square_rect(Pos::new(rank, 0));
+            let Some(s) = Pos::new(rank, 0).rank_char().map(String::from) else {
+                continue;
+            };
+            let w = text::measure(&s, l.label, FontWeightHint::Regular);
+            text_at(
+                f,
+                &s,
+                l.board.x + (l.margin - w) / 2.0,
+                r.y + (r.h - l.label) / 2.0,
+                l.label,
+                FontWeightHint::Regular,
+                SUBTEXT0,
+                None,
+            );
         }
-        py += 30.0;
+        for file in 0..8i8 {
+            let r = l.square_rect(Pos::new(0, file));
+            let Some(s) = Pos::new(0, file).file_char().map(String::from) else {
+                continue;
+            };
+            let w = text::measure(&s, l.label, FontWeightHint::Regular);
+            text_at(
+                f,
+                &s,
+                r.x + (r.w - w) / 2.0,
+                r.bottom() + (l.margin - l.label) / 2.0,
+                l.label,
+                FontWeightHint::Regular,
+                SUBTEXT0,
+                None,
+            );
+        }
+    }
 
-        // Move history header
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py,
-            text: "Moves:".to_string(),
-            color: SUBTEXT0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        py += 20.0;
+    /// The captured pieces, the moves so far, the controls, and the New game
+    /// button.
+    ///
+    /// Every row is placed from `l` and stops at the button rather than
+    /// running past it: the move list used to grow downward without a bound
+    /// and painted straight off the bottom of the window after about thirty
+    /// moves.
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.panel.w <= 0.0 {
+            return;
+        }
+        let x = l.panel.x + l.pad;
+        let w = (l.panel.w - l.pad * 2.0).max(0.0);
+        let line = l.font * 1.35;
+        let mut y = l.panel.y + l.pad;
 
-        // Move list (paired: "1. e4 e5  2. Nf3 Nc6 ...")
-        let mut move_idx = 0;
-        while move_idx < self.move_history.len() {
-            let move_num = move_idx / 2 + 1;
-            let white_notation = &self.move_history[move_idx].notation;
-            let mut line = format!("{move_num}. {white_notation}");
+        // Everything above the controls has to fit above them, and the
+        // controls above the button.
+        let controls_h = l.small * 1.5 * CONTROLS.len() as f32;
+        let floor = (l.new_game.y - l.pad - controls_h).max(l.panel.y);
 
-            if move_idx + 1 < self.move_history.len() {
-                let black_notation = &self.move_history[move_idx + 1].notation;
-                line.push_str(&format!(" {black_notation}"));
+        for (heading, pieces) in CAPTURED_HEADINGS
+            .into_iter()
+            .zip([&self.captured_black, &self.captured_white])
+        {
+            if y + line > floor {
+                break;
             }
-
-            commands.push(RenderCommand::Text {
-                x: px,
-                y: py,
-                text: line,
-                color: TEXT_COLOR,
-                font_size: MOVE_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(230.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            py += 16.0;
-            move_idx += 2;
+            text_at(
+                f,
+                heading,
+                x,
+                y,
+                l.label,
+                FontWeightHint::Bold,
+                SUBTEXT0,
+                Some(w),
+            );
+            y += line;
+            let taken: String = pieces
+                .iter()
+                .map(|p| p.unicode())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !taken.is_empty() && y + line <= floor {
+                text_at(
+                    f,
+                    &taken,
+                    x,
+                    y,
+                    l.font,
+                    FontWeightHint::Regular,
+                    TEXT_COLOR,
+                    Some(w),
+                );
+            }
+            y += line;
         }
 
-        // Controls hint at bottom of panel
-        let controls_y = BOARD_OFFSET_Y + BOARD_SIZE - 40.0;
-        if py < controls_y {
-            py = controls_y;
+        if y + line <= floor {
+            text_at(
+                f,
+                "Moves:",
+                x,
+                y,
+                l.label,
+                FontWeightHint::Bold,
+                SUBTEXT0,
+                Some(w),
+            );
+            y += line;
         }
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py + 20.0,
-            text: "Ctrl+N: New Game".to_string(),
-            color: OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
+
+        // The last pairs rather than the first: a player watching a long game
+        // wants the move just played, and the panel can only hold so many.
+        let rows = ((floor - y) / (l.small * 1.3)).floor().max(0.0) as usize;
+        let pairs: Vec<String> = self
+            .move_history
+            .chunks(2)
+            .enumerate()
+            .filter_map(|(n, pair)| {
+                let white = pair.first()?;
+                let mut s = format!("{}. {white}", n.saturating_add(1));
+                if let Some(black) = pair.get(1) {
+                    s.push(' ');
+                    s.push_str(black);
+                }
+                Some(s)
+            })
+            .collect();
+        for s in pairs.iter().skip(pairs.len().saturating_sub(rows)) {
+            text_at(
+                f,
+                s,
+                x,
+                y,
+                l.small,
+                FontWeightHint::Regular,
+                TEXT_COLOR,
+                Some(w),
+            );
+            y += l.small * 1.3;
+        }
+
+        let mut cy = (l.new_game.y - l.pad - controls_h).max(l.panel.y);
+        for hint in CONTROLS {
+            text_at(
+                f,
+                hint,
+                x,
+                cy,
+                l.small,
+                FontWeightHint::Regular,
+                OVERLAY0,
+                Some(w),
+            );
+            cy += l.small * 1.5;
+        }
+
+        self.draw_button(f, l);
+    }
+
+    /// The one thing in the panel that can be clicked.
+    fn draw_button(&self, f: &mut Frame<Target>, l: &Layout) {
+        let r = l.new_game;
+        if r.is_empty() {
+            return;
+        }
+        f.push(RenderCommand::FillRect {
+            x: r.x,
+            y: r.y,
+            width: r.w,
+            height: r.h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(l.pad * 0.4),
         });
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py + 36.0,
-            text: "Arrows/Enter: Navigate".to_string(),
-            color: OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        commands.push(RenderCommand::Text {
-            x: px,
-            y: py + 52.0,
-            text: "Esc: Deselect".to_string(),
-            color: OVERLAY0,
-            font_size: LABEL_FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        let label = "New game";
+        let tw = text::measure(label, l.font, FontWeightHint::Bold);
+        text_at(
+            f,
+            label,
+            r.x + (r.w - tw).max(0.0) / 2.0,
+            r.y + (r.h - l.font).max(0.0) / 2.0,
+            l.font,
+            FontWeightHint::Bold,
+            TEXT_COLOR,
+            Some(r.w),
+        );
+        f.hit(Target::NewGame, r);
     }
 }
 
-fn main() {
-    let _app = ChessApp::new();
+/// Push a string, or nothing when there is no room for it.
+///
+/// A `max_width` of zero or less is not a narrow column but no column at all,
+/// and text drawn into one is ink outside the box that was meant to hold it.
+fn text_at(
+    f: &mut Frame<Target>,
+    s: &str,
+    x: f32,
+    y: f32,
+    font_size: f32,
+    font_weight: FontWeightHint,
+    color: Color,
+    max_width: Option<f32>,
+) {
+    if s.is_empty() || font_size <= 0.0 || max_width.is_some_and(|w| w <= 0.0) {
+        return;
+    }
+    f.push(RenderCommand::Text {
+        x,
+        y,
+        text: String::from(s),
+        color,
+        font_size,
+        font_weight,
+        max_width,
+        overflow: if max_width.is_some() {
+            TextOverflow::Ellipsis
+        } else {
+            TextOverflow::Clip
+        },
+    });
+}
+
+impl App for ChessApp {
+    fn title(&self) -> String {
+        String::from("Chess")
+    }
+
+    fn app_id(&self) -> String {
+        String::from("chess")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    /// Black's search runs on this tick rather than inside the click handler.
+    /// Without an interval here the game would enter `thinking` after White's
+    /// first move and stay there.
+    fn tick_interval(&self) -> Option<Duration> {
+        Some(Duration::from_millis(60))
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        if matches!(event, Event::CloseRequested) {
+            return Response::Exit;
+        }
+        match self.handle_event(event) {
+            EventResult::Consumed => Response::Redraw,
+            EventResult::Ignored => Response::Idle,
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        // The size the frame is drawn at is the size the next click is read
+        // against, which is the only reason it is stored at all.
+        self.resize(width, height);
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for ChessApp {
+    type Target = Target;
+    type Outcome = EventResult;
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(button),
+        }))
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) -> Self::Outcome {
+        self.resize(size.0, size.1);
+        self.handle_event(&Event::Key(key.clone()))
+    }
+
+    fn scroll_at(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _dy: f32,
+        _size: (f32, f32),
+    ) -> Option<Self::Outcome> {
+        // Nothing scrolls: the board is sized to the window rather than panned
+        // inside it, and the move list is trimmed to what the panel holds.
+        None
+    }
+}
+
+fn main() -> ExitCode {
+    let mut app = ChessApp::new();
+    app::launch("chess", &mut app)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
 
+// A test that indexes past the end, or unwraps a `None`, is a test that has
+// already failed; panicking is the reporting mechanism, not a fault. `expect`
+// rather than `allow` so that a lint the tests stop tripping is reported
+// rather than silently kept.
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "a panicking test is a failing test, which is the point"
+)]
 mod tests {
-    // A test that indexes past the end, or unwraps a `None`, is a test that
-    // has already failed; panicking is the reporting mechanism, not a fault.
-    #![allow(
-        clippy::arithmetic_side_effects,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::unwrap_used
-    )]
-
     use super::*;
 
     // ── Board setup helpers ─────────────────────────────────────────
@@ -1849,15 +2244,26 @@ mod tests {
 
     #[test]
     fn test_pos_index() {
-        assert_eq!(Pos::new(0, 0).index(), 0);
-        assert_eq!(Pos::new(1, 0).index(), 8);
-        assert_eq!(Pos::new(7, 7).index(), 63);
+        assert_eq!(Pos::new(0, 0).index(), Some(0));
+        assert_eq!(Pos::new(1, 0).index(), Some(8));
+        assert_eq!(Pos::new(7, 7).index(), Some(63));
+    }
+
+    #[test]
+    fn off_board_squares_have_no_index() {
+        // The index is what reads the piece-square tables, so a square that is
+        // not on the board must not produce one -- there is no entry for it,
+        // and an index computed anyway would name some other square's entry.
+        assert_eq!(Pos::new(-1, 0).index(), None);
+        assert_eq!(Pos::new(0, 8).index(), None);
+        assert_eq!(Pos::new(8, 0).mirror_index(), None);
+        assert_eq!(Pos::new(0, -1).mirror_index(), None);
     }
 
     #[test]
     fn test_pos_mirror_index() {
-        assert_eq!(Pos::new(0, 0).mirror_index(), 56);
-        assert_eq!(Pos::new(7, 7).mirror_index(), 7);
+        assert_eq!(Pos::new(0, 0).mirror_index(), Some(56));
+        assert_eq!(Pos::new(7, 7).mirror_index(), Some(7));
     }
 
     // ── Piece type tests ────────────────────────────────────────────
@@ -2019,6 +2425,16 @@ mod tests {
             .iter()
             .find(|m| m.from == Pos::new(4, 4) && m.to == Pos::new(5, 5) && m.is_en_passant);
         assert!(ep_move.is_some());
+
+        // d6 is empty too, and is not the en passant square. A pawn does not
+        // move diagonally onto an empty square, so the target has to be
+        // *matched*, not merely found to be vacant.
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(4, 4) && m.to == Pos::new(5, 3)),
+            "the pawn was offered a diagonal onto an empty square"
+        );
 
         // Execute the EP capture
         let mut test_board = board.clone();
@@ -2527,6 +2943,44 @@ mod tests {
         assert!(board.is_attacked_by(Pos::new(5, 4), Side::White));
         assert!(board.is_attacked_by(Pos::new(1, 2), Side::White));
         assert!(!board.is_attacked_by(Pos::new(4, 4), Side::White));
+        // A knight of our own standing a knight's move away is not an attack
+        // on us. Every caller of this asks it of the *opponent* -- may my king
+        // stand here, may I castle across this square -- so a side test that
+        // let either colour answer would make a king's own knight forbid it
+        // squares and forbid it castling.
+        assert!(!board.is_attacked_by(Pos::new(5, 4), Side::Black));
+    }
+
+    #[test]
+    fn test_square_attacked_by_king() {
+        // The eight squares beside a king are attacked by it, which is what
+        // stops the two kings ever standing next to each other. Nothing else
+        // in the generator says so: a king is not a slider and not a knight,
+        // so dropping its clause leaves a legal position with the kings
+        // touching.
+        let mut board = Board::empty();
+        place(&mut board, 3, 3, Side::White, PieceKind::King);
+        assert!(board.is_attacked_by(Pos::new(4, 4), Side::White));
+        assert!(board.is_attacked_by(Pos::new(3, 2), Side::White));
+        assert!(!board.is_attacked_by(Pos::new(5, 3), Side::White));
+        assert!(!board.is_attacked_by(Pos::new(4, 4), Side::Black));
+    }
+
+    #[test]
+    fn test_a_king_may_not_step_beside_the_other_king() {
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 0, Side::White, PieceKind::King);
+        place(&mut board, 2, 2, Side::Black, PieceKind::King);
+        let moves = moves_from(&board, Pos::new(0, 0));
+        assert!(
+            moves.iter().any(|m| m.to == Pos::new(0, 1)),
+            "the king cannot move at all"
+        );
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(1, 1)),
+            "the two kings were allowed to touch"
+        );
     }
 
     #[test]
@@ -2676,6 +3130,50 @@ mod tests {
         assert!(score > 10000, "Should find forced mate, got {score}");
     }
 
+    #[test]
+    fn a_mate_delivered_sooner_scores_higher_than_the_same_mate_later() {
+        // The remaining depth is added to the mate score, which is what makes
+        // a mate in one beat a mate in three inside one search. The same
+        // arithmetic is visible from outside as this: search the same mate in
+        // one with more depth to spare and it scores higher, because more
+        // depth is left over when it lands.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 4, Side::White, PieceKind::King);
+        place(&mut board, 6, 0, Side::White, PieceKind::Rook);
+        place(&mut board, 5, 1, Side::White, PieceKind::Rook);
+        place(&mut board, 7, 7, Side::Black, PieceKind::King);
+        assert_eq!(
+            minimax(&board, 2, i32::MIN + 1, i32::MAX - 1, true),
+            KING_VALUE.saturating_add(1)
+        );
+        assert_eq!(
+            minimax(&board, 4, i32::MIN + 1, i32::MAX - 1, true),
+            KING_VALUE.saturating_add(3)
+        );
+    }
+
+    #[test]
+    fn the_search_scores_every_position_from_whites_side() {
+        // `maximizing` says who is choosing at this node, not whose point of
+        // view the number is from -- the mate scores are White-relative in
+        // both arms, so the leaf must be too. A leaf that negated itself for
+        // the minimising side would be comparing two different numbers.
+        let mut board = Board::empty();
+        place(&mut board, 0, 0, Side::White, PieceKind::King);
+        place(&mut board, 7, 7, Side::Black, PieceKind::King);
+        place(&mut board, 3, 3, Side::Black, PieceKind::Queen);
+        let eval = evaluate(&board);
+        assert!(eval < -800, "Black is a queen up: {eval}");
+        for maximizing in [true, false] {
+            assert_eq!(
+                minimax(&board, 0, i32::MIN + 1, i32::MAX - 1, maximizing),
+                eval,
+                "the leaf disagrees with the evaluation when maximizing={maximizing}"
+            );
+        }
+    }
+
     // ── Algebraic notation tests ────────────────────────────────────
 
     #[test]
@@ -2820,10 +3318,18 @@ mod tests {
         let mut app = ChessApp::new();
         app.click_square(Pos::new(1, 4)); // select e2
         app.click_square(Pos::new(3, 4)); // move to e4
-        // After human move + AI response, it should be White's turn again
-        // (AI plays black automatically)
+        // The click plays White's move and hands the turn over; it does not
+        // also run the search, because a search that runs inside the click
+        // freezes the window until it finishes.
+        assert_eq!(app.board.side_to_move, Side::Black);
+        assert_eq!(app.move_history.len(), 1);
+        assert!(app.thinking);
+
+        // The tick is what runs it.
+        assert!(app.think());
         assert_eq!(app.board.side_to_move, Side::White);
-        assert!(app.move_history.len() >= 2); // White + Black moved
+        assert_eq!(app.move_history.len(), 2);
+        assert!(!app.thinking);
     }
 
     #[test]
@@ -2841,560 +3347,6 @@ mod tests {
         app.click_square(Pos::new(5, 5)); // capture rook
         assert!(!app.captured_black.is_empty());
         assert_eq!(app.captured_black[0].kind, PieceKind::Rook);
-    }
-
-    // ── Keyboard handling tests ─────────────────────────────────────
-
-    #[test]
-    fn test_keyboard_navigation() {
-        let mut app = ChessApp::new();
-        assert_eq!(app.cursor, Pos::new(0, 0));
-
-        let right = KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&right);
-        assert_eq!(app.cursor, Pos::new(0, 1));
-
-        let up = KeyEvent {
-            key: Key::Up,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&up);
-        assert_eq!(app.cursor, Pos::new(1, 1));
-    }
-
-    #[test]
-    fn test_keyboard_bounds() {
-        let mut app = ChessApp::new();
-        let left = KeyEvent {
-            key: Key::Left,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&left);
-        // Should stay at 0, not go negative
-        assert_eq!(app.cursor.col, 0);
-
-        let down = KeyEvent {
-            key: Key::Down,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&down);
-        assert_eq!(app.cursor.row, 0);
-    }
-
-    #[test]
-    fn test_escape_deselects() {
-        let mut app = ChessApp::new();
-        app.click_square(Pos::new(0, 1)); // select knight
-        assert!(app.selected.is_some());
-
-        let esc = KeyEvent {
-            key: Key::Escape,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&esc);
-        assert!(app.selected.is_none());
-    }
-
-    #[test]
-    fn test_ctrl_n_new_game() {
-        let mut app = ChessApp::new();
-        app.click_square(Pos::new(1, 4));
-        app.click_square(Pos::new(3, 4));
-
-        let ctrl_n = KeyEvent {
-            key: Key::N,
-            pressed: true,
-            modifiers: Modifiers::ctrl(),
-            text: String::new(),
-        };
-        app.handle_key(&ctrl_n);
-        assert!(app.move_history.is_empty());
-        assert_eq!(app.game_result, GameResult::Ongoing);
-    }
-
-    #[test]
-    fn test_key_release_ignored() {
-        let mut app = ChessApp::new();
-        let right = KeyEvent {
-            key: Key::Right,
-            pressed: false, // release
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        };
-        app.handle_key(&right);
-        assert_eq!(app.cursor.col, 0); // Should not move
-    }
-
-    // ── Board geometry tests ────────────────────────────────────────
-    //
-    // Collapsing the renderer and the hit test into `square_origin` /
-    // `square_at` means a click test that aims at where the code says a square
-    // was painted passes for any mapping, right or wrong. So the checks below
-    // are of two kinds, and the second kind is the load-bearing one:
-    //
-    //   * round-trips -- click where the board was actually painted;
-    //   * claims measured against something the mapping does not decide: the
-    //     window, and which end of it White starts at.
-    //
-    // A round-trip has a second blind spot worth naming, because it is not
-    // obvious: `square_at` maps every point in a square to that square, so
-    // clicking a thing to find out which square it is on cannot tell a centred
-    // thing from one drawn in the corner. Anything whose *placement within* a
-    // square matters is measured against the painted rectangle instead.
-
-    /// Every square the renderer painted, as (pos-independent) rectangles, in
-    /// the order drawn. A board square is a `SQUARE_SIZE` fill; the highlights
-    /// and dots drawn over it are smaller or a different shape.
-    fn painted_squares(commands: &[RenderCommand]) -> Vec<(f32, f32)> {
-        commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x,
-                    y,
-                    width,
-                    height,
-                    color,
-                    ..
-                } if *width == SQUARE_SIZE
-                    && *height == SQUARE_SIZE
-                    && (*color == LIGHT_SQUARE || *color == DARK_SQUARE) =>
-                {
-                    Some((*x, *y))
-                }
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The colour the renderer actually painted `pos`.
-    ///
-    /// The *location* is `square_origin`'s opinion, so this shares an origin
-    /// with the renderer and cannot judge where a square went. The *colour* is
-    /// read back off the paint, and that part is independent: a renderer that
-    /// colours squares by some rule other than the one the board believes is
-    /// caught here.
-    fn painted_color(commands: &[RenderCommand], pos: Pos) -> Option<Color> {
-        let (ox, oy) = square_origin(pos);
-        commands.iter().find_map(|c| match c {
-            RenderCommand::FillRect {
-                x,
-                y,
-                width,
-                height,
-                color,
-                ..
-            } if *width == SQUARE_SIZE
-                && *height == SQUARE_SIZE
-                && (*x - ox).abs() < 0.01
-                && (*y - oy).abs() < 0.01 =>
-            {
-                Some(*color)
-            }
-            _ => None,
-        })
-    }
-
-    /// Centre of the square the renderer painted at `pos`.
-    fn painted_center(commands: &[RenderCommand], pos: Pos) -> Option<(f32, f32)> {
-        let (ox, oy) = square_origin(pos);
-        painted_squares(commands)
-            .into_iter()
-            .find(|&(x, y)| (x - ox).abs() < 0.01 && (y - oy).abs() < 0.01)
-            .map(|(x, y)| (x + SQUARE_SIZE / 2.0, y + SQUARE_SIZE / 2.0))
-    }
-
-    /// Where the glyph for a piece standing on `pos` was drawn.
-    fn painted_piece_y(commands: &[RenderCommand], glyph: char) -> Option<f32> {
-        commands.iter().find_map(|c| match c {
-            RenderCommand::Text {
-                y, text, font_size, ..
-            } if (*font_size - PIECE_FONT_SIZE).abs() < 0.01 && text.starts_with(glyph) => Some(*y),
-            _ => None,
-        })
-    }
-
-    #[test]
-    fn every_square_is_clickable_across_its_whole_face() {
-        // Corners as well as the centre: a hit test that is off by less than
-        // half a square still answers the centre correctly.
-        for row in 0..8i8 {
-            for col in 0..8i8 {
-                let pos = Pos::new(row, col);
-                let (ox, oy) = square_origin(pos);
-                for (dx, dy) in [
-                    (0.5, 0.5),
-                    (SQUARE_SIZE / 2.0, SQUARE_SIZE / 2.0),
-                    (SQUARE_SIZE - 0.5, 0.5),
-                    (0.5, SQUARE_SIZE - 0.5),
-                    (SQUARE_SIZE - 0.5, SQUARE_SIZE - 0.5),
-                ] {
-                    assert_eq!(
-                        square_at(ox + dx, oy + dy),
-                        Some(pos),
-                        "({}, {}) should land on {pos:?}",
-                        ox + dx,
-                        oy + dy
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn nothing_outside_the_board_lands_on_a_square() {
-        // Swept well past every edge, because the failure this is looking for
-        // is a saturating cast or a wrap, and both live beyond the board rather
-        // than just outside it.
-        let far = BOARD_OFFSET_X + BOARD_SIZE + 200.0;
-        let mut x = -100.0;
-        while x < far {
-            let mut y = -100.0;
-            while y < far {
-                let inside = x >= BOARD_OFFSET_X
-                    && y >= BOARD_OFFSET_Y
-                    && x < BOARD_OFFSET_X + BOARD_SIZE
-                    && y < BOARD_OFFSET_Y + BOARD_SIZE;
-                assert_eq!(
-                    square_at(x, y).is_some(),
-                    inside,
-                    "({x}, {y}) inside={inside}"
-                );
-                y += 7.0;
-            }
-            x += 7.0;
-        }
-    }
-
-    #[test]
-    fn a_click_left_of_the_board_selects_nothing() {
-        let mut app = ChessApp::new();
-        let (_, y) = square_center(Pos::new(1, 0));
-        app.handle_mouse(&MouseEvent {
-            x: BOARD_OFFSET_X - 30.0,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        });
-        assert!(
-            app.selected.is_none(),
-            "a click off the left edge must not saturate onto the a-file"
-        );
-    }
-
-    #[test]
-    fn the_painted_board_is_sixty_four_squares_on_an_even_grid() {
-        // Measured against the window and against itself, not against
-        // `square_origin`: eight distinct columns and eight distinct rows,
-        // evenly spaced, each square painted exactly once.
-        let app = ChessApp::new();
-        let squares = painted_squares(&app.render());
-        assert_eq!(squares.len(), 64, "one fill per square");
-
-        let mut xs: Vec<f32> = squares.iter().map(|&(x, _)| x).collect();
-        let mut ys: Vec<f32> = squares.iter().map(|&(_, y)| y).collect();
-        xs.sort_by(f32::total_cmp);
-        xs.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        ys.sort_by(f32::total_cmp);
-        ys.dedup_by(|a, b| (*a - *b).abs() < 0.01);
-        assert_eq!(xs.len(), 8, "eight distinct columns");
-        assert_eq!(ys.len(), 8, "eight distinct rows");
-
-        for pair in xs.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            assert!(
-                (b - a - SQUARE_SIZE).abs() < 0.01,
-                "columns should be one square apart, got {}",
-                b - a
-            );
-        }
-        for pair in ys.windows(2) {
-            let (a, b) = (pair[0], pair[1]);
-            assert!(
-                (b - a - SQUARE_SIZE).abs() < 0.01,
-                "rows should be one square apart, got {}",
-                b - a
-            );
-        }
-        assert!(
-            xs[0] >= 0.0 && ys[0] >= 0.0,
-            "board starts inside the window"
-        );
-        assert!(
-            xs[7] + SQUARE_SIZE <= PANEL_X,
-            "the board should not run under the side panel"
-        );
-    }
-
-    #[test]
-    fn white_is_painted_at_the_bottom_of_the_window() {
-        // The row flip in `square_origin` is the one part of the mapping that
-        // cannot be checked by inspection, and a round-trip test cannot see it
-        // at all -- painting and hit-testing both flip, so both stay
-        // consistent. This is the check with an outside opinion: the white king
-        // starts nearer the bottom edge than the black king.
-        let app = ChessApp::new();
-        let commands = app.render();
-        let white = painted_piece_y(&commands, '\u{2654}').expect("white king painted");
-        let black = painted_piece_y(&commands, '\u{265A}').expect("black king painted");
-        assert!(
-            white > black,
-            "white should be drawn lower down the window than black, got {white} vs {black}"
-        );
-    }
-
-    #[test]
-    fn the_dark_square_is_in_each_players_lower_left_corner() {
-        // Read back off the paint rather than recomputed, so a renderer that
-        // colours squares by some other rule is caught. a1 is dark and h1 is
-        // light -- "light on the right" -- which is the same convention a
-        // checkers board follows.
-        let app = ChessApp::new();
-        let commands = app.render();
-        assert_eq!(
-            painted_color(&commands, Pos::new(0, 0)),
-            Some(DARK_SQUARE),
-            "a1 is dark"
-        );
-        assert_eq!(
-            painted_color(&commands, Pos::new(0, 7)),
-            Some(LIGHT_SQUARE),
-            "h1 is light"
-        );
-        assert_eq!(
-            painted_color(&commands, Pos::new(7, 7)),
-            Some(DARK_SQUARE),
-            "h8 is dark"
-        );
-    }
-
-    #[test]
-    fn the_rank_and_file_labels_line_up_with_the_squares_they_name() {
-        // The labels are drawn from the same mapping as the squares, so this
-        // pins them to the *painted* squares instead: rank 1's label shares a
-        // row with a1, and file a's label shares a column with it.
-        let app = ChessApp::new();
-        let commands = app.render();
-        let label_pos = |want: &str| -> Option<(f32, f32)> {
-            commands.iter().find_map(|c| match c {
-                RenderCommand::Text {
-                    x,
-                    y,
-                    text,
-                    font_size,
-                    ..
-                } if (*font_size - LABEL_FONT_SIZE).abs() < 0.01 && text == want => Some((*x, *y)),
-                _ => None,
-            })
-        };
-        let (a1x, a1y) = square_center(Pos::new(0, 0));
-        let (h8x, h8y) = square_center(Pos::new(7, 7));
-
-        let (_, r1y) = label_pos("1").expect("rank 1 label");
-        let (_, r8y) = label_pos("8").expect("rank 8 label");
-        assert!(
-            (r1y - a1y).abs() < SQUARE_SIZE / 2.0,
-            "rank 1 beside rank 1"
-        );
-        assert!(
-            (r8y - h8y).abs() < SQUARE_SIZE / 2.0,
-            "rank 8 beside rank 8"
-        );
-
-        let (fax, _) = label_pos("a").expect("file a label");
-        let (fhx, _) = label_pos("h").expect("file h label");
-        assert!(
-            (fax - a1x).abs() < SQUARE_SIZE / 2.0,
-            "file a under the a-file"
-        );
-        assert!(
-            (fhx - h8x).abs() < SQUARE_SIZE / 2.0,
-            "file h under the h-file"
-        );
-    }
-
-    #[test]
-    fn a_legal_move_dot_is_drawn_on_the_square_it_offers() {
-        // The dots are what a player aims at, so each has to sit on the square
-        // that clicking it moves to. Checked against the painted square, and
-        // then by clicking the dot's own centre.
-        let mut app = ChessApp::new();
-        app.click_square(Pos::new(0, 1)); // b1 knight
-        let dests: Vec<Pos> = app.legal_moves_for_selected.iter().map(|m| m.to).collect();
-        assert!(!dests.is_empty(), "the knight should have moves");
-        let commands = app.render();
-        let dots: Vec<(f32, f32)> = commands
-            .iter()
-            .filter_map(|c| match c {
-                RenderCommand::FillRect {
-                    x, y, color, width, ..
-                } if *color == LEGAL_MOVE_DOT && (*width - DOT_RADIUS * 2.0).abs() < 0.01 => {
-                    Some((*x + DOT_RADIUS, *y + DOT_RADIUS))
-                }
-                _ => None,
-            })
-            .collect();
-        assert_eq!(dots.len(), dests.len(), "one dot per destination");
-        let squares = painted_squares(&commands);
-        for (x, y) in dots {
-            let hit = square_at(x, y).expect("a dot should sit on a square");
-            assert!(
-                dests.contains(&hit),
-                "a dot at ({x}, {y}) resolves to {hit:?}, which is not a legal destination"
-            );
-
-            // Landing anywhere on the square is not enough. A dot on the
-            // square's corner still resolves to that square, so the round-trip
-            // above passes while the player sees a dot straddling two squares.
-            // The square it must be centred in is the painted one, found by
-            // asking which fill contains the dot -- no shared arithmetic with
-            // the code that placed it.
-            let (sx, sy) = squares
-                .iter()
-                .copied()
-                .find(|&(sx, sy)| {
-                    x >= sx && x < sx + SQUARE_SIZE && y >= sy && y < sy + SQUARE_SIZE
-                })
-                .expect("a dot should fall inside a painted square");
-            let (want_x, want_y) = (sx + SQUARE_SIZE / 2.0, sy + SQUARE_SIZE / 2.0);
-            assert!(
-                (x - want_x).abs() < 0.01 && (y - want_y).abs() < 0.01,
-                "a dot at ({x}, {y}) is not centred in the square painted at \
-                 ({sx}, {sy}); expected ({want_x}, {want_y})"
-            );
-        }
-    }
-
-    // ── Rendering tests ─────────────────────────────────────────────
-
-    #[test]
-    fn test_render_produces_commands() {
-        let app = ChessApp::new();
-        let commands = app.render();
-        assert!(!commands.is_empty());
-    }
-
-    #[test]
-    fn test_render_has_background() {
-        let app = ChessApp::new();
-        let commands = app.render();
-        let has_bg = commands
-            .iter()
-            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
-        assert!(has_bg, "Should render background");
-    }
-
-    #[test]
-    fn test_render_has_title() {
-        let app = ChessApp::new();
-        let commands = app.render();
-        let has_title = commands
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Chess"));
-        assert!(has_title, "Should render title");
-    }
-
-    #[test]
-    fn test_render_has_board_squares() {
-        let app = ChessApp::new();
-        let commands = app.render();
-        // Should have at least 64 fill rects for board squares
-        let fill_count = commands
-            .iter()
-            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
-            .count();
-        assert!(
-            fill_count >= 64,
-            "Should render 64 board squares, got {fill_count}"
-        );
-    }
-
-    #[test]
-    fn test_render_has_pieces() {
-        let app = ChessApp::new();
-        let commands = app.render();
-        // 32 pieces in starting position
-        let piece_texts = commands
-            .iter()
-            .filter(|c| {
-                matches!(c, RenderCommand::Text { text, .. }
-                    if text.chars().any(|ch| "\u{2654}\u{2655}\u{2656}\u{2657}\u{2658}\u{2659}\u{265A}\u{265B}\u{265C}\u{265D}\u{265E}\u{265F}".contains(ch)))
-            })
-            .count();
-        assert_eq!(
-            piece_texts, 32,
-            "Should render 32 pieces, got {piece_texts}"
-        );
-    }
-
-    #[test]
-    fn test_render_selected_square() {
-        let mut app = ChessApp::new();
-        app.click_square(Pos::new(0, 1)); // select knight
-        let commands = app.render();
-        let has_selection = commands.iter().any(
-            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE),
-        );
-        assert!(has_selection, "Should render selected square highlight");
-    }
-
-    #[test]
-    fn test_render_legal_move_indicators() {
-        let mut app = ChessApp::new();
-        app.click_square(Pos::new(0, 1)); // select b1 knight (has 2 legal moves)
-        let commands = app.render();
-        let dot_count = commands
-            .iter()
-            .filter(
-                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT),
-            )
-            .count();
-        assert!(
-            dot_count >= 2,
-            "Should show legal move dots for knight, got {dot_count}"
-        );
-    }
-
-    // ── Mouse event tests ───────────────────────────────────────────
-
-    #[test]
-    fn test_mouse_click_on_board() {
-        let mut app = ChessApp::new();
-        // e2, where White's king's pawn starts. The coordinates come from the
-        // painted board rather than from a fourth copy of the arithmetic.
-        let (x, y) = painted_center(&app.render(), Pos::new(1, 4)).expect("e2 should be painted");
-        let event = MouseEvent {
-            x,
-            y,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        };
-        app.handle_mouse(&event);
-        // Should select the pawn on e2
-        assert_eq!(app.selected, Some(Pos::new(1, 4)));
-    }
-
-    #[test]
-    fn test_mouse_click_outside_board() {
-        let mut app = ChessApp::new();
-        let event = MouseEvent {
-            x: 0.0,
-            y: 0.0,
-            kind: MouseEventKind::Press(MouseButton::Left),
-        };
-        app.handle_mouse(&event);
-        assert!(app.selected.is_none());
     }
 
     // ── Move struct tests ───────────────────────────────────────────
@@ -3475,46 +3427,6 @@ mod tests {
         // Black moves
         board.make_move_unchecked(Move::normal(Pos::new(6, 4), Pos::new(4, 4)));
         assert_eq!(board.fullmove_number, 2); // Incremented after Black's move
-    }
-
-    // ── Event dispatch test ─────────────────────────────────────────
-
-    #[test]
-    fn test_handle_event_key() {
-        let mut app = ChessApp::new();
-        let event = Event::Key(KeyEvent {
-            key: Key::Right,
-            pressed: true,
-            modifiers: Modifiers::NONE,
-            text: String::new(),
-        });
-        app.handle_event(&event);
-        assert_eq!(app.cursor.col, 1);
-    }
-
-    #[test]
-    fn test_handle_event_resize_ignored() {
-        let mut app = ChessApp::new();
-        let event = Event::Resize {
-            width: 800,
-            height: 600,
-        };
-        app.handle_event(&event);
-        // Should not crash or change state
-        assert_eq!(app.game_result, GameResult::Ongoing);
-    }
-
-    // ── Game over prevents input ────────────────────────────────────
-
-    #[test]
-    fn test_game_over_prevents_moves() {
-        let mut app = ChessApp::new();
-        app.game_result = GameResult::WhiteWins;
-        app.click_square(Pos::new(1, 4)); // try to select
-        assert!(
-            app.selected.is_none(),
-            "Should not allow selection when game is over"
-        );
     }
 
     // ── Halfmove clock tests ────────────────────────────────────────
@@ -3625,5 +3537,868 @@ mod tests {
         // White queen captures Black's h8 rook
         board.make_move_unchecked(Move::normal(Pos::new(0, 0), Pos::new(7, 7)));
         assert!(!board.castling.black_kingside);
+    }
+
+    // ── Window wiring: the layout follows the window ─────────────────
+    //
+    // Every test below reads the picture the program drew. None of them
+    // recomputes a coordinate from the layout, because a click aimed by
+    // arithmetic that copies the renderer's arithmetic passes for a board
+    // painted anywhere at all.
+
+    use guitk::event::Modifiers;
+    use guitk::probe::{
+        click_background, click_sized, is_visible_sized, press, press_with, rect_of_sized, release,
+    };
+
+    /// A window smaller than the default and a different shape, so that a
+    /// coordinate that only works at 900x660 is caught.
+    const SMALL: (f32, f32) = (640.0, 480.0);
+
+    /// A window too narrow to pay for the panel.
+    const NARROW: (f32, f32) = (420.0, 700.0);
+
+    fn ctrl_n() -> KeyEvent {
+        press_with(Key::N, Modifiers::ctrl())
+    }
+
+    /// Play White's move by clicking the two squares, then let the tick run
+    /// Black's reply.
+    fn play(app: &mut ChessApp, from: Pos, to: Pos, size: (f32, f32)) {
+        click_sized(
+            app,
+            Target::Square(from.row, from.col),
+            MouseButton::Left,
+            size,
+        );
+        click_sized(app, Target::Square(to.row, to.col), MouseButton::Left, size);
+        app.handle_event(&Event::Tick { elapsed_ms: 16 });
+    }
+
+    #[test]
+    fn every_square_is_clickable_at_every_window_size() {
+        // The board is solved from the window, so all sixty-four hit boxes
+        // have to exist in each of them -- not just in the one the constants
+        // used to describe.
+        for size in [ChessApp::SIZE, SMALL, NARROW, (1600.0, 900.0)] {
+            let app = ChessApp::new();
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    assert!(
+                        is_visible_sized(&app, Target::Square(row, col), size),
+                        "{row},{col} is not clickable at {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_stays_inside_the_window_it_was_given() {
+        for size in [ChessApp::SIZE, SMALL, NARROW, (300.0, 300.0)] {
+            let app = ChessApp::new();
+            let l = Layout::solve(size.0, size.1);
+            for row in 0..8i8 {
+                for col in 0..8i8 {
+                    let r = rect_of_sized(&app, Target::Square(row, col), size)
+                        .expect("every square is drawn");
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= size.0 + 0.01
+                            && r.bottom() <= size.1 + 0.01,
+                        "square {row},{col} at {r:?} leaves the {size:?} window"
+                    );
+                    // Inside the window is not enough: the header holds the
+                    // title and the status line, and a board that started at
+                    // the top of the window would be inside it and drawn over
+                    // the one line telling the player whose move it is.
+                    assert!(
+                        r.y >= l.header.bottom() - 0.01,
+                        "square {row},{col} at {r:?} is drawn over the header at {size:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_squares_do_not_overlap_each_other() {
+        // Sixty-four boxes that overlap would still all be "visible", and a
+        // click landing in the overlap would reach whichever was recorded last
+        // rather than the one under the pointer.
+        let app = ChessApp::new();
+        let all: Vec<Rect> = (0..8i8)
+            .flat_map(|row| (0..8i8).map(move |col| (row, col)))
+            .map(|(row, col)| rect_of_sized(&app, Target::Square(row, col), SMALL).expect("drawn"))
+            .collect();
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert!(
+                    a.intersect(*b).is_none_or(|o| o.w <= 0.01 || o.h <= 0.01),
+                    "{a:?} and {b:?} overlap"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn white_is_drawn_at_the_bottom_of_the_window() {
+        // The one part of the mapping that cannot be checked by inspection:
+        // row 0 is White's back rank and belongs at the *bottom*. A board
+        // drawn upside down is a board a player cannot use, and it would pass
+        // every "is it clickable" test above.
+        let app = ChessApp::new();
+        let white_king = rect_of_sized(&app, Target::Square(0, 4), SMALL).expect("drawn");
+        let black_king = rect_of_sized(&app, Target::Square(7, 4), SMALL).expect("drawn");
+        assert!(
+            white_king.y > black_king.y,
+            "White's back rank at {white_king:?} should be below Black's at {black_king:?}"
+        );
+    }
+
+    #[test]
+    fn files_run_left_to_right() {
+        let app = ChessApp::new();
+        let a_file = rect_of_sized(&app, Target::Square(0, 0), SMALL).expect("drawn");
+        let h_file = rect_of_sized(&app, Target::Square(0, 7), SMALL).expect("drawn");
+        assert!(
+            a_file.x < h_file.x,
+            "the a-file at {a_file:?} should be left of the h-file at {h_file:?}"
+        );
+    }
+
+    #[test]
+    fn clicking_a_square_selects_the_piece_standing_on_it() {
+        let mut app = ChessApp::new();
+        let outcome = click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+    }
+
+    #[test]
+    fn a_click_reaches_the_square_it_landed_on_in_a_resized_window() {
+        // The click path and the drawing path share one mapping now. The old
+        // program computed the square from `BOARD_OFFSET_X` in the hit test and
+        // again in the renderer, so in any window that was not 900x660 both
+        // were wrong together and the test still passed.
+        let mut app = ChessApp::new();
+        let r = rect_of_sized(&app, Target::Square(1, 3), NARROW).expect("drawn");
+        let (x, y) = r.centre();
+        app.click_at(x, y, MouseButton::Left, NARROW);
+        assert_eq!(app.selected, Some(Pos::new(1, 3)));
+    }
+
+    #[test]
+    fn a_click_outside_the_board_reaches_nothing() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        assert!(app.selected.is_some());
+        // The background is not the board: the selection survives, and the
+        // window is not asked to repaint a picture that has not changed.
+        assert_eq!(click_background(&mut app), EventResult::Ignored);
+        assert!(app.selected.is_some());
+
+        // The top-left corner of the window is the header. A square is
+        // clickable where its ink is and nowhere else, so a hit box recorded
+        // anywhere but under the square it names is a square that can be
+        // played by clicking the title.
+        assert_eq!(
+            app.draw(SMALL).hit_test(0.5, 0.5),
+            None,
+            "the corner of the window belongs to a square"
+        );
+    }
+
+    #[test]
+    fn the_new_game_button_is_drawn_and_restarts_the_game() {
+        let mut app = ChessApp::new();
+        play(&mut app, Pos::new(1, 4), Pos::new(3, 4), ChessApp::SIZE);
+        assert!(!app.move_history.is_empty());
+
+        let outcome = click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE);
+        assert_eq!(outcome, EventResult::Consumed);
+        assert!(app.move_history.is_empty());
+        assert_eq!(app.board.squares, Board::new().squares);
+        assert_eq!(app.board.side_to_move, Side::White);
+    }
+
+    #[test]
+    fn a_new_game_started_by_the_button_is_not_still_thinking() {
+        // `new_game` rebuilds from `ChessApp::new` rather than clearing fields
+        // by hand, so a field added later cannot survive the reset. `thinking`
+        // is the one that would have: a game restarted while Black owed a reply
+        // would refuse every click for ever.
+        let mut app = ChessApp::new();
+        click_sized(
+            &mut app,
+            Target::Square(1, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        click_sized(
+            &mut app,
+            Target::Square(3, 4),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        assert!(app.thinking);
+        click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE);
+        assert!(!app.thinking);
+        assert_eq!(
+            click_sized(
+                &mut app,
+                Target::Square(1, 4),
+                MouseButton::Left,
+                ChessApp::SIZE
+            ),
+            EventResult::Consumed
+        );
+    }
+
+    #[test]
+    fn a_restart_keeps_the_window_size() {
+        // The size describes the window, not the game, so it is the one thing
+        // the reset carries over. Losing it would read the next click against a
+        // 900x660 picture that is not the one on screen.
+        let mut app = ChessApp::new();
+        app.resize(SMALL.0, SMALL.1);
+        app.new_game();
+        assert_eq!(app.size, SMALL);
+    }
+
+    #[test]
+    fn the_panel_is_dropped_rather_than_drawn_too_narrow_to_read() {
+        let app = ChessApp::new();
+        assert!(is_visible_sized(&app, Target::NewGame, ChessApp::SIZE));
+        // A window that cannot pay for the panel has no button either, because
+        // the button lives in it.
+        assert!(!is_visible_sized(&app, Target::NewGame, NARROW));
+        // And the board still gets every square.
+        assert!(is_visible_sized(&app, Target::Square(4, 4), NARROW));
+    }
+
+    #[test]
+    fn the_panel_is_wide_enough_for_the_lines_it_holds() {
+        // The layout measures the widest line to decide whether a panel is
+        // worth drawing. Measuring a string that is not the one drawn is a
+        // column sized for text it does not contain, which is how
+        // "Arrows/Enter: Navigate" came to be measured for a panel that draws
+        // "Arrows/Enter: Move".
+        //
+        // Every window that draws a panel is asked, not just the default one:
+        // a panel sized by a number rather than by a measurement is wide
+        // enough in a wide window and too narrow in the window that is
+        // actually near the limit, which is the only window the question is
+        // about.
+        let mut checked = 0;
+        for w in (280..=1600).step_by(20) {
+            for h in [400.0, 660.0, 900.0] {
+                #[expect(clippy::cast_precision_loss, reason = "widths well under 2^24")]
+                let l = Layout::solve(w as f32, h);
+                if l.panel.w <= 0.0 {
+                    continue;
+                }
+                checked += 1;
+                let room = l.panel.w - l.pad * 2.0;
+                for line in CONTROLS {
+                    let m = text::measure(line, l.label, FontWeightHint::Regular);
+                    assert!(m <= room + 0.01, "{line:?} does not fit at {w}x{h}");
+                }
+                for line in CAPTURED_HEADINGS {
+                    let m = text::measure(line, l.label, FontWeightHint::Bold);
+                    assert!(m <= room + 0.01, "{line:?} does not fit at {w}x{h}");
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} of those windows drew a panel");
+    }
+
+    #[test]
+    fn the_board_and_the_panel_do_not_overlap() {
+        for size in [ChessApp::SIZE, SMALL, (1600.0, 900.0)] {
+            let l = Layout::solve(size.0, size.1);
+            if l.panel.w <= 0.0 {
+                continue;
+            }
+            assert!(
+                l.board
+                    .intersect(l.panel)
+                    .is_none_or(|o| o.w <= 0.01 || o.h <= 0.01),
+                "board {:?} overlaps panel {:?} at {size:?}",
+                l.board,
+                l.panel
+            );
+        }
+    }
+
+    // ── Window wiring: the keyboard ──────────────────────────────────
+
+    #[test]
+    fn the_cursor_walks_the_board_in_the_direction_the_key_names() {
+        // Up is toward rank 8, which is *up the window*, so the assertion is
+        // made against the ink rather than against the row number: an Up that
+        // decremented the row would still be "moving up" by the row number's
+        // own account.
+        let mut app = ChessApp::new();
+        let start = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        app.key_at(&press(Key::Up), SMALL);
+        let up = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        assert!(up.y < start.y, "Up moved from {start:?} to {up:?}");
+
+        app.key_at(&press(Key::Right), SMALL);
+        let right = rect_of_sized(&app, Target::Square(app.cursor.row, app.cursor.col), SMALL)
+            .expect("drawn");
+        assert!(right.x > up.x, "Right moved from {up:?} to {right:?}");
+
+        app.key_at(&press(Key::Down), SMALL);
+        app.key_at(&press(Key::Left), SMALL);
+        assert_eq!(app.cursor, Pos::new(0, 0), "four steps should return");
+    }
+
+    #[test]
+    fn a_cursor_against_the_edge_does_not_claim_the_key() {
+        // Saying a key was consumed asks the compositor to repaint, and a
+        // repaint of an identical picture is work done for nothing.
+        let mut app = ChessApp::new();
+        assert_eq!(app.key_at(&press(Key::Left), SMALL), EventResult::Ignored);
+        assert_eq!(app.key_at(&press(Key::Down), SMALL), EventResult::Ignored);
+        assert_eq!(app.cursor, Pos::new(0, 0));
+        assert_eq!(app.key_at(&press(Key::Right), SMALL), EventResult::Consumed);
+    }
+
+    #[test]
+    fn a_key_release_moves_nothing() {
+        let mut app = ChessApp::new();
+        assert_eq!(
+            app.key_at(&release(Key::Right), SMALL),
+            EventResult::Ignored
+        );
+        assert_eq!(app.cursor, Pos::new(0, 0));
+    }
+
+    #[test]
+    fn enter_plays_the_square_the_cursor_is_on() {
+        let mut app = ChessApp::new();
+        // Walk to e2 and select it, then to e4 and play it.
+        for _ in 0..4 {
+            app.key_at(&press(Key::Right), SMALL);
+        }
+        app.key_at(&press(Key::Up), SMALL);
+        assert_eq!(app.cursor, Pos::new(1, 4));
+        assert_eq!(app.key_at(&press(Key::Enter), SMALL), EventResult::Consumed);
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+
+        app.key_at(&press(Key::Up), SMALL);
+        app.key_at(&press(Key::Up), SMALL);
+        assert_eq!(app.key_at(&press(Key::Space), SMALL), EventResult::Consumed);
+        assert_eq!(app.move_history.len(), 1);
+        assert!(app.board.get(Pos::new(3, 4)).is_some());
+    }
+
+    #[test]
+    fn escape_drops_a_selection_and_claims_nothing_when_there_is_none() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(0, 1), MouseButton::Left, SMALL);
+        assert!(app.selected.is_some());
+        assert_eq!(
+            app.key_at(&press(Key::Escape), SMALL),
+            EventResult::Consumed
+        );
+        assert!(app.selected.is_none());
+        assert_eq!(app.key_at(&press(Key::Escape), SMALL), EventResult::Ignored);
+    }
+
+    #[test]
+    fn ctrl_n_starts_a_new_game_and_a_bare_n_does_not() {
+        let mut app = ChessApp::new();
+        play(&mut app, Pos::new(1, 4), Pos::new(3, 4), SMALL);
+        assert!(!app.move_history.is_empty());
+
+        assert_eq!(app.key_at(&press(Key::N), SMALL), EventResult::Ignored);
+        assert!(!app.move_history.is_empty(), "a bare N is not a command");
+
+        assert_eq!(app.key_at(&ctrl_n(), SMALL), EventResult::Consumed);
+        assert!(app.move_history.is_empty());
+        assert_eq!(app.game_result, GameResult::Ongoing);
+    }
+
+    // ── Window wiring: the search runs on the tick ───────────────────
+
+    #[test]
+    fn the_click_that_plays_a_move_does_not_also_run_the_search() {
+        // An alpha-beta search to AI_DEPTH inside the click handler is a
+        // window that stops answering for as long as it takes. The click hands
+        // the turn over; the tick does the thinking.
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert_eq!(app.board.side_to_move, Side::Black);
+        assert!(app.thinking);
+        assert_eq!(app.move_history.len(), 1);
+    }
+
+    #[test]
+    fn a_tick_with_nothing_to_think_about_is_not_consumed() {
+        // Every tick would otherwise ask for a repaint sixteen times a second
+        // for a picture that has not changed.
+        let mut app = ChessApp::new();
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored,
+            "the reply has been played; the next tick has nothing to do"
+        );
+    }
+
+    #[test]
+    fn the_board_is_not_the_players_to_touch_while_black_owes_a_reply() {
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert!(app.thinking);
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 0), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        assert!(app.selected.is_none());
+    }
+
+    #[test]
+    fn the_status_line_says_black_is_thinking_while_it_is() {
+        // The status is what tells a player that the refused clicks above are
+        // a wait rather than a hang.
+        let mut app = ChessApp::new();
+        click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(3, 4), MouseButton::Left, SMALL);
+        assert!(
+            frame_text(&app, SMALL).contains(&"Black is thinking".to_string()),
+            "the window does not say the search is running"
+        );
+    }
+
+    #[test]
+    fn a_finished_game_refuses_the_board_but_not_the_button() {
+        // A ladder mate, played through the click path: the h7 rook cuts the
+        // seventh rank, and the second rook comes to g8. Black is mated with
+        // Black to move, so `thinking` must be false and the board dead.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 4, Side::White, PieceKind::King);
+        place(&mut app.board, 7, 0, Side::Black, PieceKind::King);
+        place(&mut app.board, 6, 7, Side::White, PieceKind::Rook);
+        place(&mut app.board, 0, 6, Side::White, PieceKind::Rook);
+        app.update_game_state();
+        click_sized(&mut app, Target::Square(0, 6), MouseButton::Left, SMALL);
+        click_sized(&mut app, Target::Square(7, 6), MouseButton::Left, SMALL);
+        assert_eq!(app.game_result, GameResult::WhiteWins);
+        assert!(!app.thinking, "a finished game owes no reply");
+        assert_eq!(
+            app.handle_event(&Event::Tick { elapsed_ms: 16 }),
+            EventResult::Ignored
+        );
+        assert_eq!(
+            click_sized(&mut app, Target::Square(0, 4), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        // The button is the way out, and it is still there.
+        assert_eq!(
+            click_sized(&mut app, Target::NewGame, MouseButton::Left, ChessApp::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(app.game_result, GameResult::Ongoing);
+    }
+
+    #[test]
+    fn a_game_that_ended_on_whites_own_move_refuses_the_board_too() {
+        // The mate above left *Black* to move, so "the game is over" and "it
+        // is not White's move" were true together and either guard alone would
+        // have refused the click. A game can equally end with White to move --
+        // White stalemated, here -- and then the result is the only thing
+        // standing between the player and a board that answers clicks after
+        // the game has finished.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 0, Side::White, PieceKind::King);
+        place(&mut app.board, 2, 1, Side::Black, PieceKind::Queen);
+        place(&mut app.board, 7, 7, Side::Black, PieceKind::King);
+        app.update_game_state();
+        assert_eq!(app.game_result, GameResult::Stalemate);
+        assert_eq!(app.board.side_to_move, Side::White, "White is to move");
+        assert!(!app.thinking, "a finished game owes no reply");
+
+        assert_eq!(
+            click_sized(&mut app, Target::Square(0, 0), MouseButton::Left, SMALL),
+            EventResult::Ignored,
+            "White's king answered a click after the game had ended"
+        );
+        assert!(app.selected.is_none());
+    }
+
+    // ── Window wiring: what the panel prints ─────────────────────────
+
+    /// Every string the frame drew, in the order it drew them.
+    fn frame_text(app: &ChessApp, size: (f32, f32)) -> Vec<String> {
+        app.draw(size)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_move_list_stops_at_the_foot_of_the_panel() {
+        // It used to grow downward without a bound and paint off the bottom of
+        // the window after about thirty moves. The rows drawn are counted from
+        // the room there is, so a long game prints fewer rows, not more ink.
+        let mut app = ChessApp::new();
+        app.move_history = (0..200).map(|n| format!("m{n}")).collect();
+        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+        for cmd in app.draw(ChessApp::SIZE).commands() {
+            if let RenderCommand::Text { y, font_size, .. } = cmd {
+                assert!(
+                    y + font_size <= l.window.h + 0.01,
+                    "text at {y} runs past the bottom of the window"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_move_list_shows_the_moves_just_played_not_the_first_ones() {
+        // A player watching a long game wants the move that was just made.
+        let mut app = ChessApp::new();
+        app.move_history = (0..200).map(|n| format!("m{n}")).collect();
+        let drawn = frame_text(&app, ChessApp::SIZE);
+        assert!(
+            drawn.iter().any(|s| s.contains("m199")),
+            "the last move is not on screen: {drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|s| s.starts_with("1. ")),
+            "the list is showing the opening instead"
+        );
+    }
+
+    #[test]
+    fn a_capture_is_listed_under_the_side_that_took_it() {
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::White;
+        place(&mut app.board, 0, 4, Side::White, PieceKind::King);
+        place(&mut app.board, 7, 4, Side::Black, PieceKind::King);
+        place(&mut app.board, 3, 3, Side::White, PieceKind::Queen);
+        place(&mut app.board, 5, 5, Side::Black, PieceKind::Rook);
+        app.update_game_state();
+        click_sized(
+            &mut app,
+            Target::Square(3, 3),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        click_sized(
+            &mut app,
+            Target::Square(5, 5),
+            MouseButton::Left,
+            ChessApp::SIZE,
+        );
+        assert_eq!(app.captured_black.len(), 1);
+
+        let drawn = frame_text(&app, ChessApp::SIZE);
+        let heading = drawn
+            .iter()
+            .position(|s| s == "Captured by White:")
+            .expect("the heading is printed");
+        let glyph = Piece::new(Side::Black, PieceKind::Rook).unicode();
+        assert_eq!(
+            drawn.get(heading + 1).map(String::as_str),
+            Some(glyph),
+            "the rook White took is not under White's heading: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_rank_and_file_labels_name_the_ranks_and_files_they_sit_beside() {
+        // Five sites used to write `b'a' + col` for themselves. They are one
+        // function now, and this is the test that the labels still line up with
+        // the squares -- the labels are matched to squares by ink, not by index.
+        let app = ChessApp::new();
+        let l = Layout::solve(ChessApp::SIZE.0, ChessApp::SIZE.1);
+        let f = app.draw(ChessApp::SIZE);
+        let text: Vec<(&str, f32, f32)> = f
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, x, y, .. } => Some((text.as_str(), *x, *y)),
+                _ => None,
+            })
+            .collect();
+
+        for rank in 0..8i8 {
+            let want = Pos::new(rank, 0).rank_char().expect("on the board");
+            let r = l.square_rect(Pos::new(rank, 0));
+            // Left of the *grid*, not merely left of `board.x + margin`: the
+            // margin is a number the layout keeps whether or not it moved the
+            // grid over to make room, so a grid that started at the board's
+            // edge would put the a-file under its own rank numbers and this
+            // assertion would still hold if it were written against `margin`.
+            let found = text.iter().any(|(s, x, y)| {
+                s.chars().eq([want])
+                    && *x >= l.board.x - 0.01
+                    && *x < l.origin.0
+                    && (*y - r.y).abs() < r.h
+            });
+            assert!(found, "rank {want} is not labelled beside its own row");
+        }
+        for file in 0..8i8 {
+            let want = Pos::new(0, file).file_char().expect("on the board");
+            let r = l.square_rect(Pos::new(0, file));
+            let found = text.iter().any(|(s, x, y)| {
+                s.chars().eq([want]) && *y > r.bottom() - 0.01 && (*x - r.x).abs() < r.w
+            });
+            assert!(found, "file {want} is not labelled under its own column");
+        }
+    }
+
+    #[test]
+    fn the_labels_are_dropped_rather_than_drawn_over_the_board() {
+        // In a window too small to spare a margin the labels have nowhere to
+        // go, and a label drawn anyway lands on the a-file.
+        let app = ChessApp::new();
+        let tiny = (44.0, 44.0);
+        let l = Layout::solve(tiny.0, tiny.1);
+        assert!(l.margin < l.label, "this window can still afford labels");
+        let drawn = frame_text(&app, tiny);
+        assert!(
+            !drawn.iter().any(|s| s == "a" || s == "1"),
+            "labels were drawn with no room for them: {drawn:?}"
+        );
+    }
+
+    #[test]
+    fn the_window_is_titled_and_sized_for_the_compositor() {
+        let app = ChessApp::new();
+        assert_eq!(app.title(), "Chess");
+        assert_eq!(app.app_id(), "chess");
+        assert_eq!(
+            app.initial_size(),
+            (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+        );
+        // Without a tick interval the game would enter `thinking` after
+        // White's first move and stay there for ever.
+        assert!(app.tick_interval().is_some());
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window() {
+        let mut app = ChessApp::new();
+        assert!(matches!(
+            app.on_event(&Event::CloseRequested),
+            Response::Exit
+        ));
+    }
+
+    #[test]
+    fn a_render_teaches_the_click_handler_the_size_it_drew_at() {
+        // The click is read against the last picture drawn. If `render` did not
+        // record its size, a resized window would be clicked at the old one.
+        let mut app = ChessApp::new();
+        app.render(SMALL.0, SMALL.1);
+        assert_eq!(app.size, SMALL);
+        let r = rect_of_sized(&app, Target::Square(1, 3), SMALL).expect("drawn");
+        let (x, y) = r.centre();
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(app.selected, Some(Pos::new(1, 3)));
+    }
+
+    #[test]
+    fn a_right_click_is_not_a_move() {
+        let mut app = ChessApp::new();
+        let r = rect_of_sized(&app, Target::Square(1, 4), SMALL).expect("drawn");
+        let (x, y) = r.centre();
+        assert_eq!(
+            app.click_at(x, y, MouseButton::Right, SMALL),
+            EventResult::Ignored
+        );
+        assert!(app.selected.is_none());
+    }
+
+    // ── Gaps the mutation sweep found ────────────────────────────────
+
+    /// The legal moves that start at `pos`.
+    fn moves_from(board: &Board, pos: Pos) -> Vec<Move> {
+        board
+            .generate_legal_moves()
+            .into_iter()
+            .filter(|m| m.from == pos)
+            .collect()
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_piece_changes_nothing() {
+        // Clicking the piece already selected repaints nothing, so claiming the
+        // click asks the compositor for a frame identical to the one on screen.
+        let mut app = ChessApp::new();
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            click_sized(&mut app, Target::Square(1, 4), MouseButton::Left, SMALL),
+            EventResult::Ignored
+        );
+        assert_eq!(app.selected, Some(Pos::new(1, 4)));
+    }
+
+    #[test]
+    fn a_search_with_no_reply_still_settles_the_game() {
+        // Black to move, stalemated. The search returns nothing, and if that
+        // arm does not settle the game the status is stuck on "Black is
+        // thinking" and `thinking` stays true, so the board never comes back.
+        let mut app = ChessApp::new();
+        app.board = Board::empty();
+        app.board.side_to_move = Side::Black;
+        place(&mut app.board, 7, 7, Side::Black, PieceKind::King);
+        place(&mut app.board, 5, 6, Side::White, PieceKind::Queen);
+        place(&mut app.board, 0, 0, Side::White, PieceKind::King);
+        app.thinking = true;
+        assert!(app.board.generate_legal_moves().is_empty());
+
+        assert!(app.think(), "the search ran");
+        assert_eq!(app.game_result, GameResult::Stalemate);
+        assert!(!app.thinking);
+        assert_ne!(app.status_message, "Black is thinking");
+    }
+
+    #[test]
+    fn off_board_squares_have_no_name() {
+        // Five sites used to write `b'a' + col as u8` for themselves, each of
+        // them able to name a square that does not exist -- `{` for the file
+        // after h, and a control character for the rank below 1.
+        assert_eq!(Pos::new(0, 8).file_char(), None);
+        assert_eq!(Pos::new(0, -1).file_char(), None);
+        assert_eq!(Pos::new(8, 0).rank_char(), None);
+        assert_eq!(Pos::new(-1, 0).rank_char(), None);
+        assert_eq!(Pos::new(0, 7).file_char(), Some('h'));
+        assert_eq!(Pos::new(7, 0).rank_char(), Some('8'));
+        assert_eq!(Pos::new(-1, 8).to_algebraic(), "");
+    }
+
+    #[test]
+    fn test_board_get_out_of_bounds() {
+        // "Off the board" is an answer the move generators need rather than a
+        // fault to be guarded against, and a negative row cast to `usize` is an
+        // enormous one that indexes somewhere real.
+        let board = Board::new();
+        assert_eq!(board.get(Pos::new(-1, 0)), None);
+        assert_eq!(board.get(Pos::new(0, -1)), None);
+        assert_eq!(board.get(Pos::new(8, 0)), None);
+        assert_eq!(board.get(Pos::new(0, 8)), None);
+    }
+
+    #[test]
+    fn test_board_set_out_of_bounds() {
+        // A piece set off the board would have to land on some square that is
+        // on it. Nothing may change.
+        let mut board = Board::new();
+        let before = board.squares;
+        for pos in [
+            Pos::new(-1, 0),
+            Pos::new(0, -1),
+            Pos::new(8, 0),
+            Pos::new(0, 8),
+        ] {
+            board.set(pos, Some(Piece::new(Side::White, PieceKind::Queen)));
+        }
+        assert_eq!(board.squares, before);
+    }
+
+    #[test]
+    fn test_knight_blocked_by_own_pieces() {
+        // A knight jumps over what is in the way, so the only thing that stops
+        // it is a piece of its own on the square it lands on.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 3, 3, Side::White, PieceKind::Knight);
+        place(&mut board, 5, 4, Side::White, PieceKind::Pawn);
+        place(&mut board, 5, 2, Side::Black, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(3, 3));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(5, 4)),
+            "the knight took its own pawn"
+        );
+        assert!(
+            moves.iter().any(|m| m.to == Pos::new(5, 2)),
+            "the knight would not take Black's pawn"
+        );
+    }
+
+    #[test]
+    fn test_king_blocked_by_own_pieces() {
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 3, 3, Side::White, PieceKind::King);
+        place(&mut board, 3, 4, Side::White, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(3, 3));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(3, 4)),
+            "the king took its own pawn"
+        );
+    }
+
+    #[test]
+    fn test_rook_blocked_by_own_piece() {
+        // The ray stops at the first piece, and a piece of our own is not
+        // captured -- nor is anything behind it reachable.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 0, 0, Side::White, PieceKind::Rook);
+        place(&mut board, 0, 3, Side::White, PieceKind::Bishop);
+        place(&mut board, 0, 5, Side::Black, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(0, 0));
+        assert!(moves.iter().any(|m| m.to == Pos::new(0, 2)));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(0, 3)),
+            "the rook took its own bishop"
+        );
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(0, 5)),
+            "the rook reached through its own bishop"
+        );
+    }
+
+    #[test]
+    fn test_pawn_no_double_push_after_move() {
+        // The double push is the starting rank's privilege. A pawn that has
+        // already moved gets one square.
+        let mut board = Board::empty();
+        board.side_to_move = Side::White;
+        place(&mut board, 2, 4, Side::White, PieceKind::Pawn);
+        let moves = moves_from(&board, Pos::new(2, 4));
+        assert!(moves.iter().any(|m| m.to == Pos::new(3, 4)));
+        assert!(
+            !moves.iter().any(|m| m.to == Pos::new(4, 4)),
+            "a pawn off its starting rank pushed two squares"
+        );
     }
 }

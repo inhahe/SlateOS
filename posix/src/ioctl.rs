@@ -659,6 +659,12 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+    // An `O_PATH` descriptor names a file without opening it, so there is no
+    // driver behind it to talk to: EBADF, ahead of the ENOTTY an unrecognised
+    // request would otherwise get.  Measured on Linux 6.6 with FIONREAD.
+    if crate::file::reject_path_fd_entry(&entry) {
+        return -1;
+    }
 
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),

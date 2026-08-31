@@ -413,20 +413,17 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::process::ExitCode;
 
-    // SAFETY (declaration): `umask` is POSIX, takes and returns `mode_t`, and
-    // has no failure mode. `mode_t` is `u32` on Linux and on x86_64-slateos.
-    unsafe extern "C" {
-        fn umask(mask: u32) -> u32;
-    }
-
     /// Read the process umask.
     ///
-    /// POSIX offers no way to read it without writing it, so this does what GNU
-    /// does: set it to 0 and keep the answer. Not restoring it is deliberate and
-    /// upstream's — `chmod` creates no files, and the process is about to exit.
+    /// GNU spells this `umask (0)` and never puts the value back, which is
+    /// sound in a process that creates no files and is about to exit. It is not
+    /// sound under `cargo test`, where this binary's code runs on a thread
+    /// beside tests that do create files, and where clearing the mask leaves
+    /// every later creation in the whole process too permissive.
+    /// [`coreutils::umask::current`] answers the same question without writing
+    /// anything; see its docs.
     fn read_umask() -> u32 {
-        // SAFETY: no arguments to get wrong, no pointers, no failure.
-        unsafe { umask(0) }
+        coreutils::umask::current()
     }
 
     /// Everything the walk needs that does not change from file to file.

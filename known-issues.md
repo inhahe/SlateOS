@@ -100138,6 +100138,456 @@ for isolation. If a program's correctness depends on a directory not moving
 under it, say so in a comment and treat it as a known gap, rather than reaching
 for `openat` and assuming it bought something.
 
+## B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT (lane B, 2026-08-30) — FIXED
+
+**In short:** `cp a a` deleted the contents of `a`. It printed nothing and
+exited 0, so nothing anywhere reported that a file had just been destroyed.
+The same happened for `cp a ./a`, `cp a dir/../a`, `cp a <hard-link-to-a>`,
+`cp a <symlink-to-a>` and `cp -r a .`. GNU refuses all six with
+`cp: 'a' and 'a' are the same file`. Fixed the same day it was found, in
+`userspace/coreutils/src/bin/cp.rs`.
+
+**Why it destroyed data.** The copy went through `std::fs::copy`, which opens
+the destination with `O_TRUNC` before it reads the source. Handed one file
+under two names, it truncated that file to zero length and then copied the
+resulting nothing back over itself. `fs::copy` returned `Ok(0)`, so `cp`
+reported success.
+
+**Why no string comparison would have caught it.** Only the first of the six
+spellings has two equal operands. The rest reach one inode by two names — a
+`.` or `..` in the middle of a path, a hard link, a symlink, or a directory
+destination that resolves to the source's own parent. GNU does not attempt a
+textual comparison: `same_file_ok` in `src/copy.c` compares the two `stat`
+results' device and inode. `cp.rs` now does the same, in `is_same_file`, at
+the same point in the same order — after the `-r not specified` refusal and
+before anything touches the destination.
+
+**The order of the checks was wrong too, and is fixed with it.** `cp.rs` asked
+"is the source a directory and was `-r` given?" *after* working out where the
+source would land, so `cp tree/..` (no `-r`) complained about the destination
+rather than about the missing `-r`. GNU asks about the source first, because
+the refusal is a fact about the source alone.
+
+**How it was found, and the general point.** By `scripts/cp-diff.sh` on its
+first run — a new differential harness, written before any new feature, purely
+to certify what `cp` already did. It found this in the first thirty seconds.
+
+The file it found it in had *already been rewritten once*, in a change whose
+commit message lists six bugs found by reading the code it replaced. That
+rewrite introduced this one: it swapped a hand-rolled byte-copy loop for
+`fs::copy` and never asked what `fs::copy` does when handed one file twice.
+So the lesson is not "read more carefully" —
+
+> **A rewrite that fixes six defects found by reading is exactly the change
+> most likely to introduce a seventh that reading will not find.** Reading
+> finds the bugs you thought to look for. The differential harness is what
+> finds the others, and it is worth writing *before* the feature work it is
+> meant to protect, not after.
+
+This is the second finding in a week that a measurement produced and no amount
+of re-reading would have — see the `nice` entry above, where the defect was a
+`#if` arm that is dead on glibc, and
+`B-QUOTING-NO-MEASURED-ROW-HELD-BOTH-A-SLASH-AND-A-QUOTE`.
+
+**Certified by** `scripts/cp-diff.sh` sections 4 and 6, and by three unit
+tests in `cp.rs` — one of which asserts the *bytes* of the source afterwards
+rather than the diagnostic, because the defect reported success and said
+nothing, and a test that checked only the message would have passed against it.
+
+## B-THE-DIFFERENTIAL-ORACLE-IS-DEBIAN-PATCHED (lane B, 2026-08-30) — FIXED, and an inventory
+
+**In short:** The `scripts/*-diff.sh` harnesses are how this project knows its
+utilities behave like GNU's: each runs our program and "GNU's" side by side and
+compares. The GNU side was whatever the machine had installed, and that binary
+is **not** GNU's — WSL ships Ubuntu's `coreutils 9.4-3ubuntu6.1`, which carries
+Debian and Ubuntu patches that change behaviour. Two of those patches are known
+to reach a harness here, and the changelog names four more that could. The
+fix is `DIFF_GNU_SOURCE` (`design-decisions.md` §726): a harness is compared
+against the GNU release tarball, built from source. **Every coreutils harness
+is now converted** (2026-08-30), so the GNU side really is GNU's. The entry
+stays as the record of what was wrong, of the patch inventory below, and of the
+one gap that is left — the built reference is compiled without ACL, xattr and
+capability support, which needs the operator to install three `-dev` packages.
+It is also the place to record distribution patches as they are found.
+
+### Why this is not a theoretical concern
+
+A harness compares against a patched binary and reports green. That green means
+"we match Ubuntu", which is what the harness *says* only if someone remembers
+the distinction. Both known instances were found by accident, in the middle of
+unrelated work, and in both the first hypothesis was that our program was
+wrong:
+
+- **`df`** (2026-08-29, `design-decisions.md` §700). Ubuntu adds `devtmpfs` and
+  `squashfs` to gnulib's `ME_DUMMY_0`, so the reference omits `/dev` from every
+  whole-table listing and ours prints it — 37 cases. Establishing which side
+  was upstream needed `LD_PRELOAD` interposition of `stat` to prove the row was
+  gone *before* the stat, plus `strings -a /usr/bin/df`.
+- **`cp -n`** (2026-08-30, this entry, `design-decisions.md` §726). Debian
+  9.4-3 reverted `-n` to its pre-9.3 meaning and added a deprecation warning:
+
+  | | `cp -n a b`, `b` exists |
+  |---|---|
+  | upstream 9.4 (`cp.c:1070` → `I_ALWAYS_NO`; `copy.c:2437`) | `cp: not replacing 'b'` on stderr, exit **1** |
+  | installed `9.4-3ubuntu6.1` | nothing on stderr but a warning, exit **0**, `b` untouched |
+
+  The warning is `cp: warning: behavior of -n is non-portable and may change in
+  future; use --update=none instead`, printed at option-parse time — even
+  `cp -n a newfile`, which overwrites nothing, prints it. It appears in no
+  upstream file at `v9.4`, `v9.5`, `v9.6` or `master`, nor anywhere in the 9.4
+  tarball; `strings /usr/bin/cp` has it. The Debian changelog is explicit:
+  `revert cp -n behavior to debian 12 & prior (Closes: #1058752)` and
+  `add deprecation/compatibility warning for above`.
+
+  The patched `-n` is `I_ALWAYS_SKIP`, i.e. exactly `--update=none`:
+  `cp -n --debug a b` prints `skipped 'b'`, which is `I_ALWAYS_SKIP`'s
+  diagnostic and not `I_ALWAYS_NO`'s.
+
+### The inventory — patches named in the changelog, and the harness each reaches
+
+Read from `/usr/share/doc/coreutils/changelog.Debian.gz` on the dev machine.
+"Reached?" is whether a harness in `scripts/` exists that could see it, not
+whether it has been checked.
+
+| Patch | Effect | Harness | Reached? |
+|---|---|---|---|
+| `cp-n.diff` (Debian #1058752) | `cp -n` skips silently, exit 0, plus a parse-time warning | `cp-diff.sh` | **yes** — see above; harness converted 2026-08-30 |
+| `treat-devtmpfs-and-squashfs-as-dummy-filesystems.patch` | `df`/`du` hide `/dev` and `/snap/*` rows | `df-diff.sh`, `du-diff.sh` | **yes** — §700; both harnesses converted 2026-08-30 |
+| `80_fedora_sysinfo.patch` | `uname -i -p` print the real processor rather than `unknown` | none | no harness yet |
+| `tail-fix-tailing-sysfs-files-where-PAGE_SIZE-BUFSIZ.patch` | `tail` on sysfs files with a 64 K page | `tail-diff.sh` | **no** — converted 2026-08-30, no count moved; no fixture is on sysfs |
+| `CVE-2024-0684.patch` | `split --line-bytes` heap overflow fix (also upstream in 9.5) | `split-diff.sh` | **no** — converted 2026-08-30, no count moved |
+| `suppress-permission-denied-errors-on-nfs.patch` | `ls -l` does not report EACCES reading attributes over NFS | `ls-diff.sh` | **no** — that harness builds 9.5 from the tarball |
+| `99_float_endian_detection.patch` | floating-point endianness detection at configure time | `printf-diff.sh`, `extfloat-diff.sh` | **no** — `printf-diff.sh` converted 2026-08-30, no count moved; `extfloat-diff.sh` has no coreutils reference at all |
+
+`ls-diff.sh`'s immunity is accidental — it built its own reference since §366
+for an unrelated reason (9.4 and 9.5 lay columns out differently). That is
+what made the general mechanism cheap enough to adopt.
+
+### What has been done, and what remains
+
+Done: `scripts/diff-wsl.sh` grows `DIFF_GNU_SOURCE=<version>`, which fetches
+`coreutils-<version>.tar.xz` from `ftp.gnu.org`, configures it once under
+`$HOME/.cache/slateos-diff-gnu`, `make`s only the binaries a harness names, and
+verifies `--version` before comparing anything. It skips rather than falling
+back if it cannot build, and treats a version mismatch as fatal. `ls-diff.sh`
+is converted and its bespoke copy of that sequence is deleted.
+
+Done since: **`cp-diff.sh` → 9.4** (2026-08-30), which unblocked `cp -n` and
+then `cp -i`; the conversion moved no count, because every `-n` case was
+written after the patch was known and none had been certified against it.
+**`df-diff.sh` and `du-diff.sh` → 9.4** (2026-08-30), which retired §700's
+`drop_hidden` subtraction, its `=` exemption marker and its
+`!Ubuntu hides devtmpfs …` xfail outright — the pristine `df` prints the `/dev`
+row, so there was nothing to subtract. `df-diff.sh` gained three
+`--output` forms that the subtraction had made uncomparable (`--output=source`
+among them, which had been the xfail), and now runs 177 cases with 174 passing
+and 3 xfails, none of them about the distribution. `du-diff.sh` moved no count
+at all: 188 pass, 5 xfail, exactly as before, which is the outcome the note
+below predicts for most of the remaining conversions and is still worth having.
+
+Done since, and this is the last of it: **the remaining 37 coreutils harnesses
+→ 9.4** (2026-08-30), in one sweep. Every coreutils harness in `scripts/` now
+compares against the built tarball, so the gap this entry describes is closed;
+it is left here as the record of it rather than as live work.
+
+The three that carried a named hypothesis from the table above were the point
+of the sweep, and all three came back a no-op — which is a result, not a
+non-result. Each had been an unchecked "probably":
+
+| Harness | Hypothesis | Measured |
+|---|---|---|
+| `tail-diff.sh` | sysfs patch unreachable: no fixture is on sysfs | 218 pass, 2 xfail — unchanged |
+| `split-diff.sh` | CVE-2024-0684 makes the *installed* binary the more correct one, so a difference here would be legitimate | 207 pass, 5 xfail — unchanged |
+| `printf-diff.sh` | float-endianness is a configure-time fix, a no-op on x86-64 | 1197 pass, 5 xfail — unchanged |
+
+The other 34 moved no count either. That is the expected outcome and was
+always the argument for doing it: it converts an unexamined assumption into a
+checked one, and every case written against these harnesses from now on is
+certified against GNU rather than against Ubuntu.
+
+One harness needed a new mechanism to get there. **`test` cannot attest its own
+version**: it has no options at all, so `--version` is an ordinary
+one-argument expression and a non-empty string is true — `test --version`
+prints nothing and exits 0, on the built 9.4 and on the installed binary
+alike. The version guard therefore read `test-diff: … is not coreutils 9.4
+(it says: )` for a tree that was exactly right. `diff-wsl.sh` grew
+`DIFF_GNU_VERIFY_WITH` for it: the tree is one `make` of one tarball, so any
+sibling in it attests the version, and `test-diff.sh` borrows `cat`. The guard
+keeps its full strength — still a real runtime check on a real binary, still
+fatal. The alternative of skipping verification whenever `--version` produced
+nothing recognisable was rejected: that is also exactly what a *wrong* binary
+would produce.
+
+The same knob fixed a defect the sweep exposed in the three **family**
+harnesses. `write-error`, `digest` and `interleave` name themselves for the
+property they test, and there is no `src/write-error` in the coreutils tree to
+ask, so the witness defaults to the first `DIFF_BINS` entry rather than to
+`DIFF_PROG`.
+
+Remaining: nothing, for coreutils. Harnesses whose reference is *not* coreutils
+are out of scope and always were: `awk`, `bc`, `cmp` (diffutils), `ed`, `find`
+and `xargs` (findutils), `grep`, `more` (util-linux), `osh`/`sh` (bash), `sed`,
+`tar`, `time`, and `extfloat` (whose reference is a C probe it compiles
+itself). The one live item left under this heading is the ACL/xattr/capability
+gap immediately below, which needs the operator.
+
+### A second, smaller gap: the built reference is upstream's source, not its build
+
+`configure` on this machine turns three features off, because their development
+headers are absent and `sudo` here needs a password:
+
+```text
+configure: WARNING: GNU coreutils will be built without ACL support.
+configure: WARNING: GNU coreutils will be built without xattr support.
+configure: WARNING: GNU coreutils will be built without capability support.
+```
+
+Ubuntu's binary has all three. Three things could show it: the `+` after
+`ls -l`'s mode string (ACL), `cp --preserve=xattr`, and `--color`'s `ca` slot
+(file capabilities). **None is reachable today** — no fixture in `scripts/`
+creates an ACL, an xattr or a capability, and no subject program implements any
+of them — so this is a note for whoever writes the first such case, not a live
+defect. The fix is `apt install libacl1-dev libattr1-dev libcap-dev`, which
+needs the operator; after it, wipe `$HOME/.cache/slateos-diff-gnu` so the
+reference is rebuilt with them.
+
+### How to check a suspected patch, cheaply
+
+The sequence that settled both, in increasing order of cost:
+
+1. `dpkg -s coreutils | grep Version` — is the binary a distribution build?
+2. `zcat /usr/share/doc/coreutils/changelog.Debian.gz | grep -i <utility>` —
+   distributions document their patches, and Debian's changelog names the
+   patch file. This is the step that should be *first* and was last both times.
+3. `curl -sfL "https://git.savannah.gnu.org/cgit/coreutils.git/plain/src/<f>.c?h=v9.4"`
+   — the `?h=` tag pin works; check it does by diffing two tags' line counts.
+4. `strings -a /usr/bin/<utility> | grep <string>` — a message in the binary
+   and in no source tree is a patch, conclusively.
+5. Only then the expensive tools: `LD_PRELOAD` interposition, a Python
+   reimplementation of the algorithm, a bisect over versions.
+
+## B-LS-DIFF-HAS-BEEN-SKIPPING (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** `scripts/ls-diff.sh` is the harness that certifies our `ls`
+against GNU's. It builds its own reference from the GNU tarball, and the
+`make` command it used was wrong in a way that could never succeed. So on
+every run it printed "coreutils 9.5 did not build; SKIPPED — a C compiler and
+make are needed", **on a host that has both**, and exited 0. Our `ls` has been
+uncertified for as long as that line existed. Found while generalising the
+build block into `diff-wsl.sh` for an unrelated reason.
+
+### The bug
+
+`ls-diff.sh` ran, from §366 onward:
+
+```sh
+./configure --quiet --disable-nls \
+  && make -s -j"$(nproc)" src/ls
+```
+
+Automake's generated `all` rule is
+
+```make
+all: $(BUILT_SOURCES)
+	$(MAKE) $(AM_MAKEFLAGS) all-am
+```
+
+— that is, `BUILT_SOURCES` are a prerequisite of **the default target only**.
+Naming `src/ls` on the command line skips them. In coreutils the built sources
+are gnulib's replacement headers: `lib/fcntl.h`, `lib/stdckdint.h`,
+`lib/wchar.h`, `lib/stdio.h` and some forty more, generated at build time from
+`.in.h` templates by rules in `lib/Makefile.am`. Without them gnulib compiles
+against the system headers it exists to shield itself from:
+
+```text
+lib/binary-io.h:54:10: error: 'O_BINARY' undeclared
+lib/backupfile.c:28:10: fatal error: stdckdint.h: No such file or directory
+lib/openat-proc.c:82:17: error: 'O_SEARCH' undeclared
+lib/mcel.h:184:13: error: unknown type name 'wint_t'
+```
+
+Not one of those messages says "you named the wrong target". They read exactly
+like a host with a broken libc, which is what the harness's own diagnostic
+then concluded and reported.
+
+### Why it went unnoticed
+
+Three layers each hid a bit of it:
+
+1. **The harness exits 0 on a skip**, which is the right policy — a machine
+   with no compiler should not fail the suite — but makes a permanent skip
+   indistinguishable from a transient one at the exit-status level.
+2. **`all-diff.sh` prints each harness's last line**, and the last line here is
+   the parenthetical hint `(a C compiler and make are needed; or set
+   GNU=/path/to/a/9.5/ls)`, not a count. In a column of "N passed, 0 differed"
+   rows it reads as a note rather than an absence. (`all-diff.sh` *did* score
+   it red — no `0 differed` in it — so the aggregate exit status was right;
+   what failed was the human scan.)
+3. **The diagnostic blamed the host.** "A C compiler and make are needed" sends
+   the reader to check for gcc, find it, and shrug.
+
+### The fix
+
+`design-decisions.md` §726 moved the build into `diff-wsl.sh` as
+`DIFF_GNU_SOURCE`, and it builds the whole package (`make -s -jN`, ~90 s at
+`-j8`) rather than one target. The full build is now the *correct* thing as
+well as the shared thing, and the header comment above the block records why,
+so the economy cannot be reintroduced by someone who sees only a slow build.
+
+Two further hardenings came out of the same investigation:
+
+- **A failed build is wiped.** A tree left half-built by the broken `make
+  src/ls` does not recover when a correct `make` is run over it: the stale
+  objects were compiled against the wrong headers and the link fails with
+  `undefined reference to rpl_mbrtoc32`, a third message naming neither cause.
+  Every failure path now `rm -rf`s the tree.
+- **Completion is marked, not inferred.** The cache is considered built when a
+  `.slateos-built` marker exists, written only after a whole `make` returned 0
+  — because "the binary exists" is exactly what a half-built tree can also be
+  true of.
+
+### The general lesson
+
+This is the second harness-level failure in a week whose symptom was *silence*
+rather than a wrong answer — see `B-CP-COPYING-A-FILE-ONTO-ITSELF-EMPTIED-IT`
+for the first, where the bug reported success. A differential harness's whole
+value is that it fails loudly; a skip path is the one branch where it does not,
+and it therefore deserves the same suspicion as an `unwrap`.
+
+Worth doing, and not yet done: make `all-diff.sh` report a *skipped* harness as
+its own state rather than by whatever its last line happened to be, so a
+permanent skip is visible as a skip. Tracked in `todo.txt`.
+
+## B-CP-R-COULD-NOT-REPLACE-AN-EXISTING-SYMLINK (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** `cp -r src dst` failed, with `File exists`, whenever the tree
+being copied contained a symlink at a name where the destination tree already
+had one. Copying a tree onto a copy of itself — the ordinary way anyone updates
+a backup directory — therefore failed on the second run and succeeded on the
+first. GNU replaces the link and says nothing. Fixed in
+`userspace/coreutils/src/bin/cp.rs`.
+
+**The mechanism.** `copy_entry`'s symlink arm called `symlink(target, at)`
+directly. `symlinkat(2)` has no truncate-or-replace mode: it fails with `EEXIST`
+if anything at all already exists at the name, a working link included. The
+regular-file arm never had this problem because `open(…, O_WRONLY|O_TRUNC)`
+opens an existing file happily, and the directory arm never had it because
+`create_dir` on an existing directory is tolerated by the surrounding code. The
+symlink arm was the one kind of member whose creation call has no "already
+there" story, and it was the one arm that had not been given one.
+
+**Why it stayed hidden.** Every recursive test in the file, and every recursive
+case in `scripts/cp-diff.sh` before section 16, copied into a destination that
+did not yet exist. That is the natural way to write a copy test and it exercises
+`new_dst` on every member, so the replace path was never entered. It took a
+fixture built specifically to be copied *twice* — `dst2`, "a second copy of the
+same tree" — to reach it.
+
+**The fix.** The symlink arm now unlinks an existing non-directory destination
+before creating, which is what GNU's `copy_internal` does for the same reason
+(it removes the destination when the source is a symlink and the destination is
+not a directory). A destination *directory* is still refused, because replacing
+a directory with a symlink is not something `cp` does without
+`--remove-destination`.
+
+**Certified by** `a_recursive_copy_replaces_an_existing_symlink` in `cp.rs`, and
+by `scripts/cp-diff.sh` section 16's recursive sub-group, which copies the same
+tree into a destination that already holds it under all four overwrite policies.
+
+**The general point, again.** Section 16 was written to certify `-f`,
+`-n` and `--remove-destination` — three options this `cp` did not have. It found
+a bug in the code that was already there, in a path none of those options touch.
+That is the third time in a week (see the two entries above) that measurement
+written for feature A found a defect in feature B, and it is the argument for
+writing the harness section *before* the feature rather than alongside it.
+
+## B-READING-THE-UMASK-BY-SETTING-IT-CORRUPTED-OTHER-TESTS-MODES (lane B, 2026-08-30) — **FIXED 2026-08-30**
+
+**In short:** Two of `cp`'s tests failed at random, a few percent of runs each,
+for as long as they have existed. The cause was in neither of them. POSIX offers
+no way to *read* the file-creation mask without *setting* it, so the code that
+needed the value set it, read the old one, and set it back — and in the moment
+between those two calls, every file created anywhere else in the process came
+out at the wrong mode. Under `cargo test`, "anywhere else in the process" is
+every other test. Fixed by adding `coreutils::umask`, which reads the value from
+`/proc/self/status` instead.
+
+**The symptoms.** Over 25 repeat runs of `cargo test --bin cp`:
+
+```text
+thread 'tests::dereference_fails_on_a_dangling_link_in_the_tree' panicked at
+  cp.rs:3557: called `Result::unwrap()` on an `Err` value:
+  Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+
+thread 'tests::copies_a_file_into_a_directory' panicked at cp.rs:2928:
+  assert!(ok, "{err}")
+```
+
+Both point at the code under test. Neither has anything to do with it: a
+`PermissionDenied` on a file the test itself had just written, and a copy that
+failed for a reason the test then printed as an empty string.
+
+**The mechanism.** `cp.rs` carried GNU's `cached_umask` (`copy.c`) verbatim:
+
+```rust
+let old = umask(0o777);   // deny everything
+umask(old);               // put it back
+```
+
+That is correct in GNU, and this is worth being precise about — it is not a bug
+upstream. `cp` there is one thread that creates nothing between the two calls,
+so the window is provably empty. Here it is not: `cargo test` runs a binary's
+tests on threads of one process, the mask is per-process, and a file another
+thread creates inside the window arrives at mode `0000` — unreadable and
+unwritable by its own owner. Worse, `cp.rs` deliberately *disabled* its
+`OnceLock` cache under `#[cfg(test)]` (so the mode tests could vary the mask),
+which turned one window per process into one window per copy.
+
+**Why no lock would have fixed it.** The obvious repair is to serialise the
+umask readers. It does not work, and the reason is worth stating: the thread
+being harmed never touches the umask at all. It is calling `File::create`. A
+mutex orders the participants that agree to take it, and the victim here is
+every non-participant in the binary. `cp.rs`'s own `with_umask` helper had
+already conceded this in a doc comment — *"It does not protect against an
+unrelated test creating a file while a mask is installed — nothing can, short of
+running single-threaded"* — which was true of the tool available at the time.
+
+**The fix.** Linux publishes the mask in `/proc/self/status` as a `Umask:` line
+(since 4.7), and SlateOS's own procfs writes the same field
+(`kernel/src/fs/procfs.rs`, `Umask:\t{mask:04o}`). Reading it there is a read:
+there is no window, and the answer is live rather than cached. The new
+`userspace/coreutils/src/umask.rs` does that, with the POSIX probe kept as the
+fallback for a Unix with no `/proc` — and the fallback probes with `umask(0)`
+rather than `umask(0777)`, because between two bad windows the one that
+*permits* too much loses a race quietly while the one that *denies* everything
+loses it loudly.
+
+**Who was migrated, and who was deliberately not.** Five binaries had each
+reproduced the idiom privately:
+
+| where | was | now |
+|---|---|---|
+| `cp.rs` | `umask(0777)` probe, uncached under `test` | `coreutils::umask::current`, cached outside `test` |
+| `tar.rs` | `umask(0)` probe, `OnceLock` | `coreutils::umask::current`, `OnceLock` |
+| `chmod.rs` | `umask(0)`, **never restored** | `coreutils::umask::current` |
+| `mkdir.rs`, `mkfifo.rs` | `umask(0)`, kept | **unchanged** — see below |
+| `userspace/chown` | `umask(0)` probe, `OnceLock` | **unchanged** — separate crate |
+
+`mkdir` and `mkfifo` are not copies of this and must not be folded into it: they
+*clear* the mask on purpose, because `-m` names an exact mode that the mask must
+not narrow. `chown` is its own crate and cannot depend on `coreutils` (the same
+constraint that moved `quote` out to `userspace/quoting`; see
+`design-decisions.md` §370). Its probe is the permissive direction and is
+cached, so it opens one short window per process; if a third crate ever needs
+this, the module should move out beside `quoting` rather than be copied a
+seventh time.
+
+**The general lesson.** An intermittent failure whose stack points at the code
+under test is evidence about the *instrument* at least as often as about the
+code. Both symptoms here were mode-shaped — a denied read, a failed create — and
+the only thing in the process that touches modes globally is the umask. That
+is a cheap first question to ask, and it was not asked for weeks because each
+failure was individually rare enough to re-run past.
 **Update 2026-08-30 (lane A).** The kernel half now exists for *three* of the
 calls — see `A-VFS-EIGHT-MORE-AT-CALLS-STILL-RESOLVE-BY-PATH` below and
 `requests/a-b-the-at-family-now-has-three-primitives-that-resolve-the-handle.md`.
@@ -101011,6 +101461,233 @@ twelve are twelve *because* the `pressed` guard is copied forward with the
 removing it from the arm reproduces this exactly -- and will pass its whole
 suite while doing so.
 
+## B-NINE-KERNEL-ERROR-CODES-REACHED-USERSPACE-AS-EIO (lane B, 2026-08-30) — FIXED
+
+**In short:** the kernel has a list of error numbers, and the POSIX layer has a
+hand-written copy of that list saying which C `errno` each one becomes. Nine
+numbers had been added to the kernel's list and never copied across. Every one
+of them arrived in userspace as `EIO` — "I/O error" — which is a real answer
+that other codes legitimately give, so nothing looked broken. Among the nine:
+the code that means "a non-blocking connect is still in progress", which a
+network client is supposed to read as *keep waiting* and instead read as *this
+socket is dead*.
+
+**Where.** `posix/src/errno.rs`, `mod native` and `translate` (now
+`errno_for`); and a second, worse copy in `posix/src/socket.rs`,
+`translate_net_error`.
+
+**The nine.**
+
+| Code | `KernelError` | Should be | Was | Who produces it |
+|---|---|---|---|---|
+| -512 | `CrossDevice` | `EXDEV` | `EIO` | `vfs.rs` rename/exchange across a mount, `handle.rs` |
+| -513 | `StaleHandle` | `ESTALE` | `EIO` | the pinned `*at` calls 662-664 (lane A, same day) |
+| -700 | `ConnectionRefused` | `ECONNREFUSED` | `EIO` | `net/socket.rs:476` |
+| -701 | `NotConnected` | `ENOTCONN` | `EIO` | `net/netstack_client.rs` ×5 |
+| -702 | `InProgress` | `EINPROGRESS` | `EIO` | non-blocking `connect` |
+| -703 | `ConnectAlready` | `EALREADY` | `EIO` | `net/socket.rs:462` |
+| -704 | `BrokenPipe` | `EPIPE` | `EIO` | `netstack_client.rs:377` |
+| -705 | `AddrInUse` | `EADDRINUSE` | `EIO` | `netstack_client.rs:506` |
+| -706 | `MsgSize` | `EMSGSIZE` | `EIO` | `netstack_client.rs` ×4 |
+
+`-401 InvalidCapability` was a tenth, acknowledged in a comment but never
+mapped; it is now `EACCES`, the same as an outright denial.
+
+**Why it went unnoticed for so long.** Two reasons, and the second is the one
+worth remembering.
+
+1. The header on `mod native` said *"MUST stay in sync with
+   kernel/src/error.rs — any mismatch causes wrong errno values throughout the
+   entire POSIX layer."* That is exactly right, and it is a comment. Comments
+   do not fail builds. Lane A added the `-700` range for the netstack and had
+   no reason to know a mirror existed two crates away.
+2. `translate` ends in `_ => EIO`. A catch-all cannot distinguish *a code the
+   kernel does not define* from *a code the kernel defines and this table has
+   not caught up with*, so a missing row does not produce an error, it produces
+   a plausible wrong answer. Had the catch-all been `unreachable!()` the first
+   `connect` would have said so; had it been a distinct sentinel errno the
+   first log line would have. `EIO` is the one choice that hides.
+
+   This is the same shape as the `all-diff.sh` skip bug fixed the same day: a
+   default that is indistinguishable from a real result. It is worth treating
+   "what does the catch-all arm mean, and can it be told apart from a real
+   answer?" as a standing question about any lookup table that mirrors
+   something else.
+
+**The second copy.** `socket.rs`'s `translate_net_error` was a full second
+transcription of the same enum — eighteen codes behind, including all of the
+`-700` range, which exists for sockets and nothing else. It differed from
+`translate` in exactly two rows: `AlreadyExists` → `EADDRINUSE` (a socket
+creates nothing by name but a local binding) and `InvalidCapability` →
+`EACCES`. The second of those was not socket-specific at all, merely present
+in one table and absent from the other. So the fix is not "update both": it is
+one table, plus the one override that is genuinely about sockets.
+
+**The fix.**
+
+- `translate` split into `errno_for(code) -> i32` (the table) and `translate`
+  (which sets errno and returns -1). Nine rows added, plus `-401`.
+- `translate_net_error` reduced to `ALREADY_EXISTS => EADDRINUSE, other =>
+  errno_for(other)`. It keeps its name and its callers; only the body went.
+- Two tests, `kernel_error_codes_are_all_accounted_for` and
+  `every_declared_code_is_actually_translated`, which read
+  `kernel/src/error.rs` and this file's own source and require every kernel
+  discriminant to be either mapped or explicitly written down as
+  deliberately-unmapped. A source-text check, because the posix crate cannot
+  depend on the kernel crate (different target, `no_std` the other way), so
+  there is no type to reflect on.
+
+**Both tests were verified to fail.** Deleting `STALE_HANDLE` and
+`CONNECTION_REFUSED` produces
+
+    kernel/src/error.rs defines 2 error code(s) that `mod native` in
+    posix/src/errno.rs has never heard of:
+      StaleHandle (-513)
+      ConnectionRefused (-700)
+
+and adding an unreferenced constant produces `these `native` constants are
+declared but never consulted by `errno_for``. The first attempt at the
+accounting check *passed* with `STALE_HANDLE` deleted: the section divider
+`// --- Filesystem (500 range: -500 to -513) ---` contains the number, and a
+range's endpoints are precisely the codes most likely to be the new ones.
+Dividers are now excluded from the searched text. A sync check that cannot be
+made to fail is not a sync check.
+
+**Not fixed, and deliberately.** Several utilities carry their own small
+code → *message* tables — `userspace/chown` (six rows),
+`userspace/{mount,mkfs,fsck,diskutil}` (two to five each). They are not errno
+translations; they render a diagnostic for the handful of failures that
+specific tool expects, and a code they do not list falls through to a generic
+"error N" that names the number. That is a legible default rather than a
+disguised one, so they are not the same defect. They are still five more
+copies of a subset of the same enum, and if one of them ever starts claiming
+to be exhaustive it should be pointed at `errno_for` instead.
+
+## B-THE-AT-FAMILY-IS-ONLY-PINNED-FOR-SINGLE-COMPONENT-UNLINK (lane B, 2026-08-30) — PARTIALLY FIXED
+
+`posix::unlinkat` now takes `SYS_FS_UNLINKAT_PINNED` (662), which has the
+kernel resolve the directory *handle* rather than the path the handle had when
+it was opened. Three gaps remain, all of them deliberate, all of them still
+carrying the original TOCTOU. Recorded together because they will be closed by
+the same kind of work and it should be obvious how much of the problem is left.
+
+**1. `unlinkat(dirfd, "sub/x")` is still resolved by path.** 662 accepts a
+single component only — by design; a handle-identity check proves nothing if
+the name may then climb out of the directory. So a multi-component name still
+goes through `resolve_dirfd_path` and is exactly as racy as it was. The proper
+fix is for `unlinkat` to walk it itself: `openat2` each intermediate directory
+with `RESOLVE_BENEATH`, pin the last, unlink there — which needs a descriptor
+per component and an unwind that closes them all on every exit path, including
+the error ones. Not a large change; it was left out so that wiring 662 was one
+reviewable thing. Where: `posix/src/file.rs`, `unlinkat` / `try_pinned_unlinkat`.
+
+**2. `fstatat` is not pinned at all, and cannot be yet.** `SYS_FS_FSTATAT_PINNED`
+(663) writes the 64-byte `FS_META_SIZE` record, which has no inode number, no
+hard link count and no block count. `struct stat` needs all three. Wiring it
+would make `st_ino` zero for every file, which is not an error anyone checks —
+it silently breaks `cp`'s same-file refusal, `ls -i`, hardlink coalescing in
+`du`/`tar`, and `find -samefile`. This matters more than it looks: `rm -r`
+`lstat`s every entry to decide whether to recurse, so the *stat* is the racy
+step even when the unlink is not. Blocked on lane A;
+`requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`
+asks for the 80-byte `SYS_FS_STAT` record instead. Where: `posix/src/file.rs`,
+`fstatat`; the record layouts are in `posix/src/stat.rs` (`KERNEL_STAT_LEN`)
+and `kernel/src/syscall/number.rs` (`FS_META_SIZE`).
+
+**3. The other eight `*at` calls are untouched.** `renameat`, `linkat`,
+`symlinkat`, `mkdirat`, `fchmodat`, `faccessat`, `readlinkat`, `utimensat` all
+still call `resolve_dirfd_path`. Lane A has the machinery and asked us to name
+which we want rather than guess; the priority order and the reasoning are in
+§5 of the request above. `fchmodat` is the one that is a privilege boundary
+rather than a correctness detail — `chmod -R` down a tree it does not control
+is the classic symlink-swap escalation.
+
+**Not a gap, but worth writing down:** the fallback is fail-*closed*. Only "this
+kernel has no such syscall" falls back to the path route; `ESTALE`, `EACCES`
+and every other verdict from 662 is final. A kernel bug that made 662 refuse
+everything would break `rm` loudly rather than silently downgrade every
+deletion to the unsafe route. And because `NotSupported` (-2) is ambiguous
+between "unregistered slot" and "this filesystem can't", the fallback latches
+off after the first call that answers with anything else — see
+`design-decisions.md` §730, decision 3.
+
+## B-READLINKAT-CANNOT-READ-A-SYMLINK-FD-BECAUSE-O_PATH-IS-UNIMPLEMENTED (lane B, 2026-08-30)
+
+**Status: half fixed, 2026-08-30.** The *observable* half — that an `O_PATH`
+descriptor refuses every operation on the file — is implemented and tested
+(`posix/src/file.rs` → `mod tests::o_path`, and see `design-decisions.md`
+§733 for why only half). What remains is the half that needs the kernel: the
+descriptor is still obtained by really opening the file, so it still asks for
+read authority the flag is meant to avoid, and a symlink still cannot be named
+at all. The original text follows, corrected.
+
+**In short:** `open` accepts the `O_PATH` flag and then ignores it — it used to
+ignore it entirely, and now honours it everywhere except where the kernel would
+have to help. The flag's whole purpose is to get a descriptor for a *name*
+without opening what the name refers to. We now refuse to read, write, seek or
+map through such a descriptor, which is what a program can see; but underneath
+we did open the file, which is what a program can trip over. One `readlinkat`
+branch is still unreachable as a result.
+
+**Where:** `posix/src/file.rs` — `open` (the flag is stored in the fd's status
+flags but never reaches `translate_open_flags`, which maps only
+READ/WRITE/CREATE/TRUNCATE/APPEND/DIRECTORY/EXCL/NOFOLLOW), and `readlinkat`,
+whose comment points here. `O_PATH` itself is defined, correctly, in
+`posix/src/fcntl.rs` (0o10_000_000).
+
+**What diverges.** The Linux column is measured on 6.6; the "ours" column is
+read off `translate_open_flags`, which is where the flag is still dropped.
+
+| call | Linux | ours |
+|---|---|---|
+| `read`/`write`/`mmap`/… on an `O_PATH` fd | `EBADF` | `EBADF` ✓ *(fixed 2026-08-30)* |
+| `fstat`/`dup`/`close`/`fcntl(F_GETFD)` on one | succeed | succeed ✓ |
+| `open(link, O_PATH\|O_NOFOLLOW)` | fd naming the *symlink* | `ELOOP` — `O_NOFOLLOW` is the only one of the two bits that survives, and on its own it means "refuse a symlink" |
+| `readlinkat(that fd, "", buf, n)` | the link body | unreachable: the fd above cannot be obtained |
+| `readlinkat(fd_to_a_regular_file, "", buf, n)` | `ENOENT` | `ENOENT` ✓ |
+| `open(p, O_PATH)` on a path the caller may traverse but not read | succeeds | fails as an ordinary read-open would |
+
+The fifth row is why `readlinkat` is *correct today* rather than merely
+untested: no descriptor a caller can obtain from this libc refers to a symlink,
+so `ENOENT` is the right answer for every fd that can actually be passed. The
+gap is latent, not live — but it becomes live the moment the *kernel* half
+lands, and then `readlinkat`'s empty-path branch needs the other half written.
+
+**Why it matters beyond `readlinkat`.** `O_PATH` is the standard way to pin a
+directory for the `*at` family without holding it open for I/O — which is
+exactly the TOCTOU work in
+`B-THE-AT-FAMILY-IS-ONLY-PINNED-FOR-SINGLE-COMPONENT-UNLINK` above. A hardened
+`rm -r` or `chmod -R` opens each directory `O_PATH|O_NOFOLLOW|O_DIRECTORY` and
+walks with `*at` calls; ours opens them for read instead, which works but asks
+for more authority than the operation needs, and fails outright on a directory
+the caller may traverse but not read. That last case is the one remaining
+*failure* rather than mere over-reach, and it is the reason this entry stays
+open.
+
+**What is left**, in order:
+
+1. A kernel-side concept: a handle that names a path without an open file
+   description behind it, obtainable without read permission and obtainable for
+   a symlink. That is lane A's, and wants a request filed against
+   `kernel/src/fs`. The userspace side would then carry it as a distinct
+   `HandleKind::Path` rather than as a status-flag bit, which would also let
+   `read` refuse it structurally instead of by flag test.
+2. Only then: `readlinkat`'s empty-path branch grows the symlink case, and
+   `openat`'s `O_NOFOLLOW` stops being the only way to decline to follow.
+
+**Superseded recommendation.** This entry originally proposed, as step 1, that
+`open` should return `EOPNOTSUPP` for `O_PATH` — on the precedent of
+`O_TMPFILE`, "turning a silent divergence into a loud one". That was wrong and
+is withdrawn. The precedent does not transfer: ignoring `O_TMPFILE` does
+something actively destructive (it opens the *directory* the caller named,
+which is not what was asked for by any reading), whereas ignoring `O_PATH`
+merely opens a file that the caller did ask for, with more authority than
+needed. And three uses of the flag already work end to end here — as a `dirfd`
+for the `*at` family, as an argument to `fstat`, and as an argument to
+`fexecve`. `EOPNOTSUPP` would break all three to make the fourth loud.
+
+Until (1), the `*at` pinning work uses `SYS_FS_*_PINNED` handles from ordinary
+`open`, which is what §730 describes and is not blocked by this.
 ### Lesson 93: a box sized by measuring one string and filled with another is a box that fits nothing (lane C, 2026-08-31)
 
 **In short:** `chess`'s layout decided whether an information panel was worth

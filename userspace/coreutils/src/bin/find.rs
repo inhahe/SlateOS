@@ -85,6 +85,7 @@ use coreutils::errmsg::{self, strerror};
 use coreutils::quote::os_bytes;
 use coreutils::quote::{self, os_from_bytes, quote};
 use coreutils::stdfd;
+use coreutils::yesno;
 use coreutils::{cfmt, extfloat, fnmatch, pathname};
 #[cfg(unix)]
 use std::collections::HashMap;
@@ -446,13 +447,12 @@ impl Tree for RealTree {
     }
 
     fn confirm(&self) -> bool {
-        // GNU reads one line and accepts it if it matches the locale's yesexpr;
-        // under C.UTF-8 that is `^[yY]`.
-        let mut line = String::new();
-        if io::stdin().read_line(&mut line).is_err() {
-            return false;
-        }
-        matches!(line.as_bytes().first(), Some(b'y' | b'Y'))
+        // What counts as a yes is `coreutils::yesno`, shared with `rm -i` and
+        // `cp -i`. This used to read the line with `read_line` into a `String`,
+        // which fails on input that is not UTF-8 and so declined a `y` typed
+        // after a stray high byte — a terminal in a single-byte locale sends
+        // exactly that, and `rm -i`, reading bytes, accepted it.
+        yesno::yesno(&mut yesno::StdinAnswers::new())
     }
 }
 

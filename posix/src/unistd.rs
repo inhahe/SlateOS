@@ -3753,6 +3753,13 @@ pub extern "C" fn futimesat(
     path: *const u8,
     times: *const crate::file::Timeval,
 ) -> i32 {
+    // An empty relative name is ENOENT, as everywhere else in the `*at`
+    // family; without this the textual join below turns it into the directory
+    // itself and the timestamps land on the wrong inode.
+    if crate::file::is_empty_path(path) {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
     if dirfd == crate::file::AT_FDCWD || crate::file::is_absolute_path(path) {
         return crate::file::utimes(path, times);
     }

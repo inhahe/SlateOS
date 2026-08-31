@@ -199,6 +199,19 @@ pub extern "C" fn __errno_location() -> *mut i32 {
 /// These are the negative values returned by native syscalls.
 /// MUST stay in sync with kernel/src/error.rs — any mismatch causes
 /// wrong errno values throughout the entire POSIX layer.
+///
+/// That sentence was a comment for a long time, and comments do not fail
+/// builds.  Nine codes had been added to the kernel enum without reaching
+/// here — `CrossDevice`, `StaleHandle`, and the whole `-700` network range —
+/// and every one of them arrived in userspace as `EIO`, because the match
+/// below ends in a catch-all.  `EIO` is not a value any caller acts on: a
+/// non-blocking `connect` that should have said `EINPROGRESS` looked like a
+/// dead socket rather than one still handshaking.  See
+/// `kernel_error_codes_are_all_accounted_for` at the bottom of this file,
+/// which reads `kernel/src/error.rs` and fails if a variant is missing from
+/// this module or from [`errno_for`].  A number written down here on purpose
+/// (as a commented-out line) satisfies it; a number nobody has looked at does
+/// not.
 pub(crate) mod native {
     // --- General (0-99 range: -1 to -8) ---
     pub const INTERNAL_ERROR: i64 = -1;
@@ -255,9 +268,14 @@ pub(crate) mod native {
 
     // --- Capability (400 range: -400 to -401) ---
     pub const PERMISSION_DENIED: i64 = -400;
-    // InvalidCapability = -401
+    /// A handle was presented that does not name a capability this process
+    /// holds.  `EACCES`, the same as an outright denial: from the caller's
+    /// side the two are one fact — the operation was not permitted — and
+    /// distinguishing them would tell an unprivileged caller which handles
+    /// exist.
+    pub const INVALID_CAPABILITY: i64 = -401;
 
-    // --- Filesystem (500 range: -500 to -511) ---
+    // --- Filesystem (500 range: -500 to -513) ---
     pub const NOT_FOUND: i64 = -500;
     pub const ALREADY_EXISTS: i64 = -501;
     pub const NOT_A_DIRECTORY: i64 = -502;
@@ -270,28 +288,63 @@ pub(crate) mod native {
     pub const READ_ONLY_FS: i64 = -509;
     pub const TOO_MANY_OPEN_FILES: i64 = -510;
     pub const FILE_TOO_LARGE: i64 = -511;
+    /// An operation needing both operands on one filesystem crossed a mount
+    /// boundary — `RENAME_EXCHANGE` between mounts, a hard link spanning two.
+    /// `EXDEV`, which is the error `mv` reads to decide it must fall back to
+    /// copy-then-delete; as `EIO` it looked like a failing disk instead.
+    pub const CROSS_DEVICE: i64 = -512;
+    /// A directory handle no longer denotes the directory it was opened on.
+    /// Returned by the pinned `*at` calls (662-664), which verify the
+    /// `(fs_id, inode)` captured at open before acting.  `ESTALE` means
+    /// *re-open*, not *retry* — a caller that retries the same handle gets
+    /// the same answer forever.
+    pub const STALE_HANDLE: i64 = -513;
 
     // --- Device / I/O (600 range: -600 to -602) ---
     pub const IO_ERROR: i64 = -600;
     pub const NO_SUCH_DEVICE: i64 = -601;
     pub const RESOURCE_BUSY: i64 = -602;
+
+    // --- Network (700 range: -700 to -706) ---
+    //
+    // This whole range exists to be translated -- each variant's kernel doc
+    // comment names the errno it is for -- and none of it was, until
+    // 2026-08-30.  `EINPROGRESS` and `EALREADY` are the ones that mattered
+    // most: they are not failures at all, they are how a non-blocking
+    // `connect` reports that the handshake is still running, and a caller
+    // that sees `EIO` there gives up on a socket that was about to connect.
+    pub const CONNECTION_REFUSED: i64 = -700;
+    pub const NOT_CONNECTED: i64 = -701;
+    pub const IN_PROGRESS: i64 = -702;
+    pub const CONNECT_ALREADY: i64 = -703;
+    pub const BROKEN_PIPE: i64 = -704;
+    pub const ADDR_IN_USE: i64 = -705;
+    pub const MSG_SIZE: i64 = -706;
 }
 
-/// Translate a native syscall return value to POSIX convention.
+/// The errno a native kernel error code corresponds to.
 ///
-/// - If `ret >= 0`, returns `ret` (success).
-/// - If `ret < 0`, sets `errno` and returns `-1`.
-#[inline]
+/// Split out of [`translate`] so there is exactly one such table in the
+/// library.  There used to be two: `socket.rs` carried its own
+/// `translate_net_error`, which differed from this one in two rows and was
+/// missing eighteen — including every code in the `-700` range, which exists
+/// for sockets and nothing else.  Two hand-maintained mirrors of one kernel
+/// enum drift, and the second one drifted silently because its catch-all
+/// answers `EIO` for anything it has not heard of.  `translate_net_error`
+/// now delegates here and keeps only the one row that is genuinely
+/// socket-specific (`AlreadyExists` means a bind collision, not `EEXIST`).
+///
+/// `code` is expected to be negative; a non-negative value is not an error
+/// and callers should not reach here with one.  It is still answered, with
+/// `EIO`, rather than panicking — this runs under every syscall wrapper in
+/// the process and a panic there would turn a wrong return value into a
+/// dead program.
 #[must_use]
-pub fn translate(ret: i64) -> i64 {
-    if ret >= 0 {
-        return ret;
-    }
-
+pub fn errno_for(code: i64) -> i32 {
     #[allow(clippy::match_same_arms)] // Kept separate for readability: each
     // native error code documents its semantic mapping even when the POSIX
     // target is the same (e.g. INTERNAL_ERROR and IO_ERROR both → EIO).
-    let err = match ret {
+    match code {
         // General errors
         native::INTERNAL_ERROR => EIO,
         native::NOT_SUPPORTED => ENOTSUP,
@@ -316,7 +369,7 @@ pub fn translate(ret: i64) -> i64 {
         native::CHANNEL_CLOSED => ECONNRESET,
 
         // Capability / permission errors
-        native::PERMISSION_DENIED => EACCES,
+        native::PERMISSION_DENIED | native::INVALID_CAPABILITY => EACCES,
 
         // Filesystem errors
         native::NOT_FOUND => ENOENT,
@@ -337,16 +390,46 @@ pub fn translate(ret: i64) -> i64 {
         native::READ_ONLY_FS => EROFS,
         native::TOO_MANY_OPEN_FILES => EMFILE,
         native::FILE_TOO_LARGE => EFBIG,
+        native::CROSS_DEVICE => EXDEV,
+        native::STALE_HANDLE => ESTALE,
 
         // Device / I/O errors
         native::IO_ERROR => EIO,
         native::NO_SUCH_DEVICE => ENODEV,
         native::RESOURCE_BUSY => EBUSY,
 
-        _ => EIO, // Unknown error → generic I/O error.
-    };
+        // Network errors
+        native::CONNECTION_REFUSED => ECONNREFUSED,
+        native::NOT_CONNECTED => ENOTCONN,
+        native::IN_PROGRESS => EINPROGRESS,
+        native::CONNECT_ALREADY => EALREADY,
+        native::BROKEN_PIPE => EPIPE,
+        native::ADDR_IN_USE => EADDRINUSE,
+        native::MSG_SIZE => EMSGSIZE,
 
-    set_errno(err);
+        // Unknown error → generic I/O error.
+        //
+        // This arm is why the accounting test at the bottom of the file
+        // exists.  It cannot distinguish "a code the kernel does not define"
+        // from "a code the kernel defines and this table has not caught up
+        // with", so on its own it converts a missing row into a plausible
+        // wrong answer rather than a loud one.  The test supplies the
+        // distinction the arm cannot.
+        _ => EIO,
+    }
+}
+
+/// Translate a native syscall return value to POSIX convention.
+///
+/// - If `ret >= 0`, returns `ret` (success).
+/// - If `ret < 0`, sets `errno` and returns `-1`.
+#[inline]
+#[must_use]
+pub fn translate(ret: i64) -> i64 {
+    if ret >= 0 {
+        return ret;
+    }
+    set_errno(errno_for(ret));
     -1
 }
 
@@ -793,5 +876,173 @@ mod tests {
 
         assert_eq!(translate(native::RESOURCE_BUSY), -1);
         assert_eq!(get_errno(), EBUSY);
+    }
+
+    #[test]
+    fn test_translate_cross_device_and_stale_handle() {
+        // -512 is what `mv` reads to decide a rename must become
+        // copy-then-delete, and -513 is what the pinned `*at` calls return
+        // when a directory handle no longer denotes its directory.  Both
+        // reached userspace as EIO until 2026-08-30.
+        assert_eq!(translate(native::CROSS_DEVICE), -1);
+        assert_eq!(get_errno(), EXDEV);
+
+        assert_eq!(translate(native::STALE_HANDLE), -1);
+        assert_eq!(get_errno(), ESTALE);
+    }
+
+    #[test]
+    fn test_translate_network_errors() {
+        for (code, want) in [
+            (native::CONNECTION_REFUSED, ECONNREFUSED),
+            (native::NOT_CONNECTED, ENOTCONN),
+            (native::IN_PROGRESS, EINPROGRESS),
+            (native::CONNECT_ALREADY, EALREADY),
+            (native::BROKEN_PIPE, EPIPE),
+            (native::ADDR_IN_USE, EADDRINUSE),
+            (native::MSG_SIZE, EMSGSIZE),
+        ] {
+            assert_eq!(translate(code), -1, "code {code} should be an error");
+            assert_eq!(get_errno(), want, "code {code} mapped to the wrong errno");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // The accounting check
+    // -----------------------------------------------------------------
+    //
+    // `native` above is a hand-written mirror of `KernelError` in another
+    // crate, and `errno_for` is a hand-written match over it.  The header
+    // said "MUST stay in sync" and nothing enforced it, so nine codes were
+    // added to the kernel and never arrived here.  They did not fail
+    // loudly, because `errno_for` ends in a catch-all: they became `EIO`,
+    // which is a legitimate answer for several real codes and therefore
+    // looks like a mapping rather than the absence of one.
+    //
+    // This reads the kernel's enum and requires each variant to be
+    // *accounted for* — either mapped, or written down here as a
+    // deliberately-unmapped number.  It is a source-text check because the
+    // posix crate cannot depend on the kernel crate (different target, and
+    // `no_std` in the other direction), so there is no type to reflect on.
+    // Being textual, it is deliberately generous about what it accepts: any
+    // occurrence of the number inside the `native` block counts, including
+    // in a comment.  The bar is that a human wrote the number down, not
+    // that they wrote it down in a particular shape.
+    //
+    // With one exception, found by deleting `STALE_HANDLE` and watching the
+    // check pass anyway.  The section dividers name their ranges as
+    // `// --- Filesystem (500 range: -500 to -513) ---`, so a divider
+    // permanently satisfies the two codes at its own endpoints — which are
+    // exactly the codes most likely to be the new ones, since a range grows
+    // at its end.  Dividers are therefore excluded from the searched text.
+    // Nothing else is: a genuine acknowledgment like
+    // `// PageFault = -102 (not typically returned to userspace)` still
+    // counts, which is the point of accepting comments at all.
+
+    /// Every `Name = -NNN,` in the kernel's `KernelError` enum.
+    fn kernel_error_codes() -> Vec<(String, i64)> {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../kernel/src/error.rs");
+        // Fail rather than skip.  A check that quietly passes when it could
+        // not run is worse than no check: it reports the state of the world
+        // it did not look at.
+        let src = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            panic!("cannot read the kernel error enum at {path}: {e}");
+        });
+        let mut out = Vec::new();
+        for line in src.lines() {
+            let line = line.trim();
+            let Some((name, rest)) = line.split_once(" = -") else {
+                continue;
+            };
+            let Some(digits) = rest.strip_suffix(',') else {
+                continue;
+            };
+            if !name.chars().all(|c| c.is_ascii_alphanumeric()) || name.is_empty() {
+                continue;
+            }
+            if !name.starts_with(|c: char| c.is_ascii_uppercase()) {
+                continue;
+            }
+            let Ok(value) = digits.parse::<i64>() else {
+                continue;
+            };
+            out.push((name.to_string(), -value));
+        }
+        assert!(
+            out.len() > 30,
+            "only found {} enum variants in {path}; the parse is probably \
+             wrong rather than the enum being tiny",
+            out.len()
+        );
+        out
+    }
+
+    /// The text of a named region of this very file.
+    fn own_source_between(open: &str, close: &str) -> String {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/errno.rs"))
+            .expect("cannot read errno.rs; the check would otherwise pass vacuously");
+        let start = src
+            .find(open)
+            .unwrap_or_else(|| panic!("no {open:?} in errno.rs"));
+        let rest = &src[start..];
+        let end = rest
+            .find(close)
+            .unwrap_or_else(|| panic!("no {close:?} after {open:?}"));
+        rest[..end].to_string()
+    }
+
+    #[test]
+    fn kernel_error_codes_are_all_accounted_for() {
+        let block: String = own_source_between("pub(crate) mod native {", "\n}\n")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("// ---"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let missing: Vec<String> = kernel_error_codes()
+            .into_iter()
+            .filter(|(_, value)| {
+                // Match on the exact token, so that `-50` does not satisfy
+                // `-500` and `-70` does not satisfy `-700`.
+                let needle = format!("{value}");
+                !block
+                    .split(|c: char| !(c.is_ascii_digit() || c == '-'))
+                    .any(|t| t == needle)
+            })
+            .map(|(name, value)| format!("{name} ({value})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "kernel/src/error.rs defines {} error code(s) that `mod native` in \
+             posix/src/errno.rs has never heard of:\n  {}\n\
+             Each one currently reaches userspace as EIO. Add a `pub const` and \
+             an `errno_for` arm, or -- if it genuinely never crosses the syscall \
+             boundary -- a commented-out `// Name = -NNN` line saying so.",
+            missing.len(),
+            missing.join("\n  "),
+        );
+    }
+
+    #[test]
+    fn every_declared_code_is_actually_translated() {
+        let block = own_source_between("pub(crate) mod native {", "\n}\n");
+        let body = own_source_between("pub fn errno_for(code: i64) -> i32 {", "\n}\n");
+        let mut unmapped = Vec::new();
+        for line in block.lines() {
+            let Some(rest) = line.trim().strip_prefix("pub const ") else {
+                continue;
+            };
+            let Some((name, _)) = rest.split_once(':') else {
+                continue;
+            };
+            if !body.contains(&format!("native::{name}")) {
+                unmapped.push(name.to_string());
+            }
+        }
+        assert!(
+            unmapped.is_empty(),
+            "these `native` constants are declared but never consulted by \
+             `errno_for`, so they translate to EIO through the catch-all: {}",
+            unmapped.join(", "),
+        );
     }
 }

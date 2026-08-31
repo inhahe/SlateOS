@@ -61,6 +61,11 @@
 set -u
 
 DIFF_PROG='pwd'
+# Not the installed binary: WSL's coreutils is Ubuntu's `9.4-3ubuntu6.1` and
+# carries behavioural patches, so a green run against it certifies agreement
+# with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
+# and `design-decisions.md` 726.
+DIFF_GNU_SOURCE=9.4
 # `command -v pwd` finds the shell builtin, which is not what is being compared.
 DIFF_REF="/usr/bin/pwd /bin/pwd"
 # shellcheck source=diff-wsl.sh

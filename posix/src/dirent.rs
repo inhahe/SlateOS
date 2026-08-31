@@ -1278,6 +1278,15 @@ pub extern "C" fn scandirat(
         return -1;
     }
 
+    // An empty relative name is ENOENT, as everywhere else in the `*at`
+    // family.  Without this the textual join below silently turns `""` into
+    // `dirfd` itself, so `scandirat(fd, "", …)` would list the directory the
+    // caller happened to hold rather than reporting that no name was given.
+    if crate::file::is_empty_path(dirname) {
+        errno::set_errno(errno::ENOENT);
+        return -1;
+    }
+
     // Resolve relative to dirfd if needed.
     if dirfd == crate::file::AT_FDCWD || crate::file::is_absolute_path(dirname) {
         return scandir(dirname, namelist, filter, compar);

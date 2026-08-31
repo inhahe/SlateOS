@@ -54,6 +54,12 @@ set -u
 # Into WSL, build ours for Linux, find glibc's, and put both behind the one
 # name `split` so `argv[0]` matches. See `scripts/diff-wsl.sh`.
 DIFF_PROG='split'
+# Not `/usr/bin/split`. Debian carries `CVE-2024-0684.patch`, a heap-overflow
+# fix in `--line-bytes` that is also upstream in 9.5 but not in 9.4 -- so on
+# this one the *installed* binary is the more correct of the two, and pinning
+# 9.4 could legitimately surface a difference rather than remove one. That is
+# worth knowing either way. See `diff-wsl.sh`'s "Why a built reference".
+DIFF_GNU_SOURCE=9.4
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 

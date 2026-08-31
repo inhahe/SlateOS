@@ -79,6 +79,17 @@ set -u
 # finds the *builtin*, which is a different implementation and deliberately not
 # what is compared. `/usr/bin/test` is the real binary.
 DIFF_PROG='test'
+# Not the installed binary: WSL's coreutils is Ubuntu's `9.4-3ubuntu6.1` and
+# carries behavioural patches, so a green run against it certifies agreement
+# with Debian rather than with GNU. See `diff-wsl.sh`'s "Why a built reference"
+# and `design-decisions.md` 726.
+DIFF_GNU_SOURCE=9.4
+# `test` is the one utility that cannot attest its own version: it has no
+# options at all, so `--version` is an ordinary one-argument expression and a
+# non-empty string is true -- `test --version` prints nothing and exits 0, on
+# both the built 9.4 and the installed binary (measured). The built tree is one
+# `make` of one tarball, so borrow a sibling that does answer.
+DIFF_GNU_VERIFY_WITH=cat
 DIFF_REF='/usr/bin/test /bin/test'
 # There is no coreutils way to create a bound unix socket, and `-S` against a
 # path with no socket on it is a case that passes by agreeing the file is

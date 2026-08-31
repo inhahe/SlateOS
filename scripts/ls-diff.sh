@@ -13,10 +13,8 @@
 # Getting there is `diff-wsl.sh`'s job, as it is for every harness here: it
 # re-execs into WSL, builds our `ls` for `x86_64-unknown-linux-gnu` -- and
 # refuses to run against a build cache that did not react to a source change --
-# fixes the locale, and hands back a scratch directory removed on exit. What
-# this harness keeps for itself is the *reference*, for the reason immediately
-# below; hence `DIFF_NO_REF=1`, and `DIFF_NO_BINDIR=1` so that the two `PATH`
-# directories are made after it has one.
+# fixes the locale, builds the reference from the GNU tarball, and hands back a
+# scratch directory removed on exit.
 #
 # The rest of the shape is `du-diff.sh`'s, deliberately so -- both sides reached
 # through a `PATH` lookup of the bare word so that `argv[0]` matches, and a
@@ -24,12 +22,17 @@
 #
 # Three things are specific to `ls` and worth stating.
 #
-# **The reference is built, not found.** Every other harness here measures
-# against whatever GNU binary WSL ships. This one cannot: WSL ships coreutils
-# 9.4, and 9.4 and 9.5 lay out columns differently for any name holding a byte
-# they cannot display. So the block below builds 9.5 from source into a cache
-# under `$HOME` and refuses to run against any other version. See
-# `design-decisions.md` §366.
+# **The reference is built, not found.** WSL ships coreutils 9.4, and 9.4 and
+# 9.5 lay out columns differently for any name holding a byte they cannot
+# display, so `DIFF_GNU_SOURCE=9.5` below makes `diff-wsl.sh` fetch and build
+# 9.5 into a cache under `$HOME` and refuse to run against any other version.
+# See `design-decisions.md` §366.
+#
+# That block used to live *here*, and was this harness's own. It moved into
+# `diff-wsl.sh` on 2026-08-30, when `cp` turned out to need the same thing for
+# an unrelated reason -- Ubuntu patches `cp -n` -- and the sequence was needed
+# by two harnesses rather than one. See `diff-wsl.sh`'s header, "Why a built
+# reference", and `design-decisions.md` §726.
 #
 # **Neither side has a terminal.** A command substitution is a pipe, so both
 # programs take their non-tty defaults: one entry per line, literal quoting, no
@@ -46,12 +49,11 @@
 set -u
 
 DIFF_PROG='ls'
-DIFF_NO_REF=1
-DIFF_NO_BINDIR=1
-# `GNU` names a reference to use instead of building 9.5; `LS_DIFF_CACHE` says
-# where to build it. Both are read below, on the far side of the re-exec, so
-# both have to be carried across it.
-DIFF_FORWARD="GNU LS_DIFF_CACHE"
+# Not the 9.4 on `PATH`; see "The reference is built, not found" above.
+# `DIFF_GNU_DIR=/path/to/coreutils-9.5/src` overrides the build, and
+# `DIFF_GNU_CACHE` moves it; `diff-wsl.sh` carries both across the re-exec
+# itself, so neither needs naming in `DIFF_FORWARD`.
+DIFF_GNU_SOURCE=9.5
 # The socket fixture is made with python3, and a socket is the only way to
 # reach the `s` type letter, the `=` indicator and the `so` colour slot. If it
 # is missing the fixture silently is too, and eleven cases agree that a name
@@ -66,76 +68,6 @@ DIFF_NEED=python3
 unset COLUMNS TABSIZE QUOTING_STYLE TIME_STYLE LS_COLORS LS_BLOCK_SIZE BLOCK_SIZE BLOCKSIZE POSIXLY_CORRECT
 export TZ=America/New_York
 
-# ------------------------------------------------------- the reference ls ---
-#
-# GNU coreutils **9.5**, built from source -- deliberately *not* the `ls` on
-# this machine's PATH, which under WSL is 9.4.
-#
-# The two are not interchangeable. 9.5 changed the flags it passes to gnulib's
-# `mbsnwidth`, so the two versions measure the width of any name holding a
-# control character or an invalid byte differently, and then lay out every
-# column format differently as a result. This port was written from the 9.5
-# source, so measuring it against a 9.4 binary produces two correct-looking
-# answers that contradict each other -- which is what happened, across two
-# commits, before it was noticed. `design-decisions.md` §366 and §367 have the
-# detail.
-#
-# So: build 9.5 once, cache it under $HOME, and **skip rather than fall back**
-# if it cannot be built. A silent fallback to the system `ls` is the one
-# outcome worse than not running at all.
-LS_DIFF_VERSION=9.5
-LS_DIFF_CACHE=${LS_DIFF_CACHE:-$HOME/.cache/slateos-ls-diff}
-GNU=${GNU:-}
-
-if [ -z "$GNU" ]; then
-    src=$LS_DIFF_CACHE/coreutils-$LS_DIFF_VERSION
-    if [ -x "$src/src/ls" ]; then
-        GNU=$src/src/ls
-    else
-        tarball=coreutils-$LS_DIFF_VERSION.tar.xz
-        mkdir -p "$LS_DIFF_CACHE" || exit 1
-        if [ ! -f "$LS_DIFF_CACHE/$tarball" ]; then
-            url=https://ftp.gnu.org/gnu/coreutils/$tarball
-            if command -v curl >/dev/null 2>&1; then
-                curl -fsSL -o "$LS_DIFF_CACHE/$tarball.part" "$url" \
-                    && mv "$LS_DIFF_CACHE/$tarball.part" "$LS_DIFF_CACHE/$tarball"
-            elif command -v wget >/dev/null 2>&1; then
-                wget -q -O "$LS_DIFF_CACHE/$tarball.part" "$url" \
-                    && mv "$LS_DIFF_CACHE/$tarball.part" "$LS_DIFF_CACHE/$tarball"
-            fi
-        fi
-        if [ ! -f "$LS_DIFF_CACHE/$tarball" ]; then
-            echo "ls-diff: could not fetch $tarball; SKIPPED"
-            echo "  (put it in $LS_DIFF_CACHE/, or set GNU=/path/to/a/9.5/ls)"
-            exit 0
-        fi
-        ( cd "$LS_DIFF_CACHE" \
-          && tar xf "$tarball" \
-          && cd "coreutils-$LS_DIFF_VERSION" \
-          && ./configure --quiet --disable-nls \
-          && make -s -j"$(nproc 2>/dev/null || echo 4)" src/ls ) >&2 || {
-            echo "ls-diff: coreutils $LS_DIFF_VERSION did not build; SKIPPED"
-            echo "  (a C compiler and make are needed; or set GNU=/path/to/a/9.5/ls)"
-            exit 0
-        }
-        GNU=$src/src/ls
-    fi
-fi
-
-# A reference of the wrong version is worse than none: it fails cases that are
-# right and passes cases that are wrong, in the same run.
-gnu_version=$("$GNU" --version 2>/dev/null | head -1)
-case $gnu_version in
-    *" $LS_DIFF_VERSION")  ;;
-    *)
-        echo "ls-diff: reference is '$gnu_version', not coreutils $LS_DIFF_VERSION"
-        echo "  (see design-decisions.md §366 for why the version has to match)"
-        exit 1
-        ;;
-esac
-
-GNU=$(cd "$(dirname "$GNU")" && pwd)/$(basename "$GNU") || exit 1
-
 pass=0; fail=0; xfail=0; xpass=0
 
 # Everything scratch lives under `$DIFF_TMP`, which `diff-wsl.sh` removes on
@@ -143,13 +75,12 @@ pass=0; fail=0; xfail=0; xpass=0
 # to it, and leak the whole directory every run; `diff_cleanup` already does the
 # `chmod -R` that the unreadable-directory fixture below needs.
 #
-# `diff-wsl.sh` was told not to build these (`DIFF_NO_BINDIR=1`), because the
-# reference is not known until the block above has built or found it. The
-# arrangement is the standard one all the same: one symlink per side, named
-# `ls`, in a directory that is the head of `PATH` for that one invocation.
-mkdir -p "$bindir/gnu" "$bindir/ours" || exit 1
-ln -s "$GNU" "$bindir/gnu/ls" || exit 1
-ln -s "$OURS" "$bindir/ours/ls" || exit 1
+# The two `PATH` directories are `diff-wsl.sh`'s now, built the standard way --
+# one symlink per side, named `ls`, in a directory that is the head of `PATH`
+# for that one invocation. This harness made its own until 2026-08-30, because
+# the reference was not known until it had built one; `DIFF_GNU_SOURCE` moved
+# that build earlier, so there is nothing left to wait for.
+#
 # Prepended, not the whole of `PATH`: a case line may hold a leading
 # `VAR=value` and a case may name any command, so narrowing `PATH` to the one
 # directory would starve them and fail both sides identically.
@@ -230,13 +161,23 @@ mkdir -p w
 : > w/BBBB
 : > w/CCCC
 
-# A fourth tree holding the one character our width table and coreutils 9.5's
-# disagree about *in this fixture*: the soft hyphen, which gnulib calls zero
-# columns and glibc calls one. It is kept out of `w/` so that the divergence
-# fails two cases here rather than every column case there. The three plain
-# names are what make the width visible: with `shy` at three columns it sorts
-# below them, with `shy` at four it sorts among them by name.
-# See `open-questions.md` "Which width table should `charwidth` follow".
+# A fourth tree exercising the width table on the soft hyphen -- the character
+# gnulib's `uc_width` calls zero columns and glibc's `wcwidth` calls one. The
+# three plain names are what make the width visible: with `shy` at three
+# columns it sorts below them, with `shy` at four it sorts among them by name.
+#
+# The two cases below used to be marked "deliberately different" on the
+# prediction that we would print one layout and GNU another. Measured
+# 2026-08-30, once `ls-diff.sh` could actually run (see `known-issues.md`
+# B-LS-DIFF-HAS-BEEN-SKIPPING -- it had never executed a case): the prediction
+# is false. Our `ls`, the locally built pristine 9.5, *and* Ubuntu's 9.4 all
+# print the same thing for both cases. The Ubuntu binary is the control: an
+# independently built GNU agreeing rules out the agreement being an artifact
+# of how we configure the reference. So they are ordinary cases now.
+#
+# This does not close `open-questions.md` "Which width table should `charwidth`
+# follow" -- it only shows this fixture does not discriminate between the two
+# tables, because `ls` reaches the same layout either way here.
 mkdir -p y
 : > "$(printf 'y/shy\u00ad')"
 : > y/AAAA
@@ -555,9 +496,12 @@ TERM=xterm ls --color=always t
 TERM=dumb ls --color=always t
 COLORTERM=truecolor ls --color=always t
 
+# Soft-hyphen width. See the `y/` fixture above for why these agree despite
+# our width table and gnulib's disagreeing about U+00AD.
+ls --sort=width -1 y
+ls -C -w 22 y
+
 # --- deliberately different ---
-!our width table is bash's and 9.5's is gnulib's; open-questions "Which width table should charwidth follow"|ls --sort=width -1 y
-!same entry: the soft hyphen is zero columns to gnulib and one to glibc, so 22 columns hold one row of four for GNU and two rows of two for us|ls -C -w 22 y
 !--help text is ours|ls --help
 !--version text is ours|ls --version
 !hyperlinks are not implemented; known-issues TD-B-LS-ACCEPTS-HYPERLINK-WITHOUT-EMITTING-IT|ls --hyperlink=always t

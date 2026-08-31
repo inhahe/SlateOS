@@ -144,6 +144,14 @@ const MIN_INTERVAL_MS: u32 = 50;
 /// The snake's starting length.
 const START_LENGTH: i32 = 3;
 
+/// The heading over the statistics column.
+///
+/// Named, because `stats_width` measures it to decide how wide the column
+/// wants to be and `draw_stats` is what draws it, forty lines and one function
+/// away. A string measured in one place and drawn in another is a column sized
+/// for a line it does not contain (known-issues lesson 93).
+const STATS_HEADING: &str = "Stats";
+
 // ── Direction ───────────────────────────────────────────────────────
 
 /// One of the four ways the snake can be pointing.
@@ -1267,7 +1275,7 @@ impl SnakeApp {
     /// without.
     #[must_use]
     pub fn stats_width(&self, l: &Layout) -> f32 {
-        let heading = text::measure("Stats", l.small, FontWeightHint::Bold);
+        let heading = text::measure(STATS_HEADING, l.small, FontWeightHint::Bold);
         let widest = self
             .stats_rows()
             .iter()
@@ -1459,7 +1467,7 @@ impl SnakeApp {
         label_left(
             f,
             &Label {
-                text: "Stats",
+                text: STATS_HEADING,
                 size: l.small,
                 weight: FontWeightHint::Bold,
                 color: LAVENDER,

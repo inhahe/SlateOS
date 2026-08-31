@@ -100788,6 +100788,33 @@ such pair in the tree agrees today. Where they are a layout function and a
 drawing function, as in `chess` and `gomoku`, they drift. `snake` and
 `stickynotes` are in the second shape and merely happen to be right.
 
+**Postscript (same day): the fudge factor beside the wrong string was what
+made the wrong string harmless, and that is not a reason to leave either.**
+All four sites are repaired now -- `gomoku` has `PANEL_HEADINGS`,
+`PANEL_LINES` and `PANEL_BUTTONS` measured at the size *and weight* each is
+drawn at, `snake` has `STATS_HEADING`, `stickynotes` has `PIN_PREFIX` -- and
+`gomoku`'s repair taught something `chess`'s did not. Its shipped line was
+`measure("Draws: 88", font, Regular).max(font * 6.0)`, and a mutation that
+restores the whole of it *survives* the new width-swept test. Measured: the
+fudge is `6.00 * font`, the widest line the panel really draws is
+`5.31 * font`, and `"Draws: 88"` is `4.27 * font`. So the `.max` won at every
+window and the panel was never actually too narrow -- one wrong number was
+covering for another. The mutation that *is* caught is that measurement with
+the fudge removed, which leaves the widest line 17 px short of the column at
+280x400 and at 400x640.
+
+Two things follow. First, a site like this cannot be found by testing, only
+by reading -- which is why the grep is the tool here and the suite is not.
+Second, and this is the part worth arguing with: "the fudge happens to be big
+enough" is no defence of leaving it, because *nothing holds it there*. It is
+a number tuned against a set of strings, sitting forty lines from those
+strings, with no test able to notice when they change and no reader able to
+see that it should. That is the same fault as the wrong literal, one level
+up: a measurement replaced by a constant that agreed with it once. The repair
+is the same either way -- measure the strings you draw -- and the surviving
+row stays in the mutation table carrying its reason, rather than being
+deleted (lesson 94).
+
 ### Lesson 94: a branch the current constant makes unreachable is a landmine, not dead code (lane C, 2026-08-31)
 
 **In short:** `chess`'s minimax scored a leaf position from White's point of

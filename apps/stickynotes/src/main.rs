@@ -1514,6 +1514,16 @@ const CHIP_GAP: f32 = 6.0;
 const TOOLBAR_FONT: f32 = 12.0;
 /// Padding inside a note, left and right.
 const NOTE_PAD: f32 = 8.0;
+
+/// What a pinned note's title is prefixed with, on the note and in the sidebar.
+///
+/// Named, because three places have to agree about it: the renderer prepends
+/// it, and both `column_in_title` and the title caret shift by *measuring* it
+/// so that a click lands on the character it was aimed at rather than one
+/// four glyphs to the left. The measuring and the drawing are in different
+/// functions, which is the shape a column sized for a line it does not contain
+/// takes (known-issues lesson 93).
+const PIN_PREFIX: &str = "[P] ";
 /// Marker left on sidebar text that did not fit. Without one, a title cut by
 /// `max_width` simply looks like a shorter title.
 const ELLIPSIS: &str = "…";
@@ -1735,7 +1745,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
     let title_x = note.x + NOTE_PAD;
     let title_room = (note.width - 40.0).max(0.0);
     let title_display = if note.pinned {
-        format!("[P] {}", note.title)
+        format!("{PIN_PREFIX}{}", note.title)
     } else {
         note.title.clone()
     };
@@ -1755,7 +1765,7 @@ fn draw_note(frame: &mut Frame, note: &Note, is_active: bool, caret: Option<Care
         // marker: the caret indexes what the user is editing, and the `[P] `
         // is drawn by the renderer rather than typed.
         let lead = if note.pinned {
-            text::measure("[P] ", title_font, FontWeightHint::Bold)
+            text::measure(PIN_PREFIX, title_font, FontWeightHint::Bold)
         } else {
             0.0
         };
@@ -2327,7 +2337,7 @@ impl StickyNotesApp {
             // title looks like a shorter title.
             let text_x = 24.0;
             let room = (SIDEBAR_WIDTH - 8.0 - text_x).max(0.0);
-            let prefix = if item.pinned { "[P] " } else { "" };
+            let prefix = if item.pinned { PIN_PREFIX } else { "" };
             frame.push(RenderCommand::Text {
                 x: text_x,
                 y: iy + 6.0,
@@ -3463,7 +3473,7 @@ impl StickyNotesApp {
         let weight = FontWeightHint::Bold;
         let size = note.font_size.title_size();
         let lead = if note.pinned {
-            text::measure("[P] ", size, weight)
+            text::measure(PIN_PREFIX, size, weight)
         } else {
             0.0
         };

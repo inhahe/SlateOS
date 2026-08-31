@@ -64,6 +64,53 @@ const LAST_INDEX: i32 = BOARD_SIZE as i32 - 1;
 const WINDOW_WIDTH: f32 = 900.0;
 const WINDOW_HEIGHT: f32 = 640.0;
 
+// ── The text the panel and the header hold ─────────────────
+//
+// Named, because `Layout::solve` has to measure these to decide whether a
+// panel is worth drawing at all and where the turn indicator starts, while
+// `draw_panel` and `draw_header` are the code that actually draws them. A
+// string measured in one function and drawn in another is a column sized for a
+// line it does not contain: this layout measured `"Draws: 88"` and nothing
+// else, so the panel's real widest lines -- `"New game (N)"` and
+// `"\u{25CF} Black: 0"` -- were never part of the decision at all
+// (known-issues lesson 93).
+
+/// The program's name, drawn at the left of the header and measured to place
+/// the turn indicator past it.
+const TITLE_TEXT: &str = "Gomoku";
+
+const GAME_INFO_HEADING: &str = "Game Info";
+const SCORES_HEADING: &str = "Scores";
+
+/// The panel's headings, drawn bold at [`Layout::font`].
+const PANEL_HEADINGS: [&str; 2] = [GAME_INFO_HEADING, SCORES_HEADING];
+
+const MOVES_STEM: &str = "Moves: ";
+const TURN_STEM: &str = "Turn: ";
+const BLACK_SCORE_STEM: &str = "\u{25CF} Black: ";
+const WHITE_SCORE_STEM: &str = "\u{25CB} White: ";
+const DRAWS_STEM: &str = "Draws: ";
+
+/// Each of the panel's lines as the layout must measure it: the stem
+/// `draw_panel` draws, followed by the widest tail the panel is sized to hold.
+///
+/// A game longer than 999 moves, or a scoreline past 99, draws a line wider
+/// than the column was sized for; it is elided by the `max_width` every panel
+/// line is drawn with rather than painted over the board.
+const PANEL_LINES: [(&str, &str); 5] = [
+    (MOVES_STEM, "888"),
+    (TURN_STEM, "Black"),
+    (BLACK_SCORE_STEM, "88"),
+    (WHITE_SCORE_STEM, "88"),
+    (DRAWS_STEM, "88"),
+];
+
+const NEW_GAME_LABEL: &str = "New game (N)";
+const UNDO_LABEL: &str = "Undo (Z)";
+
+/// The panel's buttons, drawn centred at [`Layout::small`].
+const PANEL_BUTTONS: [&str; 2] = [NEW_GAME_LABEL, UNDO_LABEL];
+
 /// What the pointer can land on. The drawing pass records one of these for
 /// every intersection it draws and for every button, so a click is answered by
 /// the picture rather than by arithmetic over constants the picture may not
@@ -131,9 +178,26 @@ impl Layout {
         // The panel is worth having only if it can hold its widest line. Below
         // that it is dropped and the board takes the whole width, rather than
         // squeezing the board to make room for a column too narrow to read.
-        let panel_w_min =
-            text::measure("Draws: 88", font, FontWeightHint::Regular).max(font * 6.0) + pad * 2.0;
-        let want_panel = (w * 0.26).clamp(panel_w_min, 220.0);
+        //
+        // Every line is measured, in the weight and size it is drawn at. This
+        // used to measure `"Draws: 88"` alone -- a string the panel never
+        // draws, and narrower than several it does.
+        let mut widest: f32 = 0.0;
+        for heading in PANEL_HEADINGS {
+            widest = widest.max(text::measure(heading, font, FontWeightHint::Bold));
+        }
+        for (stem, tail) in PANEL_LINES {
+            let mut line = String::from(stem);
+            line.push_str(tail);
+            widest = widest.max(text::measure(&line, font, FontWeightHint::Regular));
+        }
+        for button in PANEL_BUTTONS {
+            widest = widest.max(text::measure(button, small, FontWeightHint::Regular));
+        }
+        let panel_w_min = widest + pad * 2.0;
+        // `clamp` panics when the low bound is above the high one, and a large
+        // font can carry the minimum past 220.
+        let want_panel = (w * 0.26).clamp(panel_w_min, panel_w_min.max(220.0));
         let panel_w = if w - want_panel >= h * 0.45 && want_panel <= w * 0.4 {
             want_panel
         } else {
@@ -1039,7 +1103,7 @@ impl GomokuApp {
         let x = l.board.x.max(l.pad);
         text_at(
             f,
-            "Gomoku",
+            TITLE_TEXT,
             x,
             l.header.y + (l.header.h - l.title) / 2.0,
             l.title,
@@ -1050,7 +1114,7 @@ impl GomokuApp {
 
         // The turn indicator is placed past the measured width of the title
         // rather than at a hand-tuned offset from it.
-        let used = text::measure("Gomoku", l.title, FontWeightHint::Bold);
+        let used = text::measure(TITLE_TEXT, l.title, FontWeightHint::Bold);
         let (turn_text, turn_color) = match self.phase {
             GamePhase::Won if self.winner == Cell::Black => ("Black wins", GREEN),
             GamePhase::Won => ("White wins", RED),
@@ -1277,11 +1341,11 @@ impl GomokuApp {
             *y += l.pad * 0.6;
         };
 
-        heading(f, "Game Info", &mut y);
+        heading(f, GAME_INFO_HEADING, &mut y);
         for line in [
-            format!("Moves: {}", self.move_count),
+            format!("{MOVES_STEM}{}", self.move_count),
             format!(
-                "Turn: {}",
+                "{TURN_STEM}{}",
                 match self.current_turn {
                     Cell::Black => "Black",
                     Cell::White => "White",
@@ -1303,11 +1367,11 @@ impl GomokuApp {
         }
 
         y += l.pad;
-        heading(f, "Scores", &mut y);
+        heading(f, SCORES_HEADING, &mut y);
         for (line, color) in [
-            (format!("\u{25CF} Black: {}", self.scores.0), TEXT_COLOR),
-            (format!("\u{25CB} White: {}", self.scores.1), TEXT_COLOR),
-            (format!("Draws: {}", self.scores.2), SUBTEXT0),
+            (format!("{BLACK_SCORE_STEM}{}", self.scores.0), TEXT_COLOR),
+            (format!("{WHITE_SCORE_STEM}{}", self.scores.1), TEXT_COLOR),
+            (format!("{DRAWS_STEM}{}", self.scores.2), SUBTEXT0),
         ] {
             text_at(
                 f,
@@ -1327,8 +1391,8 @@ impl GomokuApp {
         y += l.pad;
         let bh = (l.font * 2.0).max(1.0);
         for (label, target, enabled) in [
-            ("New game (N)", Target::NewGame, true),
-            ("Undo (Z)", Target::Undo, !self.move_history.is_empty()),
+            (NEW_GAME_LABEL, Target::NewGame, true),
+            (UNDO_LABEL, Target::Undo, !self.move_history.is_empty()),
         ] {
             if y + bh > l.panel.bottom() {
                 break;
@@ -1440,7 +1504,7 @@ fn text_at(
 
 impl App for GomokuApp {
     fn title(&self) -> String {
-        String::from("Gomoku")
+        String::from(TITLE_TEXT)
     }
 
     fn app_id(&self) -> String {
@@ -1955,6 +2019,63 @@ mod tests {
             probe::rect_of_sized(&app, Target::NewGame, (400.0, 900.0)).is_none(),
             "a button in a panel that is not there is still clickable"
         );
+    }
+
+    /// Every line the panel draws fits between its padding, at every window
+    /// size that draws a panel at all.
+    ///
+    /// The layout decides whether a panel is worth having by measuring its
+    /// widest line, and the widest line it measured used to be `"Draws: 88"` --
+    /// a string the panel never draws, and narrower than `"New game (N)"` and
+    /// `"\u{25CF} Black: 0"`, which it does (known-issues lesson 93). The test
+    /// iterates the same named constants the layout measures and `draw_panel`
+    /// draws, so a hint edited in one place cannot fall out of step with the
+    /// other two.
+    ///
+    /// Asked of the default window alone it would prove nothing: at 900 px the
+    /// panel is a quarter of the width and comfortably wide whatever was
+    /// measured. The measurement decides something only in the windows near
+    /// the limit, which are exactly the ones a single-size test never visits --
+    /// so sweep them, and assert the sweep actually found panels, or a layout
+    /// change that dropped the panel everywhere would turn this into a loop
+    /// that runs zero times and passes.
+    #[test]
+    fn the_panel_is_wide_enough_for_the_lines_it_holds() {
+        let mut checked = 0_u32;
+        for w in (280_u16..=1600).step_by(20) {
+            for h in [400.0_f32, 640.0, 900.0] {
+                let l = Layout::solve(f32::from(w), h);
+                if l.panel.is_empty() {
+                    continue;
+                }
+                checked = checked.saturating_add(1);
+                let room = l.panel.w - l.pad * 2.0;
+                let check = |line: &str, got: f32| {
+                    assert!(
+                        got <= room + 0.01,
+                        "{line:?} wants {got} px of the {room} px the panel leaves at {w}x{h}"
+                    );
+                };
+                for heading in PANEL_HEADINGS {
+                    check(
+                        heading,
+                        text::measure(heading, l.font, FontWeightHint::Bold),
+                    );
+                }
+                for (stem, tail) in PANEL_LINES {
+                    let line = format!("{stem}{tail}");
+                    let got = text::measure(&line, l.font, FontWeightHint::Regular);
+                    check(&line, got);
+                }
+                for button in PANEL_BUTTONS {
+                    check(
+                        button,
+                        text::measure(button, l.small, FontWeightHint::Regular),
+                    );
+                }
+            }
+        }
+        assert!(checked > 50, "only {checked} of those windows drew a panel");
     }
 
     /// The coordinate labels are drawn when there is room for them and dropped

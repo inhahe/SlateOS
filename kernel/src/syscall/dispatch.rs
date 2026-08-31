@@ -42,15 +42,19 @@ use super::number::{
     SYS_FS_CHECK, SYS_FS_CLOSE, SYS_FS_COPY, SYS_FS_DELETE, SYS_FS_DUP, SYS_FS_FALLOCATE,
     SYS_FS_FCHMODAT_PINNED, SYS_FS_FLOCK, SYS_FS_FORMAT, SYS_FS_FSTAT, SYS_FS_FSTATAT_PINNED,
     SYS_FS_FTRUNCATE, SYS_FS_FUNLOCK, SYS_FS_GET_XATTR, SYS_FS_GETDENTS_PINNED, SYS_FS_HANDLE_PATH,
-    SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK, SYS_FS_LIST_DIR,
+    SYS_FS_JOURNAL_CURSOR, SYS_FS_JOURNAL_FLUSH, SYS_FS_JOURNAL_READ, SYS_FS_LINK,
+    SYS_FS_LINKAT_PINNED, SYS_FS_LIST_DIR,
     SYS_FS_LIST_XATTRS, SYS_FS_LSTAT, SYS_FS_METADATA, SYS_FS_MKDIR, SYS_FS_MKDIR_MODE,
+    SYS_FS_MKDIRAT_PINNED,
     SYS_FS_MOUNT, SYS_FS_OPEN, SYS_FS_OPEN_MODE, SYS_FS_OPENAT2, SYS_FS_READ, SYS_FS_READ_FILE,
     SYS_FS_READDIR_AT, SYS_FS_READLINK, SYS_FS_REMOVE_XATTR, SYS_FS_RENAME, SYS_FS_RMDIR,
     SYS_FS_SEEK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE, SYS_FS_SET_ATTR, SYS_FS_SET_OWNER,
     SYS_FS_SET_PERMS, SYS_FS_SET_TIMES, SYS_FS_SET_XATTR, SYS_FS_STAT, SYS_FS_STATVFS,
-    SYS_FS_SYMLINK, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH, SYS_FS_TRASH_EMPTY,
+    SYS_FS_SYMLINK, SYS_FS_SYMLINKAT_PINNED, SYS_FS_SYNC, SYS_FS_TMPFILE, SYS_FS_TRASH,
+    SYS_FS_TRASH_EMPTY,
     SYS_FS_TRASH_LIST, SYS_FS_TRASH_RESTORE, SYS_FS_TRIM, SYS_FS_TRUNCATE, SYS_FS_UMOUNT,
-    SYS_FS_UNLINKAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ,
+    SYS_FS_UNLINKAT_PINNED, SYS_FS_UTIMENSAT_PINNED, SYS_FS_WATCH_CLOSE, SYS_FS_WATCH_CREATE,
+    SYS_FS_WATCH_READ,
     SYS_FS_WRITE, SYS_FS_WRITE_FILE, SYS_FUTEX_CMP_REQUEUE_PI, SYS_FUTEX_LOCK_PI,
     SYS_FUTEX_LOCK_PI_TIMEOUT, SYS_FUTEX_REQUEUE, SYS_FUTEX_TRYLOCK_PI, SYS_FUTEX_UNLOCK_PI,
     SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_REQUEUE_PI, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
@@ -554,6 +558,13 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_FS_FSTATAT_PINNED as usize] = Some(handlers::sys_fs_fstatat_pinned);
     handlers[SYS_FS_GETDENTS_PINNED as usize] = Some(handlers::sys_fs_getdents_pinned);
     handlers[SYS_FS_FCHMODAT_PINNED as usize] = Some(handlers::sys_fs_fchmodat_pinned);
+    // The set a recursive copy needs to rebuild a tree, so that the
+    // *destination* directory is resolved once rather than re-derived by name
+    // for every entry written into it.
+    handlers[SYS_FS_MKDIRAT_PINNED as usize] = Some(handlers::sys_fs_mkdirat_pinned);
+    handlers[SYS_FS_SYMLINKAT_PINNED as usize] = Some(handlers::sys_fs_symlinkat_pinned);
+    handlers[SYS_FS_LINKAT_PINNED as usize] = Some(handlers::sys_fs_linkat_pinned);
+    handlers[SYS_FS_UTIMENSAT_PINNED as usize] = Some(handlers::sys_fs_utimensat_pinned);
     handlers[SYS_FS_CLOSE as usize] = Some(handlers::sys_fs_close);
     handlers[SYS_FS_READ as usize] = Some(handlers::sys_fs_read);
     handlers[SYS_FS_WRITE as usize] = Some(handlers::sys_fs_write);

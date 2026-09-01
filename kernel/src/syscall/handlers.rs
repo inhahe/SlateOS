@@ -129,16 +129,23 @@ fn read_user_path(ptr: u64, len: usize) -> Result<crate::fs::path::PathBuf, Kern
     Ok(crate::fs::path::PathBuf::from(bytes))
 }
 
-/// Copy a NUL-terminated user string into a kernel `String`.
+/// Copy a NUL-terminated user string in as bytes.
 ///
 /// The terminator-delimited counterpart to [`read_user_path`], for arguments
 /// that arrive as a bare C string with no length beside them — xattr keys,
 /// mount options, and similar.  See
 /// [`crate::mm::user::read_user_cstr`] for why the scan cannot be done in
 /// place over the user mapping.
-fn read_user_cstring(ptr: u64, max: usize) -> Result<alloc::string::String, KernelError> {
-    let bytes = crate::mm::user::read_user_cstr(ptr, max)?;
-    alloc::string::String::from_utf8(bytes).map_err(|_| KernelError::InvalidArgument)
+///
+/// Bytes, not `String`: a C string is a NUL-terminated byte sequence, and
+/// which of those sequences are also valid UTF-8 is not the kernel's business
+/// at this boundary any more than it is for a path.  This used to end in a
+/// `String::from_utf8(…).map_err(|_| InvalidArgument)`, which rejected an
+/// xattr name that the filesystem underneath was perfectly able to store and
+/// return — so a name written by a Linux tool could not afterwards be read,
+/// removed, or even named.  See `design-decisions.md` §660.
+fn read_user_cbytes(ptr: u64, max: usize) -> Result<alloc::vec::Vec<u8>, KernelError> {
+    crate::mm::user::read_user_cstr(ptr, max)
 }
 
 // ---------------------------------------------------------------------------
@@ -9938,7 +9945,61 @@ pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// Which rename a `SYS_FS_RENAME` flags word asks for.
+///
+/// Split out of [`sys_fs_rename`] so the mapping can be tested: the rest
+/// of the handler reads user pointers and so cannot run from kernel
+/// space, but the flag decode is where a mistake would be silent — an
+/// unknown bit quietly ignored gives the caller a plain rename when it
+/// asked to be refused, which is the exact failure `RENAME_NOREPLACE`
+/// exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameMode {
+    /// Replace the destination if it exists.
+    Replace,
+    /// `RENAME_NOREPLACE` — refuse if the destination exists.
+    NoReplace,
+    /// `RENAME_EXCHANGE` — swap the two paths atomically.
+    Exchange,
+}
+
+impl RenameMode {
+    /// Decode a `SYS_FS_RENAME` flags word.  Bit values are Linux's.
+    ///
+    /// Bits 0 and 1 together are `InvalidArgument` (Linux agrees: the two
+    /// requests contradict), and so is any other bit, so that a flag added
+    /// later is refused by an older kernel rather than dropped.
+    pub fn from_flags(flags: u64) -> KernelResult<Self> {
+        match flags {
+            0 => Ok(Self::Replace),
+            1 => Ok(Self::NoReplace),
+            2 => Ok(Self::Exchange),
+            _ => Err(KernelError::InvalidArgument),
+        }
+    }
+}
+
 /// `SYS_FS_RENAME` — rename or move a file or directory.
+///
+/// `arg0`/`arg1`: source path pointer and length.
+/// `arg2`/`arg3`: destination path pointer and length.
+/// `arg4`: flags, using Linux's `renameat2` bit values so that libc's
+/// constants pass straight through:
+///
+/// | bits | meaning |
+/// |------|---------|
+/// | `0` | plain rename — the destination is replaced if it exists |
+/// | `1` | `RENAME_NOREPLACE` — `AlreadyExists` if the destination is taken |
+/// | `2` | `RENAME_EXCHANGE` — atomically swap the two paths |
+/// | `3` | both at once: `InvalidArgument`, as on Linux |
+/// | any other bit | `InvalidArgument` |
+///
+/// Unknown bits are rejected rather than ignored so that a flag added
+/// later cannot be silently dropped by an older kernel, which would leave
+/// the caller believing it got a guarantee it did not get.  Note that
+/// `arg4` travels in `r8`, which nobody zeroes: this handler may only read
+/// it because libc already passes an explicit `0` there (lane B's
+/// `posix: pass an explicit flags word to SYS_FS_RENAME`).
 pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -9961,7 +10022,13 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::rename(&from_path, &to_path) {
+    let res = match RenameMode::from_flags(args.arg4) {
+        Ok(RenameMode::Replace) => crate::fs::Vfs::rename(&from_path, &to_path),
+        Ok(RenameMode::NoReplace) => crate::fs::Vfs::rename_noreplace(&from_path, &to_path),
+        Ok(RenameMode::Exchange) => crate::fs::Vfs::rename_exchange(&from_path, &to_path),
+        Err(e) => return SyscallResult::err(e),
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -10896,7 +10963,7 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -10947,8 +11014,18 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: key pointer (null-terminated).  `arg3`: value pointer.
-/// `arg4`: value length.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
-/// `lsetxattr` — write to the link inode's own xattrs).
+/// `arg4`: value length.  `arg5`: flags:
+///
+/// | bit | meaning |
+/// |-----|---------|
+/// | 0 | `NO_FOLLOW` — `lsetxattr`: write to the link inode's own xattrs |
+/// | 1 | `XATTR_CREATE` — fail with `EEXIST` if the attribute exists |
+/// | 2 | `XATTR_REPLACE` — fail with `ENODATA` if it does not |
+///
+/// Bits 1 and 2 together are `InvalidArgument`, as is any bit above 2:
+/// Linux rejects unknown `setxattr` flags rather than ignoring them, and
+/// silently ignoring one here would let a caller that asked for
+/// "create, or fail" get an overwrite and never learn of it.
 pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -10957,7 +11034,7 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -10975,11 +11052,23 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // arg5 bit 0 = NO_FOLLOW (lsetxattr: write the link inode's own xattrs).
+    // arg5 bit 0 = NO_FOLLOW, bit 1 = XATTR_CREATE, bit 2 = XATTR_REPLACE.
+    if args.arg5 & !0b111 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let mode = match args.arg5 & 0b110 {
+        0b000 => crate::fs::XattrSetMode::Any,
+        0b010 => crate::fs::XattrSetMode::Create,
+        0b100 => crate::fs::XattrSetMode::Replace,
+        // Both at once asks for "fail if present" and "fail if absent",
+        // which no state satisfies.  Linux returns EINVAL; so do we,
+        // rather than picking one and pretending the other was not asked.
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
     let res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::set_xattr_no_follow(&path, &key, &value)
+        crate::fs::Vfs::set_xattr_no_follow_with(&path, &key, &value, mode)
     } else {
-        crate::fs::Vfs::set_xattr(&path, &key, &value)
+        crate::fs::Vfs::set_xattr_with(&path, &key, &value, mode)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -11000,7 +11089,7 @@ pub fn sys_fs_remove_xattr(args: &SyscallArgs) -> SyscallResult {
         Ok(p) => p,
         Err(e) => return SyscallResult::err(e),
     };
-    let key = match read_user_cstring(args.arg2, XATTR_NAME_MAX) {
+    let key = match read_user_cbytes(args.arg2, XATTR_NAME_MAX) {
         Ok(k) => k,
         Err(e) => return SyscallResult::err(e),
     };
@@ -11079,7 +11168,7 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
         for key in &keys {
             // The trailing NUL is already there from the zero fill.
             if let Some(dst) = packed.get_mut(offset..offset.saturating_add(key.len())) {
-                dst.copy_from_slice(key.as_bytes());
+                dst.copy_from_slice(key);
             }
             offset = offset.saturating_add(key.len().saturating_add(1));
         }

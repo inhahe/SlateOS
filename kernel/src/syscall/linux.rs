@@ -1398,6 +1398,7 @@ pub const fn linux_errno_for(e: KernelError) -> i32 {
         KernelError::FileTooLarge => errno::EFBIG,
         KernelError::CrossDevice => errno::EXDEV,
         KernelError::StaleHandle => errno::ESTALE,
+        KernelError::NoAttribute => errno::ENODATA,
         KernelError::IoError => errno::EIO,
         KernelError::NoSuchDevice => errno::ENODEV,
         KernelError::DeviceBusy => errno::EBUSY,
@@ -48474,8 +48475,42 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
+
+    // 6. The native `SYS_FS_RENAME` flags word decodes to the right mode.
+    //
+    // The rest of that handler reads user pointers and so cannot be driven
+    // from here, but the decode is where a mistake would be *silent*: a
+    // rejected-bits rule that quietly degraded to a plain rename would give
+    // a caller asking for NOREPLACE the overwrite it asked to be spared,
+    // and report success.  Unmapped bits must therefore stay refused.
+    {
+        use crate::syscall::handlers::RenameMode;
+        let cases: &[(u64, Option<RenameMode>)] = &[
+            (0, Some(RenameMode::Replace)),
+            (1, Some(RenameMode::NoReplace)),
+            (2, Some(RenameMode::Exchange)),
+            // NOREPLACE|EXCHANGE contradict; Linux returns EINVAL too.
+            (3, None),
+            // A bit we have not defined: refused, never ignored.
+            (4, None),
+            (1 << 63, None),
+        ];
+        for &(flags, want) in cases {
+            let got = RenameMode::from_flags(flags).ok();
+            if got != want {
+                serial_println!(
+                    "[syscall/linux]   FAIL: RenameMode::from_flags({}) -> {:?} (expected {:?})",
+                    flags,
+                    got,
+                    want
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+
     serial_println!(
-        "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT; cross-mount EXCHANGE EXDEV): OK"
+        "[syscall/linux]   rename_noreplace/exchange (atomic same-mount: free-dst move, existing-dst EEXIST, EXCHANGE swap, missing-operand ENOENT; cross-mount EXCHANGE EXDEV; SYS_FS_RENAME flag decode incl. unknown-bit refusal): OK"
     );
     Ok(())
 }

@@ -256,6 +256,13 @@ fn gather_general(path: &Path, meta: &crate::fs::FileMeta) -> KernelResult<Gener
 /// Gather security properties.
 fn gather_security(_path: &Path, meta: &crate::fs::FileMeta) -> SecurityProperties {
     let perms = format_permissions(meta.permissions);
+    // The key is bytes (§660) and this struct is a display surface, so it is
+    // rendered with the octal escaping the rest of the tree already uses for
+    // byte strings in text.  That encoding is total and lossless, so an
+    // attribute whose name is not UTF-8 still shows up under a name that
+    // identifies it uniquely — where a `from_utf8_lossy` would collapse
+    // distinct names onto one, and a `<N bytes>` placeholder would hide which
+    // attribute is being described.
     let xattrs: Vec<(String, String)> = meta
         .xattrs
         .iter()
@@ -263,7 +270,7 @@ fn gather_security(_path: &Path, meta: &crate::fs::FileMeta) -> SecurityProperti
             let val = core::str::from_utf8(v)
                 .map(String::from)
                 .unwrap_or_else(|_| alloc::format!("<{} bytes>", v.len()));
-            (k.clone(), val)
+            (crate::fs::escape::escape_octal(k, &[]), val)
         })
         .collect();
 

@@ -190,11 +190,11 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     list_xattrs on new file: empty OK");
 
         // Set an xattr.
-        crate::fs::Vfs::set_xattr(&xattr_path, "user.test_key", b"test_value")?;
+        crate::fs::Vfs::set_xattr(&xattr_path, b"user.test_key", b"test_value")?;
         serial_println!("[ext4]     set_xattr user.test_key OK");
 
         // Read it back.
-        let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
+        let val = crate::fs::Vfs::get_xattr(&xattr_path, b"user.test_key")?;
         if val != b"test_value" {
             serial_println!(
                 "[ext4]   FAIL: get_xattr returned {:?}, expected 'test_value'",
@@ -209,7 +209,7 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // Set a second xattr.
-        crate::fs::Vfs::set_xattr(&xattr_path, "user.another", b"second value")?;
+        crate::fs::Vfs::set_xattr(&xattr_path, b"user.another", b"second value")?;
         let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
         if keys.len() != 2 {
             serial_println!("[ext4]   FAIL: expected 2 xattrs, got {}", keys.len());
@@ -222,8 +222,8 @@ pub fn self_test() -> KernelResult<()> {
         );
 
         // Overwrite the first xattr with a new value.
-        crate::fs::Vfs::set_xattr(&xattr_path, "user.test_key", b"updated")?;
-        let val = crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key")?;
+        crate::fs::Vfs::set_xattr(&xattr_path, b"user.test_key", b"updated")?;
+        let val = crate::fs::Vfs::get_xattr(&xattr_path, b"user.test_key")?;
         if val != b"updated" {
             serial_println!(
                 "[ext4]   FAIL: overwritten xattr = {:?}, expected 'updated'",
@@ -235,9 +235,10 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     overwrite xattr value OK");
 
         // Remove one xattr.
-        crate::fs::Vfs::remove_xattr(&xattr_path, "user.test_key")?;
+        crate::fs::Vfs::remove_xattr(&xattr_path, b"user.test_key")?;
         let keys = crate::fs::Vfs::list_xattrs(&xattr_path)?;
-        if keys.len() != 1 || keys.first().map(|s| s.as_str()) != Some("user.another") {
+        if keys.len() != 1 || keys.first().map(|k| k.as_slice()) != Some(b"user.another".as_slice())
+        {
             serial_println!(
                 "[ext4]   FAIL: after remove, expected ['user.another'], got {:?}",
                 keys
@@ -247,14 +248,18 @@ pub fn self_test() -> KernelResult<()> {
         }
         serial_println!("[ext4]     remove_xattr + verify remaining OK");
 
-        // Getting a removed xattr should fail.
-        match crate::fs::Vfs::get_xattr(&xattr_path, "user.test_key") {
-            Err(crate::error::KernelError::NotFound) => {
-                serial_println!("[ext4]     get removed xattr: NotFound OK");
+        // Getting a removed xattr should fail — and specifically with
+        // `NoAttribute`, not `NotFound`.  The file is still there; it is the
+        // attribute that is gone, and a caller has to be able to tell those
+        // apart (§660).  This assertion read `NotFound` until the two facts
+        // had separate codes to be told apart by.
+        match crate::fs::Vfs::get_xattr(&xattr_path, b"user.test_key") {
+            Err(crate::error::KernelError::NoAttribute) => {
+                serial_println!("[ext4]     get removed xattr: NoAttribute OK");
             }
             other => {
                 serial_println!(
-                    "[ext4]   FAIL: get removed xattr should be NotFound, got {:?}",
+                    "[ext4]   FAIL: get removed xattr should be NoAttribute, got {:?}",
                     other
                 );
                 let _ = crate::fs::Vfs::remove(&xattr_path);

@@ -56,7 +56,7 @@ use crate::serial_println;
 // ---------------------------------------------------------------------------
 
 /// Xattr key used to store tags.
-const TAG_XATTR_KEY: &str = "user.tags";
+const TAG_XATTR_KEY: &[u8] = b"user.tags";
 
 /// Maximum number of tags per file.
 const MAX_TAGS_PER_FILE: usize = 32;
@@ -232,7 +232,12 @@ fn read_tags(path: &Path) -> KernelResult<Vec<String>> {
             let tags: Vec<String> = s.split(',').map(|t| String::from(t.trim())).collect();
             Ok(tags)
         }
-        Err(KernelError::NotFound) => Ok(Vec::new()),
+        // "This file carries no tags" is an ordinary answer, and it is the only
+        // one we may turn into an empty list.  `NotFound` means the *path* did
+        // not resolve, which must keep propagating: swallowing it here reported
+        // "no tags" for a file that does not exist, so `list` printed nothing
+        // and `has` answered a confident false for a typo'd path.
+        Err(KernelError::NoAttribute) => Ok(Vec::new()),
         Err(e) => Err(e),
     }
 }
@@ -243,7 +248,9 @@ fn write_tags(path: &Path, tags: &[String]) -> KernelResult<()> {
         // Remove the xattr entirely when no tags remain.
         match Vfs::remove_xattr(path, TAG_XATTR_KEY) {
             Ok(()) => Ok(()),
-            Err(KernelError::NotFound) => Ok(()), // Already gone.
+            // Only the attribute being absent is "already gone" and harmless.
+            // A missing file is a real failure to report, not a success.
+            Err(KernelError::NoAttribute) => Ok(()),
             Err(e) => Err(e),
         }
     } else {

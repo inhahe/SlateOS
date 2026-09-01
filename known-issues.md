@@ -103410,3 +103410,143 @@ already claim to mean.
 **Watch it.** `scripts/check-boot-skips.py` will start reporting this skip on
 100% of boots once ten qualifying boots are recorded — which is the mechanism
 for making sure the skip above does not quietly become the permanent answer.
+
+---
+
+## B-THE-PINNED-FAST-PATH-DOWNGRADED-ITS-FIRST-REAL-REFUSAL-TO-THE-RACY-ROUTE — FIXED 2026-08-31
+
+**Status:** FIXED. Recorded because the hole existed on `main` from 2026-08-24
+(the landing of syscall 662) until 2026-08-31, and because the *shape* of the
+mistake — inferring a fact the other side could have simply told us — is worth
+having written down somewhere other than a commit message.
+
+**In short:** the POSIX layer has a fast path that asks the kernel to do a
+`unlinkat`/`fstatat`/`chmod`/… against a directory *handle* rather than a
+remembered path, so that swapping the directory mid-operation cannot redirect
+it. When such a call came back refused, this side could not tell "your kernel is
+too old to have this call" apart from "the handler ran and this filesystem
+cannot do it" — both were error code -2 — so it guessed. On the guess's wrong
+side, a filesystem's honest refusal was quietly retried by path name, which is
+exactly the race the fast path exists to close.
+
+**Where it lived.** `posix/src/file.rs`, `fn pinned_answer`, plus seven
+`PINNED_*_ANSWERED` statics beside it.
+
+**The guess.** Each syscall carried its own latch, `false` until that syscall
+returned anything other than -2, `true` forever after:
+
+| latch | -2 arrives | meaning taken | what happened |
+|---|---|---|---|
+| never set | first call | "kernel too old" | fall back to the path-based route |
+| set | any later call | "filesystem refused" | returned to the caller as the answer |
+
+The reasoning was sound as far as it went — a kernel that *has* the call answers
+the first invocation with a success or a real error, which flips the latch, so
+every subsequent -2 is honoured. The defect is the window before that first
+answer. On a kernel that has the call but a filesystem that cannot perform it,
+*every* invocation is -2, the latch never flips, and every invocation falls back
+by path. Lane A's `dispatch.rs` comment states the cost exactly: the call "gets
+silently downgraded to the racy path-based route, on the failure path, where
+nobody is looking."
+
+**Two further costs, both smaller but real.** The behaviour differed between the
+first invocation and every later one, so a test could pin only one of the two at
+a time and the suite's result depended on call ordering. And each of the seven
+syscalls needed its own latch — 662's first success must not vouch for 663 —
+which is seven statics to keep in step by hand as the family grew.
+
+**What fixed it.** Lane A split the two facts onto two numbers on 2026-08-31:
+an *empty dispatch slot* now answers `NoSuchSyscall` (-10), a *registered
+handler that refused* still answers `NotSupported` (-2). `pinned_answer` became
+a comparison against -10 (plus `HOST_ENOSYS`, which is the host build's
+compiled-out `SYSCALL` reporting itself), the seven statics and the `answered`
+parameter are gone, and `only_an_empty_dispatch_slot_falls_back` pins the rule
+in both directions with no ordering to arrange.
+
+**The general lesson.** The old code inferred, by observation over time, a fact
+the kernel already knew at the moment it answered. Any such inference has a
+window in which it is wrong, and the window is invisible because it closes
+itself. When two conditions need different responses, ask for two answers rather
+than building a heuristic to separate one — and if the other side is another
+lane, file the request. That is what happened here, and it took a day.
+
+## B-READDIR-INVENTS-D_INO-FROM-THE-ENTRY-POSITION-SO-DU-AND-TAR-COALESCE-A-TREE — OPEN 2026-08-31
+
+**In short:** when a program lists a directory, every entry comes back with an
+"inode number" — the number the filesystem uses to tell one file from another.
+Ours does not come from the filesystem. It is the entry's position in the
+listing: the first file in a directory is 0, the second is 1, and so on. So the
+first file in *every* directory claims the number that means "unknown", and the
+third file in one directory and the third file in another claim to be the same
+file. `du` and `tar` use exactly that number to notice when two names are one
+file, so they count such a tree once instead of once per file. Blocked on lane A:
+the kernel does not send an inode for a directory entry, and a client cannot
+invent a true one.
+
+**Where.** `posix/src/dirent.rs`, two sites, both feeding the same wrong value:
+
+| site | code | what it fills |
+|---|---|---|
+| `readdir`, `:218` | `dir.current.d_ino = dir.pos as u64;` | `struct dirent`'s `d_ino` |
+| `getdents64`, `:1181` | `emit_linux_dirent64(remaining, pos as u64, …)` | the `d_ino` of each `linux_dirent64` |
+
+The comment at `:217` says "Synthetic inode from position", so this was known to
+be a placeholder when written; what was not recorded is that the placeholder is
+observable and that two of its values are actively wrong rather than merely
+uninformative.
+
+**The two failures, in order of how quietly they fail.**
+
+1. **`d_ino == 0` for the first entry of every directory.** Zero is the value the
+   ABI reserves for "no inode available"; `kernel/src/syscall/handlers.rs:8923`
+   documents it as such for `SYS_FS_STAT`'s record. Assigning it to a file that
+   certainly exists means a caller that checks for the reserved value gets the
+   wrong answer about the one entry it is most likely to look at first.
+2. **Collisions across directories.** `/a/foo` and `/b/bar` are both the third
+   entry of their directory and so both inode 3. `du` and `tar` do hard-link
+   coalescing from the *listing* rather than from a stat of each file, so they
+   see one file with many names and count it once. `find -samefile` matches on
+   position. `ls -i` prints a column of indices. This is precisely the failure
+   list lane A wrote when they closed the same gap in `SYS_FS_FSTATAT_PINNED`
+   (`kernel/src/syscall/number.rs:3343-3353`, design-decisions.md §653) — it is
+   already happening here, one call over.
+
+**Why it is not fixable on this side.** The client has nothing better to use.
+Neither directory-listing wire format carries an inode: `SYS_FS_LIST_DIR` (603)
+writes a 264-byte record of `name[256] | size[4] | type[1] | pad[3]`, and
+`SYS_FS_READDIR_AT` (647) / `SYS_FS_GETDENTS_PINNED` (664) write a packed
+`type | name_len | name | size`. The only way to get a true inode per entry today
+is one `stat` syscall per entry during the walk, which turns an O(1) listing into
+O(n) syscalls and still races — the entry can be replaced between the listing and
+the stat, which is the very race 664 exists to close.
+
+**What the proper fix looks like.** A `u64 ino` appended to the shared 647/664
+record, requested in
+`requests/b-a-664s-record-has-no-inode-and-647-turns-out-to-have-no-callers-either.md`.
+It is cheap kernel-side: `DirEntry` (`kernel/src/fs/vfs.rs:85-102`) has no inode
+field, but every implementation has the value in hand at the moment it builds one
+— ext4's `child_ino` is the closure parameter at `fs/ext4/vfs_impl.rs:174`/`:225`
+and is used on the line above the construction, memfs has `self.ino`
+(`fs/memfs.rs:311`), FAT has `self.first_cluster` (`fs/fat.rs:759`). When the
+field lands, both sites above read it from the wire and pass `0` through
+unchanged rather than substituting anything.
+
+**What NOT to do, recorded because it is the tempting fix.** Do not hash the name
+into an inode client-side. The kernel's own Linux-ABI `getdents64` does exactly
+that — FNV-1a over path + "/" + name, `kernel/src/syscall/linux.rs:43174` — and
+it is a bug rather than a model: `fill_stat_from_meta` at `:19927` writes the
+real `meta.ino` as `st_ino`, so within one ABI a `stat` and a `getdents64` of the
+same file report two different inodes, and every consumer that cross-checks the
+two (`find -inum`, `ls -i` against `stat`, `rsync`/`tar` hard-link detection)
+sees a contradiction instead of a missing value. A synthesized inode that
+disagrees with `st_ino` is not an improvement on a missing one; it converts a
+detectable gap into an undetectable disagreement. Reported to lane A as §3 of the
+request above.
+
+**Until then**, the honest interim is `0` for every entry rather than the
+position index — "not available" is true where "entry 3" is false. Not applied
+yet, because it would regress the one thing the index accidentally gets right
+(distinct entries within a single directory compare unequal, which is what makes
+`ls -i` of one directory look plausible), and because the field is expected to
+land before 664 is wired. If lane A declines the widening, apply the `0` and note
+it here.

@@ -1768,6 +1768,27 @@ run_case -v a b d
 TREE='mkdir d; printf hello > a; ln a b'
 run_case -v a b d
 
+# `--update`, which records into the table even though it is skipping. Here
+# rather than in §17 because what it measures is the table, not the option: the
+# `-u` cases up there all have a single source and could never see it.
+#
+# Both destinations are newer, so both operands are skipped and both sources
+# survive — and yet `d/b` does not, because the second skip finds the first in
+# the table and links over it (`copy.c:2380`, whose own comment admits it
+# "replace[s] DST_NAME unconditionally, even if it was a newer separate file").
+# The bytes of `d/b` are the case; `-v` says only `removed 'd/b'`.
+TREE='mkdir d; printf newer > d/a; printf newer2 > d/b; touch -d "2030-01-01" d/a d/b; printf hello > a; ln a b'
+run_case -uv a b d
+
+# The same, but with `d/b` *older*, so the second operand is not skipped and
+# reaches the ordinary `earlier_file` block instead. It links to `d/a` there —
+# a destination this command never wrote, since the first operand was skipped —
+# and then removes its source, which the skipped one did not. Two adjacent
+# operands, two routes into one table, two different answers about whether the
+# source lives.
+TREE='mkdir d; printf newer > d/a; touch -d "2030-01-01" d/a; printf old > d/b; touch -d "2001-01-01" d/b; printf hello > a; ln a b'
+run_case -uv a b d
+
 # The same inode, but only one of its names moved. Here the *right* answer is
 # two separate files, and the far side must keep `b` with its bytes: a fallback
 # that unlinked the inode rather than the named link would lose it.

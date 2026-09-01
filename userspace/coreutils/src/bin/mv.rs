@@ -1808,6 +1808,57 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
     // 2. Is the destination already at least as new as the source? (`-u`,
     //    `copy.c:2353`.) Silent, and a success.
     if job.flags.update && !src_meta.is_dir() && !destination_is_older(src_meta, dst_meta) {
+        // …but not *quite* a no-op, because a skipped pair still goes into the
+        // table (`copy.c:2380`). Upstream explains it and then flags what it
+        // costs, in two comments a dozen lines apart:
+        //
+        // > However, we still must record that we've processed this src/dest
+        // > pair, in case this source file is hard-linked to another one. In
+        // > that case, we'll use the mapping information to link the
+        // > corresponding destination names.
+        //
+        // > Note we currently replace DST_NAME unconditionally, even if it was
+        // > a newer separate file.
+        //
+        // The second sentence is not a caveat about an unlikely corner: it is
+        // this branch destroying the very thing `--update` was asked to
+        // protect. Measured against GNU 9.4 — `d/a` and `d/b` two unrelated
+        // newer files, `a` and `b` two names for one older inode:
+        //
+        // ```text
+        // $ mv -uv a b d
+        // removed 'd/b'
+        // ```
+        //
+        // `d/b`'s contents are gone and it is now a second name for `d/a`;
+        // both sources survive, because the skip has already promised they
+        // would. Ours left `d/b` alone, which is the kinder answer and the
+        // wrong one — this utility is measured against the reference, and
+        // `scripts/mv-diff.sh` §22 now pins it.
+        //
+        // Unconditional [`Copied::remember`], with none of the link-count
+        // sorting the main `earlier_file` block does: at this point the source
+        // has not moved and never will, so its count is whatever it always
+        // was, and a first operand with a count of one that is *later* joined
+        // by nothing still has to be on record for the second one to find.
+        if let Some(id) = file_id(src, src_meta)
+            && let Some(earlier) = job.copied.remember(&id, target)
+            && !hardlink::force_link(
+                "mv",
+                &earlier,
+                target,
+                job.flags.verbose,
+                &mut *job.out,
+                &mut *job.err,
+            )
+        {
+            // Upstream's `goto un_backup` (`copy.c:2389`). Nothing to undo:
+            // this runs before [`make_backup`], exactly as 2380 runs before
+            // `dst_backup` at 2558. Nothing to [`Copied::forget`] either — the
+            // label's forget is guarded by `earlier_file == nullptr`
+            // (`copy.c:3361`), and reaching here means it was not.
+            return Verdict::Refused;
+        }
         return Verdict::Skipped;
     }
 
@@ -4517,6 +4568,95 @@ mod tests {
             )
         );
         assert_eq!(nlink(&fs::symlink_metadata(d.join("b")).unwrap()), 2);
+    }
+
+    /// `--update` records into the table even though it is skipping, so the
+    /// second skip links over a destination it was asked to leave alone
+    /// (`copy.c:2380`). Both sources survive — the skip promised that — and
+    /// `d/b`'s own bytes do not, which is upstream's own "even if it was a newer
+    /// separate file" in a test.
+    ///
+    /// The destinations are written *after* the sources, so they are no older by
+    /// construction and `-u` skips both without a stamp having to be forced.
+    #[test]
+    #[cfg(unix)]
+    fn an_update_skip_still_links_the_second_name_over_what_it_spared() {
+        let dir = scratch("update_linked");
+        let (a, b, d) = (dir.path("a"), dir.path("b"), dir.path("d"));
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::create_dir(&d).unwrap();
+        fs::write(d.join("a"), b"newer").unwrap();
+        fs::write(d.join("b"), b"newer2").unwrap();
+
+        let flags = MvFlags {
+            update: true,
+            verbose: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err) = mv_flags(flags, &[&a, &b, &d]);
+
+        assert!(ok, "{err}");
+        assert!(err.is_empty(), "{err}");
+        // No `renamed` and no `copied`: both operands were skipped. The one line
+        // comes from inside `force_link`, replacing a name that was in use.
+        assert_eq!(out, format!("removed {}\n", quoteaf_os(d.join("b"))));
+        assert!(a.exists() && b.exists(), "a skip keeps both sources");
+        assert_eq!(fs::read(d.join("a")).unwrap(), b"newer");
+        assert_eq!(
+            fs::read(d.join("b")).unwrap(),
+            b"newer",
+            "the spared file was replaced by a link to the other one"
+        );
+        assert_eq!(nlink(&fs::symlink_metadata(d.join("b")).unwrap()), 2);
+    }
+
+    /// The two routes into one table, side by side. `d/a` is newer so the first
+    /// operand is skipped and merely recorded; `d/b` is older so the second is
+    /// *not* skipped and reaches the ordinary `earlier_file` block, which links
+    /// it to `d/a` — a destination this command never wrote — and then removes
+    /// its source. One command, one inode, and two different answers to whether
+    /// the source lives.
+    #[test]
+    #[cfg(unix)]
+    fn a_recorded_skip_is_found_by_an_operand_that_is_not_skipped() {
+        let dir = scratch("update_mixed");
+        let (a, b, d) = (dir.path("a"), dir.path("b"), dir.path("d"));
+        fs::create_dir(&d).unwrap();
+        fs::write(d.join("b"), b"old").unwrap();
+        // Forced back a decade so it is older than the sources on any
+        // granularity; `d/a` is written afterwards and so is newer than both.
+        let old = SystemTime::UNIX_EPOCH + Duration::from_secs(978_307_200);
+        fsattr::set_times(On::Path(&d.join("b"), Link::Follow), Times::both(old)).unwrap();
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(d.join("a"), b"newer").unwrap();
+
+        let flags = MvFlags {
+            update: true,
+            verbose: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err) = mv_flags(flags, &[&a, &b, &d]);
+
+        assert!(ok, "{err}");
+        assert!(err.is_empty(), "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "removed {}\nremoved {}\n",
+                quoteaf_os(d.join("b")),
+                quoteaf_os(&b)
+            ),
+            "the link's replacement, then the removal of the source that moved"
+        );
+        assert!(a.exists(), "the skipped operand kept its source");
+        assert!(!b.exists(), "the linked one did not");
+        assert_eq!(fs::read(d.join("b")).unwrap(), b"newer");
+        assert_eq!(
+            file_id(&d.join("a"), &fs::symlink_metadata(d.join("a")).unwrap()),
+            file_id(&d.join("b"), &fs::symlink_metadata(d.join("b")).unwrap()),
+        );
     }
 
     /// Two names for one inode are still two *files* when only one of them is

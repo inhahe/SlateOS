@@ -108,9 +108,10 @@
 //!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
 //!   directory had been asked to become a subdirectory of itself.
 //!
-//! An eighteenth arrived long afterwards, from a case written while measuring a
-//! different option: `mv f d/`, with `d` a regular file, said `cannot move 'f'
-//! to 'd/': Not a directory` where GNU says `cannot stat 'd/': Not a
+//! An eighteenth arrived long afterwards, from a case written while measuring
+//! `--strip-trailing-slashes` — the no-option half of one of §21's pairs, aimed
+//! at something else entirely. `mv f d/`, with `d` a regular file, said `cannot
+//! move 'f' to 'd/': Not a directory` where GNU says `cannot stat 'd/': Not a
 //! directory`. The destination's own `lstat` had its error discarded with
 //! `.ok()`, so what got printed was the errno left over from the *speculative*
 //! rename — a sentence claiming a rename was attempted and refused, when none
@@ -122,9 +123,9 @@
 //!
 //! The harness is the artifact to keep, not the fix list: it is 300 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
-//! Eleven of its cases are marked as differing on purpose: four are `--help`
+//! Nine of its cases are marked as differing on purpose: four are `--help`
 //! and `--version`, which name SlateOS rather than the GNU project and always
-//! will, and the other seven are options this file does not implement yet — so
+//! will, and the other five are options this file does not implement yet — so
 //! implementing one is expected to *promote* a case rather than to add one. `-v` was the first to be promoted
 //! that way; its five entries became §14 and gained four more, which is the
 //! shape the rest should follow. `-i`/`-f`/`-n` was the second: its twelve
@@ -141,10 +142,16 @@
 //! a second file under a name this `mv` chooses — so every case has a name to
 //! check as well as a tree — and because the option *lifts* three of §13's
 //! refusals, each of which then has to be measured both ways round.
+//! `--strip-trailing-slashes` was the sixth, and the narrowest: two entries
+//! became §21 and gained twenty-two more. It has no policy of its own — it
+//! edits the operands and then everything else happens as it would have — so
+//! half of those cases are *pairs*, the same command line with the option and
+//! without, and nearly every one is about *when* the edit lands relative to the
+//! four checks that read the operands first. See [`strip_operands`].
 //!
 //! # Options this implementation does not have
 //!
-//! `-Z`/`--context`, `--debug`, `--no-copy` and `--strip-trailing-slashes` are
+//! `-Z`/`--context`, `--debug` and `--no-copy` are
 //! recognised and rejected with a message saying they are not implemented,
 //! rather than ignored. Silently ignoring an option that changes what happens
 //! to an existing destination would lose a file the user asked to be kept; for
@@ -166,9 +173,11 @@ use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
-use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
+use coreutils::pathname::strip_trailing_slashes;
+use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -330,6 +339,28 @@ struct Destination {
     /// `-T` / `--no-target-directory`: the last operand is a name to move
     /// *onto*, never a directory to move *into*.
     no_directory: bool,
+    /// `--strip-trailing-slashes`: remove trailing `/` from the operands before
+    /// they are moved. GNU's `remove_trailing_slashes` (`mv.c:319`).
+    ///
+    /// Here and not in [`MvFlags`] because it is not a policy applied to each
+    /// move — it rewrites the operand list once, and it does so at a point that
+    /// only [`move_all`] can see. See [`strip_operands`] for *which* operands,
+    /// which is the whole subtlety of the option.
+    ///
+    /// What it buys is `mv symlink-to-dir/ into-a-directory`. A trailing slash
+    /// makes the kernel resolve the symlink, so that command asks to move the
+    /// *directory* and fails `ENOTDIR`; strip it and the symlink itself moves.
+    /// Shells append the slash for you on tab-completion, so the option exists
+    /// for scripts that cannot control how their argument was spelled.
+    ///
+    /// It does *not* buy `mv --strip-trailing-slashes symlink-to-dir/ newname`,
+    /// where the destination does not exist — measured against GNU 9.4, that
+    /// still fails `Not a directory`. The speculative rename runs before the
+    /// strip and caches the `ENOTDIR` it got from the *unstripped* name, and
+    /// nothing afterwards retries. The option therefore helps in exactly the
+    /// three shapes that reach no speculative rename: a destination that is a
+    /// directory, `-t`, and `-T`. See [`strip_operands`].
+    strip_slashes: bool,
 }
 
 /// What the command line asked for.
@@ -431,6 +462,8 @@ Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
   -i, --interactive  prompt before overwrite
   -n, --no-clobber   do not overwrite an existing file
 If you specify more than one of -i, -f, -n, only the final one takes effect.
+      --strip-trailing-slashes  remove any trailing slashes from each SOURCE
+                       argument
   -S, --suffix=SUFFIX  override the usual backup suffix
   -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY
   -T, --no-target-directory  treat DEST as a normal file
@@ -627,6 +660,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
                 dest.no_directory = true;
             }
+            Opt::Long("strip-trailing-slashes", _) => {
+                dest.strip_slashes = true;
+            }
             // GNU `mv`'s remaining options, refused by name. Reaching them
             // means the parser recognised the option and, for `-S`, has already
             // taken its value out of argv — which is what keeps the *rest* of
@@ -815,6 +851,69 @@ fn target_in_directory(dir: &Path, src: &Path) -> (PathBuf, OsString) {
     (dir.join(&base), base)
 }
 
+/// `--strip-trailing-slashes` applied to the operands that are still operands.
+///
+/// GNU `mv.c:505`:
+///
+/// ```text
+/// if (remove_trailing_slashes)
+///   for (int i = 0; i < n_files; i++)
+///     strip_trailing_slashes (file[i]);
+/// ```
+///
+/// Two things about that loop decide everything this function has to get right,
+/// and neither is visible in the option's one-line help text.
+///
+/// **It runs late.** Every operand-shape question — the missing-operand
+/// diagnostic, `-T`'s extra operand, `-t`'s directory, the speculative
+/// `renameatu (…, RENAME_NOREPLACE)`, and the probe asking whether the last
+/// operand is a directory — is asked *before* it, on the unstripped words. All
+/// four diagnostics therefore quote the slash the user typed, and are measured
+/// doing so: `mv --strip-trailing-slashes -T a b c/` says `extra operand 'c/'`,
+/// and `mv --strip-trailing-slashes a b c/` says `target 'c/': Not a directory`.
+/// Only what happens *after* the shape is settled sees stripped names.
+///
+/// The speculative rename is the sharp one, because its errno outlives it:
+/// `mv --strip-trailing-slashes symlink-to-dir/ newname` fails
+/// `cannot move 'sym' to 'newname': Not a directory`, an `ENOTDIR` that could
+/// only have come from renaming `sym/` — the name in the message is stripped
+/// and the error in it is not. That is upstream's, and it is why this is not
+/// simply done to `paths` on the way in.
+///
+/// **It runs over `n_files`, which the directory probe may already have
+/// decremented.** So a destination that *is* a directory keeps its slashes and
+/// one that is not loses them, and `-t`'s directory — which never was one of
+/// `file[]` — always keeps them. That asymmetry is unobservable for the
+/// directory cases (a trailing slash on a name that must be a directory changes
+/// nothing) and observable for the other: `mv --strip-trailing-slashes -T a
+/// symlink-to-dir/` replaces the *symlink*, where without the option it reports
+/// that it cannot overwrite a directory with a non-directory.
+///
+/// Borrows when the option is off, so the common case allocates nothing and the
+/// operands stay the exact bytes the kernel was handed. An operand with nothing
+/// to strip is *cloned* rather than rebuilt from bytes for the same reason:
+/// [`os_bytes`] is lossy on a Windows development host, and a name that this
+/// option does not change should not be able to change anyway.
+fn strip_operands<'a>(dest: &Destination, paths: &'a [OsString]) -> Cow<'a, [OsString]> {
+    if !dest.strip_slashes {
+        return Cow::Borrowed(paths);
+    }
+    Cow::Owned(
+        paths
+            .iter()
+            .map(|p| {
+                let bytes = os_bytes(p);
+                let kept = strip_trailing_slashes(&bytes);
+                if kept.len() == bytes.len() {
+                    p.clone()
+                } else {
+                    os_from_bytes(kept)
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Move every source onto the destination, reporting failures to `job.err`.
 ///
 /// Returns `true` if every source was moved. Takes both streams through [`Job`]
@@ -888,7 +987,14 @@ fn move_all<O: Write, E: Write>(
             let _ = writeln!(job.err, "mv: target directory {}: {why}", quoteaf_os(dir));
             return false;
         }
-        return move_into_directory(job, Path::new(dir), paths);
+        // Every operand is a source under `-t`, so every operand is stripped —
+        // and the directory is not, because it came from the option and was
+        // never one of GNU's `file[]`. Both halves are unobservable here (the
+        // check above has already established it is a directory, and a trailing
+        // slash on a directory name changes nothing), so this matches upstream
+        // by construction rather than by measurement.
+        let sources = strip_operands(dest, paths);
+        return move_into_directory(job, Path::new(dir), &sources);
     }
 
     // Unreachable: the operand count was checked above.
@@ -910,11 +1016,22 @@ fn move_all<O: Write, E: Write>(
     // last-operand-is-a-directory probe, because under `-T` there is no such
     // probe for it to come before.
     if dest.no_directory {
+        // `-T` leaves `n_files` at two and `target_directory` unset, so *both*
+        // operands are stripped — the destination included, which is the one
+        // place stripping the destination is observable:
+        // `mv --strip-trailing-slashes -T a symlink-to-dir/` replaces the
+        // symlink, where without the option the slash resolves it and the move
+        // is refused as overwriting a directory with a non-directory.
+        let stripped = strip_operands(dest, paths);
+        // Unreachable: `split_last` above proves there are at least two.
+        let (Some(src), Some(target)) = (stripped.first(), stripped.get(1)) else {
+            return false;
+        };
         return move_one(
             job,
-            Path::new(&sources[0]),
-            last,
-            dest_operand,
+            Path::new(src),
+            Path::new(target),
+            target,
             Renamed::NotTried,
             true,
             &mut None,
@@ -954,20 +1071,44 @@ fn move_all<O: Write, E: Write>(
         }
     }
 
+    // Only now, with the shape settled, does `--strip-trailing-slashes` act —
+    // and on the operand list as it stands *after* the probe above, which is
+    // GNU's `n_files--`. See [`strip_operands`]: everything up to this line has
+    // read, and quoted, the words the user typed.
+    let stripped = strip_operands(dest, paths);
+
     let Some(dir) = into else {
         // Two operands, last operand not a directory: one move, to that name.
+        // Both are stripped, because the destination is still an operand.
+        //
+        // `state` is carried across the strip deliberately. It holds the errno
+        // of a speculative rename made on the *unstripped* pair, and upstream
+        // reports that errno against the stripped names —
+        // `mv --strip-trailing-slashes symlink-to-dir/ new` says
+        // `cannot move 'sym' to 'new': Not a directory`, an `ENOTDIR` no
+        // rename of `sym` could have produced.
+        let (Some(src), Some(target)) = (stripped.first(), stripped.get(1)) else {
+            return false;
+        };
         return move_one(
             job,
-            Path::new(&sources[0]),
-            last,
-            dest_operand,
+            Path::new(src),
+            Path::new(target),
+            target,
             state,
             true,
             &mut None,
         );
     };
 
-    move_into_directory(job, dir, sources)
+    // The destination *is* a directory, so `n_files--` took it out of the loop
+    // and only the sources are stripped. `dir` is still the unstripped word,
+    // which is upstream's `target_directory = lastfile` — a pointer taken
+    // before the strip, and to a name the strip would not have reached anyway.
+    let Some(stripped_sources) = stripped.split_last().map(|(_, rest)| rest) else {
+        return false;
+    };
+    move_into_directory(job, dir, stripped_sources)
 }
 
 /// Move every source in `sources` into `dir`, which the caller has already
@@ -1079,7 +1220,8 @@ fn move_one<O: Write, E: Write>(
     // directory` rather than `cannot move 'f' to 'd/': Not a directory`. The
     // difference is not cosmetic. `cannot move A to B` says a rename was tried
     // and refused; here none was — the errno in `failure` came from the
-    // speculative rename in [`move_all`], and the thing that actually just went
+    // *speculative* rename in [`move_all`], possibly on a differently-spelled
+    // pair (see [`strip_operands`]), and the thing that actually just went
     // wrong is this stat. Discarding its error with `.ok()` reported the older,
     // less relevant one and attributed it to an operation that never happened.
     //
@@ -2208,12 +2350,7 @@ mod tests {
 
     #[test]
     fn unimplemented_long_options_are_rejected_by_name() {
-        for name in [
-            "--strip-trailing-slashes",
-            "--no-copy",
-            "--debug",
-            "--context",
-        ] {
+        for name in ["--no-copy", "--debug", "--context"] {
             let e = fail(&[name, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -2262,6 +2399,72 @@ mod tests {
             assert!(!dest.no_directory, "{spelling:?}");
             assert_eq!(paths, ["a", "b"], "{spelling:?}");
         }
+    }
+
+    /// `--strip-trailing-slashes` has no short form and no value, so the only
+    /// thing the parse can get wrong is which field it writes — and it must
+    /// write *only* that one, since the option is otherwise inert.
+    ///
+    /// The abbreviation is included because [`LONG_OPTIONS`] is what decides
+    /// whether one is ambiguous, and `--str` has been unambiguous all along:
+    /// before this option was implemented it resolved to a refusal, which is
+    /// the one outcome that looks the same whether the table is right or wrong.
+    #[test]
+    fn strip_trailing_slashes_sets_only_its_own_field() {
+        for spelling in [
+            &["--strip-trailing-slashes", "a", "b"][..],
+            &["--str", "a", "b"][..],
+            &["a", "b", "--strip-trailing-slashes"][..],
+        ] {
+            let (flags, dest, paths) = run_parse_dest(spelling);
+            assert!(dest.strip_slashes, "{spelling:?}");
+            assert_eq!(dest.directory, None, "{spelling:?}");
+            assert!(!dest.no_directory, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+            assert_eq!(flags, MvFlags::default(), "{spelling:?}");
+        }
+        // And it is off without the option, which is what makes every other
+        // test in this file a test of the unstripped path.
+        let (_, dest, _) = run_parse_dest(&["a", "b"]);
+        assert!(!dest.strip_slashes);
+    }
+
+    /// [`strip_operands`] itself: gnulib's `strip_trailing_slashes` semantics,
+    /// which are not "trim `/`".
+    ///
+    /// A filesystem root keeps one slash — `///` is `/`, not the empty name —
+    /// and an interior slash is never touched, so `a//b//` loses only the pair
+    /// at the end. Both are gnulib's, and both matter here rather than being
+    /// pathname trivia: the empty name would turn `mv --strip-trailing-slashes
+    /// / x` into a move of the current directory's unnamed sibling, and
+    /// trimming interior slashes would silently rename the operand.
+    #[test]
+    fn strip_operands_follows_gnulib_not_intuition() {
+        let on = Destination {
+            strip_slashes: true,
+            ..Destination::default()
+        };
+        let cases: &[(&str, &str)] = &[
+            ("a/", "a"),
+            ("a///", "a"),
+            ("a", "a"),
+            ("a//b//", "a//b"),
+            ("/", "/"),
+            ("///", "/"),
+            ("", ""),
+            (".", "."),
+            ("..//", ".."),
+        ];
+        let given: Vec<OsString> = cases.iter().map(|(g, _)| OsString::from(*g)).collect();
+        let want: Vec<OsString> = cases.iter().map(|(_, w)| OsString::from(*w)).collect();
+        assert_eq!(strip_operands(&on, &given).as_ref(), want.as_slice());
+
+        // Off, the operands are handed on untouched *and unallocated* — the
+        // bytes the kernel sees are the bytes argv held, which is what keeps a
+        // name this host cannot spell from being rewritten on its way through.
+        let off = Destination::default();
+        assert!(matches!(strip_operands(&off, &given), Cow::Borrowed(_)));
+        assert_eq!(strip_operands(&off, &given).as_ref(), given.as_slice());
     }
 
     /// GNU compares nothing here — it asks only whether one was given already —
@@ -2587,6 +2790,53 @@ mod tests {
         let (ok, out, err) = mv_flags(MvFlags::default(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, "");
+    }
+
+    /// `--strip-trailing-slashes` reaches the move itself, not just the parse.
+    ///
+    /// Asserted through `-v` because that is the one effect this option has
+    /// that does not need a symlink to see, and symlinks are what the
+    /// interesting cases are made of — a trailing slash changes what a *name*
+    /// resolves to only when the last component is a symlink, and the Windows
+    /// development host cannot create one without a privilege the test runner
+    /// does not have. The behaviour those cases pin lives in `mv-diff.sh` §21,
+    /// measured against GNU on Linux; what is checked here is the half that is
+    /// platform-independent: the stripped name is what gets moved and what gets
+    /// announced.
+    ///
+    /// Note that with the option on, the filesystem never sees the slash at
+    /// all — which is exactly why this test is safe on a host whose `rename`
+    /// treats a trailing separator differently from Linux's.
+    #[test]
+    fn strip_trailing_slashes_moves_the_stripped_name() {
+        let dir = scratch("v_strip");
+        let src = dir.path("s");
+        let into = dir.path("d");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&into).unwrap();
+        let with_slash = PathBuf::from(format!("{}/", src.display()));
+        let landed = into.join("s");
+        let (ok, out, err, _) = mv_to(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            Destination {
+                strip_slashes: true,
+                ..Destination::default()
+            },
+            &[],
+            &[&with_slash, &into],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        // `shown(&src)` and not `shown(&with_slash)`: the announced source is
+        // the operand as the option left it.
+        assert_eq!(
+            out,
+            format!("renamed {} -> {}\n", shown(&src), shown(&landed))
+        );
+        assert!(landed.is_dir());
     }
 
     /// One line per source, in operand order, and each names the *target it
@@ -3105,6 +3355,7 @@ mod tests {
         Destination {
             directory: Some(dir.as_os_str().to_owned()),
             no_directory: false,
+            strip_slashes: false,
         }
     }
 
@@ -3114,6 +3365,7 @@ mod tests {
         Destination {
             directory: None,
             no_directory: true,
+            strip_slashes: false,
         }
     }
 
@@ -3269,6 +3521,7 @@ mod tests {
         let dest = Destination {
             directory: Some(dir.path("nosuchdir").into_os_string()),
             no_directory: true,
+            strip_slashes: false,
         };
         let (ok, err) = mv_dest(dest, &[&dir.path("a")]);
         assert!(!ok);

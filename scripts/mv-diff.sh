@@ -1366,11 +1366,10 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 # `-b`/`--backup`/`-S` became §18, where fifteen turned into fifty-eight: a backup
 # is a second file with a chosen name, so every case has a name to check as well
 # as a tree, and the option lifts three of §13's refusals besides.
-
-# --strip-trailing-slashes, which changes what a source ending in `/` names.
-missing --strip-trailing-slashes tree/ dir
-TREE='mktree; ln -s tree treelink'
-missing --strip-trailing-slashes treelink/ moved
+# `--strip-trailing-slashes` became §21, where two turned into twenty-four — half
+# of them pairs, because the option has no behaviour of its own and can only be
+# measured as the difference between a command line carrying it and the same one
+# without.
 
 # --debug, which implies -v and explains the method.
 missing --debug file.txt dst
@@ -1385,6 +1384,128 @@ missing --no-copy file.txt dst
 # only that the option is accepted.
 missing -Z file.txt dst
 missing --context file.txt dst
+
+# =============================================================================
+# 21. --strip-trailing-slashes
+# =============================================================================
+# The option has no policy of its own. It edits the operand list and then every
+# other decision is taken exactly as it would have been, so there is nothing to
+# measure about it in isolation — which is why half the cases here are pairs,
+# the same command line with the option and without, and the case is the
+# difference between them.
+#
+# What the difference *is* comes down to one line of GNU's `main` (`mv.c:505`)
+# and where it sits:
+#
+#   if (remove_trailing_slashes)
+#     for (int i = 0; i < n_files; i++)
+#       strip_trailing_slashes (file[i]);
+#
+# It is late — after the missing-operand check, after `-T`'s extra-operand
+# check, after `-t`'s directory is opened, after the speculative
+# `renameatu (…, RENAME_NOREPLACE)`, and after the probe that asks whether the
+# last operand is a directory. And it runs over `n_files`, which that probe has
+# already decremented when the destination *was* a directory. So the option
+# reaches less of the program than its help text suggests, and the cases below
+# are mostly about which side of that line each observable effect falls on.
+#
+# `-v` is on wherever the case would otherwise be silent, because the names
+# `mv` prints are the only place the stripping is directly visible: the tree
+# column says a file arrived under some name but not which spelling of the
+# source `mv` believed it was moving.
+
+# The option's actual purpose, and the one shape it was added for: a symlink to
+# a directory whose trailing slash the shell's tab-completion supplied. The
+# slash makes the kernel resolve the link, so the unstripped command asks to
+# rename the *directory* through it and gets ENOTDIR; stripped, the symlink
+# itself moves and is still a symlink afterwards, which the tree column's `->`
+# is what proves.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes treelink/ dir
+TREE='mktree; ln -s tree treelink'
+run_case -v treelink/ dir
+# `-t` reaches the same place by the other route: its directory came from the
+# option and never was one of `file[]`, so every operand is a source and every
+# operand is stripped.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes -t dir treelink/
+TREE='mktree; ln -s tree treelink'
+run_case -v -t dir treelink/
+
+# And the shape it does *not* rescue, which is the sharpest thing in this
+# section. With two operands and a destination that does not exist, GNU has
+# already tried `renameatu (file[0], file[1], RENAME_NOREPLACE)` on the
+# unstripped words and kept the errno; nothing afterwards retries it. So the
+# move still fails ENOTDIR — but the diagnostic quotes the *stripped* name,
+# naming a rename that was never attempted. The name in the message and the
+# error in it come from two different command lines. Upstream's, and reproduced
+# deliberately: see `strip_operands` in `mv.rs`.
+TREE='mktree; ln -s tree treelink'
+run_case --strip-trailing-slashes treelink/ moved
+TREE='mktree; ln -s tree treelink'
+run_case treelink/ moved
+
+# gnulib's `strip_trailing_slashes` removes a run, not a slash.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes treelink/// dir
+
+# A real directory is the boring half and is here to bound the interesting one:
+# a trailing slash on a name that really is a directory changes nothing about
+# what the kernel does, at any depth.
+run_case -v --strip-trailing-slashes tree/ dir
+run_case -v --strip-trailing-slashes tree/sub/ dir
+# So with a real directory source the option's whole observable effect is the
+# word `-v` prints — `dir` where the unstripped run says `dir/`. A case that
+# compares only trees would certify these two as the same run.
+run_case -v --strip-trailing-slashes dir/ newname
+run_case -v dir/ newname
+
+# The loop covers every source, not the first, and the two failures it prevents
+# are different failures: the directory link fails at the rename, the file link
+# fails at the `stat` before it. Both sides of the pair have to agree about the
+# order those two lines are printed in as well as their text.
+TREE='mktree; ln -s tree treelink; ln -s file.txt filelink'
+run_case -v --strip-trailing-slashes treelink/ filelink/ dir
+TREE='mktree; ln -s tree treelink; ln -s file.txt filelink'
+run_case -v treelink/ filelink/ dir
+
+# The destination is an operand too when it is not a directory, so a slashed
+# name for an existing *file* is stripped and the move succeeds. Unstripped it
+# does not even reach the rename: the probe fails, the speculative rename's
+# ENOTDIR stands, and `mv` reports it as a failure to `stat`.
+run_case -v --strip-trailing-slashes file.txt tree/a.txt/
+run_case -v file.txt tree/a.txt/
+
+# The four diagnostics asked before the loop, each quoting the slash the user
+# typed. These are the cases a from-memory implementation gets wrong, because
+# the natural place to strip operands is on the way in, and there every one of
+# these messages loses its slash.
+run_case --strip-trailing-slashes file.txt/
+run_case --strip-trailing-slashes -T file.txt dst extra/
+run_case --strip-trailing-slashes file.txt dir tree/a.txt/
+run_case --strip-trailing-slashes -t nodir/ file.txt
+
+# `-T` takes neither the probe nor the speculative rename, so both its operands
+# are stripped — and that is observable on the destination rather than the
+# source: stripped, `treelink` is a symlink and is replaced; unstripped,
+# `treelink/` is a directory and `mv` refuses to overwrite one with a file.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes -T file.txt treelink/
+TREE='mktree; ln -s tree treelink'
+run_case -v -T file.txt treelink/
+run_case -v --strip-trailing-slashes -T tree/ dir/
+
+# Spelling. The name is matched by unambiguous prefix like every other long
+# option, and `getopt_long` permutes, so the option may follow the operands it
+# governs.
+TREE='mktree; ln -s tree treelink'
+run_case -v --str treelink/ dir
+# Permuted *and* the one asymmetry worth its own case: the destination here is a
+# directory, so `n_files--` took it out of the loop and it keeps its slash —
+# which the verbose line then joins to the source's basename. The option was
+# given, and the destination is the one operand it did not touch.
+TREE='mktree; ln -s tree treelink'
+run_case -v file.txt treelink/ --strip-trailing-slashes
 
 # =============================================================================
 echo

@@ -102719,6 +102719,70 @@ agreed to supply for the code.
 
 ---
 
+### Lesson 104: finding a control by the code's own label and then clicking it proves nothing (lane C, 2026-08-31)
+
+**In short:** the camera's device panel lists the resolutions a webcam
+supports, one per row, and clicking a row selects it. The test said so, and it
+passed over a version of the panel where **every row chose the setting named on
+the row above it**. The test asked the drawing pass "where is the 1920x1080
+row?", clicked wherever it was told, and then asked whether 1920x1080 had been
+chosen. Both halves went through the same map, so the map's error cancelled
+itself out.
+
+This is not lesson 103 -- the test *did* read the picture. It read the wrong
+part of it. `probe::rect_of(&app, Target::Resolution(2))` searches the hit
+boxes the pass recorded, and the fault under test was in *what payload the pass
+recorded*, not in where. Relabelling every row consistently is invisible to any
+test whose only handle on a row is the label it is checking:
+
+| | what the test did | what the mutant did | verdict |
+|---|---|---|---|
+| find | ask for the box of `Resolution(2)` | recorded row 3's box under `Resolution(2)` | got row 3 |
+| act | click that box | dispatched it as `Resolution(2)` | chose 1920x1080 |
+| assert | is the resolution 1920x1080? | yes | **passes** |
+
+The user, meanwhile, clicks the row that reads `1920x1080` and gets `1280x720`.
+
+**The rule.** *When the point of the test is **which** control a click lands
+on, find the control by something the code did not choose for the purpose --
+the words drawn in it.* Scan `frame(w, h).commands()` for the `Text` whose
+content is the label, click at a point inside it, and assert on the label. The
+`Target` payload is the very thing in question; a test may not use it as both
+the question and the answer.
+
+**The shape to look for is circularity, not weakness.** These tests are not
+loose -- `the_device_panel_chooses_the_resolution_and_rate_it_names` asserts an
+exact equality on an exact setting. They are *closed loops*: every step of the
+test is derived from the same expression in the production code, so the whole
+test is invariant under a change to that expression. A mutation sweep is the
+only cheap way to find one, because a closed loop reads exactly like a strict
+test.
+
+**Two smaller consequences, both worth copying.**
+
+- **Locate by text, and require the text to be unique.** The camera's helper
+  asserts that at most one run of text reads the wanted words, because the same
+  string appearing twice in a frame would silently hand the caller whichever
+  came first -- a second closed loop hiding inside the fix for the first.
+- **A mutation that survives is not automatically a hole.** The same sweep's
+  other survivor widened a clip from the strip to the whole window, which
+  cannot alter one pixel: the tile count is a floor of whole steps, so nothing
+  ever reaches the clip. That row was deleted with the reason written into the
+  table rather than given an owning test. Inventing an owner for a mutation
+  that cannot change the output teaches the table to claim coverage it does not
+  have, which is worse than the missing row.
+
+**Where else to look.** Every app in the wiring campaign, and mechanically:
+grep the suites for `probe::click(&mut app, Target::X(i))` (or `rect_of`
+followed by a click) where `i` also appears in the assertion. Each one is a
+closed loop unless something outside the pass's own bookkeeping -- the drawn
+label, a fixed coordinate, a count -- breaks it. The panels most at risk are
+the ones drawn from a list in a loop: filter lists, resolution and rate lists,
+tab strips, column headers, palette swatches, and any `Target` variant carrying
+an index or an enum payload.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31

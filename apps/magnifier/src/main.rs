@@ -1964,6 +1964,16 @@ impl Magnifier {
         // chosen to — and a `pad` at each end plus a reading wider than 45% of a
         // narrow header put the two through each other. Neither number knew
         // what the other was drawing.
+        //
+        // `.min(right - left)` is the bound, and it is the only one needed for
+        // the reading's own left edge: `shows` will not let a band under 110
+        // wide reach here and `pad`'s clamp tops out at 10, so the column is at
+        // least 90 wide, and a reading cut to the column starts at
+        // `right - reading_w`, which is at or after `left` by construction. A
+        // `.max(left)` on top of that would be a guard nothing could enter,
+        // which is a guard no test could check — so it is a proof here rather
+        // than a second clamp. `split` keeps its `.max(left)`, because it
+        // subtracts a further `pad` and so genuinely can undershoot.
         let reading_w = text::measure(&right_text, small, FontWeightHint::Bold).min(right - left);
         let split = (right - reading_w - l.pad).max(left);
 
@@ -1985,7 +1995,7 @@ impl Magnifier {
             );
         }
         if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold)) {
-            let x = (right - reading_w).max(left);
+            let x = right - reading_w;
             push_text(
                 f,
                 x,
@@ -4999,6 +5009,145 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport() {
+        // `draw_paused` is reached through the viewport pass, so the
+        // containment tests do measure it — against `l.viewport`, which is the
+        // box it centres in. But a centring is only unbounded when the box is
+        // smaller than the thing being centred, and `Layout::new` never hands
+        // out a viewport that small, so the bound is never *reached* there.
+        // Squeezing the viewport is what reaches it. Squeezing it is sound here
+        // where it is not in `SQUEEZABLE`, because this pass reads `l.viewport`
+        // and nothing derived from it — no pane was solved for a box this test
+        // then replaced.
+        //
+        // The second assertion is the one with the content in it. Both lines
+        // used to be offsets from a single centring, so a viewport with room
+        // for one drew "Magnifier paused" and swallowed the line that says how
+        // to resume — a state report with its own remedy cut off, which is
+        // worse than reporting nothing and leaving the button to say it. Both
+        // lines, or neither.
+        let mut a = app();
+        a.paused = true;
+        let mut whole = 0;
+        let mut refused = 0;
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            let mut boxes = vec![base.viewport];
+            boxes.extend(squeezes(base.viewport));
+            for v in boxes {
+                let mut l = base;
+                l.viewport = v;
+                let mut f = Frame::new(w, h);
+                a.draw_paused(&mut f, &l);
+                let runs = inked(&f);
+                for (text, r) in &runs {
+                    assert!(
+                        inside(v, *r),
+                        "at {w}x{h} with the viewport read as {v:?}, the notice drew {text:?} \
+                         at {r:?}"
+                    );
+                }
+                assert!(
+                    runs.len() == 2 || runs.is_empty(),
+                    "at {w}x{h} with the viewport read as {v:?} the notice drew {} of its two \
+                     lines rather than both or neither: {runs:?}",
+                    runs.len()
+                );
+                // The `+ line_h * 0.4` that used to place the second line put
+                // it 60% of a line inside the first at every size, which is
+                // what made a pair of hand-tuned offsets look tuned. Stacked
+                // properly the two cannot touch.
+                if let [(t1, r1), (t2, r2)] = runs.as_slice() {
+                    assert!(
+                        r1.intersect(*r2).is_none(),
+                        "at {w}x{h} with the viewport read as {v:?} the notice drew {t1:?} at \
+                         {r1:?} and {t2:?} at {r2:?}, which overlap"
+                    );
+                }
+                if runs.is_empty() {
+                    refused += 1;
+                } else {
+                    whole += 1;
+                }
+            }
+        }
+        // Both halves, because "drawn only where it fits" is satisfied outright
+        // by a program that never draws, and "always drawn" by one that never
+        // refuses.
+        assert!(
+            whole > 0,
+            "the notice was never drawn at any size, so `inside` was never asked anything"
+        );
+        assert!(
+            refused > 0,
+            "no viewport was ever too short for the notice, so the refusal is untested"
+        );
+    }
+
+    #[test]
+    fn the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in() {
+        // The reading floats with the measurement — centred between the two
+        // ends and a line above them — so all four of its edges can leave the
+        // pane, and every one of them did. `Some(pane.w)` as a limit reaches
+        // the pane's full *width* from wherever the reading happens to start,
+        // and the `- line_h - 2.0` puts it above the pane whenever the
+        // measurement is taken near the top. The clip hid all of it, and a clip
+        // is not a bound any test reading the drawing commands can see.
+        //
+        // The ends are chosen to put the midpoint at each corner of the screen
+        // as well as in the middle, since which edge the reading leaves depends
+        // on where in the screen the measurement was taken.
+        let mut a = app();
+        a.crosshair = false;
+        let mut cut = 0;
+        let mut whole = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            for (start, end) in [
+                ((0.0, 0.0), (40.0, 20.0)),
+                ((1900.0, 1060.0), (1860.0, 1040.0)),
+                ((100.0, 100.0), (900.0, 700.0)),
+                ((960.0, 0.0), (980.0, 30.0)),
+                ((0.0, 540.0), (30.0, 560.0)),
+            ] {
+                a.ruler = Ruler::Done { start, end };
+                let pane = a.showing_pane(&l);
+                if pane.is_empty() {
+                    continue;
+                }
+                let mut f = Frame::new(w, h);
+                a.draw_ruler(&mut f, pane);
+                match inked(&f).first() {
+                    Some((text, r)) => {
+                        assert!(
+                            inside(pane, *r),
+                            "at {w}x{h} a measurement from {start:?} to {end:?} put the reading \
+                             {text:?} at {r:?}, outside the pane at {pane:?}"
+                        );
+                        let size = (pane.h * 0.05).clamp(8.0, 13.0);
+                        if r.w < text::measure(text, size, FontWeightHint::Bold) - 0.01 {
+                            cut += 1;
+                        } else {
+                            whole += 1;
+                        }
+                    }
+                    // Refused outright, which is the same bound answering with
+                    // its other answer.
+                    None => cut += 1,
+                }
+            }
+        }
+        assert!(
+            whole > 0,
+            "the reading was cut at every size, so a reading that fits was never checked"
+        );
+        assert!(
+            cut > 0,
+            "no measurement ever put the reading past an edge, so the cut is untested"
+        );
     }
 
     // __TESTS_TAIL__

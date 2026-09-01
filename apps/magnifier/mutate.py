@@ -553,8 +553,8 @@ MUTATIONS = [
         # not physically cover goes on answering clicks the user cannot see the
         # targets of.
         "the open sheet covers only its own pixels, not the window",
-        "        f.hit(Target::ToggleHelp, l.window);",
-        "        f.hit(Target::ToggleHelp, h);",
+        "        }\n        f.hit(Target::ToggleHelp, l.window);",
+        "        }\n        f.hit(Target::ToggleHelp, h);",
         [
             "while_the_sheet_is_up_every_point_in_the_window_belongs_to_it",
             "a_click_anywhere_while_the_sheet_is_up_closes_it_and_reaches_nothing_behind",
@@ -583,8 +583,8 @@ MUTATIONS = [
     ),
     (
         "the header says the zoom while the program is paused",
-        '        let right = if self.paused {\n            "paused".to_string()\n        } else {\n            trim_zoom(self.zoom())\n        };',
-        "        let right = trim_zoom(self.zoom());",
+        '        let right_text = if self.paused {\n            "paused".to_string()\n        } else {\n            trim_zoom(self.zoom())\n        };',
+        "        let right_text = trim_zoom(self.zoom());",
         ["the_header_says_the_zoom_and_says_paused_instead_when_it_is"],
     ),
     (
@@ -657,6 +657,197 @@ MUTATIONS = [
         "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
         "        self.frame(width, height).into_tree()",
         ["rendering_a_frame_is_what_sets_the_size_the_next_click_is_read_against"],
+    ),
+    # ── C-CENTRING-IS-NOT-A-BOUND (lesson 109) ────────────────────────────
+    #
+    # `band.y + (band.h - size) / 2.0` is an offset, not a bound.  When the
+    # band is shorter than the thing being centred in it the slack goes
+    # negative and the run is placed *above* the band's top -- and because it
+    # spills symmetrically, half of it leaves each end, so no amount of
+    # squinting at the picture shows which band the fault is in.  Every one of
+    # this app's ten centring sites now goes through `centre_line`, which
+    # answers `None` rather than a negative offset.
+    #
+    # Two of the rows below break bounds that were, until this campaign,
+    # enforced only by a *clip*.  A clip is invisible to any test that reads
+    # the drawing commands: the drawing is wrong, the picture is right, and
+    # nothing can tell.  That is the worst shape a bound can have, and it is
+    # why `draw_pane`'s seam filler and the ruler's reading are cut in the
+    # drawing now instead of being left to `f.clip`.
+    (
+        "a band shorter than the run is centred anyway rather than refused",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    Some(band.y + (band.h - height) / 2.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a band with no area at all is treated as a band",
+        "(!band.is_empty() && band.h >= height)",
+        "(band.h >= height)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "the slack is not halved, so every run sits at its band's foot",
+        ".then(|| band.y + (band.h - height) / 2.0)",
+        ".then(|| band.y + (band.h - height))",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a run is pushed into a column with no room left in it",
+        "    if size <= 0.0 || text_str.is_empty() || limit <= 0.0 {",
+        "    if size <= 0.0 || text_str.is_empty() {",
+        ["no_run_is_pushed_into_a_box_with_no_room"],
+    ),
+    (
+        "a run is drawn with no right-hand limit at all",
+        "        max_width: Some(limit),",
+        "        max_width: None,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a centred run is measured without first being cut to its box",
+        "    let w = text::measure(s, size, weight).min(r.w);",
+        "    let w = text::measure(s, size, weight);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a centred run is given its box's whole width as its limit",
+        "    push_text(f, x, y, s, size, color, weight, r.right() - x);",
+        "    push_text(f, x, y, s, size, color, weight, r.w);",
+        ["every_centred_string_is_stopped_at_the_right_hand_edge_of_its_box"],
+    ),
+    (
+        "a centred run is placed in a box too short to hold it",
+        "    let Some(y) = centre_line(r, line_h) else {\n        return;\n    };\n"
+        "    let x = r.x + (r.w - w) / 2.0;",
+        "    let y = r.y + (r.h - line_h) / 2.0;\n    let x = r.x + (r.w - w) / 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the pause notice centres one line and hangs the other off it",
+        "        let stack = line_h + small_h;",
+        "        let stack = line_h;",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the pause notice is drawn in a viewport too short for both its lines",
+        "        let Some(top) = centre_line(v, stack) else {\n            return;\n        };",
+        "        let top = v.y + (v.h - stack) / 2.0;",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the pause notice's second line is set back inside its first",
+        "            Rect::new(v.x, top + line_h, v.w, small_h),",
+        "            Rect::new(v.x, top + line_h * 0.4, v.w, small_h),",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the header's title column is a flat half of the band again",
+        "        let split = (right - reading_w - l.pad).max(left);",
+        "        let split = left + l.header.w * 0.5;",
+        ["the_header_title_gives_way_to_the_reading_rather_than_running_under_it"],
+    ),
+    (
+        "the header's title is placed in a band too short for it",
+        "        if let Some(y) = centre_line(l.header, text::line_height(size, FontWeightHint::Bold)) {",
+        "        {\n            let y = l.header.y\n                + (l.header.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the header's reading is placed in a band too short for it",
+        "        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold)) {\n            let x = right - reading_w;",
+        "        {\n            let y = l.header.y\n                + (l.header.h - text::line_height(small, FontWeightHint::Bold)) / 2.0;\n            let x = right - reading_w;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "both header runs are centred by the larger one's line height",
+        "        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold))",
+        "        if let Some(y) = centre_line(l.header, text::line_height(size, FontWeightHint::Bold))",
+        ["a_band_tall_enough_for_a_line_draws_one"],
+    ),
+    (
+        "the readout's swatch is a bare fraction of a band it may overrun",
+        "        let swatch = (l.info.h * 0.6).clamp(0.0, 18.0).min(l.info.h);",
+        "        let swatch = 18.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the readout's swatch is centred without asking whether it fits",
+        "            centre_line(l.info, swatch).unwrap_or(l.info.y),",
+        "            l.info.y + (l.info.h - swatch) / 2.0,",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the readout centres one row and hangs the status line below it",
+        "        let stack = if two_rows { line_h + status_h } else { line_h };",
+        "        let stack = line_h;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the readout admits a second row a band has no room for",
+        "        let two_rows = !self.status.is_empty() && line_h + status_h <= l.info.h;",
+        "        let two_rows = !self.status.is_empty() && l.info.h >= line_h * 2.0 + 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the readout draws in a band too short for even one row",
+        "        let Some(top) = centre_line(l.info, stack) else {\n            return;\n        };",
+        "        let top = l.info.y + (l.info.h - stack) / 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the sheet's inner column is not checked before it is divided",
+        "        let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);\n        if inner.is_empty() {\n            f.hit(Target::ToggleHelp, l.window);\n            return;\n        }",
+        "        let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's title is placed inside its panel rather than cut to it",
+        "        if let Some(box_) = Rect::new(left, h.y + l.pad, inner.w, title_h).intersect(h)\n            && let Some(y) = centre_line(box_, title_h)\n        {",
+        "        if let Some(box_) = Some(Rect::new(left, h.y + l.pad, inner.w, title_h))\n            && let Some(y) = Some(box_.y)\n        {",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's footer is placed inside its panel rather than cut to it",
+        "        if let Some(box_) = Rect::new(left, h.bottom() - foot, inner.w, small_h).intersect(h)\n            && let Some(y) = centre_line(box_, small_h)",
+        "        if let Some(box_) = Some(Rect::new(left, h.bottom() - foot, inner.w, small_h))\n            && let Some(y) = Some(box_.y)",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's rows are placed inside its panel rather than cut to it",
+        "            let Some(row) = Rect::new(left, y, inner.w, step).intersect(h) else {\n                continue;\n            };",
+        "            let row = Rect::new(left, y, inner.w, step);",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's rows are drawn in a strip too short for their own type",
+        "            let Some(y) = centre_line(row, text::line_height(size, FontWeightHint::Bold)) else {\n                continue;\n            };",
+        "            let y = row.y + (row.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's two columns are two independent guesses again",
+        "        let split = left + inner.w * 0.42;",
+        "        let split = h.x + h.w * 0.42;",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the ruler's reading is left to the clip instead of cut to its pane",
+        "        if let Some(box_) = Rect::new(\n            f32::midpoint(x1, x2) - w / 2.0,\n            f32::midpoint(y1, y2) - line_h - 2.0,\n            w,\n            line_h,\n        )\n        .intersect(pane)\n        {",
+        "        if let Some(box_) = Some(Rect::new(\n            f32::midpoint(x1, x2) - w / 2.0,\n            f32::midpoint(y1, y2) - line_h - 2.0,\n            w,\n            line_h,\n        )) {",
+        ["the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in"],
+    ),
+    (
+        "the ruler's reading is allowed the pane's whole width from wherever it starts",
+        "                box_.right() - box_.x,\n            );\n        }\n        f.unclip();",
+        "                pane.w,\n            );\n        }\n        f.unclip();",
+        ["the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in"],
+    ),
+    (
+        "the magnified blocks spend their seam filler outside the pane",
+        "                    width: (bw + 0.5).min(pane.right() - bx),\n                    height: (bh + 0.5).min(pane.bottom() - by),",
+        "                    width: bw + 0.5,\n                    height: bh + 0.5,",
+        ["no_pass_paints_outside_the_region_it_owns"],
     ),
 ]
 

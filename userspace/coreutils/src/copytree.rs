@@ -20,13 +20,14 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-/// The part of a destination's permission bits that is deliberately not on it
-/// yet, and what has to be put back once it is safe.
+/// The ways a destination's permission bits are deliberately not the ones it is
+/// to end with, and what has to be done about each once it is safe.
 ///
-/// GNU's three locals `omitted_permissions`, `restore_dst_mode` and `dst_mode`
-/// (`copy.c:2211`), carried together because they are one fact in three pieces:
-/// a destination is created **narrower** than its source on purpose, and
-/// something has to remember by how much.
+/// GNU's four locals `omitted_permissions`, `restore_dst_mode`, `dst_mode`
+/// (`copy.c:2211`) and `extra_permissions` (`copy.c:1246`), carried together
+/// because they are one fact in four pieces: a destination is created with a
+/// mode that is not its final one on purpose, and something has to remember how
+/// it differs.
 ///
 /// Two different reasons put bits in here, and they are the two branches of
 /// GNU's expression at `copy.c:2900`:
@@ -44,6 +45,11 @@ use std::path::Path;
 /// The first subsumes the second, which is why GNU's expression is an
 /// `if`/`else` rather than a union — and why a *regular file* has a debt at all
 /// under `-p`, where before `-p` existed only directories did.
+///
+/// [`Self::extra`] goes the other way — a bit that is on the destination and
+/// must come *off* — and is here rather than beside it because the settle-up is
+/// one step for both: whichever of the two is non-zero, the answer is the same
+/// chmod to the mode the file was always meant to have.
 #[derive(Clone, Copy, Default)]
 pub struct ModeDebt {
     /// GNU's `omitted_permissions`: the bits withheld at creation.
@@ -53,6 +59,23 @@ pub struct ModeDebt {
     /// either because a directory was forced owner-rwx so it could be filled,
     /// or because the settle-up stat showed the withheld bits genuinely absent.
     pub forced: Option<u32>,
+    /// GNU's `extra_permissions` (`copy.c:1453`): owner-write, granted to a
+    /// destination that is not meant to have it, so that its extended
+    /// attributes can be written.
+    ///
+    /// Linux's `xattr_permission` (`fs/xattr.c`) requires write access to the
+    /// *inode* before it will set an attribute on it, so a copy of a read-only
+    /// file — mode `0444` — is a file no `setxattr` can reach. The bit is added
+    /// at creation and taken off by the settle-up, and it costs no exposure
+    /// while it is on: the owner at that instant is the process doing the
+    /// copying, which already holds a writable descriptor to the file it just
+    /// created.
+    ///
+    /// Zero unless the destination is newly created, extended attributes are
+    /// being carried, and the caller is not root — root's `setxattr` is not
+    /// subject to the check, which is why GNU's condition is
+    /// `preserve_xattr && !x->owner_privileges`.
+    pub extra: u32,
 }
 
 impl ModeDebt {
@@ -73,6 +96,11 @@ impl ModeDebt {
         ModeDebt {
             omitted: src_mode & withhold,
             forced: None,
+            // Not decided here. Whether the extra owner-write bit is wanted
+            // depends on whether the destination turns out to be newly created,
+            // which is not known until the open; GNU sets it in the same
+            // expression as the open mode (`copy.c:1451`) for that reason.
+            extra: 0,
         }
     }
 }

@@ -105449,6 +105449,24 @@ engine is a red `main` for all three lanes:
 2. The per-file copy and its preserve tail — the `copy_reg` equivalent — which
    is where `mv`'s existing `preserve_onto_file` should end up being the same
    code rather than a parallel one.
+
+   **This stage is not a pure move, and knowingly so.** The two copy *bodies*
+   it merges are each half-right in opposite directions, so there is no
+   behaviour to preserve — only a correct one to arrive at. `mv` uses
+   `io::copy`, which gets the `copy_file_range` offload and loses the failing
+   side; `cp` uses a plain 64 KiB read/write loop, which keeps the two
+   sentences and never offloads at all. GNU's `sparse_copy` does both and has a
+   **third** sentence, `error copying SRC to DST` (`copy.c:376`), for the
+   offload failure that names neither end — which is why it never needs to tell
+   read from write there. The unified body is GNU's, and it closes
+   `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`
+   (see that entry for the errno list the fallback is entered on).
+
+   So the "harness numbers must not move" rule below is suspended **for this
+   stage only, and only for cases that reach a copy failure or measure copy
+   throughput**. Everything else must still be byte-identical, and the
+   exception must be spent deliberately: any case that moves has to be one this
+   note predicts, not one discovered afterwards and rationalised.
 3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
    struct.
 4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
@@ -105697,28 +105715,58 @@ io::copy(&mut source, &mut dest)
 `io::copy` returns one `io::Error` for both ends and does not say which end it
 came from.
 
-**What GNU does.** `copy_reg` reads and writes itself, so the two have separate
-error sites (`copy.c:1287` and `copy.c:1300`). It reaches `copy_file_range`
-first and falls back to a read/write loop, and *its* fallback keeps the
-distinction because the loop is its own code.
+**What GNU does — corrected 2026-09-01, having read `sparse_copy` rather than
+recalling it.** Not two sentences: **three**, and the third dissolves the
+problem rather than solving it. `sparse_copy` runs `copy_file_range` in a loop
+and, on a failure it cannot fall back from, prints
 
-**Why it is written this way.** `io::copy` is specialised by `std` to
+```c
+error (0, errno, _("error copying %s to %s"),
+       quoteaf_n (0, src_name), quoteaf_n (1, dst_name));   /* copy.c:376 */
+```
+
+— a sentence naming **both** files, precisely because the kernel-side copy does
+not say which end failed either. GNU never tells read from write on the offload
+path; it has a sentence for "one of these two, and here is the errno".
+`error reading %s` (`copy.c:402`) and `error writing %s` (`copy.c:435`) belong
+only to the read/write **fallback** loop, which is its own code and so does know.
+
+The fallback is entered on a narrow listed set of errnos, and only while nothing
+has been copied yet: `is_CLONENOTSUP (errno)`, plus a special case for `ENOENT`
+"seen sometimes across CIFS shares". `EINTR` retries. Everything else is a real
+failure and takes the third sentence.
+
+**Why ours is written the way it is.** `io::copy` is specialised by `std` to
 `copy_file_range` when both sides are files, which is the same kernel-side copy
 GNU reaches for and matters for two reasons: the bytes never cross into
 userspace, and a sparse file's holes are reproduced as holes rather than written
-out as zeroes. A hand-written loop would tell the two failures apart and would
-lose both of those. The destination's sentence is the one kept because that is
-the end that fails in practice — a full filesystem, an exceeded quota, a device
+out as zeroes. The destination's sentence was the one kept because that is the
+end that fails in practice — a full filesystem, an exceeded quota, a device
 unplugged mid-write — while a read error means the source medium is failing,
-which is rarer.
+which is rarer. That reasoning was sound given the two-sentence premise; the
+premise was wrong.
 
-**The proper fix.** Keep `io::copy` for the common path and learn the side from
-the descriptors after it fails, rather than from the error: on failure, check
-whether the source is still readable (a zero-length `read` at the current
-offset). If it is not, the failure was the read. That gets the distinction back
-without giving up `copy_file_range`, at the cost of one syscall on a path that
-has already failed. The alternative — a loop — is the one GNU uses and is not
-worth the sparse-file regression.
+**The proper fix — superseded 2026-09-01.** The fix previously recorded here was
+to keep `io::copy` and *infer* the failing side afterwards, by probing whether
+the source was still readable. That was a workaround for a distinction GNU does
+not actually attempt, and it is now withdrawn: it would have invented an answer
+("it was the read") in a case where upstream deliberately declines to, and a
+probe on a failing device is not reliable evidence anyway.
+
+Reproduce GNU's structure instead: drive `copy_file_range` ourselves rather than
+through `io::copy`, emit `error copying SRC to DST` when it fails outside the
+listed fallback errnos, and fall back to an explicit read/write loop that emits
+`error reading SRC` and `error writing DST` from its own two sites. Nothing is
+given up — the offload stays, the holes stay — and all three sentences come out
+byte-identical to GNU's, which is more than the withdrawn fix would have managed
+even if its inference were always right.
+
+This lands with **Stage 2 of the copy-engine extraction**, which unifies this
+copy body with `cp`'s. That is not scheduling convenience: `cp` has the opposite
+half of the same bug — a plain 64 KiB read/write loop with the two sentences and
+**no offload at all**, so it is both slower than GNU on a large same-filesystem
+copy and incapable of ever printing `error copying`. One unified body fixes both,
+and writing the fix twice is what the extraction exists to stop.
 
 **How it would be caught.** Nothing measures it today. `scripts/mv-diff.sh` §22
 has cases for a source that cannot be *opened* and a destination directory that

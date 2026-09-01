@@ -3110,6 +3110,34 @@ fn preserve_attributes<O: Write, E: Write>(
     // way. Note that the guard is *here* rather than an early return above:
     // the extended-attribute step below applies to a symlink destination and
     // GNU runs it for one.
+    //
+    // The `new_dst ||` is GNU's `copy_internal` guard (`copy.c:3265`) and *not*
+    // its `copy_reg` one, which is `!SAME_OWNER_AND_GROUP` alone
+    // (`copy.c:1645`) — so this one expression stands where upstream has two
+    // that differ. They differ for a reason that does not survive the merge:
+    // `copy_reg` has just `fstat`ed the destination descriptor, unconditionally
+    // whenever ownership is being preserved (`copy.c:1529`), so its comparison
+    // is against a fresh `stat` and is always meaningful; `copy_internal`'s
+    // `dst_sb` was taken before the destination existed, so for a new one there
+    // is nothing to compare against and the `new_dst ||` is what stops it
+    // comparing against a stale reading. Ours takes the reading inside
+    // [`owner_differs`], so neither problem applies and the wider guard is
+    // safe — it costs at most a `chown` that changes nothing.
+    //
+    // That "at most" was measured rather than assumed, because the obvious
+    // worry is that a no-op `chown` is still a write that can be refused, and a
+    // refusal here is not free: it would take the set-user-ID bit off the copy
+    // ([`Chowned::Disowned`] below). The sharpest case that can be built —
+    // a source owned by you with a group you are *not* in, copied into a
+    // set-group-ID directory carrying that same group, so the new destination
+    // is born already owner-and-group-identical to the source and GNU skips the
+    // `chown` we perform — was run against both binaries and produced `4755
+    // inhahe:daemon` on each. It cannot fail: Linux checks group membership
+    // only when the group is actually changing (`setattr_prepare`'s
+    // `!vfsgid_eq_kgid(…) && !in_group_or_capable(…)`), so a `chown` to the
+    // values already in place is permitted to anyone. GNU's own comment calls
+    // its guard an optimisation — "Avoid calling chown if we know it's not
+    // necessary" — which is exactly what it is.
     if made != Made::Symlink
         && job.flags.preserve.ownership
         && (new_dst || owner_differs(on, src.meta))
@@ -3443,11 +3471,14 @@ fn settle_mode<O: Write, E: Write>(
     debt.omitted &= !cached_umask();
 
     if made == Made::Regular {
-        // `copy_reg`'s form. Reached only under `--preserve=ownership` without
-        // `--preserve=mode`, which is the only way a regular file acquires a
-        // debt at all — and a regular file never carries a forced mode, because
-        // nothing has to be opened through it.
-        if debt.omitted == 0 {
+        // `copy_reg`'s form, and its condition is GNU's `omitted_permissions |
+        // extra_permissions` (`copy.c:1688`) — the two are settled by one chmod
+        // because the mode they are both measured against is the same one. A
+        // regular file acquires a *debt* only under `--preserve=ownership`, and
+        // an *extra* only under `--preserve=xattr` on a new destination, so
+        // either alone is reason enough to write the mode. It never carries a
+        // forced mode, because nothing has to be opened through it.
+        if debt.omitted == 0 && debt.extra == 0 {
             return true;
         }
         return chmod_settling(on, src.mode & 0o777 & !cached_umask(), dst, job);
@@ -3579,6 +3610,7 @@ fn create_destination<O: Write, E: Write>(
             // zeroes the same two locals on this arm (`copy.c:1499`).
             Ok(f) => {
                 debt.omitted = 0;
+                debt.extra = 0;
                 return Ok((f, false));
             }
             // It went away between the stat and the open. GNU reaches its
@@ -3605,8 +3637,23 @@ fn create_destination<O: Write, E: Write>(
         }
     }
 
-    match open_new(dst, permission_bits(src_meta) & !debt.omitted) {
-        Ok(f) => Ok((f, true)),
+    // GNU's `open_mode` (`copy.c:1451`), whose second half is the whole reason
+    // `cp --preserve=xattr` of a read-only file works at all. See
+    // [`ModeDebt::extra`].
+    debt.extra = if job.flags.preserve.xattr && !chown_privileges() {
+        OWNER_WRITE
+    } else {
+        0
+    };
+
+    match open_new(
+        dst,
+        (permission_bits(src_meta) & !debt.omitted) | debt.extra,
+    ) {
+        Ok(f) => {
+            top_up_extra(&f, debt);
+            Ok((f, true))
+        }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
             // `symlink_metadata` sees the link itself; `metadata` follows it,
             // so failing there is exactly "points at nothing".
@@ -3622,6 +3669,44 @@ fn create_destination<O: Write, E: Write>(
             }
         }
         Err(e) => Err(DestError::Io(e)),
+    }
+}
+
+/// `S_IWUSR` — the bit [`create_destination`] adds so the extended attributes
+/// can be written onto a copy of a read-only file. See [`ModeDebt::extra`].
+const OWNER_WRITE: u32 = 0o200;
+
+/// Put the extra owner-write bit on if the `open` did not manage it, and give up
+/// on it if that cannot be done either.
+///
+/// The mode handed to `open` is narrowed by the umask, which can perfectly well
+/// include `0o200` — `umask 0222` is unusual but legal, and under it the bit
+/// asked for at creation simply does not arrive. GNU makes the same repair in
+/// the same place and with the same fallback (`copy.c:1539`): *"if extra
+/// permissions needed for `copy_xattr` didn't happen (e.g., due to umask) chmod
+/// to add them temporarily; if that fails give up with extra permissions,
+/// letting `copy_attr` fail later."*
+///
+/// Giving up means clearing [`ModeDebt::extra`], which does two things at once
+/// and both are wanted: the extended-attribute step goes on to fail and *say
+/// so*, rather than the failure being hidden, and the settle-up does not chmod
+/// a file whose mode is already the one it should end with.
+///
+/// A failure to read the mode back is folded into the same fallback rather than
+/// given a diagnostic of its own. GNU has one — `cannot fstat %s` — but it
+/// reaches that `fstat` for other reasons too (it sizes the copy buffer from
+/// the result), so the call is free there and would be a stat-per-copy here,
+/// added solely to have somewhere to fail. On a descriptor this function was
+/// handed a moment ago there is no reachable failure to report.
+fn top_up_extra(f: &fs::File, debt: &mut ModeDebt) {
+    if debt.extra == 0 {
+        return;
+    }
+    let on = On::File(f);
+    let arrived = current_mode(on)
+        .is_ok_and(|now| now | debt.extra == now || fsattr::set_mode(on, now | debt.extra).is_ok());
+    if !arrived {
+        debt.extra = 0;
     }
 }
 

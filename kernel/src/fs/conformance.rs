@@ -378,6 +378,7 @@ pub fn self_test() -> KernelResult<()> {
 
     let mut r = Report::new();
     let mut skips = Skips::new();
+    let mut heap = HeapWatch::new();
 
     // A backend the harness fully controls, driven directly rather than through
     // the VFS. It is here for two reasons beyond checking memfs: it is the one
@@ -403,6 +404,7 @@ pub fn self_test() -> KernelResult<()> {
             );
         }
     }
+    heap.mark(&"memfs fixture", &mut r);
 
     // The live VFS mounts. Every boot has at least the root; a boot with
     // pseudo-filesystems mounted gets those too, and those are exactly the
@@ -417,7 +419,8 @@ pub fn self_test() -> KernelResult<()> {
             skips.record(path, "not mounted on this boot");
             continue;
         }
-        check_vfs_path(p, &mut r, &mut skips);
+        check_vfs_path(p, &mut r, &mut skips, &mut heap);
+        heap.mark(&path, &mut r);
     }
 
     // A pass over zero objects is not a pass, and this is the difference
@@ -476,7 +479,7 @@ pub fn self_test() -> KernelResult<()> {
 /// everything else is a failure, because a skip decided from the outcome of the
 /// call under test disables the check on exactly the boot where it would have
 /// fired.
-fn check_vfs_path(dir: &Path, r: &mut Report, skips: &mut Skips) {
+fn check_vfs_path(dir: &Path, r: &mut Report, skips: &mut Skips, heap: &mut HeapWatch) {
     use crate::fs::vfs::Vfs;
 
     let backend = "vfs";
@@ -515,6 +518,101 @@ fn check_vfs_path(dir: &Path, r: &mut Report, skips: &mut Skips) {
                 // the fixture.
             }
         }
+        // Per entry, not per directory: on a pseudo-filesystem `stat` runs the
+        // file's *generator*, so a counter that moves here names the one
+        // generator that moved it. Attributing it to the directory would leave
+        // 200 candidates.
+        heap.mark_path(&child, r);
+    }
+}
+
+/// Watches the heap's corruption counters across the pass and attributes any
+/// movement to the phase that caused it.
+///
+/// # Why this belongs in a metadata harness
+///
+/// It is here because of how the harness's own first live boot failed. Two
+/// `[heap] DOUBLE-FREE detected!` lines appeared during the pass; nothing in
+/// the log said which of ~200 `stat` calls produced them. They incremented a
+/// *global* counter, which `syshealth` later read as `[FAIL] Heap safety: 2
+/// violation(s)`, which made `kshell::self_test` rung 21 — "a checker that
+/// passed reports success" — panic the kernel. So the boot died in a self-test
+/// three subsystems away from the code that actually broke, with a message that
+/// named none of it.
+///
+/// That chain is the general hazard, not a one-off: a self-test that perturbs
+/// global state hands a later checker a failure it cannot explain, and the
+/// further apart the two run, the more expensive the diagnosis. The fix is for
+/// the perturbing pass to notice at the moment it happens, while it still knows
+/// which object it was touching.
+///
+/// Reading a `stat` on a pseudo-filesystem runs arbitrary kernel code — the
+/// file's generator — so this harness is unusually likely to be the thing that
+/// trips a latent allocator bug, and unusually well placed to say which call
+/// did it.
+struct HeapWatch {
+    double_free: u32,
+    use_after_free: u32,
+    redzone: u32,
+}
+
+impl HeapWatch {
+    /// Sample the counters as they stand before the pass touches anything.
+    ///
+    /// Baselined rather than assumed zero: an earlier self-test may legitimately
+    /// have exercised the detector (`mm::heap`'s own self-test deliberately
+    /// performs a double-free to prove detection works), and a harness that
+    /// reported those as its own would be crying wolf on every boot.
+    fn new() -> Self {
+        let s = crate::mm::heap::stats();
+        Self {
+            double_free: s.double_free_violations,
+            use_after_free: s.poison_violations,
+            redzone: s.redzone_violations,
+        }
+    }
+
+    /// Compare against the baseline, report and re-baseline. `what` names the
+    /// phase that ran since the last call.
+    ///
+    /// Counted as a conformance failure: the counters are global, so leaving
+    /// them moved is not a private matter for this harness. Something that
+    /// corrupts the allocator while a directory is being listed is a worse
+    /// finding than any metadata disagreement this module was built to look for,
+    /// and it must not be reported more quietly than one.
+    fn mark(&mut self, what: &dyn core::fmt::Display, r: &mut Report) {
+        let s = crate::mm::heap::stats();
+        let df = s.double_free_violations.saturating_sub(self.double_free);
+        let uaf = s.poison_violations.saturating_sub(self.use_after_free);
+        let rz = s.redzone_violations.saturating_sub(self.redzone);
+
+        if df != 0 || uaf != 0 || rz != 0 {
+            r.failed = r.failed.saturating_add(1);
+            serial_println!(
+                "[fsconform] FAIL heap:{} — the allocator's corruption counters moved while \
+                 this was being inspected: {} double-free(s), {} use-after-free(s), {} \
+                 redzone violation(s). The counters are global, so this will also surface \
+                 later as a syshealth failure with nothing to point at; the culprit is here.",
+                what,
+                df,
+                uaf,
+                rz
+            );
+        }
+
+        // Re-baseline unconditionally, including after a report: each phase is
+        // charged only with what it did, so one bad generator cannot make every
+        // later phase look guilty too.
+        self.double_free = s.double_free_violations;
+        self.use_after_free = s.poison_violations;
+        self.redzone = s.redzone_violations;
+    }
+
+    /// [`mark`](Self::mark) for a path, which needs `display()` rather than
+    /// `Display` because `Path` deliberately does not implement it — a path is
+    /// bytes, and rendering it is a lossy choice the caller has to make.
+    fn mark_path(&mut self, p: &Path, r: &mut Report) {
+        self.mark(&p.display(), r);
     }
 }
 

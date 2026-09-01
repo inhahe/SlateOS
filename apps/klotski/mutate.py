@@ -243,6 +243,14 @@ MUTATIONS = [
         "        let two_lines = true;",
         ["a_band_tall_enough_for_a_line_draws_one"],
     ),
+    (
+        # The room is a field precisely so that the frame can be checked against
+        # it; a room reported wider than it is puts the check back where it was.
+        "the board reports a room bigger than the one it was solved from",
+        "            board_band: band,",
+        "            board_band: Rect::new(0.0, 0.0, w, h),",
+        ["the_board_fits_the_room_it_was_solved_from"],
+    ),
     # ── Identity ────────────────────────────────────────────────────
     (
         # The bug this campaign found: an undo entry holding a `Vec` index in a
@@ -685,19 +693,19 @@ MUTATIONS = [
         "the solve does not reserve the mats ring above and below",
         "            + GAP_PER_CELL * 2.0",
         "            + GAP_PER_CELL",
-        ["the_board_never_overlaps_the_chrome"],
+        ["the_board_fits_the_room_it_was_solved_from"],
     ),
     (
         "the solve does not reserve the mats ring left and right",
         "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 + 1.0) * GAP_PER_CELL;",
         "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 - 1.0) * GAP_PER_CELL;",
-        ["every_band_stays_inside_the_window"],
+        ["the_board_fits_the_room_it_was_solved_from"],
     ),
     (
         "the grid is centred and the mat is drawn around it",
         "            let fy = band.y + (band.h - frame_h) / 2.0;",
         "            let fy = band.y + (band.h - stack_h) / 2.0;",
-        ["the_board_never_overlaps_the_chrome"],
+        ["the_board_fits_the_room_it_was_solved_from"],
     ),
     (
         # The floor that kept a selection visible on a tiny board kept it

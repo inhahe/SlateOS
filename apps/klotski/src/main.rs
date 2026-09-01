@@ -452,6 +452,19 @@ pub struct Layout {
     pub window: Rect,
     /// Title and puzzle name.
     pub header: Rect,
+    /// The room the board is solved from: what is left of the window once the
+    /// chrome has taken its bands and `pad` has been charged on every side.
+    ///
+    /// A field rather than a local, and that is the whole point of it. The
+    /// solve's contract is "the frame fits the room", and while the room had no
+    /// name the contract had no test: `board_frame` is *derived* from the solve,
+    /// so a solve that oversizes the mat oversizes the region the board pass is
+    /// measured against by exactly as much and every containment test stays
+    /// green. Checking it against the window or the chrome does not help either
+    /// — `pad` separates the band from both, so a mat that has overrun its room
+    /// by a gap is still clear of them. Only the room it was solved from can
+    /// say so.
+    pub board_band: Rect,
     /// Everything the board pass paints: the mat, the grid it wraps, and the
     /// exit strip below. This — not `board` — is the region that pass owns, for
     /// the same reason a picture's region is its frame and not its canvas.
@@ -605,6 +618,7 @@ impl Layout {
         Self {
             window: Rect::new(0.0, 0.0, w, h),
             header,
+            board_band: band,
             board_frame,
             board,
             exit,
@@ -2360,11 +2374,15 @@ mod tests {
             let l = Layout::new(w, h);
             for (name, r) in [
                 ("header", l.header),
+                ("board band", l.board_band),
                 // The frame before the grid, and both, because the grid alone
                 // is the one region the mat's overhang cannot be seen against:
                 // a solve that forgets to reserve the mat's ring grows `cell`
                 // until the *grid* still fits and the mat no longer does, and
-                // `board` is by construction unable to say so.
+                // `board` is by construction unable to say so. (The window is
+                // still too generous to catch that on its own — `pad` leaves the
+                // band room to spare — which is what
+                // `the_board_fits_the_room_it_was_solved_from` is for.)
                 ("board frame", l.board_frame),
                 ("board", l.board),
                 ("exit", l.exit),
@@ -2377,6 +2395,37 @@ mod tests {
                 assert!(
                     r.x >= -0.01 && r.y >= -0.01 && r.right() <= w + 0.01 && r.bottom() <= h + 0.01,
                     "{name} escapes the {w}x{h} window: {r:?}"
+                );
+            }
+        }
+    }
+
+    /// The solve's own contract: the frame fits the room it was solved from.
+    ///
+    /// Three separate ways of getting that wrong — dropping the mat's ring from
+    /// `per_h`, dropping it from `per_w`, and centring the grid rather than the
+    /// frame — survived every other test in this file, and for one reason:
+    /// `board_frame` is derived from the solve. A solve that oversizes the mat
+    /// oversizes the region the board pass is *checked against* by exactly as
+    /// much, so containment stays green however far the mat has escaped. The
+    /// window and the chrome cannot see it either, because `pad` separates the
+    /// band from both and the overrun is a gap, which is smaller. The room is
+    /// the only thing that holds still while the solve moves, which is why it is
+    /// a field.
+    #[test]
+    fn the_board_fits_the_room_it_was_solved_from() {
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (name, r) in [
+                ("frame", l.board_frame),
+                ("grid", l.board),
+                ("exit strip", l.exit),
+            ] {
+                assert!(
+                    inside(l.board_band, r),
+                    "at {w}x{h} the board's {name} is {r:?}, outside the {:?} it \
+                     was solved from",
+                    l.board_band
                 );
             }
         }

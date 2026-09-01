@@ -103372,14 +103372,143 @@ landed at y = -0.71. Inset the rectangle by half the line width inside `stroke`
 itself rather than at each call site; hangman fixed the same fault one call site
 at a time, and sokoban shows it belongs in the helper.
 
-And the counts to date, remeasured 2026-09-01 after this app: **47 apps and 140
-sites remain**, with only automator, taskscheduler, hangman and sokoban carrying
-`no_pass_paints_outside_the_region_it_owns`. The largest remaining are rush,
-magnifier and klotski at 7 each, then spades and snippets at 6. klotski is the
-same program as sokoban structurally -- same `Layout`, same five `draw_*` passes,
-same `fill`/`push_text`/`label`/`label_right`/`label_centred` helpers with
-`push_text` still taking an `Option<f32>` -- so this app's fix transfers to it
-nearly verbatim.
+**klotski** (2026-09-01) — done: 90 tests, 80/80 mutation rows caught. The
+prediction above was right that sokoban's fix transfers nearly verbatim — shapes
+8, 9, 2 and 11 all recurred and were fixed the same way — and wrong about the
+two faults that mattered, which no amount of transferring would have found. Both
+are new shapes:
+
+14. **A pass is bounded by the region it *paints*, not by the region the layout
+    named after it — and a solve is the easiest place to get that wrong.**
+    `Layout::board` is the grid; what `draw_board` paints first and outermost is
+    a mat one `gap` wider than the grid on every side. The solve sized only the
+    grid, so on whichever axis binds — `cell` is a `min` of the two, and on the
+    winner the grid fills the band *exactly* — the shortfall a centring has to
+    divide is nought and the mat's ring has nowhere to go but outside. At
+    900x500, where height binds, the mat's top edge landed a whole gap above the
+    band it was solved from. Note what does **not** help: centring cannot
+    rescue a child bigger than its parent (it just splits the overhang in two),
+    and no clamp on the grid can either, because the grid was never the thing
+    that overflowed. The fix is in the solve — `per_w`/`per_h` count the well as
+    well as the grid — and in the *naming*: `Layout::board_frame` is the region
+    `draw_board` owns, for the same reason a picture's region is its frame and
+    not its canvas. **The trap here is the test, not the code.** The obvious
+    containment check measures `draw_board` against `l.board`, which is the one
+    region in the program this fault is invisible in; a pass checked against the
+    wrong region is a test that cannot fail. Before writing the check, ask what
+    each pass paints *first* and *outermost* and name that — every app with a
+    solved-then-decorated region (a mat, a well, a card behind a list, a focus
+    ring around a canvas) has the same hole.
+15. **A "visibility floor" is an unbound, and dangerous specifically as an
+    outset.** `(derived * k).max(CONST)` is written to keep a decoration legible
+    when the thing it decorates gets small, so by construction it stops asking
+    how much room there is — which is fine growing *inward* and is a licence to
+    paint outside growing *outward*. klotski's selection halo grew by
+    `(l.gap * 0.8).max(1.0)` around the picked-up block: on a board whose gap is
+    a fifth of a point the halo is five times the ring it was meant to sit in.
+    It grows by `l.gap` now — into the mat's ring and no further, which is what
+    reserving the ring in the solve bought. Audit the `.max(` floors in each app
+    by *direction*: inward `ring`/`inset` uses (checkers, chess, reversi,
+    yahtzee) are safe; `apps/rush/src/main.rs:1451` is this fault
+    character-for-character.
+
+And one about the suite rather than the program, which is the reason fault 8
+survived a fix that had already been made once in sokoban:
+
+16. **A test can hold a fault in place, and it will read as the strictest test
+    in the file.** `label_centred` insets the run by half the slack and handed
+    the renderer `r.w` — the box's own width — as the limit, so the "Next" label
+    was licensed to reach 123.5 in a band 120 wide. That is shape 8 exactly, in
+    the third app to hit it, and it was missed on the read-through because
+    klotski already had `a_centred_label_is_given_the_width_of_the_box_it_sits_in`
+    asserting `max_width == Some(rects[i].w)` — a test whose *name* says the
+    property is checked and whose body pins the bug. Only the new containment
+    grid could contradict it. When a bound moves, **grep the suite for the
+    tests that assert the old bound and rewrite them to the new claim** — here,
+    `a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box`, asserting
+    `x + max == box.right()`. A test that must be rewritten to make a fix pass
+    is not a test that was protecting anything.
+
+And five more that the **mutation sweep** found and the read-through could not.
+Every one of them is a test that could not fail rather than a program that was
+wrong, which is the whole argument for running the sweep before calling an app
+done: eleven of the seventy-nine rows the table then held survived their first
+run, and not one of them was fixed by weakening an assertion. The eightieth row
+is shape 18's, added because the field shape 17 introduced needed pinning.
+
+17. **A derived region cannot check the thing that derived it.** Shape 14 above
+    fixed the solve *and* named the region — `board_frame` — the board pass is
+    measured against. But `board_frame` is computed *from* the solve, so a solve
+    that oversizes the mat oversizes the region by exactly as much, and
+    containment stays green however far the mat has escaped. The three rows that
+    break the solve all survived. The window and the chrome cannot see it
+    either: `pad` separates the band from both, and the overrun is one `gap`,
+    which is smaller. **The only rectangle that holds still while the solve
+    moves is the room the solve was handed — and it was a local, so the solve's
+    contract had no name and therefore no test.** The fix is one field,
+    `Layout::board_band`, and one test,
+    `the_board_fits_the_room_it_was_solved_from`. Any app whose layout solves a
+    size and then decorates it has this hole; the tell is a `let band = …` in
+    `Layout::new` that never reaches the struct literal.
+18. **A check whose subject is itself a claim needs its subject pinned.** Once
+    `board_band` is a field, a mutation that reports the *whole window* as the
+    room passes `the_board_fits_the_room_it_was_solved_from` trivially — a
+    bigger room is a weaker check, and the check cannot object to its own
+    subject. That row survived too. What a room that has swallowed the chrome
+    cannot pass is `the_board_never_overlaps_the_chrome`, so that test now asks
+    about the *band* as well as the frame. Whenever you add a field for a test
+    to hold, add the row that widens it and find the test that says no.
+19. **A fit check feeding a second fit check does not spill; it blanks.**
+    `two_lines` (header) and `shown` (footer) choose *how many* lines to stack,
+    and `centre_line` then refuses a stack the band cannot hold. Forcing either
+    to its two-line answer therefore makes the band draw **nothing** — and
+    nothing is inside everything, so every containment test in the file passes
+    on a program whose header has vanished. The converse test the campaign
+    already prescribes for whole passes has to exist for *bands* too:
+    `a_band_tall_enough_for_a_line_draws_one`, sweeping the band's height and
+    asserting that a band with room for one line draws one. Note it sweeps
+    height only: a band can be legitimately too *narrow* to draw in, because
+    `split` can collapse onto `left`, so a width sweep here would assert the
+    opposite of shape 20.
+20. **A guard no input reaches is indistinguishable from its own absence.**
+    `push_text`'s `limit <= 0.0` refusal — the bound that stops a run being
+    ellipsised into nothing — was never entered on a real window. It only bites
+    where the header's `split` collapses onto `left`, which only the *squeezed*
+    sweep produces. Deleting it changed no test's answer until
+    `no_run_is_pushed_into_a_box_with_no_room` swept the squeezes as well as the
+    window list. A guard is verified by the input that reaches it, not by
+    reading it.
+21. **A shared edge makes a mutation degenerate rather than visible.** `split`
+    is the title's right bound *and* the counters' left bound. Widening it to
+    the band's far edge does not let the title cross the counters — it leaves
+    the counters nought points of room, `push_text` refuses them, and two
+    columns of which one was never drawn do not overlap. The column test cannot
+    fail; what dies is every test that expects a counter. This is not a fault to
+    fix but a fact to record in the row's expectation, and it generalises: when
+    a single number bounds two things from opposite sides, breaking it starves
+    one of them instead of overlapping them.
+
+Two smaller carries. `push_text` and `label_right` picked up sokoban's shape 9
+and shape 8 fixes unchanged, and the header needed the same column split (a
+title column that takes what the "Moves:"/"Undo:" counters leave) to have a real
+number to pass. And three bounds in this app are genuinely **bounded by
+construction** — the board solve, whose `min` over both axes does the work; the
+button row, whose height is `controls.h - pad` so the centring offset is a
+constant `pad / 2.0`; and the win panel, which is a *fraction* of the window and
+so has a shortfall that scales. Each got the proof written out as a comment
+rather than a redundant clamp, because shape 2 says the clamp would be a claim
+no test could check.
+
+And the counts to date, remeasured 2026-09-01 after this app: **46 apps and 133
+sites remain**, with only automator, taskscheduler, hangman, sokoban and klotski
+carrying `no_pass_paints_outside_the_region_it_owns`. The largest remaining are
+rush and magnifier at 7 each, then spades and snippets at 6. **rush is next, and
+it is klotski's before-state character-for-character**: same `Layout`, same five
+`draw_*` passes, `push_text` still taking an `Option<f32>` with a `label()` that
+passes `None`, a `label_right` with no left bound, the halo floor at line 1451,
+and a `label_centred` whose doc comment claims it is "**limited to `r`**" while
+passing `Some(r.w)` from a run inset by half the slack — fault 16's twin, one
+app on.
 
 ---
 

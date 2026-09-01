@@ -103173,6 +103173,64 @@ window very small sees text overlapping the panel next door. It does not get
 worse with time, but every newly wired app adds sites at the current rate of
 roughly two or three per app.
 
+### Progress
+
+**automator** (2026-09-01) — the app the lesson was found in. 6 faults, fixed.
+
+**taskscheduler** (2026-09-01) — done: 131 tests, 30/30 mutation rows caught.
+The scope was three times what the grep predicted, and the extra two thirds are
+the part worth carrying to the next app:
+
+* The grep only sees *vertical* centring. The same fault is there horizontally
+  and the shape is different, so it does not show up in a search for
+  `(h - size) / 2.0`: a constant inset (`PADDING`) is right of a band narrower
+  than the padding, a constant `max_width` runs off the right edge, and
+  `text::center_x(label, rect.centre().0, …)` is left of a button narrower than
+  its own label. Add `span(band, x, want) -> Option<(f32, f32)>` alongside
+  `centre_line` and route every cell through one `run_in`.
+* Fixed-size *fills* are a third shape again: a heading strip written as a
+  32-point rectangle at the area's corner, a `bottom() - 3.0` underline, a
+  `bottom() - 1.0` separator. `bottom_strip(band, want)` for the ones on an
+  edge; `.min(band.h)` for the rest. Never `centre_line` — a fill shrinks.
+* The largest fault in the app was neither: both modal dialogs painted a
+  constant 440x380 (and 360x160) panel — scrim, border, fields, buttons and
+  hit boxes — over whatever lies beyond a smaller window.
+
+**And three things the containment test cannot see on its own**, all found by
+the mutation sweep rather than by reading the code — they are the whole of the
+first sweep's eight survivors, one of shape 1, three of shape 2, four of shape
+3. Budget for them:
+
+1. **A bound that nothing can squeeze is not verified.** taskscheduler's list
+   rows were bounded correctly *inside their loops*, but the only rectangle the
+   loop ever produced was a whole 32-point row, so every bound in the row body
+   could be deleted with the suite green. The fix is structural: extract the
+   row into a function *of the row*, and add it to the `squeezes()` sweep next
+   to the text field and the button. Only one survivor was this shape, but it
+   is the one that hid a real bug — once a row could be handed a three-point
+   box it turned out a row squeezed to nothing still painted its background and
+   still recorded a click target for a task the user cannot see. Expect it in
+   any app with a list.
+2. **A clamp that a stronger guard upstream already dominates is unreachable,
+   and only the sweep will tell you.** `CHECKBOX_SIZE.min(row.h)` sitting above
+   an `.intersect(row)` produces a byte-identical rectangle at every height; a
+   caret clamped to a field that `centre_line`/`span` has already refused to
+   draw in cannot bind. Such a clamp reads as prudence and is really a claim
+   the tests cannot check. **Delete it and re-point its mutation row at the
+   bound that does the work.** Do not weaken the test to "reach" it, and do not
+   leave it in on the grounds that it is harmless — an unreachable guard is
+   what a later reader will trust instead of the real one.
+3. **Containment can always be satisfied by drawing nothing**, so it must be
+   paired with a reachability assertion. Every bound in this campaign is an
+   intersection, and an intersection is equally happy to return an empty
+   rectangle: a dialog whose buttons are placed by their nominal offset rather
+   than by the dialog's cut-down height has them *deleted* by the cut, and the
+   containment test is delighted. `a_dialog_with_room_still_shows_its_buttons`
+   is the counterweight — when the box is big enough for the control, the
+   control must be there. Also assert the converse the guards actually promise:
+   a control given an empty box draws nothing at all, since a zero-sized fill
+   is inside every region there is.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

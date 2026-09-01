@@ -105357,58 +105357,75 @@ comparison is finally pinned.
 `bench_vfs_readdir_root_cost` (`kernel/src/bench.rs`) ran the 2x2. It lists one
 8-entry memfs directory four times, varying only what is mounted and where:
 
-| arm | mount table | listed dir is their parent? | min |
-|---|---|---|---|
-| `vfs_readdir_mp_base` | baseline | — | 20990 ns |
-| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns |
-| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** |
-| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns |
+| arm | mount table | listed dir is their parent? | run 1 | run 2 |
+|---|---|---|---|---|
+| `vfs_readdir_mp_base` | baseline | — | 20990 ns | 23747 ns |
+| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns | 28998 ns |
+| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** | **97932 ns** |
+| `vfs_readdir_mp_submount_stat` | one stat of a mount root | (not a listing) | — | 8740 ns |
+| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns | 21529 ns |
 
-**Read the percentages, not the nanoseconds.** The harness flagged this boot as
-an outlier run — everything measured ~38% slower than usual, against a baseline
-that was itself an outlier (x1.307) — and printed the standing instruction not
-to quote its absolute numbers as the cost of anything. The design survives that:
-all four arms ran inside the same window, so a uniform inflation cancels in every
-comparison below. The ratios are the finding; the raw figures are ~1.4x high.
+**Read the percentages, not the nanoseconds.** The harness flagged *both* boots
+as outlier runs — everything ~38% and ~22% slower than usual respectively — and
+printed the standing instruction not to quote their absolute numbers as the cost
+of anything. The design survives that: within each run all arms shared one
+window, so a uniform inflation cancels in every comparison below. The ratios are
+the finding; the raw figures are high by roughly those factors. Two runs are
+reported because the second was run to add the `submount_stat` arm, and having
+them replicates the headline independently.
 
-Three results, in decreasing order of how much they change the picture:
+Four results, in decreasing order of how much they change the picture:
 
-1. **Being a mount parent costs +81429 ns, +292%** — and that is against
-   `elsewhere`, so the mount-table growth is already subtracted out. This is not
-   merely "the missing ~20 us": it is the entire 29.4 us gap and roughly 2.5x
-   more, on a directory with a quarter of root's entries. Root's anomaly is
-   here, in `finish_listing`'s per-submount work, and nowhere else.
+1. **Being a mount parent costs +292% (run 1) / +237% (run 2)** — measured
+   against `elsewhere`, so mount-table growth is already subtracted out. That is
+   +81429 ns and +68934 ns, i.e. the entire 29.4 us gap and ~2.5x more, on a
+   directory with a *quarter* of root's entries. Root's anomaly is here, in
+   `finish_listing`'s per-submount work, and nowhere else. Replicated.
 
-2. **But it is not the stat.** Per submount that is ~16285 ns, against a measured
-   `vfs_stat_breakdown_resolved` of ~2000 ns — **8x a full stat, per mount
-   point.** The estimate above ("five full stats = 9640 ns, 33% of the gap") had
-   the mechanism's *location* right and its *magnitude* wrong by an order of
-   magnitude. So the fix proposed above is still worth making, and it will not
-   recover most of this: something in the per-submount path costs several stats'
-   worth beyond the stat, and has not been identified yet.
+2. **It is mostly the stat — but the stat costs 4x what the estimate assumed.**
+   One `metadata_resolved` of a *mount root* measures **8740 ns**, against
+   ~2000 ns for `vfs_stat_breakdown_resolved` on an ordinary file. Five of those
+   is 43700 ns, which is **63% of run 2's 68934 ns**. So the estimate above
+   ("five full stats = 9640 ns, 33% of the gap") had the mechanism right and was
+   low only because it priced a mount-root stat at an ordinary file's cost. The
+   proposed `finish_listing` fix is the right fix and should recover most of
+   this.
 
-3. **Being a filesystem's own root is free.** `fsroot` is +1636 ns over `base`,
-   which is +273 ns once this boot's own per-mount table cost is subtracted —
-   under 2%. That eliminates the third candidate listed above ("memfs's own
-   root-directory lookup, which may not be structured like a child directory's").
-   It is structured like a child directory's, and it costs the same.
+   *(An earlier revision of this section said the opposite — "it is not the stat
+   … the fix will not recover most of this". That was written from run 1, which
+   had no `submount_stat` arm, and it was an inference, not a measurement. Run 2
+   added the arm and contradicted it. Left visible rather than quietly
+   overwritten, because the same mistake is what this whole entry is downstream
+   of.)*
 
-A fourth number falls out that was not the question but is worth recording:
-**each registered mount adds ~1363 ns to every `readdir` in the system**,
-whatever it lists (`base` -> `elsewhere` is +6817 ns for five mounts, on a
-directory none of them are under). That is `resolve_mount`'s longest-prefix scan,
-and it is the reason this benchmark mounts its five filesystems twice in two
-different places rather than measuring a naive before/after — charged to
+3. **The remaining ~37% is `finish_listing`'s own loop** — the `PathBuf` join per
+   mount point and the `!entries.iter().any(...)` de-dup scan. ~5000 ns per
+   submount. Worth a second look after the fix lands, not before: the fix changes
+   that loop, so measuring its remainder now would price code about to be
+   replaced.
+
+4. **Being a filesystem's own root is free.** `fsroot` came out +1636 ns (+7%)
+   over `base` in run 1 and **−2218 ns (−9%)** in run 2 — bracketing zero, which
+   is stronger evidence than either run alone. That eliminates the third
+   candidate listed above ("memfs's own root-directory lookup, which may not be
+   structured like a child directory's"). It is, and it costs the same.
+
+A fifth number falls out that was not the question but is worth recording:
+**each registered mount adds ~1000–1400 ns to every `readdir` in the system**,
+whatever it lists (`base` -> `elsewhere` is +6817 / +5251 ns for five mounts, on
+a directory none of them are under). That is `resolve_mount`'s longest-prefix
+scan, and it is the reason this benchmark mounts its five filesystems twice in
+two different places rather than measuring a naive before/after — charged to
 `finish_listing`, it would have inflated result 1 by 8%.
 
-**What is still unknown.** Why one submount costs 8 stats. The two candidates
-from the original list that survive are `submount_children` taking the `VFS` lock
-a second time (`finish_listing` holds it, then each `submount_root_ino`
-re-acquires it through `resolve_mount`) and the `PathBuf` join per mount point.
-Neither obviously costs 16 us, so the next step is the same as this one was: a
-breakdown benchmark inside the per-submount path, not an argument from reading
-the code. The same discipline applies — the entry above this one exists because
-two days went into acting on an unmeasured hypothesis.
+**Next step: apply the fix.** `finish_listing` already holds the mount table when
+it computes `submount_children`; the mounted filesystem's handle is right there
+in the table entry. Cloning the `Arc` alongside the name, releasing the VFS lock,
+then reading each root's metadata through that handle removes the join and the
+whole `resolve_mount` longest-prefix scan per submount, while preserving the
+§43 lock discipline that `submount_root_ino`'s doc comment turns on (VFS lock
+released before any filesystem lock is taken). The 2x2 above is the before/after
+harness for it.
 
 
 ---

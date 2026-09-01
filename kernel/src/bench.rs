@@ -7551,69 +7551,98 @@ fn bench_vfs_readdir_root_cost() {
     // from five 1928ns stats, because a prediction that is never checked out
     // loud is a prediction nobody notices was wrong.
     //
-    // Four branches, not three. The first version had no upper bound on
-    // CONFIRMED -- any delta at least half the prediction printed "the same
-    // order as ~9640ns" -- and the very first run measured 81429ns, 8.4x the
-    // prediction, and duly called that "the same order". A ladder that cannot
-    // distinguish "matches" from "vastly exceeds" is not reporting a
-    // measurement, it is confirming a hypothesis it was built to test, which is
-    // the exact failure `bench_vfs_readdir_breakdown`'s saturating_sub bug was.
-    // EXCEEDED is a different finding from CONFIRMED and points somewhere else:
-    // a stat costs `vfs_stat_breakdown_resolved`, so a per-submount cost that is
-    // a large multiple of one stat means the expense is NOT the stat, and
-    // removing the stats will not recover most of it.
+    // The ladder branches on a number THIS RUN MEASURED, not on the 9640ns
+    // known-issues predicted. That is the second correction this verdict has
+    // needed and the only one that fixes the class of bug rather than an
+    // instance of it.
+    //
+    // History, because it is the argument for the design. v1 had no upper bound
+    // on CONFIRMED, so 81429ns was reported as "the same order as ~9640ns". v2
+    // added EXCEEDED, which caught the magnitude but asserted a *cause* it had
+    // no measurement for -- "the expense is NOT the stat, removing the stats
+    // cannot recover most of it" -- and the very next run added the
+    // `mp_submount_stat` arm and found the stats are 63% of it. Both failures
+    // are the same failure: the verdict reasoned from a constant while the
+    // benchmark was capable of measuring the quantity that constant estimated.
+    //
+    // So the decision variable is `explained`: how much of the parent delta the
+    // five measured stats actually account for. A hardcoded prediction cannot
+    // go stale if nothing branches on it, so 9640ns survives only as something
+    // to *report* against -- it is the number in known-issues.md, and a reader
+    // comparing the two is exactly who this line is for.
     const PREDICTED_PARENT_NS: i64 = 9640;
+    /// What `vfs_stat_breakdown_resolved` costs for an ordinary file. Not a
+    /// branch condition either -- it is the yardstick that makes "statting a
+    /// mount root is expensive" a statement with a size attached.
+    const ORDINARY_STAT_NS: i64 = 2000;
+
     let per_submount = d_parent / READDIR_MOUNT_ARM as i64;
+    let stat_ns = i64::from(submount_stat.min_ns as i32);
+    let stats_total = stat_ns * READDIR_MOUNT_ARM as i64;
+    let explained = if d_parent > 0 {
+        stats_total * 100 / d_parent
+    } else {
+        0
+    };
+
     if readdir_signed_pct(d_parent, elsewhere.min_ns).abs() < READDIR_MATERIAL_PCT {
         serial_println!(
             "[bench]   vfs_readdir_root_cost: REFUTED — being a mount parent costs {}ns, under \
-             {}% of the {}ns window. known-issues predicts ~{}ns from {} stats of {}ns each, so \
-             submount_root_ino is NOT where root's cost is, and rewriting finish_listing would \
-             buy nothing.",
+             {}% of the {}ns window. known-issues predicts ~{}ns from {} stats, so \
+             submount_root_ino is NOT where root's cost is and rewriting finish_listing would buy \
+             nothing.",
             d_parent,
             READDIR_MATERIAL_PCT,
             elsewhere.min_ns,
             PREDICTED_PARENT_NS,
-            READDIR_MOUNT_ARM,
-            PREDICTED_PARENT_NS / READDIR_MOUNT_ARM as i64
-        );
-    } else if d_parent > PREDICTED_PARENT_NS * 2 {
-        serial_println!(
-            "[bench]   vfs_readdir_root_cost: EXCEEDED — being a mount parent costs {}ns, which is \
-             {}x the ~{}ns known-issues predicts from {} full stats. Per submount that is {}ns \
-             against a measured stat (vfs_stat_breakdown_resolved) of roughly 2000ns, so the \
-             expense is NOT the stat and removing the {} stats cannot recover most of it. This \
-             arm holds root's whole unexplained gap and more: keep the finish_listing fix, but \
-             the per-submount path needs its own breakdown before it is called solved.",
-            d_parent,
-            d_parent / PREDICTED_PARENT_NS,
-            PREDICTED_PARENT_NS,
-            READDIR_MOUNT_ARM,
-            per_submount,
             READDIR_MOUNT_ARM
         );
-    } else if d_parent * 2 >= PREDICTED_PARENT_NS {
+    } else if explained >= 60 {
         serial_println!(
-            "[bench]   vfs_readdir_root_cost: CONFIRMED — being a mount parent costs {}ns ({}ns \
-             per submount), within 2x of the ~{}ns known-issues predicts from {} full stats. \
-             finish_listing already holds the mount table when it computes submount_children; \
-             reading the root inode from there removes {} stats, joins and lock acquisitions per \
-             root listing.",
+            "[bench]   vfs_readdir_root_cost: STATS-DOMINATE — mount parenthood costs {}ns \
+             ({}ns/submount) and the {} measured stats account for {}% of it. The known-issues \
+             fix is the right one and should recover most of this. Note the prediction was low \
+             for the right reason and the wrong size: it priced these at an ordinary file's \
+             ~{}ns, but statting a MOUNT ROOT measures {}ns -- {}x -- so 5 of them are {}ns, not \
+             the ~{}ns predicted. The other {}% is finish_listing's own loop (the PathBuf join \
+             and the de-dup scan), and is the remainder to chase after the fix lands.",
             d_parent,
             per_submount,
-            PREDICTED_PARENT_NS,
             READDIR_MOUNT_ARM,
-            READDIR_MOUNT_ARM
+            explained,
+            ORDINARY_STAT_NS,
+            stat_ns,
+            stat_ns / ORDINARY_STAT_NS,
+            stats_total,
+            PREDICTED_PARENT_NS,
+            100 - explained
+        );
+    } else if explained >= 25 {
+        serial_println!(
+            "[bench]   vfs_readdir_root_cost: STATS-PARTIAL — mount parenthood costs {}ns \
+             ({}ns/submount); the {} measured stats ({}ns each) are {}% of it. Removing them is \
+             worth doing and is not the whole answer: the majority is in finish_listing's own \
+             loop, so budget a second fix there. (known-issues predicted ~{}ns for the stats \
+             alone.)",
+            d_parent,
+            per_submount,
+            READDIR_MOUNT_ARM,
+            stat_ns,
+            explained,
+            PREDICTED_PARENT_NS
         );
     } else {
         serial_println!(
-            "[bench]   vfs_readdir_root_cost: PARTIAL — being a mount parent costs a material \
-             {}ns, but well under the ~{}ns predicted from {} full stats. The mechanism is real \
-             and cheaper than the estimate; the fix is still worth making, and the remainder of \
-             root's cost is elsewhere.",
+            "[bench]   vfs_readdir_root_cost: STATS-MINOR — mount parenthood costs a material \
+             {}ns ({}ns/submount), but the {} measured stats ({}ns each) are only {}% of it. The \
+             known-issues fix targets the wrong {}%: the cost is in finish_listing's own loop, \
+             not in submount_root_ino, and that loop is where to look next.",
             d_parent,
-            PREDICTED_PARENT_NS,
-            READDIR_MOUNT_ARM
+            per_submount,
+            READDIR_MOUNT_ARM,
+            stat_ns,
+            explained,
+            explained
         );
     }
 }

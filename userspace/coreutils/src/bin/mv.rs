@@ -108,26 +108,28 @@
 //!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
 //!   directory had been asked to become a subdirectory of itself.
 //!
-//! The harness is the artifact to keep, not the fix list: it is 204 cases, it
+//! The harness is the artifact to keep, not the fix list: it is 226 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
-//! Forty-three of its cases are marked as differing on purpose — every one is an
+//! Thirty-two of its cases are marked as differing on purpose — every one is an
 //! option this file does not implement yet, so implementing one is expected to
 //! *promote* a case rather than to add one. `-v` was the first to be promoted
 //! that way; its five entries became §14 and gained four more, which is the
 //! shape the rest should follow. `-i`/`-f`/`-n` was the second: its twelve
 //! entries became §15 and gained twenty more, plus the `--no-cl` abbreviation
 //! case in §2 that had been an xfail only because the option it resolves to did
-//! not exist.
+//! not exist. `-t`/`-T` was the third and the widest so far: eleven entries
+//! became §16 and gained twenty-two more, because those two options are about
+//! *which operand is the destination*, so every operand-count and wrong-shape
+//! diagnostic acquires a second spelling.
 //!
 //! # Options this implementation does not have
 //!
-//! `-b`/`--backup`, `-t`/`--target-directory`, `-T`/`--no-target-directory`,
-//! `-u`/`--update`, `-S`/`--suffix`, `-Z`/`--context`, `--debug`, `--no-copy`
-//! and `--strip-trailing-slashes` are recognised and rejected with a message
-//! saying they are not implemented, rather than ignored. Silently ignoring
-//! `-b` would lose the copy the user asked to be kept, and ignoring `-T` would
-//! move a file *into* a directory the user meant to replace; for this utility
-//! both mistakes are unrecoverable, and an error costs only a retype.
+//! `-b`/`--backup`, `-u`/`--update`, `-S`/`--suffix`, `-Z`/`--context`,
+//! `--debug`, `--no-copy` and `--strip-trailing-slashes` are recognised and
+//! rejected with a message saying they are not implemented, rather than
+//! ignored. Silently ignoring `-b` would lose the copy the user asked to be
+//! kept; for this utility that mistake is unrecoverable, and an error costs
+//! only a retype.
 //!
 //! They are all listed in [`LONG_OPTIONS`] anyway, because the table is what
 //! decides whether an abbreviation is ambiguous — drop `--verbose` and `mv --v`
@@ -228,13 +230,38 @@ struct MvFlags {
     stdin_tty: bool,
 }
 
+/// How the command line named its destination — GNU's `target_directory` and
+/// `no_target_directory` (`mv.c:325`).
+///
+/// Two independent fields rather than one three-state enum, because **both can
+/// be given at once** and that combination is a diagnostic of its own rather
+/// than one of them winning. Collapsing them would have to pick a winner, and
+/// every choice of winner silently obeys an option the user is being told is
+/// contradictory.
+///
+/// It is separate from [`MvFlags`] because it is not a policy applied to each
+/// move: it decides the *shape of the operand list*, once, before any move
+/// happens. Keeping it out also keeps `MvFlags` `Copy`.
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Destination {
+    /// `-t DIR` / `--target-directory=DIR`: the destination is named ahead of
+    /// the operands, so every operand is a source — which is also the only
+    /// shape in which one source and a directory is unambiguous.
+    directory: Option<OsString>,
+    /// `-T` / `--no-target-directory`: the last operand is a name to move
+    /// *onto*, never a directory to move *into*.
+    no_directory: bool,
+}
+
 /// What the command line asked for.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Request {
     Help,
     Version,
-    /// Every operand, in order. The last is the destination.
-    Run(MvFlags, Vec<OsString>),
+    /// Every operand, in order, and where they are going. Without `-t` the last
+    /// operand is the destination; with it, every one is a source.
+    Run(MvFlags, Destination, Vec<OsString>),
 }
 
 /// The parts of a run that every step below needs: what was asked for, and the
@@ -275,7 +302,7 @@ fn run_main() -> ExitCode {
             println!("mv (SlateOS coreutils) 0.1.0");
             ExitCode::SUCCESS
         }
-        Ok(Request::Run(mut flags, paths)) => {
+        Ok(Request::Run(mut flags, dest, paths)) => {
             // GNU's `mv.c:436`. Sampled here rather than inside the check that
             // reads it, so that the answer is the one the process started with.
             flags.stdin_tty = stdfd::is_tty(0);
@@ -291,7 +318,7 @@ fn run_main() -> ExitCode {
                     err: &mut err,
                     answers: &mut answers,
                 };
-                if move_all(&mut job, &paths) {
+                if move_all(&mut job, &dest, &paths) {
                     ExitCode::SUCCESS
                 } else {
                     ExitCode::from(1)
@@ -312,14 +339,17 @@ fn run_main() -> ExitCode {
 
 fn help_text() -> String {
     "\
-Usage: mv [OPTION]... SOURCE DEST
+Usage: mv [OPTION]... [-T] SOURCE DEST
   or:  mv [OPTION]... SOURCE... DIRECTORY
+  or:  mv [OPTION]... -t DIRECTORY SOURCE...
 Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
 
   -f, --force        do not prompt before overwriting
   -i, --interactive  prompt before overwrite
   -n, --no-clobber   do not overwrite an existing file
 If you specify more than one of -i, -f, -n, only the final one takes effect.
+  -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY
+  -T, --no-target-directory  treat DEST as a normal file
   -v, --verbose      explain what is being done
       --help         display this help and exit
       --version      output version information and exit
@@ -363,6 +393,7 @@ const SHORT_OPTIONS: &str = "bfint:uvS:TZ";
 /// long option given a value it does not take, or one denied a value it needs.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = MvFlags::default();
+    let mut dest = Destination::default();
     let mut paths: Vec<OsString> = Vec::new();
 
     for item in MV.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
@@ -386,16 +417,39 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 flags.interactive = Interactive::AlwaysNo;
             }
             Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            Opt::Short(b't', value) | Opt::Long("target-directory", value) => {
+                // Refused here rather than at use, and refused without
+                // comparing the two directories — GNU asks only whether one was
+                // given already, so `mv -t d -t d a` fails as surely as
+                // `-t d -t e` does. Measured, not assumed.
+                //
+                // A plain diagnostic with no "Try 'mv --help'" after it, because
+                // upstream raises it with `error (EXIT_FAILURE, …)` and not
+                // through `usage`.
+                if dest.directory.is_some() {
+                    return Err(MV.usage("multiple target directories specified".into()));
+                }
+                // Unreachable: `t:` in [`SHORT_OPTIONS`] and `Takes::Required`
+                // in [`LONG_OPTIONS`] both make the parser supply a value or
+                // fail before this arm is reached.
+                let Some(dir) = value else {
+                    return Err(MV.short_missing_argument(b't'));
+                };
+                dest.directory = Some(dir);
+            }
+            Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
+                dest.no_directory = true;
+            }
             // GNU `mv`'s remaining options, refused by name. Reaching them
-            // means the parser recognised the option and, for `-t` and `-S`,
-            // has already taken its value out of argv — which is what keeps the
-            // *rest* of the line reading the way GNU reads it.
+            // means the parser recognised the option and, for `-S`, has already
+            // taken its value out of argv — which is what keeps the *rest* of
+            // the line reading the way GNU reads it.
             Opt::Short(flag, _) => return Err(unimplemented_short(flag)),
             Opt::Long(name, _) => return Err(unimplemented_long(name)),
         }
     }
 
-    Ok(Request::Run(flags, paths))
+    Ok(Request::Run(flags, dest, paths))
 }
 
 /// The diagnostic for an option that GNU `mv` has and this one does not.
@@ -532,32 +586,101 @@ fn target_in_directory(dir: &Path, src: &Path) -> (PathBuf, OsString) {
 /// A failure on one source does not stop the others: `mv a b c dir/` with `b`
 /// unmovable still moves `a` and `c`, and exits 1.
 ///
-/// The shape follows GNU's `main` (`mv.c:440-550`), and the order is
+/// This is where [`Destination`] is resolved into one of three shapes — every
+/// operand into `-t`'s directory, one operand onto `-T`'s name, or the trailing
+/// operand deciding between the two. The order of the checks that pick between
+/// them is GNU's and is observable at every step; see the comments inline.
+///
+/// The shape follows GNU's `main` (`mv.c:427-550`), and the order is
 /// load-bearing rather than stylistic — see [`Renamed`].
-fn move_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> bool {
-    // Zero and one operand are distinct diagnostics, as in GNU. "missing
-    // operand" alone left the user to work out *which*.
-    let Some((dest, sources)) = paths.split_last() else {
-        let _ = writeln!(
-            job.err,
-            "mv: {}",
-            MV.usage_referring("missing file operand".into())
-        );
-        return false;
-    };
-    if sources.is_empty() {
-        let _ = writeln!(
-            job.err,
-            "mv: {}",
-            MV.usage_referring(format!(
+fn move_all<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    dest: &Destination,
+    paths: &[OsString],
+) -> bool {
+    // GNU's `n_files <= !target_directory` (`mv.c:427`). With `-t` the
+    // destination came from the option, so *one* operand is a whole command;
+    // without it the last operand is the destination and two are needed. Zero
+    // and one are distinct diagnostics, as in GNU — "missing operand" alone left
+    // the user to work out *which*.
+    if paths.len() <= usize::from(dest.directory.is_none()) {
+        let message = match paths.first() {
+            None => "missing file operand".to_string(),
+            Some(first) => format!(
                 "missing destination file operand after {}",
-                quoteaf_os(dest)
-            ))
-        );
+                quoteaf_os(first)
+            ),
+        };
+        let _ = writeln!(job.err, "mv: {}", MV.usage_referring(message));
         return false;
     }
 
-    let last = Path::new(dest);
+    // Both `-T` refusals come before `-t`'s directory is so much as stat'd,
+    // which is GNU's order and is observable: `mv -T -t nosuchdir a b` reports
+    // the combination and not the missing directory.
+    if dest.no_directory {
+        if dest.directory.is_some() {
+            let _ = writeln!(
+                job.err,
+                "mv: cannot combine --target-directory (-t) and --no-target-directory (-T)"
+            );
+            return false;
+        }
+        // `-T` says the destination is exactly one name, so a third operand is
+        // not a third source — there is nowhere for it to go.
+        if let Some(extra) = paths.get(2) {
+            let _ = writeln!(
+                job.err,
+                "mv: {}",
+                MV.usage_referring(format!("extra operand {}", quoteaf_os(extra)))
+            );
+            return false;
+        }
+    }
+
+    // `-t`: every operand is a source, and the directory is checked once, here.
+    // The failure names it as a *target directory*, which is a different
+    // sentence from the trailing operand's bare `target` below — the user named
+    // this one as a directory, so being told it is not one is the whole answer.
+    if let Some(dir) = &dest.directory {
+        if let Err(e) = target_directory_operand(Path::new(dir)) {
+            let why = strerror(&e);
+            let _ = writeln!(job.err, "mv: target directory {}: {why}", quoteaf_os(dir));
+            return false;
+        }
+        return move_into_directory(job, Path::new(dir), paths);
+    }
+
+    // Unreachable: the operand count was checked above.
+    let Some((dest_operand, sources)) = paths.split_last() else {
+        return false;
+    };
+    let last = Path::new(dest_operand);
+
+    // `-T`: the destination is a name to move *onto*, so it is never asked
+    // whether it is a directory — that question is the whole of what `-T`
+    // switches off, and `mv -T file dir` therefore reaches the sentence about
+    // overwriting a directory rather than putting `file` inside it.
+    //
+    // `Renamed::NotTried` and not the speculative attempt below, matching
+    // upstream, whose `renameatu (…, RENAME_NOREPLACE)` sits in the branch
+    // neither option reaches (`mv.c:501`). The attempt is not skipped so much as
+    // moved: [`move_one`] makes it on `NotTried`, with the same arguments and
+    // the same answer. What it does not do here is come *before* the
+    // last-operand-is-a-directory probe, because under `-T` there is no such
+    // probe for it to come before.
+    if dest.no_directory {
+        return move_one(
+            job,
+            Path::new(&sources[0]),
+            last,
+            dest_operand,
+            Renamed::NotTried,
+            true,
+            &mut None,
+        );
+    }
+
     let mut state = if sources.len() == 1 {
         match rename_noreplace(Path::new(&sources[0]), last) {
             Ok(()) => Renamed::Done,
@@ -584,7 +707,7 @@ fn move_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> 
                 // `error (EXIT_FAILURE, …)` at `mv.c:495`.
                 if sources.len() > 1 {
                     let why = strerror(&e);
-                    let _ = writeln!(job.err, "mv: target {}: {why}", quoteaf_os(dest));
+                    let _ = writeln!(job.err, "mv: target {}: {why}", quoteaf_os(dest_operand));
                     return false;
                 }
             }
@@ -597,13 +720,32 @@ fn move_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> 
             job,
             Path::new(&sources[0]),
             last,
-            dest,
+            dest_operand,
             state,
             true,
             &mut None,
         );
     };
 
+    move_into_directory(job, dir, sources)
+}
+
+/// Move every source in `sources` into `dir`, which the caller has already
+/// established is a directory.
+///
+/// Both spellings of "the destination is a directory" end here — the trailing
+/// operand and `-t` — which is the point of the split. `-t`'s only difference
+/// from a trailing directory is *which operands are sources*; once that is
+/// settled, the collision bookkeeping, the per-source diagnostics and the
+/// exit status are the same code and not a second copy of it.
+///
+/// Returns `true` if every source moved. One failure does not stop the rest:
+/// `mv a b c dir/` with `b` unmovable still moves `a` and `c`, and exits 1.
+fn move_into_directory<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    dir: &Path,
+    sources: &[OsString],
+) -> bool {
     // The set is built only when it can matter — GNU's comment at `mv.c:526`:
     // "the problem it is used to detect can arise only if there are two or more
     // files to move."
@@ -1296,9 +1438,16 @@ mod tests {
 
     /// The flags *and* operands of a successful parse.
     fn run_parse_full(items: &[&str]) -> (MvFlags, Vec<String>) {
+        let (f, _, p) = run_parse_dest(items);
+        (f, p)
+    }
+
+    /// The whole of a successful parse, [`Destination`] included.
+    fn run_parse_dest(items: &[&str]) -> (MvFlags, Destination, Vec<String>) {
         match parse_args(&args(items)).unwrap() {
-            Request::Run(f, p) => (
+            Request::Run(f, d, p) => (
                 f,
+                d,
                 p.iter().map(|o| o.to_string_lossy().into_owned()).collect(),
             ),
             other => panic!("expected Run, got {other:?}"),
@@ -1520,10 +1669,11 @@ mod tests {
     /// `-i`, `-n`, `--interactive` and `--no-clobber` were on this list until
     /// they were implemented, which is what a promotion out of it looks like:
     /// the letters move to [`the_last_of_minus_i_f_n_wins`] and the harness's
-    /// `missing` markers move to its own section.
+    /// `missing` markers move to its own section. `-t` and `-T` left the same
+    /// way, to [`a_target_directory_is_taken_out_of_the_operands`] and §16.
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in ["-b", "-t", "-T", "-u", "-S", "-Z"] {
+        for flag in ["-b", "-u", "-S", "-Z"] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -1537,7 +1687,6 @@ mod tests {
     fn unimplemented_long_options_are_rejected_by_name() {
         for name in [
             "--backup",
-            "--no-target-directory",
             "--strip-trailing-slashes",
             "--update",
             "--no-copy",
@@ -1553,31 +1702,91 @@ mod tests {
         }
     }
 
-    /// An option that takes a value takes it even while the option is refused.
+    /// An option that takes a value takes it even while the option is refused:
+    /// `-S`'s suffix does not survive into the operand list as a file to move.
     ///
     /// This is the half of [`SHORT_OPTIONS`] that is not about which options
-    /// exist. If `t:`'s colon were missing, `-t` would be refused with `dir`
-    /// left behind as an operand — and `mv -t dir a b` would then be a
-    /// four-operand command in every later reading of the line. Nothing user
-    /// visible depends on it while the refusal is fatal, which is exactly why
-    /// it is pinned now rather than after it starts mattering.
+    /// exist. Nothing user visible depends on it while the refusal is fatal,
+    /// which is exactly why it is pinned before it starts mattering — `-t`
+    /// spent a release in this test for that reason and is now
+    /// [`a_target_directory_is_taken_out_of_the_operands`] instead.
     #[test]
     fn a_refused_option_still_consumes_its_value() {
-        for form in [
-            &["-t", "dir", "a"][..],
-            &["-tdir", "a"][..],
-            &["--target-directory=dir", "a"][..],
-            &["--target-directory", "dir", "a"][..],
-            &["-S", ".bak", "a", "b"][..],
-        ] {
-            let e = fail(form);
-            assert!(e.sentence.contains("not implemented"), "{form:?}: {e:?}");
-        }
+        let e = fail(&["-S", ".bak", "a", "b"]);
+        assert!(e.sentence.contains("not implemented"), "{e:?}");
         // And a value that is *absent* is the parser's error, not the
         // refusal's — GNU reports the same, because `getopt` never reaches the
         // switch arm.
-        let e = fail(&["-t"]);
+        let e = fail(&["-S"]);
         assert!(e.sentence.contains("requires an argument"), "{e:?}");
+    }
+
+    /// All four spellings of `-t`, and the fact that its value never lands in
+    /// the operand list. `-tdir` is the one that could only work through a
+    /// table that says the letter takes a value; `mv a b -t d` is the one that
+    /// could only work through a parser that permutes.
+    #[test]
+    fn a_target_directory_is_taken_out_of_the_operands() {
+        for spelling in [
+            &["-t", "d", "a", "b"][..],
+            &["-td", "a", "b"][..],
+            &["--target-directory=d", "a", "b"][..],
+            &["--target-directory", "d", "a", "b"][..],
+            &["a", "b", "-t", "d"][..],
+        ] {
+            let (_, dest, paths) = run_parse_dest(spelling);
+            assert_eq!(dest.directory, Some(OsString::from("d")), "{spelling:?}");
+            assert!(!dest.no_directory, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+        }
+    }
+
+    /// GNU compares nothing here — it asks only whether one was given already —
+    /// so naming the same directory twice fails just as two different ones do.
+    #[test]
+    fn a_second_target_directory_is_refused() {
+        for spelling in [
+            &["-t", "d", "-t", "d", "a"][..],
+            &["-t", "d", "-t", "e", "a"][..],
+            &["-t", "d", "--target-directory=e", "a"][..],
+        ] {
+            let e = fail(spelling);
+            assert_eq!(e.sentence, "multiple target directories specified");
+            // `error (EXIT_FAILURE, …)` upstream, not `usage`, so there is no
+            // "Try 'mv --help'" after it.
+            assert_eq!(e.referral, None, "{spelling:?}");
+        }
+    }
+
+    /// `-T` is a flag, both spellings, and it does not disturb the operands.
+    /// Repeating it is not an error — unlike `-t`, there is no value to
+    /// disagree with.
+    #[test]
+    fn no_target_directory_is_a_flag_both_ways() {
+        for spelling in [
+            &["-T", "a", "b"][..],
+            &["--no-target-directory", "a", "b"][..],
+            &["-T", "-T", "a", "b"][..],
+            &["a", "b", "-T"][..],
+        ] {
+            let (_, dest, paths) = run_parse_dest(spelling);
+            assert!(dest.no_directory, "{spelling:?}");
+            assert_eq!(dest.directory, None, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+        }
+    }
+
+    /// The contradiction is *recorded*, not resolved, by the parser: both
+    /// fields come back set, and the diagnostic is [`move_all`]'s. This is what
+    /// [`Destination`]'s two fields buy — a single three-state field would have
+    /// had to pick a winner here, and every winner obeys an option the user is
+    /// about to be told is contradictory.
+    #[test]
+    fn both_target_options_together_survive_parsing() {
+        let (_, dest, paths) = run_parse_dest(&["-T", "-t", "d", "a"]);
+        assert_eq!(dest.directory, Some(OsString::from("d")));
+        assert!(dest.no_directory);
+        assert_eq!(paths, ["a"]);
     }
 
     #[test]
@@ -1601,7 +1810,7 @@ mod tests {
             "the fixture must be un-representable as String, or it tests nothing"
         );
         match parse_args(&[OsString::from("-f"), bad.clone(), OsString::from("d")]).unwrap() {
-            Request::Run(_, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
+            Request::Run(_, _, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1639,7 +1848,7 @@ mod tests {
             "the fixture must be un-representable as String, or it tests nothing"
         );
         match parse_args(&[OsString::from("-f"), bad.clone(), OsString::from("d")]).unwrap() {
-            Request::Run(_, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
+            Request::Run(_, _, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1754,6 +1963,17 @@ mod tests {
         replies: &[&str],
         paths: &[&Path],
     ) -> (bool, String, String, usize) {
+        mv_to(flags, Destination::default(), replies, paths)
+    }
+
+    /// [`mv_answering`] with a [`Destination`] other than the default, which is
+    /// how `-t` and `-T` are exercised without going through argv.
+    fn mv_to(
+        flags: MvFlags,
+        dest: Destination,
+        replies: &[&str],
+        paths: &[&Path],
+    ) -> (bool, String, String, usize) {
         let owned: Vec<OsString> = paths.iter().map(|p| p.as_os_str().to_owned()).collect();
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
@@ -1765,7 +1985,7 @@ mod tests {
                 err: &mut err,
                 answers: &mut answers,
             };
-            move_all(&mut job, &owned)
+            move_all(&mut job, &dest, &owned)
         };
         (
             ok,
@@ -2345,6 +2565,192 @@ mod tests {
         assert!(err.contains("Not a directory"), "{err}");
         // Nothing was touched.
         assert!(a.is_file() && b.is_file() && c.is_file());
+    }
+
+    // ------------------------------------------------------------ -t and -T --
+
+    /// `-t DIR`, as a [`Destination`].
+    fn into_dir(dir: &Path) -> Destination {
+        Destination {
+            directory: Some(dir.as_os_str().to_owned()),
+            no_directory: false,
+        }
+    }
+
+    /// `-T`. Named for what it does rather than for the letter: the destination
+    /// is a name, not a directory to fill.
+    fn as_name() -> Destination {
+        Destination {
+            directory: None,
+            no_directory: true,
+        }
+    }
+
+    fn mv_dest(dest: Destination, paths: &[&Path]) -> (bool, String) {
+        let (ok, _, err, _) = mv_to(MvFlags::default(), dest, &[], paths);
+        (ok, err)
+    }
+
+    /// The shape `-t` exists for and that nothing else can spell: a *single*
+    /// operand that still goes inside the directory rather than being taken for
+    /// the destination.
+    #[test]
+    fn a_target_directory_takes_every_operand_as_a_source() {
+        let dir = scratch("t_one");
+        let dest = dir.path("dest");
+        fs::create_dir(&dest).unwrap();
+        let a = dir.path("a");
+        fs::write(&a, b"A").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&dest), &[&a]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"A");
+        assert!(!a.exists());
+    }
+
+    /// The collision check is not a property of the trailing-directory shape —
+    /// `move_into_directory` is one function precisely so that `-t` cannot
+    /// arrive at it by a route that skips the bookkeeping.
+    #[test]
+    fn a_target_directory_still_refuses_a_shared_basename() {
+        let dir = scratch("t_collide");
+        let dest = dir.path("dest");
+        let one = dir.path("one");
+        let two = dir.path("two");
+        for d in [&dest, &one, &two] {
+            fs::create_dir(d).unwrap();
+        }
+        fs::write(one.join("same"), b"1").unwrap();
+        fs::write(two.join("same"), b"2").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&dest), &[&one.join("same"), &two.join("same")]);
+        assert!(!ok);
+        assert!(err.contains("will not overwrite just-created"), "{err}");
+        // The first arrival is the one that survives, and the second is still
+        // where it was.
+        assert_eq!(fs::read(dest.join("same")).unwrap(), b"1");
+        assert!(two.join("same").is_file());
+    }
+
+    /// With `-t` the destination is not the last operand, so *one* operand is a
+    /// whole command and zero is the "no operands at all" diagnostic — not the
+    /// "missing destination" one, which would name an operand that was given.
+    #[test]
+    fn a_target_directory_makes_one_operand_enough() {
+        let dir = scratch("t_count");
+        let dest = dir.path("dest");
+        fs::create_dir(&dest).unwrap();
+        let (ok, err) = mv_dest(into_dir(&dest), &[]);
+        assert!(!ok);
+        assert!(err.contains("missing file operand"), "{err}");
+        assert!(!err.contains("missing destination"), "{err}");
+    }
+
+    /// `target directory 'x': …`, not the trailing operand's bare `target 'x':
+    /// …`. The user named this one as a directory, so being told it is not one
+    /// is the whole answer; the other sentence has to also say *which* role the
+    /// operand was being read in.
+    #[test]
+    fn a_target_directory_that_is_not_one_is_named_as_a_target_directory() {
+        let dir = scratch("t_notdir");
+        let a = dir.path("a");
+        let plain = dir.path("plain");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&plain, b"P").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&plain), &[&a]);
+        assert!(!ok);
+        assert!(err.contains("target directory"), "{err}");
+        assert!(err.contains("Not a directory"), "{err}");
+        assert!(
+            a.is_file(),
+            "nothing may move once the directory is refused"
+        );
+
+        let (ok, err) = mv_dest(into_dir(&dir.path("nosuch")), &[&a]);
+        assert!(!ok);
+        assert!(err.contains("target directory"), "{err}");
+        assert!(err.contains("No such file"), "{err}");
+    }
+
+    /// `-T` against a directory is a refusal, and the very same operands
+    /// *without* `-T` are a move into it. The pair is the whole point of the
+    /// option, so it is asserted as a pair.
+    #[test]
+    fn no_target_directory_refuses_the_directory_the_default_would_fill() {
+        let dir = scratch("cap_t_dir");
+        let a = dir.path("a");
+        let d = dir.path("d");
+        fs::write(&a, b"A").unwrap();
+        fs::create_dir(&d).unwrap();
+
+        let (ok, err) = mv_dest(as_name(), &[&a, &d]);
+        assert!(!ok);
+        assert!(
+            err.contains("cannot overwrite directory"),
+            "{err}: -T must not move it inside"
+        );
+        assert!(!d.join("a").exists());
+
+        let (ok, err) = mv_dest(Destination::default(), &[&a, &d]);
+        assert!(ok, "{err}");
+        assert!(d.join("a").is_file());
+    }
+
+    /// The case `-T` is *for*: replacing a directory rather than nesting it
+    /// inside itself. `mv newdir olddir` puts `newdir` at `olddir/newdir`;
+    /// `mv -T newdir olddir` makes `newdir` *be* `olddir`.
+    #[test]
+    fn no_target_directory_replaces_an_empty_directory() {
+        let dir = scratch("cap_t_replace");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dst).unwrap();
+        fs::write(src.join("inside"), b"I").unwrap();
+
+        let (ok, err) = mv_dest(as_name(), &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert!(!src.exists());
+        assert_eq!(fs::read(dst.join("inside")).unwrap(), b"I");
+    }
+
+    /// `-T` says the destination is exactly one name, so a third operand is not
+    /// a third source — there is nowhere for it to go.
+    #[test]
+    fn no_target_directory_refuses_a_third_operand() {
+        let dir = scratch("cap_t_extra");
+        let (ok, err) = mv_dest(as_name(), &[&dir.path("a"), &dir.path("b"), &dir.path("c")]);
+        assert!(!ok);
+        assert!(err.contains("extra operand"), "{err}");
+        assert!(err.contains('c'), "{err}");
+    }
+
+    /// Both options at once is a diagnostic of its own, and it is raised
+    /// *before* `-t`'s directory is stat'd — so a directory that does not exist
+    /// is not what gets reported. That order is GNU's and this is the only case
+    /// that can see it.
+    #[test]
+    fn both_target_options_are_refused_before_the_directory_is_looked_at() {
+        let dir = scratch("cap_t_combine");
+        let dest = Destination {
+            directory: Some(dir.path("nosuchdir").into_os_string()),
+            no_directory: true,
+        };
+        let (ok, err) = mv_dest(dest, &[&dir.path("a")]);
+        assert!(!ok);
+        assert!(
+            err.contains("cannot combine --target-directory (-t) and --no-target-directory (-T)"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("nosuchdir"),
+            "the missing directory must not be reported: {err}"
+        );
+        // And it is a plain line, not a usage error, so there is no referral.
+        assert!(!err.contains("Try 'mv"), "{err}");
     }
 
     /// Bug 2 in the module docs: with `-f` the old code printed nothing here and

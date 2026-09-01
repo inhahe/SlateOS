@@ -867,7 +867,110 @@ TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
 run_case -vi file.txt dst
 
 # =============================================================================
-# 16. --help and --version
+# 16. -t and -T, the two ways to say what the destination is
+# =============================================================================
+# Without either of them the *last operand* decides its own role, by being a
+# directory or not. That is convenient and it is ambiguous, and both options
+# exist to remove the ambiguity from opposite ends: `-t DIR` names the directory
+# up front so every operand is a source, and `-T` says the destination is a
+# name, never a directory to move into.
+#
+# The ambiguity is not academic. `mv "$f" "$d"` in a script does one thing when
+# `$d` exists as a directory and a different thing when it does not, so a script
+# that means "put this file in that directory" silently renames the file the day
+# the directory is missing. `-t` is what `xargs mv -t dir` is for; `-T` is what
+# makes `mv -T newdir olddir` replace a directory rather than nest it inside
+# itself.
+#
+# The order of the checks below is upstream's (`mv.c:427-500`) and every step of
+# it is observable, which is why the contradictory and the malformed lines are
+# here rather than left to a unit test:
+#
+#   1. the operand count, which `-t` changes: one operand is a whole command
+#   2. `-T` with `-t`, refused before `-t`'s directory is so much as stat'd
+#   3. `-T` with a third operand, which has nowhere to go
+#   4. `-t`'s directory, whose failure says `target directory` where the
+#      trailing operand's says a bare `target`
+#
+# What `-T` switches off has no diagnostic of its own: the question "is the last
+# operand a directory?", which every other two-operand case asks and answers
+# before deciding anything. That is why `mv -T file dir` and `mv file dir` are
+# paired below — the same two operands, one refusal and one move, and no option
+# in sight that says which.
+
+run_case -t dir file.txt
+run_case --target-directory=dir file.txt tree/a.txt
+# The clustered value, which only works through a table that says `t` takes one.
+run_case -tdir file.txt
+# After the operands, since options permute.
+run_case file.txt -t dir
+# A single source still goes *inside*, which is the shape that has no spelling
+# without `-t`: `mv file.txt dir` would too, but only because `dir` happens to
+# be a directory today.
+run_case -t dir tree
+run_case -v -t dir file.txt tree/a.txt
+# A trailing slash on the directory, and a symlink to it: the operand is opened
+# the way gnulib opens it, which follows.
+run_case -t dir/ file.txt
+TREE='mktree; ln -s dir dlink'
+run_case -t dlink file.txt
+# An overwrite inside the directory is an ordinary overwrite.
+TREE='mktree; printf old > dir/file.txt'
+run_case -t dir file.txt
+# Two sources with one basename, which is the collision `dest_info` is for. It
+# needs `-t` no more than it needs a trailing directory, but the operand list is
+# a different shape here and the check must still fire.
+TREE='mktree; mkdir two; printf x > two/a.txt'
+run_case -t dir tree/a.txt two/a.txt
+
+# `-t` and the operand count. One operand is enough; zero is not, and the
+# diagnostic is the one for *no operands at all*, not for a missing destination.
+run_case -t dir
+run_case -t dir ''
+# The directory itself, checked once and named as a *target directory* — a
+# different sentence from the trailing operand's bare `target`.
+run_case -t nosuchdir file.txt
+run_case -t file.txt tree/a.txt
+run_case -t '' file.txt
+# A second `-t` is refused without the two being compared, so naming the same
+# directory twice fails exactly as two different ones do.
+run_case -t dir -t tree file.txt
+run_case -t dir -t dir file.txt
+run_case -t dir --target-directory=tree file.txt
+
+# `-T`: the destination is a name. Against a directory that is a refusal, and
+# without `-T` the very same line moves the file inside.
+run_case -T file.txt dir
+run_case file.txt dir
+run_case -T file.txt new.txt
+run_case --no-target-directory tree moved
+# Directory onto directory, which is the case `-T` exists for: with an empty
+# destination the rename succeeds and replaces it; with a full one it fails
+# rather than nesting.
+run_case -T tree dir
+TREE='mktree; printf x > dir/keep'
+run_case -T tree dir
+# An existing plain destination is overwritten, with no question asked about
+# whether the name was free.
+TREE='mktree; printf old > dst'
+run_case -T file.txt dst
+# Repeating it is not an error: unlike `-t` there is no value to disagree with.
+run_case -T -T file.txt new.txt
+run_case file.txt new.txt -T
+
+# `-T` and the operand count, which it does not change: two, no more and no
+# fewer.
+run_case -T
+run_case -T file.txt
+run_case -T file.txt tree/a.txt dir
+# Both options at once is a diagnostic of its own, raised before `-t`'s
+# directory is looked at — so a *missing* directory is not what gets reported.
+run_case -T -t dir file.txt
+run_case -t dir -T file.txt
+run_case -T -t nosuchdir file.txt
+
+# =============================================================================
+# 17. --help and --version
 # =============================================================================
 # The family's two deliberate differences: `--help` omits the GNU project's
 # `Report bugs to:` block, and `--version` names SlateOS.
@@ -879,31 +982,15 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help file.txt dst
 xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 
 # =============================================================================
-# 17. Options GNU has and this mv has not
+# 18. Options GNU has and this mv has not
 # =============================================================================
 # An inventory, not a permission. Each entry names its option and turns into an
 # XPASS the moment the option lands, which is what forces it to be promoted to a
 # real case above. Every one of these is refused rather than ignored: silently
 # ignoring an option that decides whether a file is destroyed is how data is
-# lost. `-v` was promoted this way and became §14; `-i`/`-f`/`-n` became §15.
-
-# -t, --target-directory: the destination given first, so every operand is a
-# source. It is also the only shape in which one source and a directory is
-# unambiguous.
-missing -t dir file.txt
-missing --target-directory=dir file.txt tree/a.txt
-missing -t dir
-missing -t nosuchdir file.txt
-missing -t file.txt tree/a.txt
-missing -t dir -t tree file.txt
-
-# -T, --no-target-directory: the destination is a name, never a directory to
-# move into.
-missing -T file.txt dir
-missing -T file.txt new.txt
-missing --no-target-directory tree moved
-missing -T file.txt tree/a.txt dir
-missing -T -t dir file.txt
+# lost. `-v` was promoted this way and became §14; `-i`/`-f`/`-n` became §15;
+# `-t`/`-T` became §16, where the eleven entries that were here turned into
+# thirty-three.
 
 # -u, --update: move only when the source is newer. The fixture pins both times
 # so `older` has a fixed answer.

@@ -109,6 +109,22 @@ const MAX_INTERVAL_MINUTES: u32 = 600_000;
 /// overlap where one tab would answer for the other.
 const TAB_HIT_WIDTH: f32 = 80.0;
 
+// Where each column of the two lists starts. Named at module scope because the
+// heading strip and the rows have to agree, and they are now drawn by two
+// different functions: a heading at one offset over cells at another is a table
+// that lies about what it is showing.
+const COL_ENABLED_X: f32 = PADDING;
+const COL_TASK_NAME_X: f32 = 50.0;
+const COL_TASK_COMMAND_X: f32 = 200.0;
+const COL_TASK_FREQ_X: f32 = 420.0;
+const COL_TASK_NEXT_X: f32 = 560.0;
+const COL_TASK_RESULT_X: f32 = 700.0;
+const COL_RUN_TIME_X: f32 = PADDING;
+const COL_RUN_NAME_X: f32 = 180.0;
+const COL_RUN_STATUS_X: f32 = 380.0;
+const COL_RUN_DURATION_X: f32 = 500.0;
+const COL_RUN_ERROR_X: f32 = 620.0;
+
 // ============================================================================
 // Targets -- every control a click can land on
 // ============================================================================
@@ -244,6 +260,89 @@ fn take_top(y: &mut f32, limit: f32, width: f32, want: f32) -> Rect {
     let band = Rect::new(0.0, *y, width, h);
     *y += h;
     band
+}
+
+/// The top of one line of `size`, centred down `band` -- or `None` when `band`
+/// is too short to hold the line.
+///
+/// Centring is not a bound. `band.y + (band.h - size) / 2.0` sits *above* the
+/// band's top edge the moment the band is shorter than the line, and hangs the
+/// same distance below its bottom, so a strip squeezed by a small window puts
+/// its run outside the strip in both directions at once. Every run in this file
+/// was placed by that expression and nothing bounded any of them: [`take_top`]
+/// deliberately shrinks a band to what remains, so a window a few points tall
+/// gives the header a strip shorter than its own heading and the title is
+/// drawn over the toolbar below it.
+///
+/// The refusal lives here, in one place every caller goes through, rather than
+/// as eight copies of the same comparison -- which is how the rule would have
+/// come to hold in seven places and not the eighth.
+fn centre_line(band: Rect, size: f32) -> Option<f32> {
+    (band.h + 0.01 >= size).then(|| band.y + (band.h - size) / 2.0)
+}
+
+/// The horizontal counterpart of [`centre_line`]: the part of `x .. x + want`
+/// that lies inside `band`, as `(x, width)` -- or `None` when none of it does.
+///
+/// Every run in this file is placed at a constant inset and given a constant
+/// `max_width`, and a constant is not a bound either: `PADDING` is left of a
+/// band narrower than the padding, and a 190-point count pinned 200 points from
+/// the right edge runs off it as soon as the window is narrower than the two
+/// numbers together. Returning `None` rather than a zero-width span is what
+/// keeps the run out of the command list entirely -- a zero-width run still has
+/// an `x`, and an `x` outside the band is still ink outside the band.
+fn span(band: Rect, x: f32, want: f32) -> Option<(f32, f32)> {
+    let left = x.max(band.x);
+    let right = (x + want.max(0.0)).min(band.right());
+    (right > left).then_some((left, right - left))
+}
+
+/// One line of text to place inside a band: everything about it except which
+/// band it goes in and what it says.
+#[derive(Clone, Copy)]
+struct Run {
+    /// Left edge, before clipping to the band.
+    x: f32,
+    /// How much width it would like, before clipping to the band.
+    w: f32,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+}
+
+/// Push `text` as one line inside `band`, or push nothing at all when the band
+/// has no room for it.
+///
+/// The single door every list cell goes through, so that "a cell stays inside
+/// its row" is one rule rather than one rule per column -- the task list has
+/// six columns and the history list four, and a rule stated ten times is a rule
+/// that will hold nine times.
+fn run_in(frame: &mut Frame, band: Rect, run: Run, text: String) {
+    if let (Some(y), Some((x, w))) = (centre_line(band, run.size), span(band, run.x, run.w)) {
+        frame.push(RenderCommand::Text {
+            x,
+            y,
+            text,
+            color: run.color,
+            font_size: run.size,
+            font_weight: run.weight,
+            max_width: Some(w),
+            overflow: TextOverflow::Ellipsis,
+        });
+    }
+}
+
+/// A strip of at most `want` points along the bottom edge of `band`, as
+/// `(y, height)`.
+///
+/// The fill counterpart of [`centre_line`]. A separator or an underline written
+/// as `band.bottom() - want` with a literal height is above the band's top edge
+/// whenever the band is thinner than the rule itself, and a fill is pushed
+/// exactly as asked whatever the clip -- so it really does paint on whatever
+/// sits above.
+fn bottom_strip(band: Rect, want: f32) -> (f32, f32) {
+    let h = want.min(band.h).max(0.0);
+    (band.bottom() - h, h)
 }
 
 /// Where every band goes, derived from the live window size.
@@ -2183,16 +2282,21 @@ impl SchedulerUI {
             },
         });
 
-        frame.push(RenderCommand::Text {
-            x: PADDING,
-            y: band.y + (band.h - FONT_SIZE_HEADING) / 2.0,
-            text: String::from("Task Scheduler"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        if let (Some(y), Some((x, w))) = (
+            centre_line(band, FONT_SIZE_HEADING),
+            span(band, PADDING, width - PADDING * 2.0),
+        ) {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("Task Scheduler"),
+                color: COLOR_TEXT,
+                font_size: FONT_SIZE_HEADING,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         // Task count in header.
         let count_text = format!(
@@ -2200,19 +2304,24 @@ impl SchedulerUI {
             self.scheduler.task_count(),
             self.scheduler.enabled_count()
         );
-        frame.push(RenderCommand::Text {
-            // Never left of the title, however narrow the window gets: at
-            // 200px the two would otherwise swap places and the count would
-            // be drawn off the left edge.
-            x: (width - 200.0).max(PADDING),
-            y: band.y + (band.h - FONT_SIZE_SMALL) / 2.0,
-            text: count_text,
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(190.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Never left of the title, however narrow the window gets: at 200px the
+        // two would otherwise swap places and the count would be drawn off the
+        // left edge.
+        if let (Some(y), Some((x, w))) = (
+            centre_line(band, FONT_SIZE_SMALL),
+            span(band, (width - 200.0).max(PADDING), 190.0),
+        ) {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: count_text,
+                color: COLOR_SUBTEXT,
+                font_size: FONT_SIZE_SMALL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
     }
 
     fn render_toolbar(&self, frame: &mut Frame, layout: &Layout) {
@@ -2227,10 +2336,19 @@ impl SchedulerUI {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let btn_y = band.y + (band.h - BUTTON_HEIGHT) / 2.0;
+        // The button shrinks to the strip rather than being centred in it at
+        // its nominal height. A button is a fill and a hit box, and both are
+        // taken exactly as asked whatever the clip: a 28-point button centred
+        // in a 6-point toolbar paints over the tab bar below it *and* answers
+        // clicks there.
+        let btn_h = BUTTON_HEIGHT.min(band.h);
+        let btn_y = band.y + (band.h - btn_h) / 2.0;
         let mut bx = PADDING;
         let mut button = |target: Option<Target>, label: &str, bg: Color| {
-            let rect = Rect::new(bx, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT);
+            // Width the same way: four 80-point buttons need 360 points of
+            // toolbar, and the window is not obliged to provide them.
+            let w = (band.right() - bx).clamp(0.0, BUTTON_WIDTH);
+            let rect = Rect::new(bx, btn_y, w, btn_h);
             bx += BUTTON_WIDTH + 8.0;
             (target, label.to_string(), bg, rect)
         };
@@ -2287,42 +2405,50 @@ impl SchedulerUI {
             corner_radii: CornerRadii::ZERO,
         });
 
-        // Separator line.
-        frame.push(RenderCommand::Line {
-            x1: 0.0,
-            y1: band.bottom() - 1.0,
-            x2: band.w,
-            y2: band.bottom() - 1.0,
-            color: COLOR_SURFACE1,
-            width: 1.0,
-        });
+        // Separator line, along the bottom edge but never above the top one.
+        let (sep_y, sep_h) = bottom_strip(band, 1.0);
+        if sep_h > 0.0 {
+            frame.push(RenderCommand::Line {
+                x1: 0.0,
+                y1: sep_y,
+                x2: band.w,
+                y2: sep_y,
+                color: COLOR_SURFACE1,
+                width: sep_h,
+            });
+        }
 
         for (tab, label, x, underline_w) in [
             (UiTab::Tasks, "Tasks", PADDING, 40.0),
             (UiTab::History, "History", PADDING + 80.0, 50.0),
         ] {
             let selected = self.tab == tab;
-            frame.push(RenderCommand::Text {
-                x,
-                y: band.y + (band.h - FONT_SIZE) / 2.0,
-                text: label.to_string(),
-                color: if selected { COLOR_BLUE } else { COLOR_SUBTEXT },
-                font_size: FONT_SIZE,
-                font_weight: if selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                max_width: Some(TAB_HIT_WIDTH),
-                overflow: TextOverflow::Ellipsis,
-            });
+            if let (Some(y), Some((tx, tw))) =
+                (centre_line(band, FONT_SIZE), span(band, x, TAB_HIT_WIDTH))
+            {
+                frame.push(RenderCommand::Text {
+                    x: tx,
+                    y,
+                    text: label.to_string(),
+                    color: if selected { COLOR_BLUE } else { COLOR_SUBTEXT },
+                    font_size: FONT_SIZE,
+                    font_weight: if selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                    max_width: Some(tw),
+                    overflow: TextOverflow::Ellipsis,
+                });
+            }
 
-            if selected {
+            if selected && let Some((ux, uw)) = span(band, x, underline_w) {
+                let (uy, uh) = bottom_strip(band, 3.0);
                 frame.push(RenderCommand::FillRect {
-                    x,
-                    y: band.bottom() - 3.0,
-                    width: underline_w,
-                    height: 3.0,
+                    x: ux,
+                    y: uy,
+                    width: uw,
+                    height: uh,
                     color: COLOR_BLUE,
                     corner_radii: CornerRadii::all(1.5),
                 });
@@ -2331,10 +2457,9 @@ impl SchedulerUI {
             // The whole height of the strip, not just the text's own line:
             // a tab that only answers to a click on its glyphs is a tab that
             // feels broken every time the pointer lands a pixel high.
-            frame.hit(
-                Target::Tab(tab),
-                Rect::new(x, band.y, TAB_HIT_WIDTH, band.h),
-            );
+            if let Some((hx, hw)) = span(band, x, TAB_HIT_WIDTH) {
+                frame.hit(Target::Tab(tab), Rect::new(hx, band.y, hw, band.h));
+            }
         }
     }
 
@@ -2344,44 +2469,43 @@ impl SchedulerUI {
         let top = area.y;
         let height = area.h;
 
-        // Column headers.
-        let header_y = top;
+        // Column headings. The strip is a band of the area, not a 32-point
+        // rectangle drawn at the area's top corner: the content area is
+        // whatever `take_top` had left, and it is routinely shorter than one
+        // row in a small window.
+        let head = Rect::new(area.x, area.y, area.w, ROW_HEIGHT.min(area.h));
         frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: header_y,
-            width,
-            height: ROW_HEIGHT,
+            x: head.x,
+            y: head.y,
+            width: head.w,
+            height: head.h,
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let col_enabled_x = PADDING;
-        let col_name_x: f32 = 50.0;
-        let col_command_x: f32 = 200.0;
-        let col_freq_x: f32 = 420.0;
-        let col_next_x: f32 = 560.0;
-        let col_result_x: f32 = 700.0;
-
-        let header_text_y = header_y + (ROW_HEIGHT - FONT_SIZE_SMALL) / 2.0;
-
         for (label, x) in [
-            ("On", col_enabled_x),
-            ("Name", col_name_x),
-            ("Command", col_command_x),
-            ("Frequency", col_freq_x),
-            ("Next Run", col_next_x),
-            ("Last Result", col_result_x),
+            ("On", COL_ENABLED_X),
+            ("Name", COL_TASK_NAME_X),
+            ("Command", COL_TASK_COMMAND_X),
+            ("Frequency", COL_TASK_FREQ_X),
+            ("Next Run", COL_TASK_NEXT_X),
+            ("Last Result", COL_TASK_RESULT_X),
         ] {
-            frame.push(RenderCommand::Text {
-                x,
-                y: header_text_y,
-                text: label.to_string(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(140.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            // A column that starts past the right edge is dropped rather than
+            // drawn off it: the six columns want 815 points and the window is
+            // free to be 400.
+            run_in(
+                frame,
+                head,
+                Run {
+                    x,
+                    w: 140.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Bold,
+                },
+                label.to_string(),
+            );
         }
 
         // Task rows. The old loop drew every task at a computed y with no
@@ -2408,166 +2532,225 @@ impl SchedulerUI {
             let row_y = rows_top + (drawn as f32) * ROW_HEIGHT;
             let is_selected = self.selected_task_id == Some(task.id);
 
-            // Row background.
-            let row_bg = if is_selected {
-                COLOR_SURFACE1
-            } else if i % 2 == 0 {
-                COLOR_BASE
-            } else {
-                COLOR_SURFACE0
+            // The row is what the area and the nominal row height have in
+            // common. `scroll_window::visible` already counts whole rows, so
+            // this trims nothing today -- it is here so that the row a cell is
+            // measured against can never be a row the area does not contain.
+            let Some(row) = Rect::new(area.x, row_y, area.w, ROW_HEIGHT).intersect(area) else {
+                continue;
             };
-            frame.push(RenderCommand::FillRect {
-                x: 0.0,
-                y: row_y,
-                width,
-                height: ROW_HEIGHT,
-                color: row_bg,
-                corner_radii: CornerRadii::ZERO,
-            });
-            // By task id, not by row index: the list scrolls and can be
-            // re-sorted, so an index recorded here would name a different
-            // task by the time the click arrives.
-            frame.hit(
-                Target::TaskRow(task.id),
-                Rect::new(0.0, row_y, width, ROW_HEIGHT),
-            );
+            Self::draw_task_row(frame, row, task, i % 2 == 0, is_selected);
+        }
 
-            let text_y = row_y + (ROW_HEIGHT - FONT_SIZE) / 2.0;
-
-            // Enabled checkbox. Recorded after the row so it wins the click:
-            // the box is inside the row's own rectangle, and hitting the box
-            // must toggle rather than merely select.
-            let cb_y = row_y + (ROW_HEIGHT - CHECKBOX_SIZE) / 2.0;
-            frame.hit(
-                Target::TaskCheckbox(task.id),
-                // Padded to the full row height. A 16px square is a small
-                // target for a pointer; the column is the checkbox's alone,
-                // so widening it costs nothing and misses nothing.
-                Rect::new(0.0, row_y, col_enabled_x + CHECKBOX_SIZE + 6.0, ROW_HEIGHT),
+        // A list hiding tasks says how many. The band is the line's own box,
+        // so a strip with no room below the last row drops the note rather
+        // than writing it over the status bar.
+        let hidden = tasks.len().saturating_sub(window.count);
+        if hidden > 0
+            && let Some(band) = Rect::new(
+                area.x,
+                rows_top + (window.count as f32) * ROW_HEIGHT,
+                area.w,
+                FONT_SIZE_SMALL,
+            )
+            .intersect(area)
+        {
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: PADDING,
+                    w: width - PADDING * 2.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                format!("{hidden} more"),
             );
+        }
+
+        // Empty state.
+        if tasks.is_empty()
+            && let Some(band) =
+                Rect::new(area.x, top + ROW_HEIGHT + 40.0, area.w, FONT_SIZE).intersect(area)
+        {
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: width / 2.0 - 80.0,
+                    w: 200.0,
+                    size: FONT_SIZE,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                String::from("No tasks scheduled"),
+            );
+        }
+    }
+
+    /// The old body of the loop above, kept as a function of the row it is
+    /// given.
+    ///
+    /// Not a refactor for tidiness: as an inline block its only rectangle came
+    /// from `scroll_window::visible`, which counts *whole* rows, so every bound
+    /// inside it -- the row's own `intersect`, the checkbox's `.min(row.h)`,
+    /// each cell's `run_in` -- was exercised at exactly one height and could be
+    /// deleted without a test noticing. Taking the row as an argument is what
+    /// lets the suite hand it a three-point one.
+    fn draw_task_row(
+        frame: &mut Frame,
+        row: Rect,
+        task: &ScheduledTask,
+        even: bool,
+        selected: bool,
+    ) {
+        // See `render_text_field`: no area means no ink and no hit box. A row
+        // squeezed to nothing that still records `TaskRow` is a click target
+        // for a task the user cannot see.
+        if row.is_empty() {
+            return;
+        }
+
+        // Row background.
+        let row_bg = if selected {
+            COLOR_SURFACE1
+        } else if even {
+            COLOR_BASE
+        } else {
+            COLOR_SURFACE0
+        };
+        frame.push(RenderCommand::FillRect {
+            x: row.x,
+            y: row.y,
+            width: row.w,
+            height: row.h,
+            color: row_bg,
+            corner_radii: CornerRadii::ZERO,
+        });
+        // By task id, not by row index: the list scrolls and can be
+        // re-sorted, so an index recorded here would name a different
+        // task by the time the click arrives.
+        frame.hit(Target::TaskRow(task.id), row);
+
+        // Enabled checkbox. Recorded after the row so it wins the click:
+        // the box is inside the row's own rectangle, and hitting the box
+        // must toggle rather than merely select.
+        //
+        // Padded to the full row height. A 16px square is a small target
+        // for a pointer; the column is the checkbox's alone, so widening
+        // it costs nothing and misses nothing.
+        if let Some(hit) =
+            Rect::new(row.x, row.y, COL_ENABLED_X + CHECKBOX_SIZE + 6.0, row.h).intersect(row)
+        {
+            frame.hit(Target::TaskCheckbox(task.id), hit);
+        }
+        // Centred and then cut to the row, rather than shrunk to fit and then
+        // centred. The two agree in every case -- a 16-point box centred in a
+        // six-point row is cut back to exactly the six points a shrunken one
+        // would have covered -- so the shrink was doing no work the cut was
+        // not already doing, and the sweep proved it by deleting it without a
+        // test noticing. What does the work is the `intersect`.
+        if let Some(cb) = Rect::new(
+            COL_ENABLED_X,
+            row.y + (row.h - CHECKBOX_SIZE) / 2.0,
+            CHECKBOX_SIZE,
+            CHECKBOX_SIZE,
+        )
+        .intersect(row)
+        {
             frame.push(RenderCommand::StrokeRect {
-                x: col_enabled_x,
-                y: cb_y,
-                width: CHECKBOX_SIZE,
-                height: CHECKBOX_SIZE,
+                x: cb.x,
+                y: cb.y,
+                width: cb.w,
+                height: cb.h,
                 color: COLOR_SUBTEXT,
                 line_width: 1.0,
                 corner_radii: CornerRadii::all(3.0),
             });
-            if task.enabled {
+            if task.enabled
+                && let Some(tick) =
+                    Rect::new(cb.x + 3.0, cb.y + 3.0, cb.w - 6.0, cb.h - 6.0).intersect(cb)
+            {
                 frame.push(RenderCommand::FillRect {
-                    x: col_enabled_x + 3.0,
-                    y: cb_y + 3.0,
-                    width: CHECKBOX_SIZE - 6.0,
-                    height: CHECKBOX_SIZE - 6.0,
+                    x: tick.x,
+                    y: tick.y,
+                    width: tick.w,
+                    height: tick.h,
                     color: COLOR_GREEN,
                     corner_radii: CornerRadii::all(2.0),
                 });
             }
-
-            // Name.
-            let name_color = if task.enabled {
-                COLOR_TEXT
-            } else {
-                COLOR_SUBTEXT
-            };
-            frame.push(RenderCommand::Text {
-                x: col_name_x,
-                y: text_y,
-                text: task.name.clone(),
-                color: name_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(145.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Command.
-            frame.push(RenderCommand::Text {
-                x: col_command_x,
-                y: text_y,
-                text: task.command.clone(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(215.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Frequency.
-            frame.push(RenderCommand::Text {
-                x: col_freq_x,
-                y: text_y,
-                text: task.frequency.display_name(),
-                color: COLOR_MAUVE,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(135.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Next run.
-            let next_run_text = if task.next_run_timestamp == u64::MAX {
-                String::from("--")
-            } else {
-                format_timestamp(task.next_run_timestamp)
-            };
-            frame.push(RenderCommand::Text {
-                x: col_next_x,
-                y: text_y,
-                text: next_run_text,
-                color: COLOR_TEAL,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(135.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Last result.
-            let result_color = match &task.last_result {
-                None => COLOR_SUBTEXT,
-                Some(TaskResult::Ok) => COLOR_GREEN,
-                Some(TaskResult::Error(_)) => COLOR_RED,
-            };
-            frame.push(RenderCommand::Text {
-                x: col_result_x,
-                y: text_y,
-                text: task.result_display().to_string(),
-                color: result_color,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(115.0),
-                overflow: TextOverflow::Ellipsis,
-            });
         }
 
-        // A list hiding tasks says how many.
-        let hidden = tasks.len().saturating_sub(window.count);
-        if hidden > 0 {
-            frame.push(RenderCommand::Text {
-                x: PADDING,
-                y: rows_top + (window.count as f32) * ROW_HEIGHT,
-                text: format!("{hidden} more"),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-
-        // Empty state.
-        if tasks.is_empty() {
-            frame.push(RenderCommand::Text {
-                x: width / 2.0 - 80.0,
-                y: top + ROW_HEIGHT + 40.0,
-                text: String::from("No tasks scheduled"),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let name_color = if task.enabled {
+            COLOR_TEXT
+        } else {
+            COLOR_SUBTEXT
+        };
+        let next_run_text = if task.next_run_timestamp == u64::MAX {
+            String::from("--")
+        } else {
+            format_timestamp(task.next_run_timestamp)
+        };
+        let result_color = match &task.last_result {
+            None => COLOR_SUBTEXT,
+            Some(TaskResult::Ok) => COLOR_GREEN,
+            Some(TaskResult::Error(_)) => COLOR_RED,
+        };
+        for (run, text) in [
+            (
+                Run {
+                    x: COL_TASK_NAME_X,
+                    w: 145.0,
+                    size: FONT_SIZE,
+                    color: name_color,
+                    weight: FontWeightHint::Regular,
+                },
+                task.name.clone(),
+            ),
+            (
+                Run {
+                    x: COL_TASK_COMMAND_X,
+                    w: 215.0,
+                    size: FONT_SIZE,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                task.command.clone(),
+            ),
+            (
+                Run {
+                    x: COL_TASK_FREQ_X,
+                    w: 135.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_MAUVE,
+                    weight: FontWeightHint::Regular,
+                },
+                task.frequency.display_name(),
+            ),
+            (
+                Run {
+                    x: COL_TASK_NEXT_X,
+                    w: 135.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_TEAL,
+                    weight: FontWeightHint::Regular,
+                },
+                next_run_text,
+            ),
+            (
+                Run {
+                    x: COL_TASK_RESULT_X,
+                    w: 115.0,
+                    size: FONT_SIZE_SMALL,
+                    color: result_color,
+                    weight: FontWeightHint::Regular,
+                },
+                task.result_display().to_string(),
+            ),
+        ] {
+            run_in(frame, row, run, text);
         }
     }
 
@@ -2582,41 +2765,37 @@ impl SchedulerUI {
         let top = area.y;
         let height = area.h;
 
-        // Column headers.
-        let header_y = top;
+        // Column headings, as a band of the area rather than a fixed-height
+        // rectangle at its top corner. See `render_task_list`.
+        let head = Rect::new(area.x, area.y, area.w, ROW_HEIGHT.min(area.h));
         frame.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: header_y,
-            width,
-            height: ROW_HEIGHT,
+            x: head.x,
+            y: head.y,
+            width: head.w,
+            height: head.h,
             color: COLOR_SURFACE1,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let col_time_x = PADDING;
-        let col_name_x: f32 = 180.0;
-        let col_status_x: f32 = 380.0;
-        let col_duration_x: f32 = 500.0;
-        let col_error_x: f32 = 620.0;
-
-        let header_text_y = header_y + (ROW_HEIGHT - FONT_SIZE_SMALL) / 2.0;
         for (label, x) in [
-            ("Time", col_time_x),
-            ("Task", col_name_x),
-            ("Status", col_status_x),
-            ("Duration", col_duration_x),
-            ("Error", col_error_x),
+            ("Time", COL_RUN_TIME_X),
+            ("Task", COL_RUN_NAME_X),
+            ("Status", COL_RUN_STATUS_X),
+            ("Duration", COL_RUN_DURATION_X),
+            ("Error", COL_RUN_ERROR_X),
         ] {
-            frame.push(RenderCommand::Text {
-                x,
-                y: header_text_y,
-                text: label.to_string(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(180.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            run_in(
+                frame,
+                head,
+                Run {
+                    x,
+                    w: 180.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Bold,
+                },
+                label.to_string(),
+            );
         }
 
         // History rows (newest first). The 100-entry cap was standing in for
@@ -2642,117 +2821,140 @@ impl SchedulerUI {
             // the list scrolls.
             let i = window.start.saturating_add(drawn);
             let row_y = rows_top + (drawn as f32) * ROW_HEIGHT;
-            let row_bg = if i % 2 == 0 {
-                COLOR_BASE
-            } else {
-                COLOR_SURFACE0
+            let Some(row) = Rect::new(area.x, row_y, area.w, ROW_HEIGHT).intersect(area) else {
+                continue;
             };
-            frame.push(RenderCommand::FillRect {
-                x: 0.0,
-                y: row_y,
-                width,
-                height: ROW_HEIGHT,
-                color: row_bg,
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            let text_y = row_y + (ROW_HEIGHT - FONT_SIZE) / 2.0;
-
-            // Timestamp.
-            frame.push(RenderCommand::Text {
-                x: col_time_x,
-                y: text_y,
-                text: format_timestamp(entry.timestamp),
-                color: COLOR_TEAL,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(165.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Task name.
-            frame.push(RenderCommand::Text {
-                x: col_name_x,
-                y: text_y,
-                text: entry.task_name.clone(),
-                color: COLOR_TEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(195.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Status.
-            let (status_text, status_color) = if entry.success {
-                ("OK", COLOR_GREEN)
-            } else {
-                ("Failed", COLOR_RED)
-            };
-            frame.push(RenderCommand::Text {
-                x: col_status_x,
-                y: text_y,
-                text: status_text.to_string(),
-                color: status_color,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(110.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Duration.
-            frame.push(RenderCommand::Text {
-                x: col_duration_x,
-                y: text_y,
-                text: format_duration_ms(entry.duration_ms),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(115.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Error.
-            if let Some(err) = &entry.error {
-                frame.push(RenderCommand::Text {
-                    x: col_error_x,
-                    y: text_y,
-                    text: err.clone(),
-                    color: COLOR_RED,
-                    font_size: FONT_SIZE_SMALL,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(195.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
+            Self::draw_history_row(frame, row, entry, i % 2 == 0);
         }
 
         // A list hiding entries says how many.
         let hidden = entries.len().saturating_sub(window.count);
-        if hidden > 0 {
-            frame.push(RenderCommand::Text {
-                x: PADDING,
-                y: rows_top + (window.count as f32) * ROW_HEIGHT,
-                text: format!("{hidden} more"),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE_SMALL,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if hidden > 0
+            && let Some(band) = Rect::new(
+                area.x,
+                rows_top + (window.count as f32) * ROW_HEIGHT,
+                area.w,
+                FONT_SIZE_SMALL,
+            )
+            .intersect(area)
+        {
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: PADDING,
+                    w: width - PADDING * 2.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                format!("{hidden} more"),
+            );
         }
 
         // Empty state.
-        if entries.is_empty() {
-            frame.push(RenderCommand::Text {
-                x: width / 2.0 - 60.0,
-                y: top + ROW_HEIGHT + 40.0,
-                text: String::from("No history yet"),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(200.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if entries.is_empty()
+            && let Some(band) =
+                Rect::new(area.x, top + ROW_HEIGHT + 40.0, area.w, FONT_SIZE).intersect(area)
+        {
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: width / 2.0 - 60.0,
+                    w: 200.0,
+                    size: FONT_SIZE,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                String::from("No history yet"),
+            );
+        }
+    }
+
+    /// One run of the history, drawn inside `row` and nowhere else.
+    ///
+    /// A function of its row for the same reason as [`Self::draw_task_row`]:
+    /// the list only ever hands out whole rows, so a bound that lives here can
+    /// only be tested by a caller that hands it a partial one.
+    fn draw_history_row(frame: &mut Frame, row: Rect, entry: &TaskHistoryEntry, even: bool) {
+        // See `Self::draw_task_row`.
+        if row.is_empty() {
+            return;
+        }
+        let row_bg = if even { COLOR_BASE } else { COLOR_SURFACE0 };
+        frame.push(RenderCommand::FillRect {
+            x: row.x,
+            y: row.y,
+            width: row.w,
+            height: row.h,
+            color: row_bg,
+            corner_radii: CornerRadii::ZERO,
+        });
+
+        let (status_text, status_color) = if entry.success {
+            ("OK", COLOR_GREEN)
+        } else {
+            ("Failed", COLOR_RED)
+        };
+        for (run, text) in [
+            (
+                Run {
+                    x: COL_RUN_TIME_X,
+                    w: 165.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_TEAL,
+                    weight: FontWeightHint::Regular,
+                },
+                format_timestamp(entry.timestamp),
+            ),
+            (
+                Run {
+                    x: COL_RUN_NAME_X,
+                    w: 195.0,
+                    size: FONT_SIZE,
+                    color: COLOR_TEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                entry.task_name.clone(),
+            ),
+            (
+                Run {
+                    x: COL_RUN_STATUS_X,
+                    w: 110.0,
+                    size: FONT_SIZE,
+                    color: status_color,
+                    weight: FontWeightHint::Bold,
+                },
+                status_text.to_string(),
+            ),
+            (
+                Run {
+                    x: COL_RUN_DURATION_X,
+                    w: 115.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_SUBTEXT,
+                    weight: FontWeightHint::Regular,
+                },
+                format_duration_ms(entry.duration_ms),
+            ),
+        ] {
+            run_in(frame, row, run, text);
+        }
+
+        if let Some(err) = &entry.error {
+            run_in(
+                frame,
+                row,
+                Run {
+                    x: COL_RUN_ERROR_X,
+                    w: 195.0,
+                    size: FONT_SIZE_SMALL,
+                    color: COLOR_RED,
+                    weight: FontWeightHint::Regular,
+                },
+                err.clone(),
+            );
         }
     }
 
@@ -2800,16 +3002,18 @@ impl SchedulerUI {
             },
         });
 
-        frame.push(RenderCommand::Text {
-            x: PADDING,
-            y: y + (bar_h - FONT_SIZE_SMALL) / 2.0,
-            text: message.to_string(),
-            color: COLOR_YELLOW,
-            font_size: FONT_SIZE_SMALL,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        run_in(
+            frame,
+            band,
+            Run {
+                x: PADDING,
+                w: width - PADDING * 2.0,
+                size: FONT_SIZE_SMALL,
+                color: COLOR_YELLOW,
+                weight: FontWeightHint::Regular,
+            },
+            message.to_string(),
+        );
     }
 
     fn render_add_edit_dialog(&self, frame: &mut Frame, layout: &Layout, title: &str) {
@@ -2833,38 +3037,52 @@ impl SchedulerUI {
         // and the first fields out of reach rather than merely cramped.
         let dx = ((window.w - dialog_w) / 2.0).max(0.0);
         let dy = ((window.h - dialog_h) / 2.0).max(0.0);
+        // ...and never off the bottom or right edge either. The clamp above
+        // held the dialog's *origin* inside the window and left its size a
+        // constant, so a window smaller than 440x380 got a dialog painted over
+        // the desktop beyond it. Everything below is measured against this
+        // rectangle rather than against the two constants, so a squeezed
+        // dialog loses its lower rows instead of hanging them outside.
+        let dialog = Rect::new(dx, dy, dialog_w.min(window.w), dialog_h.min(window.h));
 
         // Dialog background.
         frame.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
+            x: dialog.x,
+            y: dialog.y,
+            width: dialog.w,
+            height: dialog.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
         frame.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
+            x: dialog.x,
+            y: dialog.y,
+            width: dialog.w,
+            height: dialog.h,
             color: COLOR_SURFACE2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        // Title.
-        frame.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + PADDING,
-            text: title.to_string(),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_w - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Title. The band is the line's own box, so the title is dropped
+        // rather than drawn in a dialog with no room for it.
+        if let Some(band) =
+            Rect::new(dialog.x, dialog.y + PADDING, dialog.w, FONT_SIZE_HEADING).intersect(dialog)
+        {
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: dialog.x + PADDING,
+                    w: dialog.w - PADDING * 2.0,
+                    size: FONT_SIZE_HEADING,
+                    color: COLOR_TEXT,
+                    weight: FontWeightHint::Bold,
+                },
+                title.to_string(),
+            );
+        }
 
         let mut field_y = dy + 44.0;
         let label_x = dx + PADDING;
@@ -2875,30 +3093,49 @@ impl SchedulerUI {
         // geometry is written once here rather than four times below. The
         // closure also advances `field_y`, which is what stops a row that is
         // conditionally drawn from leaving a gap where it would have been.
+        //
+        // The rows run down past the dialog's bottom edge in any window shorter
+        // than 380, so both the label and the control that follows it are cut
+        // to the dialog -- a field rectangle drawn uncut would record a hit box
+        // outside the dialog it belongs to. `label` hands back the row's *full*
+        // rectangle, because the checkbox row below measures itself from it and
+        // a row cut down to nothing would have moved it to the window's corner;
+        // `cut` is applied where the rectangle is drawn from. An empty
+        // rectangle draws nothing -- see `render_text_field`.
+        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);
         let mut label = |frame: &mut Frame, text: &str| {
             let y = field_y;
-            frame.push(RenderCommand::Text {
-                x: label_x,
-                y,
-                text: text.to_string(),
-                color: COLOR_SUBTEXT,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            if let Some(band) = Rect::new(dialog.x, y, dialog.w, FONT_SIZE).intersect(dialog) {
+                run_in(
+                    frame,
+                    band,
+                    Run {
+                        x: label_x,
+                        w: 100.0,
+                        size: FONT_SIZE,
+                        color: COLOR_SUBTEXT,
+                        weight: FontWeightHint::Regular,
+                    },
+                    text.to_string(),
+                );
+            }
             field_y += field_spacing;
             Rect::new(value_x, y - 2.0, FIELD_WIDTH, FIELD_HEIGHT)
         };
 
         let rect = label(frame, "Name:");
-        self.render_text_field(frame, Target::Field(FormField::Name), rect, &self.form.name);
+        self.render_text_field(
+            frame,
+            Target::Field(FormField::Name),
+            cut(rect),
+            &self.form.name,
+        );
 
         let rect = label(frame, "Command:");
         self.render_text_field(
             frame,
             Target::Field(FormField::Command),
-            rect,
+            cut(rect),
             &self.form.command,
         );
 
@@ -2908,7 +3145,7 @@ impl SchedulerUI {
             .get(self.form.frequency_index)
             .unwrap_or(&"Unknown");
         let rect = label(frame, "Frequency:");
-        self.render_picker(frame, Target::FrequencyCycle, rect, freq_label);
+        self.render_picker(frame, Target::FrequencyCycle, cut(rect), freq_label);
 
         // Frequency-specific parameter. Which control this is -- picker, text
         // field or nothing at all -- is decided by `param_kind`, so the click
@@ -2919,67 +3156,92 @@ impl SchedulerUI {
                     .map(DayOfWeek::display_name)
                     .unwrap_or("Monday");
                 let rect = label(frame, "Day of week:");
-                self.render_picker(frame, Target::ParamCycle, rect, day);
+                self.render_picker(frame, Target::ParamCycle, cut(rect), day);
             }
             3 => {
                 let day_text = self.form.monthly_day.to_string();
                 let rect = label(frame, "Day of month:");
-                self.render_text_field(frame, Target::Field(FormField::Param), rect, &day_text);
+                self.render_text_field(
+                    frame,
+                    Target::Field(FormField::Param),
+                    cut(rect),
+                    &day_text,
+                );
             }
             5 => {
                 let min_text = self.form.interval_minutes.to_string();
                 let rect = label(frame, "Minutes:");
-                self.render_text_field(frame, Target::Field(FormField::Param), rect, &min_text);
+                self.render_text_field(
+                    frame,
+                    Target::Field(FormField::Param),
+                    cut(rect),
+                    &min_text,
+                );
             }
             6 => {
                 let rect = label(frame, "Cron:");
                 self.render_text_field(
                     frame,
                     Target::Field(FormField::Param),
-                    rect,
+                    cut(rect),
                     &self.form.cron_expr,
                 );
             }
             _ => {}
         }
 
-        // Enabled checkbox.
+        // Enabled checkbox. Its row is the one `label` did not hand back as a
+        // field rectangle, so it is cut to the dialog here instead.
         let cb_rect = label(frame, "Enabled:");
         let cb_y = cb_rect.y + 2.0;
-        frame.push(RenderCommand::StrokeRect {
-            x: value_x,
-            y: cb_y - 1.0,
-            width: CHECKBOX_SIZE,
-            height: CHECKBOX_SIZE,
-            color: COLOR_SUBTEXT,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(3.0),
-        });
-        if self.form.enabled {
-            frame.push(RenderCommand::FillRect {
-                x: value_x + 3.0,
-                y: cb_y + 2.0,
-                width: CHECKBOX_SIZE - 6.0,
-                height: CHECKBOX_SIZE - 6.0,
-                color: COLOR_GREEN,
-                corner_radii: CornerRadii::all(2.0),
+        if let Some(cb) =
+            Rect::new(value_x, cb_y - 1.0, CHECKBOX_SIZE, CHECKBOX_SIZE).intersect(dialog)
+        {
+            frame.push(RenderCommand::StrokeRect {
+                x: cb.x,
+                y: cb.y,
+                width: cb.w,
+                height: cb.h,
+                color: COLOR_SUBTEXT,
+                line_width: 1.0,
+                corner_radii: CornerRadii::all(3.0),
             });
+            if self.form.enabled
+                && let Some(tick) = Rect::new(
+                    value_x + 3.0,
+                    cb_y + 2.0,
+                    CHECKBOX_SIZE - 6.0,
+                    CHECKBOX_SIZE - 6.0,
+                )
+                .intersect(cb)
+            {
+                frame.push(RenderCommand::FillRect {
+                    x: tick.x,
+                    y: tick.y,
+                    width: tick.w,
+                    height: tick.h,
+                    color: COLOR_GREEN,
+                    corner_radii: CornerRadii::all(2.0),
+                });
+            }
         }
         // The whole row, label included: on a form, "Enabled:" and its box are
         // one control, and a click on the word is a click on the box.
-        frame.hit(
-            Target::FormEnabled,
-            Rect::new(
-                label_x,
-                cb_rect.y,
-                value_x - label_x + CHECKBOX_SIZE + 6.0,
-                FIELD_HEIGHT,
-            ),
-        );
+        if let Some(hit) = Rect::new(
+            label_x,
+            cb_rect.y,
+            value_x - label_x + CHECKBOX_SIZE + 6.0,
+            FIELD_HEIGHT,
+        )
+        .intersect(dialog)
+        {
+            frame.hit(Target::FormEnabled, hit);
+        }
 
-        // Dialog buttons.
-        let btn_y = dy + dialog_h - BUTTON_HEIGHT - PADDING;
-        let cancel_x = dx + dialog_w - PADDING - BUTTON_WIDTH;
+        // Dialog buttons, along the dialog's own bottom edge rather than at a
+        // constant 380 points below its top.
+        let btn_y = dialog.bottom() - BUTTON_HEIGHT - PADDING;
+        let cancel_x = dialog.right() - PADDING - BUTTON_WIDTH;
         let save_x = cancel_x - 8.0 - BUTTON_WIDTH;
 
         // Save greys out when the form is not submittable but stays
@@ -2992,7 +3254,7 @@ impl SchedulerUI {
         self.render_button(
             frame,
             Some(Target::DialogSave),
-            Rect::new(save_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            cut(Rect::new(save_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Save",
             if can_save {
                 COLOR_GREEN
@@ -3003,7 +3265,7 @@ impl SchedulerUI {
         self.render_button(
             frame,
             Some(Target::DialogCancel),
-            Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            cut(Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Cancel",
             COLOR_SURFACE2,
         );
@@ -3026,72 +3288,82 @@ impl SchedulerUI {
         let dialog_h: f32 = 160.0;
         let dx = ((window.w - dialog_w) / 2.0).max(0.0);
         let dy = ((window.h - dialog_h) / 2.0).max(0.0);
+        // Cut to the window, not merely nudged into its corner: see
+        // `render_add_edit_dialog`.
+        let dialog = Rect::new(dx, dy, dialog_w.min(window.w), dialog_h.min(window.h));
+        let cut = |r: Rect| r.intersect(dialog).unwrap_or(Rect::EMPTY);
 
         frame.push(RenderCommand::FillRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
+            x: dialog.x,
+            y: dialog.y,
+            width: dialog.w,
+            height: dialog.h,
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
         frame.push(RenderCommand::StrokeRect {
-            x: dx,
-            y: dy,
-            width: dialog_w,
-            height: dialog_h,
+            x: dialog.x,
+            y: dialog.y,
+            width: dialog.w,
+            height: dialog.h,
             color: COLOR_SURFACE2,
             line_width: 1.0,
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
-        // Title.
-        frame.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + PADDING,
-            text: String::from("Confirm Delete"),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE_HEADING,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(dialog_w - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Message.
         let task_name = self
             .scheduler
             .get_task(task_id)
             .map(|t| t.name.as_str())
             .unwrap_or("this task");
-        let msg = format!("Delete task '{task_name}'? This cannot be undone.");
-        frame.push(RenderCommand::Text {
-            x: dx + PADDING,
-            y: dy + 52.0,
-            text: msg,
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(dialog_w - PADDING * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        for (dy_off, size, color, weight, text) in [
+            (
+                PADDING,
+                FONT_SIZE_HEADING,
+                COLOR_TEXT,
+                FontWeightHint::Bold,
+                String::from("Confirm Delete"),
+            ),
+            (
+                52.0,
+                FONT_SIZE,
+                COLOR_SUBTEXT,
+                FontWeightHint::Regular,
+                format!("Delete task '{task_name}'? This cannot be undone."),
+            ),
+        ] {
+            let band = cut(Rect::new(dialog.x, dialog.y + dy_off, dialog.w, size));
+            run_in(
+                frame,
+                band,
+                Run {
+                    x: dialog.x + PADDING,
+                    w: dialog.w - PADDING * 2.0,
+                    size,
+                    color,
+                    weight,
+                },
+                text,
+            );
+        }
 
-        // Buttons.
-        let btn_y = dy + dialog_h - BUTTON_HEIGHT - PADDING;
-        let cancel_x = dx + dialog_w - PADDING - BUTTON_WIDTH;
+        // Buttons, measured from the dialog's own bottom-right corner.
+        let btn_y = dialog.bottom() - BUTTON_HEIGHT - PADDING;
+        let cancel_x = dialog.right() - PADDING - BUTTON_WIDTH;
         let delete_x = cancel_x - 8.0 - BUTTON_WIDTH;
 
         self.render_button(
             frame,
             Some(Target::DeleteConfirm),
-            Rect::new(delete_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            cut(Rect::new(delete_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Delete",
             COLOR_RED,
         );
         self.render_button(
             frame,
             Some(Target::DialogCancel),
-            Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT),
+            cut(Rect::new(cancel_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT)),
             "Cancel",
             COLOR_SURFACE2,
         );
@@ -3105,6 +3377,13 @@ impl SchedulerUI {
     /// offering a movable cursor, so a caret anywhere else would promise an
     /// edit the field cannot make.
     fn render_text_field(&self, frame: &mut Frame, target: Target, rect: Rect, value: &str) {
+        // A control with no area draws nothing and answers nothing. Returning
+        // here rather than pushing zero-sized commands is the difference
+        // between a field that has been squeezed out of the dialog and one
+        // that is still recording a hit box at a position outside it.
+        if rect.is_empty() {
+            return;
+        }
         let focused = matches!(target, Target::Field(f) if self.focus == Some(f));
 
         frame.push(RenderCommand::FillRect {
@@ -3125,29 +3404,41 @@ impl SchedulerUI {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        let text_x = rect.x + 6.0;
-        let text_y = rect.y + (rect.h - FONT_SIZE) / 2.0;
-        frame.push(RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: value.to_string(),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(rect.w - 12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let text_y = centre_line(rect, FONT_SIZE);
+        let text_span = span(rect, rect.x + 6.0, rect.w - 12.0);
+        if let (Some(y), Some((x, w))) = (text_y, text_span) {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: value.to_string(),
+                color: COLOR_TEXT,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
-        if focused {
+        if focused && let (Some(y), Some((x, _))) = (text_y, text_span) {
             // Measured, not counted: a caret placed at `len * average_width`
             // drifts off the end of the text on anything but a monospace
-            // font. Kept inside the field's own right edge so a long value
-            // does not push it out over the dialog.
-            let caret_x = (text_x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))
+            // font. `.min` keeps it inside the field's own right edge, which a
+            // measured position does not do by itself -- `text::measure` sizes
+            // the *unelided* value, so a value wider than the field puts the
+            // caret past its right edge.
+            //
+            // The size is a literal on purpose, and the mutation sweep is why:
+            // clamping it as well read like prudence but could not be reached.
+            // The caret is drawn only where `text_y` and `text_span` both
+            // answered, and those two say the field is at least FONT_SIZE tall
+            // and more than six points wide, while the `.min` above leaves
+            // three points to the caret's right. A clamp that no input can
+            // make bind is not a guard, it is a claim the tests cannot check.
+            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))
                 .min(rect.right() - 3.0);
             frame.push(RenderCommand::FillRect {
                 x: caret_x,
-                y: text_y,
+                y,
                 width: 1.5,
                 height: FONT_SIZE,
                 color: COLOR_TEXT,
@@ -3161,6 +3452,10 @@ impl SchedulerUI {
     /// Draw a value that is picked rather than typed: same box as a text
     /// field, but with a hint that clicking cycles it and never a caret.
     fn render_picker(&self, frame: &mut Frame, target: Target, rect: Rect, value: &str) {
+        // See `render_text_field`: no area means no ink and no hit box.
+        if rect.is_empty() {
+            return;
+        }
         frame.push(RenderCommand::FillRect {
             x: rect.x,
             y: rect.y,
@@ -3179,29 +3474,35 @@ impl SchedulerUI {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        frame.push(RenderCommand::Text {
-            x: rect.x + 6.0,
-            y: rect.y + (rect.h - FONT_SIZE) / 2.0,
-            text: value.to_string(),
-            color: COLOR_TEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            // Room for the chevron, so a long value is elided before it
-            // reaches the mark that says the value can be changed.
-            max_width: Some((rect.w - 26.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let text_y = centre_line(rect, FONT_SIZE);
 
-        frame.push(RenderCommand::Text {
-            x: rect.right() - 16.0,
-            y: rect.y + (rect.h - FONT_SIZE) / 2.0,
-            text: String::from("\u{25be}"),
-            color: COLOR_SUBTEXT,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(12.0),
-            overflow: TextOverflow::Clip,
-        });
+        // Room for the chevron, so a long value is elided before it reaches the
+        // mark that says the value can be changed.
+        if let (Some(y), Some((x, w))) = (text_y, span(rect, rect.x + 6.0, rect.w - 26.0)) {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: value.to_string(),
+                color: COLOR_TEXT,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
+
+        if let (Some(y), Some((x, w))) = (text_y, span(rect, rect.right() - 16.0, 12.0)) {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: String::from("\u{25be}"),
+                color: COLOR_SUBTEXT,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w),
+                overflow: TextOverflow::Clip,
+            });
+        }
 
         frame.hit(target, rect);
     }
@@ -3220,6 +3521,12 @@ impl SchedulerUI {
         label: &str,
         bg: Color,
     ) {
+        // See `render_text_field`: no area means no ink and no hit box. A
+        // disabled button is drawn-but-not-recorded; a button squeezed to
+        // nothing is neither.
+        if rect.is_empty() {
+            return;
+        }
         frame.push(RenderCommand::FillRect {
             x: rect.x,
             y: rect.y,
@@ -3229,19 +3536,25 @@ impl SchedulerUI {
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
+        // Horizontal centring is no more a bound than vertical centring is:
+        // `centre - measure / 2` is left of a button narrower than its own
+        // label, and the `max_width` then carries the run off the right edge
+        // as well. Clamping the start and measuring the width from it elides
+        // the label instead, which is what a too-small button should do.
         let text_x = text::center_x(label, rect.centre().0, FONT_SIZE, FontWeightHint::Bold);
-        let text_y = rect.y + (rect.h - FONT_SIZE) / 2.0;
-
-        frame.push(RenderCommand::Text {
-            x: text_x,
-            y: text_y,
-            text: label.to_string(),
-            color: COLOR_BASE,
-            font_size: FONT_SIZE,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(rect.w),
-            overflow: TextOverflow::Ellipsis,
-        });
+        if let (Some(y), Some((x, w))) = (centre_line(rect, FONT_SIZE), span(rect, text_x, rect.w))
+        {
+            frame.push(RenderCommand::Text {
+                x,
+                y,
+                text: label.to_string(),
+                color: COLOR_BASE,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(w),
+                overflow: TextOverflow::Ellipsis,
+            });
+        }
 
         if let Some(target) = target {
             frame.hit(target, rect);
@@ -3780,7 +4093,6 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::float_cmp,
         clippy::arithmetic_side_effects
     )]
 
@@ -5485,5 +5797,407 @@ mod tests {
         assert_eq!(sched.run_due_tasks(10_000), vec![id]);
         assert_eq!(sched.history.count(), 1);
         assert_eq!(sched.history.success_count(), 0);
+    }
+
+    // --- containment --------------------------------------------------------
+
+    /// The window widths every containment claim is checked at.
+    ///
+    /// A rule about geometry is a rule at *every* size, so a handful of sampled
+    /// sizes tests a handful of points and nothing else. The sizes that break a
+    /// rule are the ones nobody would think to sample: 5 is narrower than
+    /// `PADDING`, so a run at a constant inset starts past the right edge; 40
+    /// fits neither of the four toolbar buttons; 400 is where the last three
+    /// list columns -- which run to 815 points -- fall off the edge.
+    const GRID_W: [f32; 8] = [0.0, 5.0, 40.0, 120.0, 400.0, 820.0, 1200.0, 1600.0];
+
+    /// The window heights every containment claim is checked at.
+    ///
+    /// The 6 is not a rounding of the 20 next to it. Between zero and one line
+    /// of text there is a band of heights at which a strip exists but cannot
+    /// show anything, and it is a band with its own bugs -- the toolbar's
+    /// buttons are 30-point fills centred in the strip, so at six points tall
+    /// they painted over the tab bar below and answered clicks there. Zero does
+    /// not find that (`take_top` hands out an empty band and the fills come out
+    /// empty too) and twenty does not either, because by then the button is
+    /// merely cramped. The 130 is the same sample one level down: it leaves the
+    /// content area six points tall, which is a list strip too short for its own
+    /// column headings.
+    const GRID_H: [f32; 8] = [0.0, 6.0, 20.0, 60.0, 130.0, 400.0, 600.0, 1000.0];
+
+    /// Every window size the containment sweeps run at.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is what a pass draws
+    /// when its band has been squeezed out of existence, and something that was
+    /// left out cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// The states the containment sweeps are run in.
+    ///
+    /// Every branch that draws something has to be represented, because a
+    /// branch nobody enters is a branch nobody measures: the empty-state line,
+    /// the "N more" note, the caret, the chevron, the tick in the checkbox and
+    /// each dialog are all drawn by code the default state never reaches.
+    fn states() -> Vec<(&'static str, SchedulerUI)> {
+        let mut selected = ui_with_tasks(40);
+        let first = selected.scheduler.list_tasks().first().map(|t| t.id);
+        selected.selected_task_id = first;
+        selected.status_message = Some(String::from(
+            "A status message long enough to need eliding in a narrow window.",
+        ));
+
+        let mut long_names = ui_with_tasks(3);
+        for task in long_names.scheduler.tasks.values_mut() {
+            task.name = "a task name far wider than the column it goes in".to_string();
+            task.command =
+                "/usr/local/bin/a-command-with-a-very-long-path --and --flags".to_string();
+            task.enabled = false;
+        }
+
+        let mut failed_history = SchedulerUI::new();
+        failed_history.scheduler.history.record_failure(
+            1,
+            "nightly backup",
+            1_000,
+            120,
+            "no such file or directory",
+        );
+        failed_history.tab = UiTab::History;
+
+        let mut empty_history = SchedulerUI::new();
+        empty_history.tab = UiTab::History;
+
+        let mut add = SchedulerUI::new();
+        add.open_add_dialog();
+        add.focus = Some(FormField::Name);
+        add.form.name = "a name far wider than the field it is typed into".to_string();
+
+        let mut cron = SchedulerUI::new();
+        cron.open_add_dialog();
+        cron.form.frequency_index = 6;
+
+        let mut weekly = SchedulerUI::new();
+        weekly.open_add_dialog();
+        weekly.form.frequency_index = 2;
+        weekly.form.enabled = true;
+
+        let mut edit = ui_with_tasks(3);
+        if let Some(id) = edit.scheduler.list_tasks().first().map(|t| t.id) {
+            edit.open_edit_dialog(id);
+        }
+
+        let mut delete = ui_with_tasks(3);
+        if let Some(id) = delete.scheduler.list_tasks().first().map(|t| t.id) {
+            delete.open_delete_dialog(id);
+        }
+
+        vec![
+            ("an empty task list", SchedulerUI::new()),
+            ("a selected task with a status message", selected),
+            ("tasks with overlong text", long_names),
+            ("a full history", ui_with_history(40)),
+            ("a failed run in the history", failed_history),
+            ("an empty history", empty_history),
+            ("the add dialog with a focused field", add),
+            ("the add dialog on a cron schedule", cron),
+            ("the add dialog on a weekly schedule", weekly),
+            ("the edit dialog", edit),
+            ("the delete dialog", delete),
+        ]
+    }
+
+    /// Every rectangle a pass filled or stroked.
+    fn rects(f: &Frame) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                }
+                | RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        // A rectangle drawn past the edge is a rectangle the compositor pays to
+        // clip. More to the point it means the geometry believed in room the
+        // window does not have -- which is how both dialogs came to paint a
+        // 440x380 panel into a 120x60 window.
+        for (name, ui) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for r in rects(&ui.frame(w, h)) {
+                    assert!(
+                        inside(window, r),
+                        "{name}: a rect at {r:?} escapes a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        // The window test above is the coarsest bound there is, and until this
+        // test it was the only one. Every band is inside the window by
+        // construction, so a pass that overruns its own band paints on top of a
+        // *sibling* and the window test sees nothing at all: the header's title
+        // was placed by `band.y + (band.h - size) / 2.0` with nothing bounding
+        // it, and in a window too short for the header that put the title above
+        // the header and over the toolbar.
+        //
+        // Text and hit boxes are checked as well as fills, because whole passes
+        // here paint no fill of their own -- a list row's five cells are five
+        // runs and nothing else. Note the asymmetry: `frame()` clips the content
+        // area, and a clip hides an overrun from text and from hit boxes but not
+        // from fills, which is why the top-level test above can only ask about
+        // fills. Here each pass is handed an *unclipped* frame, so all three
+        // witnesses are available.
+        fn check(state: &str, pass: &str, region: Rect, f: &Frame) {
+            for r in rects(f) {
+                assert!(
+                    inside(region, r),
+                    "{state}: the {pass} pass, given {region:?}, filled {r:?}"
+                );
+            }
+            for c in f.commands() {
+                let RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                // A run has no height in the command stream, so the height has
+                // to be supplied before the question can be asked at all --
+                // which is exactly why the centring bug went unseen.
+                let bound =
+                    max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                let run = Rect::new(*x, *y, bound, *font_size);
+                assert!(
+                    inside(region, run),
+                    "{state}: the {pass} pass, given {region:?}, inked {text:?} at {run:?}"
+                );
+            }
+            for (target, rect) in f.hits() {
+                assert!(
+                    inside(region, *rect),
+                    "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+                );
+            }
+        }
+
+        /// `r`, and `r` squeezed to boxes the layout does not currently hand out.
+        ///
+        /// A sub-pass's contract is "stay inside the box you are given" for any
+        /// box, not for the boxes today's `Layout::new` happens to produce. A
+        /// text field is only ever handed a 280x24 rectangle from the dialog
+        /// today; the guard being tested lives in the field, and the field takes
+        /// its box as an argument, which means the test can simply hand it one.
+        fn squeezes(r: Rect) -> Vec<Rect> {
+            let mut out = vec![r];
+            for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+                if h < r.h {
+                    out.push(Rect::new(r.x, r.y, r.w, h));
+                }
+            }
+            for w in [0.0, 1.0, 5.0, 20.0] {
+                if w < r.w {
+                    out.push(Rect::new(r.x, r.y, w, r.h));
+                }
+            }
+            out
+        }
+
+        for (name, ui) in states() {
+            let task_id = ui.scheduler.list_tasks().first().map(|t| t.id).unwrap_or(0);
+            for (w, h) in sizes() {
+                let l = Layout::new(w, h, ui.status_message.is_some());
+                let state = format!("{name} at {w}x{h}");
+
+                // The passes whose box is a field of the layout. There is no
+                // squeezing these: the box is whatever `Layout::new` decided and
+                // the pass reads it back off the layout for itself.
+                type Panel = Box<dyn Fn(&SchedulerUI, &mut Frame)>;
+                let panels: Vec<(&'static str, Rect, Panel)> = vec![
+                    (
+                        "header",
+                        l.header,
+                        Box::new(move |u, f| u.render_header(f, &l)),
+                    ),
+                    (
+                        "toolbar",
+                        l.toolbar,
+                        Box::new(move |u, f| u.render_toolbar(f, &l)),
+                    ),
+                    (
+                        "tab bar",
+                        l.tab_bar,
+                        Box::new(move |u, f| u.render_tab_bar(f, &l)),
+                    ),
+                    (
+                        "task list",
+                        l.content,
+                        Box::new(move |u, f| u.render_task_list(f, &l)),
+                    ),
+                    (
+                        "history",
+                        l.content,
+                        Box::new(move |u, f| u.render_history(f, &l)),
+                    ),
+                    (
+                        "status bar",
+                        l.status,
+                        Box::new(move |u, f| u.render_status_bar(f, &l, "a status message")),
+                    ),
+                    (
+                        "add/edit dialog",
+                        l.window,
+                        Box::new(move |u, f| u.render_add_edit_dialog(f, &l, "Add Task")),
+                    ),
+                    (
+                        "delete dialog",
+                        l.window,
+                        Box::new(move |u, f| u.render_confirm_delete_dialog(f, &l, task_id)),
+                    ),
+                ];
+                for (pass, region, draw) in panels {
+                    let mut f = Frame::new(w, h);
+                    draw(&ui, &mut f);
+                    check(&state, pass, region, &f);
+                }
+            }
+
+            // The passes that take their box as an argument. Their sizes come
+            // from constants, so the layout never squeezes them -- the dialog
+            // hands out a 280x24 field and the lists hand out a whole 32-point
+            // row, every time. That is exactly why they are swept separately:
+            // a bound that is only ever asked about one rectangle is a bound
+            // that can be deleted without a test noticing, and the two list
+            // rows were extracted out of their loops so that this sweep could
+            // hand them a three-point one.
+            type Control = fn(&SchedulerUI, &mut Frame, Rect);
+            let controls: [(&'static str, Control); 6] = [
+                ("text field", |u, f, r| {
+                    u.render_text_field(
+                        f,
+                        Target::Field(FormField::Name),
+                        r,
+                        "a value far wider than the field",
+                    );
+                }),
+                ("empty text field", |u, f, r| {
+                    u.render_text_field(f, Target::Field(FormField::Name), r, "");
+                }),
+                ("picker", |u, f, r| {
+                    u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
+                }),
+                ("button", |u, f, r| {
+                    u.render_button(f, Some(Target::DialogSave), r, "Save", COLOR_GREEN);
+                }),
+                ("task row", |u, f, r| {
+                    if let Some(task) = u.scheduler.list_tasks().first() {
+                        SchedulerUI::draw_task_row(f, r, task, true, true);
+                    }
+                }),
+                ("history row", |u, f, r| {
+                    if let Some(entry) = u.scheduler.history.recent(1).first() {
+                        SchedulerUI::draw_history_row(f, r, entry, false);
+                    }
+                }),
+            ];
+            for (pass, draw) in controls {
+                for region in squeezes(Rect::new(40.0, 60.0, FIELD_WIDTH, FIELD_HEIGHT)) {
+                    let mut f = Frame::new(800.0, 600.0);
+                    draw(&ui, &mut f, region);
+                    check(name, pass, region, &f);
+
+                    // "No area means no ink and no hit box" is what each
+                    // control's opening guard promises, and containment alone
+                    // cannot hold it to that: a zero-sized fill is inside
+                    // every region there is, so the guard could be deleted and
+                    // the assertions above would all still pass. A hit box
+                    // with no area answers no click, but recording one says
+                    // the control is there when it is not.
+                    if region.is_empty() {
+                        assert!(
+                            f.commands().is_empty() && f.hits().is_empty(),
+                            "{name}: the {pass} pass, given the empty {region:?}, drew \
+                             {} command(s) and {} hit box(es)",
+                            f.commands().len(),
+                            f.hits().len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Cutting a control to the dialog must shrink it, not delete it.
+    ///
+    /// The other half of the containment sweep, and the failure it does not
+    /// see. Every bound in this app is enforced by intersecting with the box
+    /// the thing belongs in, and an intersection is just as happy to return
+    /// nothing at all: a dialog whose buttons are placed by the *nominal* 380
+    /// points rather than by its own cut-down height puts them below itself,
+    /// where the cut removes them entirely. Containment is delighted -- there
+    /// is no ink to be outside anything -- and the dialog has no buttons.
+    #[test]
+    fn a_dialog_with_room_still_shows_its_buttons() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+
+        for (w, h) in sizes() {
+            let l = Layout::new(w, h, false);
+            let mut f = Frame::new(w, h);
+            ui.render_add_edit_dialog(&mut f, &l, "Add Task");
+
+            // What the dialog measures after being cut to the window, which is
+            // what decides whether it has room for a row of buttons at all.
+            let dw = 440.0_f32.min(l.window.w);
+            let dh = 380.0_f32.min(l.window.h);
+            if dw < BUTTON_WIDTH * 2.0 + PADDING + 8.0 || dh < BUTTON_HEIGHT + PADDING * 2.0 {
+                continue;
+            }
+            for target in [Target::DialogSave, Target::DialogCancel] {
+                let hit = f.hits().iter().find(|(t, _)| *t == target);
+                let Some((_, rect)) = hit else {
+                    panic!("at {w}x{h} the dialog is {dw}x{dh} and has no {target:?}");
+                };
+                assert!(
+                    rect.w > 0.0 && rect.h > 0.0,
+                    "at {w}x{h} the dialog is {dw}x{dh} and its {target:?} is {rect:?}"
+                );
+            }
+        }
     }
 }

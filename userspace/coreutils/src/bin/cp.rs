@@ -3110,6 +3110,34 @@ fn preserve_attributes<O: Write, E: Write>(
     // way. Note that the guard is *here* rather than an early return above:
     // the extended-attribute step below applies to a symlink destination and
     // GNU runs it for one.
+    //
+    // The `new_dst ||` is GNU's `copy_internal` guard (`copy.c:3265`) and *not*
+    // its `copy_reg` one, which is `!SAME_OWNER_AND_GROUP` alone
+    // (`copy.c:1645`) — so this one expression stands where upstream has two
+    // that differ. They differ for a reason that does not survive the merge:
+    // `copy_reg` has just `fstat`ed the destination descriptor, unconditionally
+    // whenever ownership is being preserved (`copy.c:1529`), so its comparison
+    // is against a fresh `stat` and is always meaningful; `copy_internal`'s
+    // `dst_sb` was taken before the destination existed, so for a new one there
+    // is nothing to compare against and the `new_dst ||` is what stops it
+    // comparing against a stale reading. Ours takes the reading inside
+    // [`owner_differs`], so neither problem applies and the wider guard is
+    // safe — it costs at most a `chown` that changes nothing.
+    //
+    // That "at most" was measured rather than assumed, because the obvious
+    // worry is that a no-op `chown` is still a write that can be refused, and a
+    // refusal here is not free: it would take the set-user-ID bit off the copy
+    // ([`Chowned::Disowned`] below). The sharpest case that can be built —
+    // a source owned by you with a group you are *not* in, copied into a
+    // set-group-ID directory carrying that same group, so the new destination
+    // is born already owner-and-group-identical to the source and GNU skips the
+    // `chown` we perform — was run against both binaries and produced `4755
+    // inhahe:daemon` on each. It cannot fail: Linux checks group membership
+    // only when the group is actually changing (`setattr_prepare`'s
+    // `!vfsgid_eq_kgid(…) && !in_group_or_capable(…)`), so a `chown` to the
+    // values already in place is permitted to anyone. GNU's own comment calls
+    // its guard an optimisation — "Avoid calling chown if we know it's not
+    // necessary" — which is exactly what it is.
     if made != Made::Symlink
         && job.flags.preserve.ownership
         && (new_dst || owner_differs(on, src.meta))

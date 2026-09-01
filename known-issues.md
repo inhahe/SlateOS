@@ -103465,14 +103465,33 @@ What that changed, in the terms this entry was filed in:
 - `nlink` and `st_ino` now mean on memfs what the entry below notes they were
   only half-promising: `nlink` counts the names, and `drop_link` frees the
   object when the last one goes.
-- `self_test_linux_link` (ring 3) falls back from `/mnt` to `/tmp`, so the
-  **diskless** boot the CI actually runs exercises `link(2)` end to end. This
-  was the entry's real subject — not that memfs lacked a feature, but that the
-  configuration under test could not reach the feature's tests.
+- `self_test_linux_link` (ring 3) falls back from `/mnt` to `/tmp` when there
+  is no ext4 mount. Insurance, not a repair — see the correction below.
 - `memfs::self_test` gained direct coverage: shared inode, shared data, unlink
   decrementing rather than deleting, follow vs no-follow, and no inode leak.
 
-The original report follows unedited.
+**Correction to this entry's own title and premise, 2026-09-01.** The title
+says "NO BOOT EVER TESTS A HARD LINK", and the report below says "no boot has
+ever exercised a hard link". Both are **false**, and were false when filed.
+Checked against the serial log and `scripts/check-boot-skips.py --list`:
+
+- `scripts/boot-test.sh` attaches `rootfs.ext4` as vdb; `main.rs` probes vdb/vdc
+  and mounts the first ext4 it finds at `/mnt`. So `/mnt` exists on every boot
+  the harness runs.
+- `self_test_linux_link` therefore ran, on ext4, in **all 14** boots in the skip
+  window — it records no skip. The serial log for this very boot reads
+  `Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)... OK`.
+
+What *was* true is narrower and still worth the fix: the assertions that need
+the **root** filesystem to have hard links could not run. `pinned linkat`'s
+positive same-inode/`nlinks` half skipped in **7 of those 14 boots** because it
+works in `/tmp`, and memfs had no hard-link coverage of its own because it had
+no hard links. That is the gap this refactor closed; "no boot ever tests a hard
+link" overstated it, and the overstatement was in the direction that made the
+work look more necessary than it was. The title is left as filed so the ID
+stays stable and searchable.
+
+The original report follows unedited (including the false sentence above).
 
 ---
 

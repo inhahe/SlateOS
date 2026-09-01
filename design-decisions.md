@@ -2424,10 +2424,16 @@ accompany a different Linux-compat signal strategy.
 ## 30. memfs hard links — leave unsupported (spec-correct EPERM); test `link(2)` on ext4 instead of refactoring memfs to an inode table
 
 > **SUPERSEDED 2026-09-01 by §665.** Option (A) below — the inode-table
-> refactor — was done. The deciding fact this entry did not have: the boot test
-> runs diskless, so "test `link(2)` on ext4" meant testing it on no boot at
-> all. The entry is kept unedited below, because the reasoning it records is
-> the reasoning §665 has to answer.
+> refactor — was done. What this entry got wrong is not that ext4 went untested
+> (it did not: the boot test attaches `rootfs.ext4` as vdb, `/mnt` is mounted,
+> and the ring-3 `link(2)` rung has run on ext4 in all 14 boots in the skip
+> window). It is that "test it on ext4 *instead*" quietly conceded every
+> assertion that can only be made where the filesystem under test is the root —
+> above all `[vfs] pinned linkat`, which works in `/tmp` and therefore **skipped
+> its positive same-inode/`nlinks` assertion in 7 of those same 14 boots**. One
+> filesystem passing is not the property; *every* filesystem claiming `link`
+> support honouring it is. The entry is kept unedited below, because the
+> reasoning it records is the reasoning §665 has to answer.
 
 **Date:** 2026-06-16
 
@@ -58158,7 +58164,7 @@ become false, and one was never quite right:
 | §30 said | Now |
 |---|---|
 | "no current consumer demanding it" | `Vfs::link_at_pinned` — the primitive `cp -r`/`cp -al` needs — had its positive same-inode assertion **skipped** for exactly this reason. A recorded skip *is* a consumer. |
-| "the practically important case already works [on ext4]" | The boot test runs **diskless**. Every rung that tests hard links gated on `/mnt` and returned `Ok(())`. Hard links were not tested on any boot CI actually performs — which is what `A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK` was filed to say. |
+| "the practically important case already works [on ext4]" | True as stated, and it is the *"instead"* that does not survive. ext4 really is exercised every boot — `rootfs.ext4` is attached as vdb, `/mnt` is mounted, and the ring-3 `link(2)` rung ran on it in all 14 boots in the skip window. But "one filesystem honours `link`" is a weaker property than "every filesystem that claims `link` honours it", and it is the weaker one §30 bought. The assertions that needed the *root* filesystem to have hard links — `pinned linkat`'s positive half, and memfs's own coverage — had no way to run at all. |
 | "large, risky" | It came to ~900 lines of diff in one file, compiled on the first `cargo check`, and *removed* code: `walk_mut`, `nlink_count`, `rename`'s subtree move, `rename_exchange`'s rollback, and `statvfs`'s recursive count all went away. |
 | "memfs reporting no hard-link support is spec-correct" | Still true, and still not the point. `EPERM` is a *permitted* answer, not a good one; it made the filesystem under `/tmp` less capable than the one under `/mnt` for no reason a caller could predict. |
 
@@ -58210,8 +58216,18 @@ unconditionally, because one that tolerates the filesystem declining to do the
 thing is one that passes when the thing stops working.
 
 `self_test_linux_link` (ring 3) now falls back to `/tmp` when there is no
-`/mnt`, so the boot test executes it. It still prefers ext4 when a disk is
-present, since that is the only ring-3 exercise of ext4's `link`.
+`/mnt`. This one is insurance rather than a fix: the rung is *not* currently
+skipping — `/mnt` is mounted on every boot the harness runs, and the skip
+window records no skip for it — so the fallback buys coverage for a diskless
+configuration rather than restoring coverage that was missing. It still prefers
+ext4 when a disk is present, since that is the only ring-3 exercise of ext4's
+`link`.
+
+An earlier draft of this entry (and of the commit message) asserted the boot
+test "runs diskless" and that the ext4 rung therefore never executed. That was
+wrong, and it was wrong in the direction that flatters the change — checked
+against the serial log and `check-boot-skips.py --list` afterwards, not before
+writing it down. The real gap was narrower and is stated in the table above.
 
 ### How to reverse
 

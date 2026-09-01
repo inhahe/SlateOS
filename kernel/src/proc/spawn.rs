@@ -13235,7 +13235,8 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
     // Targets the ext4 volume at `/mnt` (backed by vdb) rather than the memfs
     // `/tmp` the other fastpy tools use.  Both support hard links now, but ext4
     // is the one whose `link` this rung is otherwise the only ring-3 exercise
-    // of; `self_test_linux_link` covers the memfs side on a diskless boot.
+    // of.  memfs's side is covered on every boot by `memfs::self_test` and by
+    // `vfs_selftest`'s pinned-`linkat` assertion, both of which run in `/tmp`.
     const TARGET: &str = "/mnt/link-target.txt";
     const TARGET_ARG: &[u8] = b"/mnt/link-target.txt";
     const LINK: &str = "/mnt/link-hard";
@@ -20278,11 +20279,14 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     // since it stopped storing its tree as by-value nodes and moved to a flat
     // inode table.
     //
-    // The fallback is the point.  This rung used to `return Ok(())` on a
-    // diskless boot, which is the configuration the boot test actually runs —
-    // so the one ring-3 assertion that `link(2)` is not still an `EROFS` stub
-    // never once executed in CI.  A test whose only path to running is a
-    // fixture CI does not have is a test that does not exist.
+    // The fallback is insurance, not a repair.  `boot-test.sh` attaches
+    // `rootfs.ext4` as vdb and `main.rs` mounts it at `/mnt`, so this rung is
+    // not in fact skipping today — `check-boot-skips.py --list` records no skip
+    // for it across the window.  What the fallback buys is that the one ring-3
+    // assertion that `link(2)` is not still an `EROFS` stub keeps running if
+    // the disk fixture ever goes away, rather than silently becoming a
+    // `return Ok(())`.  A test whose only path to running is a fixture CI might
+    // stop providing is a test with an expiry date on it.
     let on_ext4 = crate::fs::Vfs::exists("/mnt");
     let (src_path, dst_path, src_nul, dst_nul, base): (&str, &str, &[u8], &[u8], &str) = if on_ext4
     {

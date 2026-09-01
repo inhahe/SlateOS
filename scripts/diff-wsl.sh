@@ -403,6 +403,177 @@ done
 # reference to rpl_mbrtoc32` -- a third error message that names neither cause.
 # Every failure path below therefore removes the tree, so the next run starts
 # from the tarball rather than inheriting a wreck.
+
+## The reference's own dependencies, which are not free
+#
+# A coreutils built by the block below on a host without libattr has `USE_XATTR`
+# undefined, which is not a small thing: `copy_attr`'s entire body becomes
+# `return true`, so the reference `cp` and `mv` silently carry no extended
+# attributes at all, and `cp --preserve=xattr` refuses to run. Without libacl,
+# `USE_ACL` goes the same way and `copy_acl` degrades to a plain `chmod`, so the
+# reference loses access-control lists — which ours carries, since on this kernel
+# an ACL *is* the extended attribute `system.posix_acl_access`.
+#
+# Either way a harness that writes a case about the thing compares our correct
+# behaviour against a reference that cannot do it, and reports a difference *in
+# us* — the one direction that is worst, because the natural reading of a red
+# case is that the subject is wrong. That is not hypothetical: the first five
+# extended-attribute cases ever written here came back exactly like that.
+#
+# The host has neither development package and no way to install one (`sudo`
+# wants a password this script does not have), so both are **built from source
+# into the same cache**, exactly as coreutils itself is and for the same reason.
+# They are small C libraries; the two builds together take a few seconds. See
+# `design-decisions.md` 744 for why this is preferred to an `xfail` that
+# promises never to fail.
+#
+# The system is tried first and the source build is the fallback, so a host that
+# does have the development packages pays nothing.
+#
+# Failure is never fatal at any step. A host with no network, or a library that
+# will not build, gets the old behaviour — a reference without that support —
+# and the harnesses that care say so in their own headers rather than here.
+diff_dep_cppflags=
+diff_dep_ldflags=
+diff_xattr_ref=no
+diff_acl_ref=no
+diff_attr_version=2.5.2
+diff_acl_version=2.3.2
+
+# One prefix for both, and not one each: `acl` links against `attr`, so its own
+# `configure` has to be able to find the `attr` this script may have just built.
+# Sharing the prefix makes that the same `-I`/`-L` pair the reference gets, with
+# nothing to keep in step.
+diff_dep_cache=${DIFF_GNU_CACHE:-$HOME/.cache/slateos-diff-gnu}
+diff_dep_prefix=$diff_dep_cache/deps-prefix
+# `-Wl,-rpath` and not `LD_LIBRARY_PATH`: the reference binaries are run through
+# symlinks in a throwaway `PATH` directory, by two different harnesses, in an
+# environment the case controls. A library path baked into the binary cannot be
+# lost by any of that, and cannot leak into the *subject's* environment either —
+# which matters, because our binaries must not accidentally acquire a library
+# the target does not have.
+diff_dep_cpp=-I$diff_dep_prefix/include
+diff_dep_ld="-L$diff_dep_prefix/lib -Wl,-rpath,$diff_dep_prefix/lib"
+
+# Does a C program link with these flags? `diff_dep_links <cppflags> <ldflags>
+# <libs>`, with the program itself on standard input.
+#
+# Its own scratch directory, and not `$DIFF_TMP`: these probes run while the
+# reference is still being *located*, which is a few hundred lines before the
+# harness's own temporary tree is made. Reaching forward to a variable that does
+# not exist yet is how the first version of this failed, under `set -u`, with
+# `DIFF_TMP: unbound variable` and no other output.
+diff_dep_links() {
+  command -v cc >/dev/null 2>&1 || return 1
+  diff_dep_dir=$(mktemp -d) || return 1
+  cat > "$diff_dep_dir/probe.c"
+  # shellcheck disable=SC2086
+  cc $1 -o "$diff_dep_dir/probe" "$diff_dep_dir/probe.c" $2 $3 >/dev/null 2>&1
+  diff_dep_rc=$?
+  rm -rf "$diff_dep_dir"
+  return $diff_dep_rc
+}
+
+# Fetch, configure, build and install one dependency into the shared prefix.
+# `diff_dep_build <name> <version> <url-directory>`. Silent, and never fatal: a
+# failure leaves the tree removed so the next run starts from the tarball rather
+# than inheriting a wreck, which is the same rule the coreutils build follows
+# and for the same measured reason.
+#
+# The tree is removed on *success* too, which is the opposite of what the
+# coreutils build does and is right for a different reason: coreutils is used
+# from where it was built, so its tree is the product, while these two are used
+# from the prefix they installed into and the tree is spoil. The tarball is
+# kept, so nothing has to be re-fetched; what is thrown away is only the object
+# files. What was actually achieved is read back from `config.h` further down,
+# never inferred from this function's exit status.
+diff_dep_build() {
+  diff_dep_src=$diff_dep_cache/$1-$2
+  diff_dep_tar=$1-$2.tar.gz
+  if [ ! -f "$diff_dep_cache/$diff_dep_tar" ]; then
+    diff_dep_url=$3/$diff_dep_tar
+    mkdir -p "$diff_dep_cache" || return 1
+    # `.part` and a rename, so an interrupted fetch cannot be mistaken for a
+    # complete tarball on the next run.
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "$diff_dep_cache/$diff_dep_tar.part" "$diff_dep_url" \
+        && mv "$diff_dep_cache/$diff_dep_tar.part" "$diff_dep_cache/$diff_dep_tar"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O "$diff_dep_cache/$diff_dep_tar.part" "$diff_dep_url" \
+        && mv "$diff_dep_cache/$diff_dep_tar.part" "$diff_dep_cache/$diff_dep_tar"
+    fi
+  fi
+  [ -f "$diff_dep_cache/$diff_dep_tar" ] || return 1
+  rm -rf "$diff_dep_src"
+  ( cd "$diff_dep_cache" \
+    && tar xf "$diff_dep_tar" \
+    && cd "$1-$2" \
+    && ./configure --quiet --prefix="$diff_dep_prefix" \
+         --disable-nls --disable-static \
+         CPPFLAGS="$diff_dep_cpp" LDFLAGS="$diff_dep_ld" \
+    && make -s -j"$(nproc 2>/dev/null || echo 4)" \
+    && make -s install ) >/dev/null 2>&1 \
+    || { rm -rf "$diff_dep_src"; return 1; }
+  rm -rf "$diff_dep_src"
+  return 0
+}
+
+# coreutils' own `m4/xattr.m4` probe, reduced to the part that decides.
+diff_attr_usable() {
+  diff_dep_links "$1" "$2" -lattr <<'C_PROBE'
+#include <attr/error_context.h>
+#include <attr/libattr.h>
+static int perms(const char *n, struct error_context *c)
+{ return attr_copy_action(n, c) == ATTR_ACTION_PERMISSIONS; }
+int main(void) { return attr_copy_fd("/", 0, "/", 0, perms, 0); }
+C_PROBE
+}
+
+# And `m4/acl.m4`'s. `acl_extended_file` is in it deliberately: it is the Linux
+# entry point gnulib uses for the cheap "does this file have an ACL at all?"
+# test, and a `sys/acl.h` without it is a different library wearing the name.
+diff_acl_usable() {
+  diff_dep_links "$1" "$2" -lacl <<'C_PROBE'
+#include <sys/acl.h>
+int main(void)
+{
+  acl_t a = acl_get_file("/", ACL_TYPE_ACCESS);
+  if (a) acl_free(a);
+  return acl_extended_file("/") < 0;
+}
+C_PROBE
+}
+
+if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "${DIFF_GNU_DIR:-}" ]; then
+  # attr first, and not merely for tidiness: `acl` will not configure without
+  # it, so a host missing both has to get them in this order.
+  if diff_attr_usable '' ''; then
+    diff_xattr_ref=yes
+  else
+    diff_attr_usable "$diff_dep_cpp" "$diff_dep_ld" \
+      || diff_dep_build attr "$diff_attr_version" \
+           https://download.savannah.nongnu.org/releases/attr
+    if diff_attr_usable "$diff_dep_cpp" "$diff_dep_ld"; then
+      diff_dep_cppflags=$diff_dep_cpp
+      diff_dep_ldflags=$diff_dep_ld
+      diff_xattr_ref=yes
+    fi
+  fi
+
+  if diff_acl_usable '' ''; then
+    diff_acl_ref=yes
+  else
+    diff_acl_usable "$diff_dep_cpp" "$diff_dep_ld" \
+      || diff_dep_build acl "$diff_acl_version" \
+           https://download.savannah.nongnu.org/releases/acl
+    if diff_acl_usable "$diff_dep_cpp" "$diff_dep_ld"; then
+      diff_dep_cppflags=$diff_dep_cpp
+      diff_dep_ldflags=$diff_dep_ld
+      diff_acl_ref=yes
+    fi
+  fi
+fi
+
 gnu_dir=${DIFF_GNU_DIR:-}
 if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
   diff_gnu_cache=${DIFF_GNU_CACHE:-$HOME/.cache/slateos-diff-gnu}
@@ -412,7 +583,22 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
   # The marker, not `src/$DIFF_PROG`: it is written only after a whole `make`
   # returned 0, so it distinguishes "built" from "a binary happens to exist",
   # which is exactly the distinction the half-built tree above destroys.
-  if [ ! -f "$diff_gnu_src/.slateos-built" ]; then
+  #
+  # It carries the *flags the tree was configured with* and not merely the fact
+  # of a build, because the tree can now be built two ways. A cache holding a
+  # coreutils built before libattr was available would otherwise be reused
+  # forever, and the harnesses would go on comparing against a `cp` whose
+  # `copy_attr` is `return true` — with nothing to say so, since the tree looks
+  # built and is.
+  #
+  # The flags and not the *outcome*: a marker recording "xattr=no" on a host
+  # where the probe says yes but coreutils' own configure disagrees would be
+  # rebuilt on every single run, ninety seconds at a time, forever. Inputs
+  # change once; outcomes can disagree with intent indefinitely. What was
+  # actually achieved is read back from `config.h` below, where it costs a
+  # `grep` rather than a build.
+  diff_gnu_want="dep-flags=$diff_dep_cppflags|$diff_dep_ldflags"
+  if [ "$(cat "$diff_gnu_src/.slateos-built" 2>/dev/null)" != "$diff_gnu_want" ]; then
     mkdir -p "$diff_gnu_cache" || exit 1
     if [ ! -f "$diff_gnu_cache/$diff_gnu_tar" ]; then
       diff_gnu_url=https://ftp.gnu.org/gnu/coreutils/$diff_gnu_tar
@@ -437,6 +623,7 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
       && tar xf "$diff_gnu_tar" \
       && cd "coreutils-$DIFF_GNU_SOURCE" \
       && ./configure --quiet --disable-nls \
+           CPPFLAGS="$diff_dep_cppflags" LDFLAGS="$diff_dep_ldflags" \
       && make -s -j"$(nproc 2>/dev/null || echo 4)" ) >&2 || {
       rm -rf "$diff_gnu_src"
       echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE did not build; SKIPPED"
@@ -444,10 +631,50 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
       echo "$diff_gnu_hint"
       exit 0
     }
-    : > "$diff_gnu_src/.slateos-built"
+    printf '%s\n' "$diff_gnu_want" > "$diff_gnu_src/.slateos-built"
   fi
   gnu_dir=$diff_gnu_src/src
 fi
+# What the reference can actually do, read from the tree rather than inferred
+# from what it was asked to do. `gl_FUNC_XATTR` can decide `use_xattr=no` and
+# only *warn*, so intent is not evidence: a tree configured with the flags can
+# still hold `/* #undef USE_XATTR */`, and that is precisely the reference that
+# silently drops every attribute. Harnesses that write cases about extended
+# attributes must test this, not `diff_xattr_ref` above.
+#
+# Read relative to `$gnu_dir` and not to `$diff_gnu_src`, so that a reference
+# supplied by hand through `DIFF_GNU_DIR` is judged by the same evidence. If it
+# is a bare directory of binaries with no `lib/config.h` beside it, the answer
+# is "no" -- which costs a skipped section and never a wrong verdict.
+if [ -z "$gnu_dir" ] \
+   || ! grep -q '^#define USE_XATTR 1' "$gnu_dir/../lib/config.h" 2>/dev/null
+then
+  diff_xattr_ref=no
+fi
+# The same reading for ACLs, and for the same reason: `gl_FUNC_ACL` also only
+# warns, and a reference with `USE_ACL` undefined compiles `copy_acl` down to a
+# plain `chmod`. That reference does not *fail* an ACL case -- it quietly
+# carries the mode and drops the entries, so the case goes red against a
+# correct `cp`. Separate from the xattr answer because the two libraries are
+# separate builds and either can be present without the other.
+if [ -z "$gnu_dir" ] \
+   || ! grep -q '^#define USE_ACL 1' "$gnu_dir/../lib/config.h" 2>/dev/null
+then
+  diff_acl_ref=no
+fi
+# The name the harnesses read; `diff_xattr_ref` is this file's working variable
+# and is not part of the interface. The suppression below is not a nuisance
+# silencer: this file is *sourced*, so its only reader is in another file, and
+# the checker works one file at a time and cannot see that use. It is left
+# unexported deliberately, matching `DIFF_XATTR` and `DIFF_TMP`: the case
+# scripts are run as children and have no business inheriting harness state.
+#
+# (A comment line beginning with the checker's own name is parsed as a
+# directive, which is why that sentence is worded around it.)
+# shellcheck disable=SC2034
+DIFF_XATTR_REF=$diff_xattr_ref
+# shellcheck disable=SC2034
+DIFF_ACL_REF=$diff_acl_ref
 
 # A reference of the wrong version is worse than none: it fails cases that are
 # right and passes cases that are wrong, in the same run. Fatal rather than a
@@ -893,3 +1120,181 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
       ;;
   esac
 fi
+
+# --- 8. extended attributes ---------------------------------------------------
+# An extended attribute is a small named blob a filesystem stores beside a file
+# — a SELinux label, a `user.mime_type`, a backup tool's bookkeeping. `cp -a`
+# and `mv` both carry them, and neither harness could see them until this was
+# written: `B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` was filed after a
+# fix for a *dropped* attribute landed with the harness reporting an identical
+# 341/0/11 before and after.
+#
+# ## Why Python and not `getfattr`
+#
+# `getfattr` is the obvious tool and is what the issue asked for. It is part of
+# the `attr` package, which is not installed here and cannot be installed
+# without a password this script does not have. Python is installed, is already
+# a dependency of half the repository's tooling, and is in three ways the better
+# instrument for this particular job:
+#
+# * **`os.listxattr(..., follow_symlinks=False)` reads a symlink's own
+#   attributes.** `getfattr` needs `-h` for that and it is easy to leave off,
+#   which would silently compare the *target's* attributes twice.
+# * **The value is bytes, and stays bytes.** `getfattr -d` picks an encoding per
+#   value (`text` or base64) by guessing, so an attribute whose value happens to
+#   contain a quote is printed differently from one that does not. Here the rule
+#   is fixed and stated in one place: printable ASCII as itself, anything else
+#   as hex.
+# * **The elision is one `if`** rather than a `-m` regex whose syntax differs
+#   between implementations.
+#
+# If `attr` is ever installed this can be reconsidered, but there is nothing to
+# gain by it: nothing about the comparison wants a subprocess per file.
+#
+# ## What is elided, and why only that
+#
+# `security.selinux` only. It is set by the *system's* policy from the path a
+# file is created at, so the two sides get different labels for the same reason
+# they get different inode numbers, and on a machine with SELinux disabled it is
+# absent from both. Everything else is compared, including the rest of
+# `security.*`: `security.capability` in particular is a real thing for these
+# two programs to lose, since `chown` clears it and the copy has to notice.
+DIFF_XATTR=
+for diff_xa in python3 python; do
+  command -v "$diff_xa" >/dev/null 2>&1 || continue
+  # Present is not the same as working: a Python built without `os.setxattr`,
+  # or a filesystem mounted `nouser_xattr`, would make every case report "no
+  # attributes" rather than failing, which is the silent-blind-spot outcome the
+  # issue was filed about. Probe by actually setting one.
+  if "$diff_xa" - "$DIFF_TMP" >/dev/null 2>&1 <<'PY'
+import os, sys, tempfile
+fd, p = tempfile.mkstemp(dir=sys.argv[1])
+os.close(fd)
+try:
+    os.setxattr(p, "user.diffprobe", b"1")
+    assert os.getxattr(p, "user.diffprobe") == b"1"
+finally:
+    os.unlink(p)
+PY
+  then DIFF_XATTR=$diff_xa; break; fi
+done
+
+# One tree's extended attributes as sorted text: `<prefix><path> <name> <value>`,
+# one line per attribute, nothing at all when the tree has none.
+#
+# Errors are swallowed per path rather than per run, which matches what
+# `snapshot` does with `find`'s: a case that leaves an unreadable directory
+# leaves one on both sides, so the blind spot is symmetric.
+diff_xattrs_in() {
+  [ -n "$DIFF_XATTR" ] || return 0
+  [ -d "$2" ] || return 0
+  "$DIFF_XATTR" - "$1" "$2" 2>/dev/null <<'PY'
+import os, sys
+
+prefix, root = sys.argv[1], sys.argv[2]
+ELIDE = {"security.selinux"}
+
+
+def show(value):
+    """Printable ASCII as itself, anything else as hex — fixed, not guessed."""
+    if value and all(32 <= b < 127 for b in value):
+        return value.decode("ascii")
+    return "0x" + value.hex()
+
+
+lines = []
+for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    # A symlink to a directory lands in `dirnames` and is not descended into,
+    # so listing both lists reaches every entry exactly once.
+    for name in dirnames + filenames:
+        path = os.path.join(dirpath, name)
+        rel = os.path.relpath(path, root)
+        try:
+            names = os.listxattr(path, follow_symlinks=False)
+        except OSError:
+            continue
+        for attr in names:
+            if attr in ELIDE:
+                continue
+            try:
+                value = os.getxattr(path, attr, follow_symlinks=False)
+            except OSError:
+                continue
+            lines.append("%s%s %s %s" % (prefix, rel, attr, show(value)))
+sys.stdout.write("".join(line + "\n" for line in sorted(lines)))
+PY
+  return 0
+}
+
+# Set one, for a fixture. `diff_setxattr <path> <name> <value>`, on the link
+# itself rather than its target — a fixture that wants the target can name it.
+# Silent when there is no Python: the case still runs and still compares
+# everything else, and the missing comparison is announced once in the header
+# rather than once per case.
+diff_setxattr() {
+  [ -n "$DIFF_XATTR" ] || return 0
+  "$DIFF_XATTR" - "$1" "$2" "$3" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], sys.argv[2], sys.argv[3].encode(), follow_symlinks=False)
+PY
+}
+
+## Access-control lists, which need a fixture and no comparison
+#
+# An ACL is a per-file permission list finer than the nine mode bits — "user
+# alice may write this, group build may read it" — and `cp -p` is supposed to
+# carry it. On Linux it is *stored* as the extended attribute
+# `system.posix_acl_access`, which means `diff_xattrs_in` above already sees it
+# and already compares it byte for byte. There is deliberately no
+# `diff_getfacl`: adding one would be a second, weaker view of a thing already
+# compared exactly, and two views that can disagree is worse than one that
+# cannot.
+#
+# What is still needed is a way to *make* one, and that does need a tool.
+# Writing the raw attribute by hand is possible — the format is a 4-byte version
+# followed by `{tag, perm, id}` triples — but a fixture that hand-assembles the
+# on-disk encoding is a fixture that can be wrong in a way no case would catch,
+# and it would not be checked against the kernel's own validation the way
+# `setfacl` is.
+#
+# The system's `setfacl` is preferred; the one built beside libacl (section
+# above) is the fallback, and on this host it is the only one. Empty when
+# neither works, in which case the ACL cases skip and say so — the same shape as
+# `DIFF_XATTR`, and for the same reason.
+DIFF_SETFACL=
+for diff_sf in setfacl "$diff_dep_prefix/bin/setfacl"; do
+  case $diff_sf in
+    setfacl) command -v setfacl >/dev/null 2>&1 || continue ;;
+    *) [ -x "$diff_sf" ] || continue ;;
+  esac
+  # Present is not working: a filesystem mounted `noacl` accepts nothing, and a
+  # `setfacl` that cannot find its libacl exits before touching the file. Probe
+  # by setting one and confirming the attribute it is stored as appears — via
+  # the same reader the cases will use, so a probe that passes guarantees a case
+  # can see the result.
+  diff_sf_dir=$(mktemp -d) || continue
+  : > "$diff_sf_dir/probe"
+  if "$diff_sf" -m u:0:rwx "$diff_sf_dir/probe" >/dev/null 2>&1 \
+     && [ -n "$DIFF_XATTR" ] \
+     && "$DIFF_XATTR" - "$diff_sf_dir/probe" >/dev/null 2>&1 <<'PY'
+import os, sys
+assert "system.posix_acl_access" in os.listxattr(sys.argv[1])
+PY
+  then
+    rm -rf "$diff_sf_dir"
+    DIFF_SETFACL=$diff_sf
+    break
+  fi
+  rm -rf "$diff_sf_dir"
+done
+
+# Set one, for a fixture. `diff_setfacl <path> <spec>`, where the spec is
+# whatever `setfacl -m` takes (`u:0:rwx`, `g:0:r-x`, `d:u:0:rwx` for a
+# directory's default ACL). Silent when there is no usable tool, matching
+# `diff_setxattr`: the case still runs, and the gap is announced once in the
+# harness header rather than once per case.
+diff_setfacl() {
+  [ -n "$DIFF_SETFACL" ] || return 0
+  "$DIFF_SETFACL" -m "$2" "$1" >/dev/null 2>&1
+  return 0
+}

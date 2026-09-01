@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-four so far. Three are about the interface these programs share
+//! There are twenty-seven so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -387,6 +387,49 @@
 //!   same rule across a filesystem boundary, where a copy stands in for a
 //!   rename and a rename would have kept the names together.
 //!
+//! The twenty-fifth is what a copy has to put back once the bytes have arrived,
+//! and it is here because *the order of the putting back is load-bearing* — a
+//! fact no call site can be expected to rediscover:
+//!
+//! - [`fsattr`] — a file's metadata: timestamps, owner, permissions, access
+//!   control list, extended attributes. `cp -p`, `mv` across a filesystem
+//!   boundary, `install -p` and `touch` all write some subset, and the subsets
+//!   have to be written in one particular sequence. The owner goes before the
+//!   extended attributes, because changing a file's owner makes the kernel drop
+//!   its `security.capability`; the mode goes after the access control list,
+//!   because writing an ACL rewrites the mode bits. Each of those is one line
+//!   in `copy.c` and a silently lost privilege if a second copy of the code
+//!   gets it backwards. It also owns the `On::{Path, File}` distinction, which
+//!   is a security property rather than an optimisation: restoring a setuid bit
+//!   *by name* leaves a window in which the name can be made to mean a
+//!   different file.
+//!
+//! The twenty-sixth is the same argument about a *directory*, and it exists
+//! because upstream never split the two programs in the first place:
+//!
+//! - [`copytree`] — making a destination directory, reading a source one in the
+//!   order GNU walks it, and the bookkeeping for permission bits deliberately
+//!   withheld while a copy is in flight. There is one `copy_internal` in
+//!   `copy.c` and `mv` is that engine with `move_mode` set, so a recursive walk
+//!   written separately for `mv` would be a second home for every bug this one
+//!   has. Nothing in it reads an option struct, which is the property that
+//!   makes it shareable at all.
+//!
+//! The twenty-seventh is one question inside that copy, and it is here for the
+//! reason [`human`] is: the obvious implementation is wrong, and wrong in a way
+//! that only shows up on someone else's filesystem:
+//!
+//! - [`utimecmp`] — is the destination already at least as new as the source?
+//!   `cp -u` and `mv -u` are documented as the same option and ask it
+//!   identically. Subtracting one `mtime` from the other gets it wrong exactly
+//!   when the two files are on filesystems of different timestamp precision:
+//!   a source at `10.5` seconds copied to a filesystem that stores whole
+//!   seconds arrives at `10.0`, reads as older on the next run, and is copied
+//!   again — forever, which is the one thing `-u` exists to prevent. The fix is
+//!   to compare against the source *rounded to what the destination could
+//!   store*, and no interface reports that precision, so it has to be deduced
+//!   and then measured by experiment.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -395,6 +438,7 @@ pub mod backup;
 mod bignat;
 pub mod canon;
 pub mod cfmt;
+pub mod copytree;
 pub mod digest;
 pub mod errmsg;
 pub mod extfloat;
@@ -420,6 +464,7 @@ pub mod stdfd;
 pub mod tabstops;
 pub mod umask;
 pub mod userspec;
+pub mod utimecmp;
 pub mod vercmp;
 pub mod xnum;
 pub mod yesno;

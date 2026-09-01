@@ -111,6 +111,32 @@ pub fn same_inode(a: (&Path, &fs::Metadata), b: (&Path, &fs::Metadata)) -> bool 
     }
 }
 
+/// Are two already-stat'd files on the same filesystem? GNU's
+/// `dst_sb.st_dev == src_sb.st_dev`.
+///
+/// The device half of a [`FileId`] on its own. It is a different question from
+/// [`same_inode`] and is asked for a different reason: not "is this the same
+/// file" but "will moving between these two be a rename or a copy", which is
+/// what decides whether a timestamp survives verbatim or is rounded to what the
+/// other filesystem can hold. `mv -u`'s comparison turns on it — see
+/// [`crate::utimecmp`].
+///
+/// The portable arm answers `true` — one filesystem — because it has no device
+/// numbers to compare, and the only caller uses the answer to *disable* a
+/// filesystem-precision correction that the same arm cannot make anyway.
+#[cfg(unix)]
+#[must_use]
+pub fn same_device(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev()
+}
+
+#[cfg(not(unix))]
+#[must_use]
+pub fn same_device(_a: &fs::Metadata, _b: &fs::Metadata) -> bool {
+    true
+}
+
 /// How many directory entries point at this file — `st_nlink`.
 ///
 /// The count is what separates "the destination is the last name this file has"

@@ -92,6 +92,7 @@ use std::time::SystemTime;
 
 #[cfg(unix)]
 use crate::pathname::c_path;
+use crate::quote::{quoteaf, quoteaf_os};
 
 /// Whether a metadata write passes *through* a symbolic link at the end of the
 /// path, or lands on the link itself.
@@ -900,6 +901,74 @@ pub struct XattrError {
     pub err: io::Error,
 }
 
+impl XattrStep {
+    /// libattr's four sentences, filled in.
+    ///
+    /// They are not interchangeable: two name the attribute and two do not, and
+    /// two blame the source while two blame the destination. The caller supplies
+    /// both names and this picks between them; handing them over the wrong way
+    /// round produces a sentence that is grammatical and names the wrong file.
+    ///
+    /// The attribute name goes through `quoteaf` for the same reason the file
+    /// names do — coreutils hands libattr `copy_attr_quote`, which *is*
+    /// `quoteaf`, and libattr quotes the attribute name with it as well as the
+    /// path.
+    ///
+    /// Here rather than in a utility because both `cp` and `mv` copy extended
+    /// attributes and neither may word the failure differently: `mv` reaches
+    /// this through `cp_option_init`'s `preserve_xattr = true` (`mv.c:145`), so
+    /// the two are the *same* gnulib call site, and a script that matches one
+    /// has to match the other.
+    #[must_use]
+    pub fn sentence(&self, src: &Path, dst: &Path) -> String {
+        match self {
+            XattrStep::List => format!("listing attributes of {}", quoteaf_os(src)),
+            XattrStep::Get(name) => {
+                format!("getting attribute {} of {}", quoteaf(name), quoteaf_os(src))
+            }
+            XattrStep::Set(name) => {
+                format!(
+                    "setting attribute {} for {}",
+                    quoteaf(name),
+                    quoteaf_os(dst)
+                )
+            }
+            XattrStep::SetAll => format!("setting attributes for {}", quoteaf_os(dst)),
+        }
+    }
+}
+
+/// gnulib's `errno_unsupported` (`copy.c:700`): the two errors that mean the
+/// filesystem has nothing to say rather than that something went wrong.
+///
+/// This is *not* [`absent_everywhere`], and the difference between them is the
+/// reason both exist. That one decides whether there was a failure at all; this
+/// one decides whether to mention one there certainly was. `ENODATA` is here and
+/// not there: it cannot come from the initial `listxattr` — a filesystem does
+/// not answer "no such attribute" to a request for the list — but it can come
+/// from a `getxattr` for a name removed between the listing and the read, and a
+/// copy losing a race with `setfattr -x` is not worth a diagnostic.
+///
+/// *Which* of three volumes a caller wants is not decided here, because it is
+/// not the same question for the two callers. gnulib picks one of three error
+/// callbacks (`copy.c:3700`), which reads as two booleans and is three
+/// behaviours:
+///
+/// | Asked for | Printed | Exit status |
+/// |---|---|---|
+/// | `cp --preserve=xattr` | every failure | 1 |
+/// | `cp --preserve=all`, and **all of `mv`** | all but this predicate | 0 |
+/// | `cp -a` | nothing at all | 0 |
+///
+/// `mv` has no option that moves it off the middle row: `cp_option_init` sets
+/// `require_preserve_xattr = false` and `reduce_diagnostics = false`
+/// (`mv.c:145`, `mv.c:141`), and nothing in `mv`'s getopt writes either field.
+#[must_use]
+pub fn errno_unsupported(e: &io::Error) -> bool {
+    e.raw_os_error()
+        .is_some_and(|n| n == ENOTSUP || n == ENODATA)
+}
+
 /// Copy extended attributes from one file to another.
 ///
 /// Returns the failures in the order they happened; an empty vector is success.
@@ -1059,7 +1128,14 @@ fn no_xattrs_here() -> io::Error {
 /// `ENOTSUP` (== `EOPNOTSUPP`) on Linux, the only ABI this ships on. This crate
 /// has no `libc` dependency to read it from; named for the same reason
 /// `cp`'s `libc_eloop` is.
-#[cfg(unix)]
+///
+/// Ungated, unlike two of its three neighbours, because [`errno_unsupported`] is
+/// ungated and has to compile on the Windows *host* the tests run on. Comparing
+/// a Windows error number against 95 is meaningless — and unreachable: the
+/// non-unix [`copy_xattrs`] returns no failures, so nothing is ever handed to
+/// that predicate there. A second `cfg(not(unix))` arm answering a fixed `false`
+/// would put one decision in two places to avoid a comparison that never
+/// happens. [`ENODATA`] is ungated for the same reason.
 const ENOTSUP: i32 = 95;
 
 /// `ENOSYS` on Linux — "the kernel does not implement this call".
@@ -1073,7 +1149,6 @@ const ERANGE: i32 = 34;
 
 /// `ENODATA` (== `ENOATTR`) on Linux — "the file exists, that attribute does
 /// not". The two spellings are one number; there is no second code.
-#[cfg(unix)]
 const ENODATA: i32 = 61;
 
 /// Whether a failure means "this filesystem simply has no extended attributes",

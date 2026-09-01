@@ -58745,6 +58745,101 @@ and nothing else has to move.
 
 ---
 
+## 743. `utimecmp` is a shared library module with one caller, and it does the on-disk probe rather than assuming a resolution
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** `mv -u b/x a/x` between two *different* filesystems has to answer
+"is the copy that is already there as new as the thing I would replace it
+with?" — and the copy that is already there was rounded off when it was written,
+because filesystems do not all record the time to the same fineness. A source
+stamped 10.5 seconds, copied to a filesystem that stores whole seconds, arrives
+as 10.0; compare 10.0 against 10.5 and the destination looks older *forever*, so
+`mv -u` copies it again on every run and never settles. GNU corrects this by
+working out how fine the destination's clock actually is and rounding the source
+the same way before comparing. Two questions had to be answered to follow it:
+where the correcting code lives, and whether it is allowed to write to the disk
+to find the answer.
+
+### Where it lives: `coreutils::utimecmp`, not a private function in `mv.rs`
+
+`cp --update` is not implemented yet — it is explicitly refused by name, and
+`cp.rs`'s `unimplemented_long_options_are_rejected_by_name` test pins that — so
+today the module has exactly one caller, which is normally an argument for
+keeping it private. The decision went the other way on three pieces of evidence.
+
+* **The option is one option, not two that happen to be spelled alike.**
+  Upstream's `-u` for `cp` and for `mv` is the same field of the same struct
+  read by the same line of `copy.c`. Only the *flag* differs, and even that
+  differs only because `mv` can rename: for `cp` the flag is
+  `preserve_timestamps`, and for `mv` the same expression reduces to "the move
+  crosses a filesystem". When `cp --update` lands it will call this, and a
+  private copy in `mv.rs` would be moved at that point rather than reused.
+* **Upstream itself made this call.** `utimecmp` is in gnulib's `lib/`, not in
+  `src/mv.c`, and it is shared by `cp`, `mv` and `install`.
+* **It is a self-contained calculation with a cache**, not a fragment of `mv`'s
+  control flow. The per-`dev_t` resolution cache is the kind of state that wants
+  to outlive one call and be shared by every caller in the process.
+
+This is the opposite conclusion from the one reached for `copytree` a day
+earlier, and deliberately so: `copytree` had one upstream caller
+(`copy_internal`) and no option struct anyone else read, so making it shared
+would have been inventing a boundary upstream does not have. Here the boundary
+is upstream's. The test is *"does the code have more than one caller in the
+design"*, not *"does it have more than one caller today"*.
+
+### Whether it may write to the destination to find the resolution
+
+gnulib's measurement is not passive. When the trailing zeros of the
+destination's three timestamps do not settle the question, it **writes** a
+deliberately awkward modification time onto the destination file, `stat`s it
+back to see which digits survived, and writes the original time back. That is a
+real side effect of a comparison, on a file the user did not ask to modify, and
+it is visible to anything watching the filesystem.
+
+**Kept, rather than assuming a resolution.** The alternatives were each worse in
+a way that is not recoverable:
+
+* **Assume nanoseconds.** Wrong on exactly the filesystems the flag exists for.
+  `mv -u` onto FAT or onto a network filesystem would never converge, which is
+  the original bug with extra steps.
+* **Assume the worst (two seconds).** Rounds the source down by up to two
+  seconds on *every* cross-device `mv -u`, including the overwhelmingly common
+  case where both sides keep nanoseconds — turning a correctness fix into a
+  correctness bug in the opposite direction, where a genuinely newer source is
+  skipped.
+* **Ask `pathconf(_PC_TIMESTAMP_RESOLUTION)`.** The honest answer, and gnulib
+  prefers it where it exists — but it does not exist on Linux, which is what we
+  target, so the `#ifdef` is dead code here and was left out.
+
+Three things bound the cost. The probe runs at most **once per device per
+process** — the result is cached by `st_dev`. It runs only after the quick exits
+have failed, so the two stamps are already within two seconds of each other and
+the trailing-zero deduction was inconclusive. And the original time is written
+back **whenever it might not still be there**, including when the read-back
+itself failed, since a failed read cannot prove the probe did not land.
+
+What is given up by keeping it: a `mv -u` that is interrupted between the probe
+write and the restore leaves the destination stamped `res / 9` nanoseconds late
+and possibly on an odd second. That is a real if narrow hazard, and it is
+upstream's; the alternative to accepting it is one of the three wrong answers
+above.
+
+### One deliberate divergence from upstream
+
+gnulib builds its probe timestamp as a C `struct timespec` and lets `utimensat`
+reject anything malformed. The port converts through `SystemTime`, whose
+arithmetic can overflow, so `instant()` returns `Option` and a stamp that is not
+representable makes the whole comparison answer `Age::Unknown` — which the
+caller reads as "not known to be up to date", so the move goes ahead, the same
+thing `mv` without `-u` would have done. The important half is that the refusal
+happens **before** the write: substituting some other time onto a real file
+would be worse than admitting the two cannot be compared.
+
+---
+
 ## §667 — lane A added a line to lane C's orphan-module ledger, in the direction that ledger says it never moves
 
 **Date:** 2026-09-01
@@ -59058,3 +59153,208 @@ consult the verdict, and a host OOM lands on whatever allocation the kernel
 happened to be making — so a host-killed boot can easily wear the shape of a
 known bug. Recording that would file a recurrence of an issue that did not
 recur, in the counter several `known-issues.md` closure bars are written in.
+
+---
+
+## 744. The differential reference's own dependencies are built from source into the cache, rather than the comparison being given up
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** the two harnesses that certify our `cp` and `mv` do it by running
+the real GNU ones side by side and comparing everything both leave behind. The
+GNU ones are not the machine's installed copies — they are built from the
+official 9.4 tarball, for reasons in §726. It turned out that a program built
+that way is only as capable as the *libraries present on the build machine*, and
+this machine was missing one: with no libattr, GNU's `cp` is compiled with its
+whole extended-attribute routine replaced by "succeed, do nothing". So the first
+five cases written about extended attributes came back saying we were wrong,
+when what had happened is that the thing we were being compared against could
+not do it. The decision is that when the reference is missing a dependency, the
+harness **builds that dependency too**, into the same cache, rather than
+recording the comparison as impossible.
+
+### What actually happens
+
+`scripts/diff-wsl.sh` tries the system's libattr first, so a machine with the
+development package installed pays nothing. Failing that it fetches attr 2.5.2
+from Savannah, configures it `--prefix` into
+`~/.cache/slateos-diff-gnu/attr-prefix`, and passes `-I…/include` and
+`-L…/lib -Wl,-rpath,…/lib` to coreutils' `configure` as `CPPFLAGS`/`LDFLAGS`.
+Failure at any step is never fatal: the reference is then built as before, and
+the harnesses say so in their header and skip the cases that need it.
+
+Two details that are not incidental:
+
+* **`-Wl,-rpath` and not `LD_LIBRARY_PATH`.** The reference binaries are run
+  through symlinks in a throwaway `PATH` directory, by two harnesses, in an
+  environment each case controls. A library path baked into the binary cannot be
+  lost by any of that — and, more to the point, cannot leak into the *subject's*
+  environment, where it would let our binaries silently acquire a library the
+  real target does not have.
+* **What was achieved is read back from the built tree's `config.h`,** not
+  inferred from the flags that were passed. `gl_FUNC_XATTR` can decide it cannot
+  use libattr and only `AC_MSG_WARN` about it, so a tree configured with the
+  flags can still hold `/* #undef USE_XATTR */`. Intent is not evidence.
+
+### The alternatives, and why each is worse
+
+**Accept the degraded reference and mark the cases `xfail` forever.** This is
+what was in the tree that morning: three `xfail_case`s in `cp-diff.sh` reading
+"the built reference has USE_XATTR undefined and refuses the word", and a
+comment stating the situation "will not turn green by anything done here". It is
+honest, and it is cheap, and it is also how a certification suite quietly stops
+certifying: an `xfail` is a case that has been promised never to fail. The three
+were promoted the same day the dependency was built, and the harness reported
+eight new passing cases — eight comparisons that had been declared impossible.
+
+**Ask the operator to install `libattr-dev`.** One `apt install`, and then the
+harness works on exactly one machine. Every other machine — a fresh checkout, a
+different account's WSL, whatever runs this in a year — is back to the degraded
+reference, and back to reporting our correct behaviour as a difference in us,
+which is the worst direction for a false result to point. The cache build is
+strictly more portable than the instruction to install, and it costs seconds.
+
+**Compare against the *system's* `/usr/bin/cp`, which does have xattr support.**
+This trades one wrong reference for another and is the thing §726 exists to
+refuse: Ubuntu carries `debian/patches/cp-n.diff`, so certifying against the
+installed binary certifies us into Debian's behaviour and away from the
+specification, while looking green.
+
+### What is genuinely given up
+
+A network fetch and a compile, once per cache, for a library the harness does
+not otherwise need — and a second upstream tarball whose checksum nobody here
+verifies, on top of the coreutils one that already had that property. That is a
+real cost and it is the reason this is written down rather than assumed: the
+harness now builds two third-party projects to certify one of ours, and each one
+added is a thing that can fail on a machine that is not this one. The mitigation
+is that every step is non-fatal and the header says out loud what was and was
+not compared, so the failure mode is a *skipped* section rather than a wrong
+verdict.
+
+### Where this goes next
+
+The same host also has no libacl, so the reference's `copy_acl` is likewise
+reduced — and our `cp` does carry POSIX ACLs, storing them exactly as Linux does
+in `system.posix_acl_access`. Since that is an ordinary extended attribute, the
+comparison added today would already see a difference; what is missing is a case
+that seeds an ACL, and a reference that could match it. The precedent set here
+says to build attr's sibling `acl` the same way rather than to write another
+permanent `xfail`.
+
+---
+
+## §670 — a benchmark's printed verdict is bound by the same evidence rules as the report that scores it
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** a benchmark in the kernel measures something, then prints an
+English sentence saying what the measurement means. On one run the measurement
+was garbage — the machine's speed changed halfway through, so the first and
+second halves of the run disagreed by 92% — and the sentence was printed anyway,
+confidently, and was wrong in three separate ways. The tooling that reads these
+runs *had* already thrown the same numbers out as unusable, in the same log. The
+decision is that the sentence must obey the rules the tooling obeys: say nothing
+when the measurement is void, never narrate a physically impossible number as a
+finding, and never assert a cause the run did not measure.
+
+### Why a printed verdict is not just a convenience
+
+`bench_vfs_readdir_root_cost` exists because an earlier investigation lost two
+days to acting on an unmeasured hypothesis. Its whole purpose is to replace
+reasoning with measurement, and it ends by printing a one-line conclusion so the
+next reader does not have to re-derive it from five numbers.
+
+That last part is the dangerous part. A table of numbers carries its own
+caveats — a reader who sees `92% UNSTABLE` next to a figure discounts it. A
+sentence does not: "STATS-DOMINATE — mount parenthood costs 18422ns and the 5
+measured stats account for 151% of it" reads as a finding no matter what
+produced it. The convenience that makes the line worth printing is exactly what
+makes a wrong one worse than no line at all.
+
+### The three ways one run got it wrong
+
+All three came from a single boot, the first after the `finish_listing` fix.
+
+1. **It concluded from samples the host-side report had discarded.** `run`
+   already cross-checks each measurement window's two halves against each other,
+   and `bench-report`'s `MEASUREMENT VOID` class refuses to score a benchmark
+   whose halves disagree. On this boot `mp_parent` and `mp_elsewhere` were 92%
+   and 82% apart, the report correctly voided them — and four lines earlier in
+   the same log, the kernel's own verdict had already announced a conclusion
+   drawn from them.
+
+2. **It narrated an impossible number as a finding.** It reported that adding
+   five mounts made an unrelated listing *faster* by 26%. That cannot happen:
+   `resolve_mount` does a longest-prefix scan whose length is monotonic in the
+   number of mounts. A negative there is not a small effect, it is proof the arm
+   measured noise — and it was being printed in the same voice as the real
+   results, and fed as a correction term into a later arm.
+
+3. **It described the tree as it had been, not as it was.** The verdict said
+   "the known-issues fix is the right one and should recover most of this" about
+   a binary that already contained that fix. The `submount_stat` arm measures the
+   by-path stat the fix *removed*; once removed, five of them cost more than the
+   delta they used to be part of, which is why the fraction read 151%.
+
+### The decision
+
+Three guards, and one deliberate non-guard.
+
+- **Void guard.** The ladder checks `split.is_unstable()` on every arm it rests
+  on and prints `VOID` with the split figures instead of a verdict. The rule is
+  that the in-kernel sentence may not claim more than the host-side report will
+  score.
+- **Impossibility guard.** A negative mount-table delta is named as noise, and
+  the per-mount unit price derived from it is withheld from the arm that
+  subtracts it, rather than laundered into a figure that looks corrected.
+- **Tense.** Every surviving branch is worded so none presupposes the fix is
+  unapplied. The two that should now be unreachable say so, and say to check the
+  split figures before believing them.
+- **`explained` is deliberately NOT clamped to 100%.** This is the non-guard, and
+  it is the interesting half. A percentage over 100 looks like a bug and the
+  reflex is to clamp it. But while the by-path stat was inside the loop, five of
+  them could not exceed the delta they were part of; that they now do is the
+  measurement reporting that the call has left the loop. Clamping would have
+  destroyed the one signal the arm was added to detect — and did, in effect:
+  the run reported `STATS-DOMINATE` where the truth was `STATS-REMOVED`.
+
+### The alternative, and why not
+
+The obvious alternative is to delete the printed verdict and leave the numbers,
+on the grounds that a number cannot lie about itself. That is genuinely safer,
+and it is what most benchmark suites do.
+
+Rejected because the numbers here are not self-explanatory: the finding is a
+*difference between two arms* that only means anything once mount-table growth
+has been subtracted, and a reader who does not know that will read `parent` as
+the cost of listing a directory. The sentence is what carries the experimental
+design. Deleting it would trade a verdict that can be wrong for a table that is
+reliably misread — and the entry this benchmark serves exists because someone
+misread a table.
+
+The narrower alternative — keep the verdict but drop the `submount_stat` arm now
+that its call is out of the loop — was rejected for the same reason the arm was
+added: it is the yardstick for what the fix removed, measured fresh every boot
+instead of quoted from a constant. `metadata_resolved` is still live code and
+still what any ordinary caller pays to stat a mount point. A constant quoted
+instead of measured is the exact failure this benchmark was built to end.
+
+### Consequences
+
+- Boots where the host is loaded produce `VOID` rather than a confident wrong
+  sentence. This is a real loss: a contaminated run now yields no verdict at
+  all, and contamination is common on this host. Accepted — the run's numbers
+  are still recorded and still enter the history, so nothing is lost except a
+  claim that should not have been made.
+- The `STATS-DOMINATE` and `STATS-PARTIAL` branches are now assertions that a
+  regression has occurred, not descriptions of a healthy state. If either fires
+  on a quiet host, `finish_listing` has gone back to resolving paths.
+- The rule generalises beyond this benchmark: any in-kernel line that interprets
+  a measurement is bound by the evidence rules of the tooling that scores it. No
+  other benchmark prints a verdict of this kind today; if one is added, this is
+  the standard it has to meet.

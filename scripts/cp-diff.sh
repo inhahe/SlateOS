@@ -74,12 +74,16 @@
 # lands. `cp.rs`'s module docs explain why those options are *refused* rather
 # than ignored.
 #
-# The third group is at present only `--preserve=xattr`, whose reason is in
-# section 17: the reference is built from source on a host with no libattr, so
-# its `cp` is compiled without extended-attribute support and refuses the word
-# outright. That one will not turn green by anything done here — it would take
-# a libattr on the build host — which is why it names the reference in its
-# reason rather than pretending to be an inventory entry.
+# The third group is the one where the *reference* is what cannot do the thing.
+# It held `--preserve=xattr` until 2026-09-01: the reference is built from
+# source, this host had no libattr, so its `cp` was compiled without
+# extended-attribute support and refused the word outright. This comment used to
+# say that would "not turn green by anything done here — it would take a libattr
+# on the build host". It took a libattr on the build host: `diff-wsl.sh` now
+# builds one from source into the same cache and configures coreutils against
+# it, and those three are real cases whenever it succeeds. They fall back to
+# `xfail_case` when it does not, which is what `xattr_case` in section 17 is.
+# The group is currently empty on this host.
 #
 # ## The reference is built, not found
 #
@@ -240,6 +244,17 @@ hardlinks() {
       | LC_ALL=C sort )
 }
 
+# And the extended attributes, which `snapshot` cannot see: they are not in the
+# mode, the size or the name, so a `cp -a` that carried every byte and dropped
+# every attribute looked perfect here until this was added. `diff_xattrs_in` and
+# its reasoning live in `diff-wsl.sh` section 8.
+#
+# Empty output on a tree that has none, which is almost every case in this file —
+# so the cost of comparing it everywhere is one line of "" against "".
+xattrs() {
+  diff_xattrs_in '' "$1"
+}
+
 # And the bytes, so that a file which arrived with the right size and the wrong
 # contents is still caught. `-type f` does not follow, so a symlink is not read
 # here — its target is already in the snapshot above.
@@ -330,9 +345,10 @@ run_one() {
 
 judge() {
   local o_dir=$1 g_dir=$2 o_out=$3 g_out=$4 o_extra=$5 g_extra=$6 label=$7
-  local o_snap g_snap o_body g_body o_show g_show o_link g_link
+  local o_snap g_snap o_body g_body o_show g_show o_link g_link o_xat g_xat
   o_snap=$(snapshot "$o_dir"); g_snap=$(snapshot "$g_dir")
   o_link=$(hardlinks "$o_dir"); g_link=$(hardlinks "$g_dir")
+  o_xat=$(xattrs "$o_dir"); g_xat=$(xattrs "$g_dir")
   o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | scrub "$g_dir")
   o_show=$(scrub "$o_dir" <"$o_out"); g_show=$(scrub "$g_dir" <"$g_out")
   o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir")
@@ -340,18 +356,18 @@ judge() {
 
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
      && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
-     && [ "$o_link" = "$g_link" ]; then
+     && [ "$o_link" = "$g_link" ] && [ "$o_xat" = "$g_xat" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s}' \
+  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}' \
     "$(printf '%s' "$o_extra" | tr '\n' '|')" "$(printf '%s' "$o_show" | tr '\n' '|')" \
     "$(printf '%s' "$o_snap" | tr '\n' '|')" "$(printf '%s' "$o_body" | tr '\n' '|')" \
-    "$(printf '%s' "$o_link" | tr '\n' '|')" \
+    "$(printf '%s' "$o_link" | tr '\n' '|')" "$(printf '%s' "$o_xat" | tr '\n' '|')" \
     "$(printf '%s' "$g_extra" | tr '\n' '|')" "$(printf '%s' "$g_show" | tr '\n' '|')" \
     "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')" \
-    "$(printf '%s' "$g_link" | tr '\n' '|')")
+    "$(printf '%s' "$g_link" | tr '\n' '|')" "$(printf '%s' "$g_xat" | tr '\n' '|')")
   LABEL=$label
 }
 
@@ -417,6 +433,37 @@ SELF_RESIDUE='GNU leaves a partial copy, we leave the tree untouched'
 echo "cp-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
+# Said out loud, because a harness that has quietly stopped checking something
+# is worse than one that never checked it: the run would otherwise report the
+# same counts while comparing one fewer thing.
+#
+# Two independent facts, and both are needed. The harness must be able to *set*
+# an attribute (Python, and a filesystem that accepts one), and the reference
+# must have been built with `USE_XATTR` — a coreutils compiled without libattr
+# has a `copy_attr` whose whole body is `return true`, so it drops every
+# attribute silently and a case comparing against it would report the loss as
+# *ours*. Section 17's `--preserve=xattr` cases are the ones that need the
+# second fact; the comparison itself runs on every case either way, since a
+# tree with no attributes costs an empty string against an empty string.
+if [ -z "$DIFF_XATTR" ]; then
+  echo "  xattr: NOT COMPARED -- no working setxattr found"
+elif [ "$DIFF_XATTR_REF" != yes ]; then
+  echo "  xattr: compared with $DIFF_XATTR, but the reference lacks USE_XATTR"
+else
+  echo "  xattr: $DIFF_XATTR, reference has USE_XATTR"
+fi
+# ACLs are compared by the same reader — on Linux an ACL *is* the extended
+# attribute `system.posix_acl_access` — so what is reported here is only what
+# section 17's ACL cases need: a tool to make one, and a reference that keeps
+# one. The two are independent, and the first is the one that can make a case
+# pass for the wrong reason.
+if [ -z "$DIFF_SETFACL" ]; then
+  echo "  acl:   NOT EXERCISED -- no working setfacl to build a fixture with"
+elif [ "$DIFF_ACL_REF" != yes ]; then
+  echo "  acl:   $DIFF_SETFACL, but the reference lacks USE_ACL"
+else
+  echo "  acl:   $DIFF_SETFACL, reference has USE_ACL"
+fi
 
 # =============================================================================
 # 1. Too few operands
@@ -1666,18 +1713,15 @@ run_case --no-preserve=links,xattr,context file.txt new.txt
 
 # `--preserve=xattr`, `--preserve=all` and `-a`.
 #
-# What these cases can pin is the *option surface* — that the spellings are
+# These pin two different things, and until 2026-09-01 only the first was
+# available. The first is the *option surface* — that the spellings are
 # accepted, that each asks for the attributes GNU says it asks for, and that a
-# copy under them lands identically. What they cannot pin is an extended
-# attribute actually crossing, and the reason is the reference: `diff-wsl.sh`
-# builds coreutils with a plain `./configure`, this host has no libattr headers,
-# and so the built `cp` has `USE_XATTR` undefined and a `copy_attr` whose whole
-# body is `return true`. The host has no `setfattr` to seed an attribute with
-# either. That half is covered where it can be: `cp.rs`'s tests write and read
-# real attributes through the syscalls on a real filesystem.
+# copy under them lands identically. The second is an extended attribute
+# actually crossing, which needs a reference that can carry one.
 #
-# `--preserve=xattr` therefore differs on purpose, and *loudly*: a `cp` built
-# without xattr support does not ignore the word, it refuses the run —
+# It could not, and the reason is worth keeping: a `cp` built without libattr has
+# `USE_XATTR` undefined, `copy_attr`'s whole body becomes `return true`, and
+# `--preserve=xattr` does not ignore the word but refuses the run outright —
 #
 #   #if !USE_XATTR
 #     if (x.require_preserve_xattr)
@@ -1685,22 +1729,157 @@ run_case --no-preserve=links,xattr,context file.txt new.txt
 #                                 "built without xattr support"));
 #   #endif                                                      (cp.c:1276)
 #
-# — which is a shortfall in the reference and not in us, and is why these three
-# are `xfail_case` rather than `missing`: the option is implemented, and it is
-# the comparison that cannot be made.
+# — so the three cases below were `xfail_case`s reading "the built reference has
+# USE_XATTR undefined and refuses the word". `diff-wsl.sh` now builds libattr
+# from source into the same cache coreutils is built in and configures against
+# it, so on this host they are real cases. They stay conditional rather than
+# becoming unconditional `run_case`s because that build can still fail — no
+# network, no compiler — and a case that goes red for the reference's sake
+# teaches the reader the wrong thing.
 #
 # That same `#if` is also the sharpest available confirmation of what
 # `require_preserve_xattr` means, because `--preserve=all` and `-a` walk
 # straight past it in the very same binary. GNU's `PRESERVE_ALL` sets
 # `preserve_xattr` and deliberately not `require_preserve_xattr`, so only the
-# word typed by hand insists. Those cases below are real, and they agree.
+# word typed by hand insists. Those cases below have always been real.
 NO_XATTR_REF='the built reference has USE_XATTR undefined and refuses the word'
+xattr_case() {
+  if [ "$DIFF_XATTR_REF" = yes ]; then run_case "$@"
+  else xfail_case "$NO_XATTR_REF" "$@"; fi
+}
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
-xfail_case "$NO_XATTR_REF" --preserve=xattr file.txt new.txt
+xattr_case --preserve=xattr file.txt new.txt
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
-xfail_case "$NO_XATTR_REF" --preserve=mode,xattr file.txt new.txt
+xattr_case --preserve=mode,xattr file.txt new.txt
 STAMPS=1 TREE='mkstamped'
-xfail_case "$NO_XATTR_REF" --preserve=xattr -r tree dst
+xattr_case --preserve=xattr -r tree dst
+
+# And the half that was missing entirely: an attribute that has to *arrive*.
+# Every case above copies a tree with no attributes on it, so all of them would
+# pass against a `cp` that dropped every one — which is precisely what the
+# reference was doing, and precisely the shape of blind spot
+# `B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` was filed about.
+#
+# Measured rather than assumed: with `copy_xattrs` in `cp.rs` short-circuited to
+# `return true` and nothing else changed, this run goes from 565/0 to 562/3 —
+# the three cases that seed an attribute and expect it to arrive, and correctly
+# not the two below them that expect one *not* to.
+#
+# `-a` and not `--preserve=xattr` for the tree case: `-a` is what a user reaches
+# for, and it exercises the same `copy_attr` through the other spelling.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+xattr_case --preserve=xattr file.txt new.txt
+# Several at once, one with a value that is not printable ASCII — a copy that
+# carried the names and re-read the values as text mangles the last one, and a
+# copy that carried only the first passes the case above.
+STAMPS=1 TREE='mkstamped
+              diff_setxattr file.txt user.a one
+              diff_setxattr file.txt user.b two
+              diff_setxattr file.txt user.c "héllo"'
+xattr_case --preserve=xattr file.txt new.txt
+# Down a tree, so that a directory's own attributes are carried too and not just
+# its files'. `mkstamped` builds `tree/`; both levels get one.
+STAMPS=1 TREE='mkstamped
+              diff_setxattr tree user.ondir d
+              diff_setxattr tree/a.txt user.onfile f'
+xattr_case -a tree dst
+# Asked for and *not* wanted: plain `cp` preserves nothing, so the attribute
+# must be absent from the copy on both sides. A subject that always carried
+# attributes would pass every case above and fail only this one.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+run_case file.txt new.txt
+# `--no-preserve=xattr` after `-a`, which is the documented way to turn the one
+# word off. The source keeps its attribute; the copy must not get it.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+xattr_case -a --no-preserve=xattr file.txt new.txt
+
+# Access-control lists, which ride on `--preserve=mode` and not on
+# `--preserve=xattr`.
+#
+# An ACL is a permission list finer than the nine mode bits — "user 0 may write
+# this as well as the owner". GNU treats it as part of the *mode*: `copy_reg`
+# calls `set_acl`/`copy_acl` from the mode arm, and `copy_attr` explicitly skips
+# the attribute an ACL is stored in, so `--preserve=xattr` alone carries no ACL
+# and `--preserve=mode` carries one. Ours reaches the same place by a different
+# route — `fsattr::copy_permissions` sets the mode, clears the permission
+# attributes, then copies them — and these cases are what pin the two together.
+#
+# Two independent facts again. The harness must be able to *make* an ACL
+# (`DIFF_SETFACL`; without it the fixture sets nothing and every case below
+# would pass against a `cp` that dropped every ACL — the vacuous pass this whole
+# block exists to avoid), and the reference must have `USE_ACL`, since without
+# libacl gnulib compiles `copy_acl` down to a plain `chmod` and it drops the
+# entries while carrying the bits.
+#
+# The second fact fails differently from the xattr one and so is handled
+# differently: `--preserve=xattr` on a reference without libattr *refuses to
+# run*, which is loud, but a reference without libacl copies happily and is
+# merely wrong. That is why this is an `xfail_case` with the reason spelled out
+# rather than anything quieter.
+#
+# Measured rather than assumed: with the `copy_xattrs(.., Xattrs::Permissions)`
+# call in `fsattr::copy_permissions` short-circuited — leaving the `set_mode`
+# and the clearing in place, which is exactly the shape of a gnulib built
+# without libacl, carrying the bits and dropping the entries — this run goes
+# from 572/0 to 567/5. The five are the two that ask for the mode, the
+# two-entry one, the tree, and the ACL-plus-attribute one; the
+# `--preserve=xattr` and bare-`cp` cases below stay green, which is the half
+# that says the cases are about ACLs and not about copying generally. No other
+# case in the suite moved.
+NO_ACL_REF='the built reference has USE_ACL 0, so its copy_acl is a plain chmod'
+acl_case() {
+  if [ "$DIFF_ACL_REF" = yes ]; then run_case "$@"
+  else xfail_case "$NO_ACL_REF" "$@"; fi
+}
+if [ -z "$DIFF_SETFACL" ]; then
+  echo "SKIP section 17 (ACLs): no working setfacl, so the fixture cannot make"
+  echo "                        an ACL for the copy to carry -- and a case whose"
+  echo "                        fixture sets nothing passes against a cp that"
+  echo "                        drops everything"
+else
+  # The plain one: an extra named-user entry, carried by `-p`.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case -p file.txt new.txt
+  # `--preserve=mode` alone, which is the word that actually owns this.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case --preserve=mode file.txt new.txt
+  # `--preserve=xattr` alone, which must *not* carry it: GNU's `copy_attr` skips
+  # `system.posix_acl_access` by name, so the copy gets the source's mode bits
+  # and no entries. A subject that carried ACLs whenever it carried attributes
+  # passes every other case here and fails this one.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case --preserve=xattr file.txt new.txt
+  # And plain `cp`, which preserves nothing: the copy is a new file with the
+  # umask's mode and no ACL at all.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case file.txt new.txt
+  # Several entries, including a group one and a mask, so that a copy carrying
+  # only the first entry is caught. `setfacl` recomputes the mask itself when a
+  # named entry is added, which is part of what is being compared: the copy has
+  # to arrive with the same mask, not a recomputed one.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl file.txt u:0:rwx
+                diff_setfacl file.txt g:0:r-x'
+  acl_case -p file.txt new.txt
+  # A directory's *default* ACL — `system.posix_acl_default`, a separate
+  # attribute that new children inherit. `-a` down a tree, so both the
+  # directory's own ACL and its default one have to cross, and the file inside
+  # keeps its own.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl tree u:0:rwx
+                diff_setfacl tree d:u:0:rwx
+                diff_setfacl tree/a.txt u:0:rw-'
+  acl_case -a tree dst
+  # An ACL and an extended attribute on the same file, which are two attributes
+  # in the same list and are carried by two different pieces of GNU's code. A
+  # subject that copied the whole attribute list in one pass would pass this and
+  # fail the `--preserve=xattr` case above; one that special-cased the ACL and
+  # forgot the rest would do the reverse.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl file.txt u:0:rwx
+                diff_setxattr file.txt user.tag v1'
+  acl_case -a file.txt new.txt
+fi
 # `--preserve=all` is every word GNU has, `context` included; on a host without
 # SELinux the security-context line is guarded by `if (selinux_enabled)` and so
 # asks for nothing. That is why `all` works here and `context` alone does not.

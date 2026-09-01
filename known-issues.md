@@ -104994,13 +104994,25 @@ target was *not* stamped through the link. Six `xfail_case`s in
 `scripts/mv-diff.sh` §22 became XPASS on the first run after the fix and are now
 plain `run_case`s.
 
-**Two things that did not fall out of it, and are still open.** The
-`UTIMECMP_TRUNCATE_SOURCE` half of `-u`'s comparison is now *reachable* — there
-is a preserved timestamp for the truncation to be about — and is still not
-implemented; see `destination_is_older`'s doc. And `preserve_links` across the
-fallback is untouched; that half has been split out into its own entry below,
-because leaving it under a heading marked FIXED would make a reader who found
-the §22 case believe it was already dealt with.
+**Two things that did not fall out of it.** The `UTIMECMP_TRUNCATE_SOURCE` half
+of `-u`'s comparison became *reachable* with this fix — there is a preserved
+timestamp for the truncation to be about — and was still not implemented when
+this paragraph was first written. **It was implemented the same day**, in
+`userspace/coreutils/src/utimecmp.rs`: a port of gnulib's `lib/utimecmp.c` that
+deduces the destination filesystem's resolution from the trailing zeros of its
+three stamps and, when that is not decisive, measures it by writing a probe
+timestamp and reading back which digits survived. `mv.rs`'s
+`destination_is_older` became `destination_is_up_to_date` and passes the flag as
+`!fileid::same_device(src, dst)`, which is what upstream's expression reduces to
+for `mv`. Five `-u` cases were added to §22 — with the caveat, stated there,
+that they cannot *measure* the truncation: both filesystems the harness can
+reach keep nanoseconds, so the resolution deduces to one nanosecond, the
+truncation is the identity, and upstream's own `SYSCALL_RESOLUTION < res` guard
+skips the interesting code entirely. Breaking that code leaves all five passing;
+only the unit tests catch it. And `preserve_links` across the fallback is
+untouched; that half has been split out into its own entry below, because
+leaving it under a heading marked FIXED would make a reader who found the §22
+case believe it was already dealt with.
 
 ---
 
@@ -105345,13 +105357,60 @@ share the walk rather than to write a second one, and it should follow
 recursive copy that does not preserve attributes would only multiply that defect
 by the number of files in the tree.
 
+**Both prerequisites are now closed** (times/owner, and
+`B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` on 2026-09-01), so
+nothing gates this but the work itself.
+
+**"Share the walk" is measured to be bigger than it sounds — read this before
+starting.** `copy_tree` (`cp.rs:2709`) is only a `make_dir` plus a loop over
+`copy_entry`, and it looks liftable on its own. It is not: `copy_entry`
+(`cp.rs:2863`) calls `stat_destination`, `overwrite_allowed`,
+`remove_destination_first` and `place_entity`, reads `job.flags.follow_walked()`
+and consults `job.copied` — and `place_entity` is the whole per-entity dispatch,
+which reaches the file copy, the symlink recreation, the preserve tail and back
+into `copy_tree`. Lifting the walk therefore means lifting cp's copy *core*, not
+a walk. `cp.rs` is 8411 lines; the flag coupling is the shallow part (33
+`job.flags.` sites).
+
+That is still the right shape, because it is GNU's: there is one
+`copy_internal`, parameterised by `struct cp_options`, and `mv` is that engine
+with `move_mode = true` and `preserve_*` forced on (`mv.c:119-146`). Two
+independent walks would be two places for the same bug.
+
+**Do it in stages that each leave the tree green**, because a half-extracted
+engine is a red `main` for all three lanes:
+
+1. Leaf helpers that are already pure (`read_dir_fastread`, `make_dir`,
+   `create_dir_with_mode`, `ModeDebt`) into a library module.
+2. The per-file copy and its preserve tail — the `copy_reg` equivalent — which
+   is where `mv`'s existing `preserve_onto_file` should end up being the same
+   code rather than a parallel one.
+3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
+   struct.
+4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
+
+Each stage is certifiable the same way the `fsattr` moves in this chain were:
+`scripts/cp-diff.sh` and `scripts/mv-diff.sh` must stay byte-identical across
+it. A stage that moves code without changing behaviour and *does* move those
+numbers has a bug in the move.
+
+The numbers themselves are deliberately **not** written down here any more.
+They were — "557 passed, 0 differed, 33 differ on purpose" and "341/0/11" —
+and within a day of being written both were wrong, because the harnesses gain
+cases faster than this entry gets re-read: cp-diff is 572/0/30 and mv-diff
+357/0/11 as of 2026-09-01, having moved twice that day for reasons that had
+nothing to do with this work. A stale target number is worse than none, since
+the natural reading of a mismatch is that the stage broke something. Take the
+baseline by *running both harnesses immediately before starting a stage*, and
+compare against that.
+
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case
 keeps measuring something after the refusal is lifted.
 
 ---
 
-## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — FIXED 2026-09-01
 
 **In short:** a file moved across a filesystem boundary arrives without its
 extended attributes. Its times, owner, mode and access-control lists are carried
@@ -105392,6 +105451,166 @@ would also cover `cp`'s xattr cases, currently unmeasured for the same reason.
 Until then the unit tests in `mv.rs` are the place: they drive
 `copy_across_devices` directly and can set an attribute on the source and assert
 it on the destination, on a `/tmp` that supports one.
+
+**Status:** FIXED 2026-09-01. `preserve_onto_file` gained a `preserve_xattrs`
+call between the ownership step and the permissions step, `preserve_onto_link`
+gained one after its `set_times`, and `create_destination` gained the `S_IWUSR`.
+mv's own suite went 126 → 128 passed; `scripts/mv-diff.sh` is unchanged at 341
+passed, 0 differed, 11 differ on purpose, which is what "the harness cannot see
+this" above predicted and is therefore evidence rather than a shrug.
+
+Three corrections to what this entry prescribed, all found by reading rather
+than by assuming:
+
+* **`Xattrs::All` does not exist**, and inventing it would have been wrong
+  rather than merely unavailable. The right variant is `Xattrs::Ordinary` —
+  everything *except* the permission class — because the permission class is
+  `system.posix_acl_access` and its default counterpart, which the
+  `copy_permissions` on the next line already carries. Copying them here as
+  well would write the access list twice, and the second write would land
+  *before* the mode that has to precede it.
+* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:145`,
+  not `129`; the `preserve_xattr = true` inside it is `mv.c:145`; `copy_attr`
+  is `copy.c:1662`, `copy_acl`'s arm is `copy.c:1672` rather than `1668`, and
+  the `S_IWUSR` is `copy.c:1450` rather than `1457`.
+  The claim they support is right; the citations were not, and a citation that
+  does not resolve is worse than none.
+* **`preserve_onto_link` needed one too, which reads like a contradiction of
+  mv.rs's own doc and is not.** That doc explains at length that a symlink
+  returns early at `copy.c:3285` and so never reaches the mode block. But
+  `copy_attr` is at 3280 — *before* that return, at 3285–3286 — so a link passes
+  through it on the way out. Whether anything is then carried is the
+  filesystem's business (Linux permits only `trusted.` and `security.` on a
+  link), so in the ordinary case the call copies nothing and costs nothing;
+  what it buys is that the one namespace that *can* be set on a link is not
+  silently dropped.
+
+**The `S_IWUSR` is not decoration, and the test proves it.** With the widening
+removed, `a_read_only_source_still_gets_its_attributes` fails with
+`mv: setting attribute 'user.tag' for '…/b': Permission denied` — a `0444`
+destination that Linux's `xattr_permission` will not let its own creator write
+an attribute to. The same test asserts the bit does not *survive*: the mode at
+the end is `0444` again, because a move takes `copy.c:1672`'s
+`if (x->preserve_mode || x->move_mode)` arm and `copy_acl` writes `src_mode`
+absolutely — so GNU's `extra_permissions` cleanup branch is unreachable for
+`mv`, and ours needs no bookkeeping either, `copy_permissions` beginning with
+the same absolute `set_mode`.
+
+Both new tests were checked for discrimination rather than assumed to
+discriminate: with the `preserve_xattrs` call removed both fail, and with only
+the widening removed exactly the read-only one does.
+
+**Still open, and deliberately not done here:** teaching `snapshot` in the diff
+harnesses to run `getfattr -d -m -`. The paragraph above is still the argument
+for it, and it is still worth doing — it is what would let the *harness* catch a
+regression here instead of the unit tests, and it would cover `cp`'s xattr cases
+too. Left out because it changes the harness for both utilities and belongs in
+its own change; tracked as
+`B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` below.
+
+---
+
+## B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES — FIXED 2026-09-01
+
+**In short:** the two differential harnesses that compare our `cp` and `mv`
+against the real GNU ones cannot see extended attributes — small named blobs a
+filesystem stores alongside a file (a SELinux label, a `user.mime_type`, a
+backup tool's bookkeeping). So a change that silently stopped carrying them
+would show up as "0 differed". Both utilities *do* carry them, and both have
+unit tests that say so; what is missing is the whole-program check.
+
+**Where.** `scripts/cp-diff.sh` and `scripts/mv-diff.sh`, the `snapshot`
+function in each. It records the tree, each file's bytes, its mode, and the
+hard-link groups — everything an attribute is not.
+
+**The proper fix.** Add `getfattr -d -m - --absolute-names` per file to
+`snapshot`, with its output sorted and folded into the same text blob the rest
+of the snapshot goes into, so a difference in attributes fails a case the same
+way a difference in bytes does. Two things to get right:
+
+* **`getfattr` may not be installed.** It is part of `attr`, which is not
+  guaranteed. The harness should probe once and, if it is absent, say so in the
+  summary line rather than silently comparing nothing — a harness that quietly
+  stops checking something is worse than one that never checked it.
+* **`security.selinux` will differ on a machine with SELinux enforcing**, for
+  the same uninteresting reason the owner does. It belongs in the same category
+  as the fields `snapshot` already elides.
+
+Then add cases that actually set one: `setfattr -n user.tag -v v` in a `TREE`,
+for both a plain file and a hard-linked pair, and — for `mv` — a `FAR` case, the
+only shape where the fallback runs at all.
+
+**How it would be caught.** It is the catcher; nothing catches it. The evidence
+it is needed is that
+`B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` above was fixed with the
+harness reporting an identical 341/0/11 before and after.
+
+**Fixed 2026-09-01, in two halves, and the second half was the one that was not
+foreseen above.**
+
+The first half is the comparison: `diff-wsl.sh` section 8 adds `diff_xattrs_in`,
+which both harnesses fold into `judge` beside the tree, the bytes and the
+hard-link groups, and which reports as `xattr{…}`. It is **not** `getfattr`, as
+this entry proposed. `getfattr` is part of `attr`, which is not installed on
+this host and cannot be installed without a password the scripts do not have —
+but the substitution is an improvement rather than a concession, for three
+reasons set out at length in section 8: `os.listxattr(..., follow_symlinks=
+False)` reads a symlink's own attributes without a flag that is easy to leave
+off, the value stays bytes under one stated encoding rule instead of `-d`'s
+per-value guess between text and base64, and no subprocess is needed per file.
+`security.selinux` is elided, as suggested; the rest of `security.*` is not,
+since `security.capability` is a real thing for these two programs to lose.
+
+The second half is that **the reference could not carry an attribute either**,
+which this entry did not anticipate and which would have made the first half
+worse than useless: `m4/xattr.m4` had found no libattr on the build host, so the
+reference `cp` and `mv` had `USE_XATTR` undefined and a `copy_attr` whose entire
+body is `return true`. The first five cases written against it came back red
+with *ours* carrying the attributes and GNU carrying none — a harness reporting
+a difference in the subject that is entirely in the reference is worse than one
+that reports nothing. `diff-wsl.sh` therefore builds libattr 2.5.2 from source
+into the same cache coreutils is built in, and configures coreutils against it;
+what was actually achieved is read back from the built tree's `config.h` rather
+than assumed from the flags, because `gl_FUNC_XATTR` can decline and only warn.
+
+Cases: mv-diff section 23, five of them, and cp-diff section 17, five more plus
+the three `--preserve=xattr` cases that were `xfail_case`s naming this exact
+shortfall and are now real. Measured rather than assumed, which is the test this
+entry itself demands: with `preserve_xattrs` in `mv.rs` short-circuited to
+`return`, mv-diff goes from 351/0 to 348/3 — before this work the same break
+changed nothing at all.
+
+Still not covered, for a reason outside the harness: an attribute on a directory
+crossing a filesystem boundary, because a directory cannot cross one yet
+(`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`). mv-diff section 23 names the
+case to add when it can.
+
+**Extended to access-control lists, 2026-09-01 (same day).** The half about the
+reference turned out to have a second instance: without libacl, gnulib compiles
+`copy_acl` down to a plain `chmod`, so the reference carries a file's mode bits
+and silently drops its ACL entries. That failure is *quieter* than the libattr
+one — a reference without libattr refuses `--preserve=xattr` outright, which is
+loud, while this one copies happily and is merely wrong — so it is the shape
+more likely to be mistaken for a bug in the subject. `diff-wsl.sh`'s libattr
+block was generalised into a pair (`diff_dep_links`, `diff_dep_build`) that
+builds any small autotools dependency into one shared prefix, and libacl 2.3.2
+goes through it; `DIFF_ACL_REF` is read back from `config.h`'s `USE_ACL 1`, and
+`DIFF_SETFACL` is the separate fact of having a tool that can *make* one.
+
+No new comparison was needed: on Linux an ACL is stored as the extended
+attribute `system.posix_acl_access`, so `diff_xattrs_in` already reads it byte
+for byte. There is deliberately no `diff_getfacl` — a second, weaker view of a
+thing already compared exactly is worse than one that cannot disagree with
+itself.
+
+Cases: cp-diff section 17, seven (four requiring the list to arrive, two
+requiring it *not* to — `--preserve=xattr` alone and bare `cp` — and one with an
+ACL and an ordinary attribute on the same file); mv-diff section 24, six.
+Measured: short-circuiting the permission-attribute copy in
+`fsattr::copy_permissions`, which is exactly a gnulib built without libacl,
+takes cp-diff from 572/0 to 567/5 and mv-diff from 357/0 to 353/4, and in both
+the cases that move are exactly the ones that should. The same directory gap
+applies: mv's cross-device directory default-ACL case waits on the same issue.
 
 ---
 
@@ -105552,11 +105771,14 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
 
-**Status:** open, **now localised** — see the MEASURED section appended at the
-end of this entry (2026-09-01). The cause is being the parent of mount points,
-and it is *far* larger than the estimate below; being a filesystem's own root is
-ruled out. Not a regression — it has presumably always been true — and not a
-gate: the series that exposes it (`vfs_readdir_root`) is tracked, not scored.
+**Status:** **FIXED 2026-09-01** — see the two appended sections at the end of
+this entry: MEASURED (which localised it) and FIXED (which records the change
+and the after-numbers). The cause was being the parent of mount points, and
+specifically the by-path stat `finish_listing` ran per submount; per-submount
+cost fell 5.3x and mount parenthood fell from +237–292% of a listing to +34%.
+Being a filesystem's own root was ruled out. Never a regression — it had
+presumably always been true — and never a gate: the series that exposes it
+(`vfs_readdir_root`) is tracked, not scored.
 
 **In short:** listing the root directory is about four times more expensive per
 entry than listing an ordinary directory, even though on the boot-test both are
@@ -105636,58 +105858,139 @@ comparison is finally pinned.
 `bench_vfs_readdir_root_cost` (`kernel/src/bench.rs`) ran the 2x2. It lists one
 8-entry memfs directory four times, varying only what is mounted and where:
 
-| arm | mount table | listed dir is their parent? | min |
-|---|---|---|---|
-| `vfs_readdir_mp_base` | baseline | — | 20990 ns |
-| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns |
-| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** |
-| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns |
+| arm | mount table | listed dir is their parent? | run 1 | run 2 |
+|---|---|---|---|---|
+| `vfs_readdir_mp_base` | baseline | — | 20990 ns | 23747 ns |
+| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns | 28998 ns |
+| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** | **97932 ns** |
+| `vfs_readdir_mp_submount_stat` | one stat of a mount root | (not a listing) | — | 8740 ns |
+| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns | 21529 ns |
 
-**Read the percentages, not the nanoseconds.** The harness flagged this boot as
-an outlier run — everything measured ~38% slower than usual, against a baseline
-that was itself an outlier (x1.307) — and printed the standing instruction not
-to quote its absolute numbers as the cost of anything. The design survives that:
-all four arms ran inside the same window, so a uniform inflation cancels in every
-comparison below. The ratios are the finding; the raw figures are ~1.4x high.
+**Read the percentages, not the nanoseconds.** The harness flagged *both* boots
+as outlier runs — everything ~38% and ~22% slower than usual respectively — and
+printed the standing instruction not to quote their absolute numbers as the cost
+of anything. The design survives that: within each run all arms shared one
+window, so a uniform inflation cancels in every comparison below. The ratios are
+the finding; the raw figures are high by roughly those factors. Two runs are
+reported because the second was run to add the `submount_stat` arm, and having
+them replicates the headline independently.
 
-Three results, in decreasing order of how much they change the picture:
+Four results, in decreasing order of how much they change the picture:
 
-1. **Being a mount parent costs +81429 ns, +292%** — and that is against
-   `elsewhere`, so the mount-table growth is already subtracted out. This is not
-   merely "the missing ~20 us": it is the entire 29.4 us gap and roughly 2.5x
-   more, on a directory with a quarter of root's entries. Root's anomaly is
-   here, in `finish_listing`'s per-submount work, and nowhere else.
+1. **Being a mount parent costs +292% (run 1) / +237% (run 2)** — measured
+   against `elsewhere`, so mount-table growth is already subtracted out. That is
+   +81429 ns and +68934 ns, i.e. the entire 29.4 us gap and ~2.5x more, on a
+   directory with a *quarter* of root's entries. Root's anomaly is here, in
+   `finish_listing`'s per-submount work, and nowhere else. Replicated.
 
-2. **But it is not the stat.** Per submount that is ~16285 ns, against a measured
-   `vfs_stat_breakdown_resolved` of ~2000 ns — **8x a full stat, per mount
-   point.** The estimate above ("five full stats = 9640 ns, 33% of the gap") had
-   the mechanism's *location* right and its *magnitude* wrong by an order of
-   magnitude. So the fix proposed above is still worth making, and it will not
-   recover most of this: something in the per-submount path costs several stats'
-   worth beyond the stat, and has not been identified yet.
+2. **It is mostly the stat — but the stat costs 4x what the estimate assumed.**
+   One `metadata_resolved` of a *mount root* measures **8740 ns**, against
+   ~2000 ns for `vfs_stat_breakdown_resolved` on an ordinary file. Five of those
+   is 43700 ns, which is **63% of run 2's 68934 ns**. So the estimate above
+   ("five full stats = 9640 ns, 33% of the gap") had the mechanism right and was
+   low only because it priced a mount-root stat at an ordinary file's cost. The
+   proposed `finish_listing` fix is the right fix and should recover most of
+   this.
 
-3. **Being a filesystem's own root is free.** `fsroot` is +1636 ns over `base`,
-   which is +273 ns once this boot's own per-mount table cost is subtracted —
-   under 2%. That eliminates the third candidate listed above ("memfs's own
-   root-directory lookup, which may not be structured like a child directory's").
-   It is structured like a child directory's, and it costs the same.
+   *(An earlier revision of this section said the opposite — "it is not the stat
+   … the fix will not recover most of this". That was written from run 1, which
+   had no `submount_stat` arm, and it was an inference, not a measurement. Run 2
+   added the arm and contradicted it. Left visible rather than quietly
+   overwritten, because the same mistake is what this whole entry is downstream
+   of.)*
 
-A fourth number falls out that was not the question but is worth recording:
-**each registered mount adds ~1363 ns to every `readdir` in the system**,
-whatever it lists (`base` -> `elsewhere` is +6817 ns for five mounts, on a
-directory none of them are under). That is `resolve_mount`'s longest-prefix scan,
-and it is the reason this benchmark mounts its five filesystems twice in two
-different places rather than measuring a naive before/after — charged to
+3. **The remaining ~37% is `finish_listing`'s own loop** — the `PathBuf` join per
+   mount point and the `!entries.iter().any(...)` de-dup scan. ~5000 ns per
+   submount. Worth a second look after the fix lands, not before: the fix changes
+   that loop, so measuring its remainder now would price code about to be
+   replaced.
+
+4. **Being a filesystem's own root is free.** `fsroot` came out +1636 ns (+7%)
+   over `base` in run 1 and **−2218 ns (−9%)** in run 2 — bracketing zero, which
+   is stronger evidence than either run alone. That eliminates the third
+   candidate listed above ("memfs's own root-directory lookup, which may not be
+   structured like a child directory's"). It is, and it costs the same.
+
+A fifth number falls out that was not the question but is worth recording:
+**each registered mount adds ~1000–1400 ns to every `readdir` in the system**,
+whatever it lists (`base` -> `elsewhere` is +6817 / +5251 ns for five mounts, on
+a directory none of them are under). That is `resolve_mount`'s longest-prefix
+scan, and it is the reason this benchmark mounts its five filesystems twice in
+two different places rather than measuring a naive before/after — charged to
 `finish_listing`, it would have inflated result 1 by 8%.
 
-**What is still unknown.** Why one submount costs 8 stats. The two candidates
-from the original list that survive are `submount_children` taking the `VFS` lock
-a second time (`finish_listing` holds it, then each `submount_root_ino`
-re-acquires it through `resolve_mount`) and the `PathBuf` join per mount point.
-Neither obviously costs 16 us, so the next step is the same as this one was: a
-breakdown benchmark inside the per-submount path, not an argument from reading
-the code. The same discipline applies — the entry above this one exists because
-two days went into acting on an unmeasured hypothesis.
+**Next step: apply the fix.** `finish_listing` already holds the mount table when
+it computes `submount_children`; the mounted filesystem's handle is right there
+in the table entry. Cloning the `Arc` alongside the name, releasing the VFS lock,
+then reading each root's metadata through that handle removes the join and the
+whole `resolve_mount` longest-prefix scan per submount, while preserving the
+§43 lock discipline that `submount_root_ino`'s doc comment turns on (VFS lock
+released before any filesystem lock is taken). The 2x2 above is the before/after
+harness for it.
+
+### FIXED 2026-09-01 — commit `7e3b02158`, per-submount cost down 5.3x
+
+`submount_children` now clones the mounted filesystem's `Arc` out of the mount
+table alongside the name, and `submount_root_ino` stats that handle's root
+directly instead of rebuilding a path and re-running `resolve_mount`. `Vfs::mount`
+refuses a duplicate mount path (`vfs.rs:1681`), so each path maps to exactly one
+table entry and the two are equivalent — that is what makes the substitution
+safe rather than merely faster. §43 lock discipline is unchanged: the VFS lock is
+still released before any filesystem lock is taken, which the old code needed
+too (it took the same filesystem lock inside `metadata_resolved`).
+
+The 2x2 as before/after, all figures the controlled `parent` − `elsewhere`
+comparison so mount-table growth is subtracted out:
+
+| | base | elsewhere | parent | delta | per submount | parenthood costs |
+|---|---|---|---|---|---|---|
+| before, run 1 | 20990 | 27807 | 109236 | 81429 | 16286 ns | **+292%** |
+| before, run 2 | 23747 | 28998 | 97932 | 68934 | 13787 ns | **+237%** |
+| after, clean run | 29986 | 37551 | 50530 | 12979 | **2595 ns** | **+34%** |
+
+**Per-submount cost fell from ~13800–16300 ns to 2595 ns — 5.3x, or 81% of it
+removed.** The scored `vfs_readdir_root` fell from 90145 ns on the run
+immediately before the fix to 36958 ns and then 37872 ns on the two runs after
+it (the harness scored the first of those `-50% vs suite, -59% raw`), so the
+headline is replicated across two independent boots.
+
+**Why there are three after-runs and only one is quoted.** The first post-fix
+boot was a `MEASUREMENT VOID`: `mp_parent` and `mp_elsewhere` came back 92% and
+82% split-half apart, and `elsewhere` landed *below* `base` — impossible, since
+five more mounts can only make `resolve_mount`'s scan longer. Its numbers are
+not in the table. The quoted run has all five arms at 0–1% split and none of
+them in the dispersion list; the run is flagged contaminated on the canary
+instrument alone, with dispersion and wall time both inside the host's band.
+
+**The benchmark's own verdict was wrong on that void run, and that is fixed
+too** (commit `3d140217f`). It printed a confident `STATS-DOMINATE` from samples
+the host-side report had just discarded, told the reader "the fix should recover
+most of this" about a binary that already contained the fix, and reported an
+impossible negative mount-table delta as a finding. Three guards were added: the
+ladder now refuses to conclude when any arm it rests on is split-half unstable;
+a negative `d_table` is named as noise instead of narrated, and is withheld from
+the fs-root arm's correction; and a `STATS-REMOVED` branch keys on `explained`
+exceeding 100%, which is only possible once the by-path stat is out of the loop.
+`explained` is deliberately not clamped — clamping is what made the void run
+misreport the fix as unapplied. See design-decisions.md §670.
+
+**What is left, and it is small.** 2595 ns per submount remains, against ~2000 ns
+for an ordinary file's stat. That is now `finish_listing`'s own loop — the
+`!entries.iter().any(...)` de-dup scan and the per-root filesystem lock — plus
+the mount-root stat itself, which is irreducible (the entry has to report an
+inode). Not worth chasing: the remaining per-submount cost is within ~30% of a
+plain stat, so there is at most ~600 ns per submount of overhead left to find.
+
+**One caveat on arm 4 that is now visible and was not before.** `vfs_readdir_fsroot`
+came out −62% below `base` this run (−54% the run before), which reads as "being
+a filesystem's own root is much *faster*". It is not a finding: `base` lists a
+directory inside the **root** filesystem, which holds the whole boot image's
+inodes, while `fsroot` lists a freshly-mounted memfs holding eight. The
+`vfs_readdir_breakdown` arms in the same boot measure that confound directly —
+2048 extra inodes elsewhere move an 8-entry listing by 7567 ns (53%). So arm 4
+is not controlled for inode-table size and its magnitude is uninterpretable. The
+*direction* is all it supports, and the original conclusion stands on that: being
+a filesystem's own root is not expensive. Logged as tech debt below.
 
 
 ---
@@ -105827,9 +106130,33 @@ is that it will be labelled rather than blamed on the kernel.
 
 ---
 
-## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix)
+## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix) — FIXED 2026-09-01 by lane C
 
-**Status:** OPEN — filed 2026-09-01, `requests/b-c-gui-toolkit-tree-module-is-orphaned-and-blocks-every-lanes-boot-test.md`
+**Status:** FIXED 2026-09-01 by lane C, same day as filed. `gui/toolkit/src/tree.rs`
+and its `pub mod tree;` are deleted; `scripts/scan-orphan-modules.py --check` now
+says `no new islands (47 pinned)` and exits 0, and the baseline file is
+byte-identical — nothing was pinned. Reply and full reasoning in
+`requests/c-b-the-tree-widget-is-deleted-and-the-gate-is-green-for-all-three-lanes.md`
+and `design-decisions.md` §574. Lane C chose *delete* over *wire up* because
+`TreeNode` is concrete with no payload slot, so each of the five programs that
+draw a hierarchy would have had to maintain a parallel tree of labels keyed by id
+— a synchronisation bug traded for a one-column widget — and over *baseline*
+because `orphan-modules-baseline.txt`'s own header forbids adding to it. The
+module landed 2026-05-17 in `a9d9dd09b` and never had a caller.
+
+**The gate itself is unchanged and the question stands, now with lane C's view on
+the record.** Lane C agrees the cost was real — a filed request plus an unplanned
+task to clear a module neither affected lane could touch — but notes it asked for
+the gate in the first place (`requests/c-a-please-add-the-orphan-module-ratchet-to-the-pre-build-gate.md`),
+that lane A owns `boot-test.sh` and so holds the pen, and that it is *not* asking
+for a softening: an orphan is a whole-repo fact, the check costs no build, and a
+lane merging up has a real interest in not carrying one across. If lane A does
+soften it, the shape both lanes converged on independently is *advisory when the
+orphan is outside the running lane's zone, blocking when it is inside* — which is
+`pre-boot.py`'s own rule applied per-module-path rather than per-lane. Left to
+lane A; no request filed, because neither B nor C is asking for a change.
+
+The original report follows unchanged.
 
 **In short:** `./scripts/boot-test.sh` currently exits 1 before compiling
 anything, in *any* worktree, because `scripts/scan-orphan-modules.py --check` —
@@ -105867,3 +106194,130 @@ orphan-module gate is in `boot-test.sh` with no such softening, so it does the
 thing that comment set out to prevent. Possibly intentional — an orphan is a
 whole-repo fact in a way a per-lane compile error is not — but the blast radius
 of one lane's orphan is presently all three lanes' ability to merge.
+
+
+---
+
+## A-READDIR-FSROOT-ARM-NOT-CONTROLLED-FOR-INODE-TABLE-SIZE
+
+**Status:** FIXED 2026-09-01 in `91b0f753e` — arm 4b landed and the report line
+now compares against it instead of against `base`. The first controlled reading
+came off a **contaminated** boot, so the number itself is not yet quotable; see
+"What the controlled arm measured so far" at the bottom. The debt — a benchmark
+making an unfair comparison and printing the result as a finding — is closed.
+
+*The rest of this entry is the original text, kept because it is the argument
+for the fix.* Tech debt in a benchmark, not a kernel bug. The arm's *direction*
+was sound and its conclusion stood; only the magnitude it printed was
+uninterpretable.
+
+**In short:** one arm of a benchmark compares two directories that differ in two
+ways at once, and reports the difference as if they differed in only one. It
+prints a number like "−62%" that reads as a discovery and is mostly an artifact
+of the comparison being unfair. Nothing in the kernel is wrong; the benchmark
+just cannot support the size of the claim it makes.
+
+**Where:** `kernel/src/bench.rs`, `bench_vfs_readdir_root_cost`, arm 4
+(`vfs_readdir_fsroot`), and the report line that compares it against
+`vfs_readdir_mp_base`.
+
+**What it does.** Arm 4 asks whether listing a directory that *is* a mounted
+filesystem's root costs more than listing an ordinary child directory holding
+the same eight entries. It mounts a fresh `MemFs`, puts eight files in it, and
+lists it — comparing against `base`, which lists a plain directory holding eight
+files.
+
+**Why the comparison is not controlled.** `base`'s directory lives in the **root**
+filesystem, whose inode table holds the entire boot image. Arm 4's memfs is
+brand new and holds eight inodes. `bench_vfs_readdir_breakdown`, in the same
+boot, measures exactly this confound: 2048 extra inodes elsewhere in the same
+filesystem move an 8-entry listing by 7567 ns (53%), and the whole reason that
+benchmark exists is `A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER`. So arm 4
+varies *two* things — mount-root-ness and inode-table size — and attributes the
+sum to the first.
+
+**How it shows.** The arm reports `fsroot` as *faster* than `base`, by −54% and
+−62% on the two 2026-09-01 runs after the `finish_listing` fix. A directory
+cannot be cheaper to list for being a mount root; the negative is the
+inode-table difference showing through with the opposite sign.
+
+**Why it was not visible earlier.** The first two runs put it at +7% and −9% —
+bracketing zero, which looked like a clean "no effect" result and was read as
+one. Those runs were heavily contaminated (~38% and ~22% slow), which
+compressed the arm toward the rest of the suite. The cleaner the run, the more
+plainly the confound shows.
+
+**What the arm still supports.** Its direction, which is all the parent entry
+ever claimed: being a filesystem's own root is *not* expensive. Since the
+uncontrolled difference biases the arm toward looking fast, a null-or-negative
+result rules out a *positive* cost a fortiori. That is why
+`readdir("/") costs 4x per entry` was closed with this arm's conclusion intact.
+
+**The proper fix.** Give arm 4 a fair partner: mount a second fresh `MemFs`
+elsewhere, populate it with the same eight files, and list a *child* directory
+inside it. Then both sides of the comparison sit in an equally-sized inode
+table, and the only remaining difference is mount-root-ness. Cheap to do — it
+is one more mount and one more populate call in a function that already has
+helpers for both (`readdir_mount_populate`, `readdir_mount_cleanup`) — and it
+would turn a direction into a measurement.
+
+**Until then**, the report line should be read as "not positive", never as a
+speedup, and the printed percentage should not be quoted anywhere. The FIXED
+section of `readdir("/") costs 4x per entry` states that caveat inline for the
+same reason.
+
+---
+
+### FIXED 2026-09-01 — commit `91b0f753e`, arm 4b
+
+**What landed.** `vfs_readdir_fsroot_peer`: a second fresh `MemFs` mounted at
+`/tmp/_rdm/p`, with the eight files one level down in `/tmp/_rdm/p/c`, so the
+listed directory is an ordinary *child* of a filesystem whose inode table is the
+same size (ten inodes against nine — the extra is the child directory itself).
+
+Two things were controlled, not one. The inode-table confound is the one this
+entry was filed about. The second is the mount table: **`peer` is mounted before
+either measurement window**, so both arms see the same number of mounts. That is
+what removed the `table_1` correction the old comparison had to apply — the
+correction existed only because the old arms were measured across *different*
+mount tables, and it was the smaller of the two errors anyway. Mount-root-ness
+is now the only difference between the two sides.
+
+The report block matches on `(fsroot_result, peer_result)` and has three arms:
+controlled when both are present (carrying the same split-half VOID guard §670
+put on the rest of the ladder), explicitly "**NOT quotable** as a mount-root
+cost" when the peer could not be set up — rather than silently falling back to
+the biased comparison, which is the failure this entry describes — and
+UNAVAILABLE when the fs-root mount itself failed.
+
+**What the controlled arm measured so far.** One boot, and it is not a reading:
+
+| | uncontrolled (old) | controlled (new) |
+|---|---|---|
+| comparison | `fsroot` vs `base` | `fsroot` vs `peer` |
+| result | −54%, −62% | −16% (19697ns vs 23637ns) |
+
+The confound accounted for roughly three quarters of the apparent effect, which
+is the right order — `bench_vfs_readdir_breakdown` prices 2048 extra inodes at
+53%, and `base`'s filesystem holds the whole boot image.
+
+**Why −16% is not yet a finding.** That boot was `RUN CONTAMINATED` (reference
+access cost spread 115% over 15 samples against a 25% tolerance), and the
+positional attribution puts both new arms in the worst of it: `vfs_readdir_fsroot`
+ran at 1.50x the run's baseline reference cost and `vfs_readdir_fsroot_peer` at
+1.59x — positions 55 and 56, inside the same disturbance. Their split-halves
+(12% and 15%) passed the kernel-side guard, so the line printed rather than
+voiding, but a host that moved 115% under the canary is not a host to read a
+16% difference from.
+
+**A negative here is not impossible, unlike `d_table`.** Worth stating because
+the ladder treats a negative mount-table delta as proof of noise, and the two
+are different. For a mount root, `find_mount` yields the relative path `/` and
+the per-filesystem lookup is the root directory directly; the peer's child needs
+one more component walked inside its memfs. The fs root genuinely does less
+work, so "cheaper" has a mechanism and the sign is not self-refuting. What is
+missing is a quiet boot, not an explanation.
+
+**Trigger for closing the number out:** the next `--bench` boot that is not
+contaminated. Nothing depends on it — the parent entry's conclusion never rested
+on the magnitude, only on the direction, and the direction is unchanged.

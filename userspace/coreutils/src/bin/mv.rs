@@ -89,7 +89,7 @@
 //!   destroyed the file and left nothing — `mv link file`, where `link` points
 //!   at `file`, deleted `file`. [`same_file_ok`] is GNU's check, reduced to this
 //!   `mv`'s option set and then measured case by case against GNU, including the
-//!   pair upstream documents at `copy.c:1907`: with `l` a hard link to `f` and
+//!   pair upstream documents at `copy.c:1909`: with `l` a hard link to `f` and
 //!   `s` a symlink to `f`, `mv s f` must fail and `mv s l` must succeed.
 //! - **Two sources with the same basename silently ate each other.**
 //!   `mv one/same two/same dir` moved both to `dir/same` and reported success:
@@ -441,7 +441,7 @@ struct Job<'a, O: Write, E: Write> {
     /// a test can put a canned reply behind a prompt without a terminal; see
     /// [`coreutils::yesno::Canned`].
     answers: &'a mut dyn Answers,
-    /// GNU's one `src_to_dest` table (`copy.c:1997`): which inodes this command
+    /// GNU's one `src_to_dest` table (`cp-hash.c:45`): which inodes this command
     /// has already put somewhere, and where. One per command and not one per
     /// operand — that is the whole point of it, and it is why it lives on the
     /// `Job` rather than inside [`move_one`]. See the `earlier_file` block there.
@@ -962,7 +962,7 @@ type DestInfo = std::collections::HashSet<(OsString, FileId)>;
 ///
 /// **The last component is appended verbatim, `.` and `..` included.** This is
 /// the one place `mv` and `cp` genuinely differ: `cp` has an
-/// `arg_base += STREQ (arg_base, "..")` bump (`cp.c:678`) and `mv` has no such
+/// `arg_base += STREQ (arg_base, "..")` bump (`cp.c:739`) and `mv` has no such
 /// line, so `cp a/.. d` targets `d/a` while `mv a/.. d` targets `d/..`. Reading
 /// that as "`mv` forgot" and adding the bump here would be wrong twice over: it
 /// would move the wrong file, and it would do so silently, where the verbatim
@@ -1258,7 +1258,7 @@ fn move_into_directory<O: Write, E: Write>(
         let src_path = Path::new(src);
         let (target, base) = target_in_directory(dir, src_path);
         // The last operand is exempt from being recorded, because nothing that
-        // follows could collide with it (`copy.c:2779`).
+        // follows could collide with it (`copy.c:2778`).
         let last_file = i.saturating_add(1) == sources.len();
         if !move_one(
             job,
@@ -1429,7 +1429,7 @@ fn move_one<O: Write, E: Write>(
     //
     // * **`st_nlink > 1`** — `remember_copied`, which both looks up and records.
     //   This is the source that *has* another name, so a later operand may be it.
-    // * **`st_nlink == 1`** — a bare lookup (`copy.c:2673`). This arm is the one
+    // * **`st_nlink == 1`** — a bare lookup (`copy.c:2672`). This arm is the one
     //   that is easy to leave out and fatal to: by the time the last of a set of
     //   links is reached, the earlier ones have been removed and its count is
     //   back down to 1. A rule spelled "only when the count is above one" would
@@ -1547,7 +1547,7 @@ fn move_one<O: Write, E: Write>(
     // with a *new* file at that name rather than the old one rewritten. GNU
     // says why in as many words — "remove any existing destination file so that
     // a cross-device `mv` acts as if it were really using the rename syscall"
-    // (`copy.c:2870`) — and the difference is not bookkeeping. Written through
+    // (`copy.c:2869`) — and the difference is not bookkeeping. Written through
     // instead, the destination keeps its inode, and with it its mode, its owner
     // and *its other hard links*: `mv /other/fs/f g`, where `g` is one of a
     // linked pair, silently rewrote the pair's other name too, and `g` came out
@@ -1777,7 +1777,7 @@ fn record_move(
     seen: &mut Option<DestInfo>,
 ) -> bool {
     // The last source is exempt: nothing follows it that could collide
-    // (`copy.c:2779`), and GNU does not even take the stat.
+    // (`copy.c:2778`), and GNU does not even take the stat.
     if last_file {
         return true;
     }
@@ -1922,7 +1922,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
                 &mut *job.err,
             )
         {
-            // Upstream's `goto un_backup` (`copy.c:2389`). Nothing to undo:
+            // Upstream's `goto un_backup` (`copy.c:2391`). Nothing to undo:
             // this runs before [`make_backup`], exactly as 2380 runs before
             // `dst_backup` at 2558. Nothing to [`Copied::forget`] either — the
             // label's forget is guarded by `earlier_file == nullptr`
@@ -1957,7 +1957,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
 
     let (src_dir, dst_dir) = (src_meta.is_dir(), dst_meta.is_dir());
 
-    // 4. A directory onto a non-directory (`copy.c:2455`). The destination is
+    // 4. A directory onto a non-directory (`copy.c:2450`). The destination is
     //    named first, which reads oddly until you notice the sentence is about
     //    what is being destroyed.
     //
@@ -2002,7 +2002,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
         return Verdict::Refused;
     }
 
-    // 6. A non-directory onto a directory (`copy.c:2485`), which unlike 4 does
+    // 6. A non-directory onto a directory (`copy.c:2484`), which unlike 4 does
     //    not name the source at all. Lifted by `--backup` for the same reason
     //    as 4, and with the mirror-image comment upstream.
     if !src_dir && dst_dir && !job.flags.backup.enabled() {
@@ -2014,7 +2014,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
         return Verdict::Refused;
     }
 
-    // 7. `copy.c:2504`, and it is **not** redundant with 4 even though it asks
+    // 7. `copy.c:2503`, and it is **not** redundant with 4 even though it asks
     //    the same question of the same two files. 4 now stands down under
     //    `--backup`; this one does too — `x->backup_type == no_backups` is part
     //    of its condition — so with `-b` a directory really may replace a
@@ -2042,7 +2042,7 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
 }
 
 /// Step 8, the last thing between the refusals and the rename: `-b`'s move of
-/// the destination out of the way (`copy.c:2515`).
+/// the destination out of the way (`copy.c:2517`).
 ///
 /// Its own function rather than eight more lines inside [`move_one`] because it
 /// has three outcomes and the middle one is the easy mistake: `Ok(None)` — no
@@ -2126,7 +2126,7 @@ fn make_backup<O: Write, E: Write>(
 
 /// `-u`'s question: is the destination already at least as new as the source,
 /// and so not worth replacing? GNU asks it as `0 <= utimecmpat (…)` and skips
-/// when that holds (`copy.c:2378`).
+/// when that holds (`copy.c:2365`).
 ///
 /// Modification times only — `-u` has never consulted `st_ctime` or the size —
 /// and equal counts as at least as new, so `mv -u a b` between two files
@@ -2235,7 +2235,7 @@ fn abandon_move<O: Write, E: Write>(
 /// question it answers.
 ///
 /// The case that makes this worth its length is the one GNU spells out in its
-/// own comment (`copy.c:1907`):
+/// own comment (`copy.c:1909`):
 ///
 /// ```text
 /// touch f && ln f l && ln -s f s
@@ -2502,7 +2502,7 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 /// `target` is a free name: [`clear_destination`] has just unlinked anything
 /// that was there, so every kind here creates rather than overwrites. That is
 /// also why nothing here is conditional on a `new_dst`: GNU's is set `true` by
-/// the block that does the unlinking (`copy.c:2890`), so every test of it in the
+/// the block that does the unlinking (`copy.c:2892`), so every test of it in the
 /// machinery below that point is a test of a constant for this caller.
 ///
 /// **A move is meant to be indistinguishable from a rename**, and that is not a
@@ -2565,7 +2565,7 @@ fn copy_across_devices<E: Write>(
         // The link's owner is taken *here*, where the link was made, and not by
         // the tail below — whose ownership step skips a symlink destination
         // outright. That is GNU's arrangement rather than this file's: the
-        // `lchownat` is inline in `copy_internal`'s symlink arm (`copy.c:3175`)
+        // `lchownat` is inline in `copy_internal`'s symlink arm (`copy.c:3180`)
         // and the shared tail's is guarded by `!dest_is_symlink`, so dropping
         // this call in favour of the tail's would leave a moved link unable to
         // keep its owner at all. [`Made::Symlink`] is what tells the engine
@@ -2662,7 +2662,7 @@ fn copy_across_devices<E: Write>(
 ///
 /// The withholding is GNU's `omitted_permissions`, which for a move is
 /// `dst_mode & (S_IRWXG | S_IRWXO)` — every group and other bit — because
-/// `preserve_ownership` is on (`copy.c:2892`). The bits come back in the final
+/// `preserve_ownership` is on (`copy.c:2902`). The bits come back in the final
 /// [`fsattr::copy_permissions`], and the window they are missing from is the one
 /// between the file existing and it having the right owner. Without the
 /// withholding, a file whose source is group- or world-readable is briefly
@@ -2670,7 +2670,7 @@ fn copy_across_devices<E: Write>(
 /// contents, before the `chown` hands it to whoever should have had it.
 ///
 /// `create_new` is GNU's `O_EXCL`, which it uses whenever `new_dst`
-/// (`copy.c:1457`) — and after the destination has been unlinked, `new_dst` is
+/// (`copy.c:1456`) — and after the destination has been unlinked, `new_dst` is
 /// what this caller always is. It is not an optimisation: without it a name
 /// created between the unlink and the open would be opened and truncated, which
 /// is the very thing the unlink was there to prevent.
@@ -2679,7 +2679,7 @@ fn copy_across_devices<E: Write>(
 /// extended attributes rather than for the bytes: Linux's `xattr_permission`
 /// (`fs/xattr.c`) demands write access to the *inode* before it will set an
 /// attribute on it, so a read-only source — mode `0444` — would otherwise
-/// produce a copy that no `setxattr` could write to. `copy.c:1450` widens the
+/// produce a copy that no `setxattr` could write to. `copy.c:1452` widens the
 /// open mode by exactly that bit, and only for a non-root caller, root's
 /// `setxattr` not being subject to the check. That condition is
 /// [`fsattr::chown_privileges`], which is upstream's `x->owner_privileges`
@@ -4963,7 +4963,7 @@ mod tests {
         // Every outcome here is all-or-nothing: either the move happened, and
         // then `b` holds the source's bytes and `a` is gone, or it did not, and
         // then `b` is untouched and `a` is still there. Upstream's skip sets
-        // `*rename_succeeded = true` (`copy.c:2394`), which is precisely the
+        // `*rename_succeeded = true` (`copy.c:2373`), which is precisely the
         // flag that tells `mv` not to unlink the source afterwards — so a
         // mistake there breaks this pairing rather than either half alone, and
         // it is checked on every case rather than in one dedicated test.
@@ -5574,7 +5574,7 @@ mod tests {
     ///
     /// The refusal exists because the rename destroys the file at the
     /// destination; with a backup it is not destroyed, so upstream's own
-    /// comment says the move is "ok only with --backup" (`copy.c:2467`). Both
+    /// comment says the move is "ok only with --backup" (`copy.c:2455`). Both
     /// halves are asserted, because a lifted refusal that lifts unconditionally
     /// is the bug this guards against.
     #[test]
@@ -5624,7 +5624,7 @@ mod tests {
     /// backup of `into/f` is `into/f~` every time, so the second source would
     /// back the first source's arrival up over the first source's own backup
     /// and destroy it. Upstream says as much — "it works fine if you use
-    /// --backup=numbered" (`copy.c:2482`).
+    /// --backup=numbered" (`copy.c:2472`).
     ///
     /// `NumberedExisting` is *not* numbered for this purpose even when it would
     /// end up numbering, because the check reads the type that was asked for

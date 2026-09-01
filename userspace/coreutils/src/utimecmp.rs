@@ -46,7 +46,7 @@
 //! crate's library is here: `cp -u` and `mv -u` are documented as the same
 //! option, and the only difference between them is one line — the flag that
 //! selects the truncation, which GNU computes as `preserve_timestamps &&
-//! !(move_mode && dst_dev == src_dev)` at `copy.c:2358`. For `mv` that reduces
+//! !(move_mode && dst_dev == src_dev)` at `copy.c:2359`. For `mv` that reduces
 //! to "the move crosses a filesystem boundary"; for `cp -p` it is always true.
 //! Today only `mv` calls it, because `cp --update` is still refused by name;
 //! when it lands it needs this and not a second copy of it.

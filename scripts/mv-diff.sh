@@ -774,7 +774,7 @@ run_case s2 file.txt
 # the other touches nothing either points at.
 TREE='mktree; ln -s file.txt s1; ln -s file.txt s2'
 run_case s1 s2
-# The example GNU spells out in `same_file_ok`'s own comment (`copy.c:1907`):
+# The example GNU spells out in `same_file_ok`'s own comment (`copy.c:1909`):
 #   touch f && ln f l && ln -s f s
 # `mv s f` must fail — it would destroy the only thing `s` names — while
 # `mv s l` must succeed, because `f` survives as the other link.
@@ -1288,8 +1288,9 @@ run_case --update=nosuchword -n file.txt dst
 # does, before the same-file check, so the group is left whole and unmentioned;
 # `-u` gets there by the time comparison instead. Either way a skip must not
 # unlink the source — upstream sets `*rename_succeeded` on the skip path
-# (`copy.c:2394`) precisely so it does not, and this column is where getting
-# that wrong would show as one file where there were two.
+# (`copy.c:2373` for `-u`, `copy.c:2414` for `--update=none`) precisely so it
+# does not, and this column is where getting that wrong would show as one file
+# where there were two.
 TREE='mkstamped; printf hl > a; ln a b; touch -d "2009-09-09" a b'; STAMPS=1
 run_case -u a b
 TREE='mktree; printf hl > a; ln a b'
@@ -1952,7 +1953,7 @@ run_case -iv @FAR@/f g
 
 # `-u` across the boundary, which is a *different comparison* from §17's, not
 # just the same one in a new place. GNU passes `utimecmp` a "truncate the
-# source" flag whenever the move crosses a filesystem (`copy.c:2358`:
+# source" flag whenever the move crosses a filesystem (`copy.c:2359`:
 # `preserve_timestamps && !(move_mode && same st_dev)`, and `mv` sets both of
 # those unconditionally), because the source's time is about to be *written*
 # onto the far side rather than carried by a rename — so what the destination

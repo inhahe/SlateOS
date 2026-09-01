@@ -21,8 +21,8 @@
 //!   [`ModeDebt`], [`read_dir_fastread`], [`make_dir`].
 //! * **The first half of stage 2**, the *preserve tail* —
 //!   [`preserve_attributes`] and everything it calls. This is
-//!   `copy_internal`'s closing run of steps (`copy.c:3200` onwards) merged with
-//!   `copy_reg`'s (`copy.c:1620` onwards), which upstream writes twice because
+//!   `copy_internal`'s closing run of steps (`copy.c:3205` onwards) merged with
+//!   `copy_reg`'s (`copy.c:1626` onwards), which upstream writes twice because
 //!   they live in two functions and which this tree, until now, wrote *four*
 //!   times — twice in `cp.rs` following upstream, and twice more in `mv.rs`
 //!   because a move was written as its own program.
@@ -119,7 +119,7 @@ pub struct Opts {
     ///
     /// **The one field that is not one of GNU's**, and the deviation is
     /// deliberate. Upstream reads the mask through the global `cached_umask()`
-    /// (`copy.c:3302`, `copy.c:1685`), which is a function-static cache because
+    /// (`copy.c:3305`, `copy.c:1685`), which is a function-static cache because
     /// `copy.c` has nowhere better to put it. We do: the options struct that is
     /// already threaded through every step that needs it. A real `cp` is one
     /// process with one mask for its whole life, so building this once per run
@@ -411,10 +411,10 @@ impl<'a> Source<'a> {
 /// **The order is correctness, not arrangement**, and GNU leaves the reason for
 /// each step in a line above it. Two reasons, and they point the same way:
 ///
-/// * `copy.c:3211` — "chown turns off set[ug]id bits for non-root, so do the
+/// * `copy.c:3245` — "chown turns off set[ug]id bits for non-root, so do the
 ///   chmod last". A `chmod` written before the `chown` compiles, runs, and
 ///   quietly drops the set-user-ID bit off every copy a non-root user makes.
-/// * `copy.c:3244` — "Set xattrs after ownership as changing owners will clear
+/// * `copy.c:3279` — "Set xattrs after ownership as changing owners will clear
 ///   capabilities". A `setxattr` written before the `chown` loses
 ///   `security.capability`, which the kernel strips when a file changes hands.
 ///
@@ -507,7 +507,7 @@ pub fn preserve_attributes<E: Write>(
 
     // A failure here is only *fatal* if the user named `xattr` — GNU's two call
     // sites both write `! copy_attr (…) && x->require_preserve_xattr`
-    // (`copy.c:1657` and `copy.c:3246`). Under `--preserve=all` the diagnostic
+    // (`copy.c:1662` and `copy.c:3280`). Under `--preserve=all` the diagnostic
     // is printed and the copy still succeeds, which is the whole difference
     // between asking for everything and asking for this.
     let fatal = run.opts.preserve_xattr
@@ -526,7 +526,7 @@ pub fn preserve_attributes<E: Write>(
     }
 
     // "The operations beyond this point may dereference a symlink"
-    // (`copy.c:3251`), and nothing portable can set a symlink's mode in any
+    // (`copy.c:3284`), and nothing portable can set a symlink's mode in any
     // case — Linux has no working `lchmod` at all.
     if made == Made::Symlink {
         return true;
@@ -539,7 +539,7 @@ pub fn preserve_attributes<E: Write>(
 /// say as much about the ones that would not go as the options asked for.
 ///
 /// gnulib decides how loud to be by picking one of three error callbacks
-/// (`copy.c:3700`), which reads as two booleans and is three behaviours:
+/// (`copy.c:782`), which reads as two booleans and is three behaviours:
 ///
 /// | Asked for | Printed | Exit status |
 /// |---|---|---|
@@ -593,7 +593,7 @@ fn nofollow(on: On<'_>) -> On<'_> {
     }
 }
 
-/// GNU's `set_owner` (`copy.c:889`), whose three outcomes are three different
+/// GNU's `set_owner` (`copy.c:897`), whose three outcomes are three different
 /// things rather than a success and a failure.
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(test, derive(Debug))]
@@ -640,7 +640,8 @@ pub fn chown_to_source<E: Write>(
     // Narrowing an *existing* destination first, because changing its owner
     // while it still wears its old mode is a window in which the new owner
     // holds permissions the copy will never have. GNU calls it exactly that —
-    // "a window of vulnerability" — and closes it here (`copy.c:900`).
+    // "a window of vulnerability" — and closes it here (`copy.c:905`, the
+    // comment; the restrictive temporary mode it describes is `copy.c:911`).
     if !new_dst && run.opts.preserve_mode && !narrow_before_chown(src, on, dst, run) {
         return fatal;
     }
@@ -650,7 +651,7 @@ pub fn chown_to_source<E: Write>(
     // whether it ends the copy, which is the half `mv` does differently.
     //
     // A symlink gets no retry, which is GNU's asymmetry rather than ours: its
-    // symlink arm (`copy.c:3178`) is a bare `lchownat`, while `copy_reg` and the
+    // symlink arm (`copy.c:3180`) is a bare `lchownat`, while `copy_reg` and the
     // shared tail both retry. Matching it matters because the difference is
     // visible in `ls -l` on the copied link.
     let retry = if made == Made::Symlink {
@@ -734,7 +735,7 @@ fn narrow_before_chown<E: Write>(
     };
     let new = src.mode;
     // GNU's condition is `USE_ACL || (old & CHMOD_MODE_BITS & (~new | special))`
-    // (`copy.c:917`), and this kernel has access-control lists, so the first
+    // (`copy.c:918`), and this kernel has access-control lists, so the first
     // half is true and the second is never consulted. Narrowing unconditionally
     // is not belt-and-braces: the mode-bit test asks "does the old mode grant
     // anything the new one does not?", and an ACL can grant what no mode bit
@@ -765,8 +766,8 @@ fn narrow_before_chown<E: Write>(
 
 /// The last step: give the destination the mode it is meant to end with.
 ///
-/// Three branches, and they are GNU's three — at `copy.c:3289` for a directory
-/// and at `copy.c:1669` for a regular file, which is the same decision written
+/// Three branches, and they are GNU's three — at `copy.c:3290` for a directory
+/// and at `copy.c:1672` for a regular file, which is the same decision written
 /// twice because the two live in different functions:
 ///
 /// * **`--preserve=mode`** copies the source's whole `07777`, special bits
@@ -820,7 +821,7 @@ fn settle_mode<E: Write>(
 
     if run.opts.explicit_no_preserve_mode && new_dst {
         // GNU's `MODE_RW_UGO` for a file and `S_IRWXUGO` for a directory
-        // (`copy.c:3302`). A socket gets the directory's answer there too; this
+        // (`copy.c:3303`). A socket gets the directory's answer there too; this
         // `cp` copies neither sockets nor devices, so the two kinds below are
         // all of them.
         let default = if made == Made::Directory {
@@ -875,7 +876,7 @@ fn settle_mode<E: Write>(
 
     // The stat is what a *debt* needs; the chmod below is what a *forced* mode
     // needs, and the two are separate conditions. GNU's `if (restore_dst_mode)`
-    // sits outside its `if (omitted_permissions)` (`copy.c:3327`) for exactly
+    // sits outside its `if (omitted_permissions)` (`copy.c:3335`) for exactly
     // this case: a 0500 source directory owes nothing — 0500 withholds no
     // group or other bit — but was still forced to 0700 so it could be filled,
     // and returning early on "no debt" would leave every copy of a read-only

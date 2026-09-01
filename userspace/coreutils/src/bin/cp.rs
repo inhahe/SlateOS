@@ -498,7 +498,7 @@ impl Preserve {
 
     /// Add what `-p` asks for, leaving the attributes it does not name alone.
     ///
-    /// **Not `*self = Self::posix()`.** GNU's `case 'p'` (`cp.c:1104`) is three
+    /// **Not `*self = Self::posix()`.** GNU's `case 'p'` (`cp.c:1094`) is three
     /// assignments and no fourth: it never mentions `preserve_links`, so a `-p`
     /// that follows a `-d` still has it. Overwriting the whole value reads the
     /// same in every test that gives one option at a time, and turns `cp -d -p`
@@ -574,7 +574,7 @@ struct CpFlags {
     /// an error rather than a warning.
     ///
     /// Set by `-p` and by any `--preserve=`, and **not** by `--no-preserve=`
-    /// (`cp.c:1085`) — asking to stop preserving something cannot fail. The
+    /// (`cp.c:1077`) — asking to stop preserving something cannot fail. The
     /// distinction is the whole difference between `cp -p a b` exiting 1 when
     /// the times could not be set and `cp --no-preserve=xattr a b` exiting 0,
     /// and it is why this is a flag rather than a constant `true`.
@@ -656,7 +656,7 @@ impl CpFlags {
         self.resolved_deref() == Deref::Always
     }
 
-    /// GNU's `should_dereference` (`copy.c:2148`), which is the same question
+    /// GNU's `should_dereference` (`copy.c:2151`), which is the same question
     /// as the two above asked once with the *place* as a parameter rather than
     /// baked into the name.
     ///
@@ -1063,7 +1063,7 @@ fn unimplemented_attribute(word: &str, because: &str) -> getopt::Error {
     ))
 }
 
-/// GNU's `decode_preserve_arg` (`cp.c:872`): apply one comma-separated list of
+/// GNU's `decode_preserve_arg` (`cp.c:876`): apply one comma-separated list of
 /// attribute words, either switching them on (`--preserve=`) or off
 /// (`--no-preserve=`).
 ///
@@ -1261,7 +1261,7 @@ impl<O: Write, E: Write> Job<'_, O, E> {
 /// actually happening for a directory.
 ///
 /// `backup` is `None` at the directory call site and always will be: `cp` backs
-/// a destination up only when it is *not* a directory (`copy.c:2524`), and a
+/// a destination up only when it is *not* a directory (`copy.c:2526`), and a
 /// directory source onto a non-directory destination is refused earlier with
 /// `cannot overwrite non-directory`. `mv` is the utility for which that
 /// combination exists, and it does not share this function.
@@ -1718,7 +1718,7 @@ fn overwrite_ok<O: Write, E: Write>(
 }
 
 /// The whole of the "is this destination to be left alone" decision — GNU's
-/// one block at `copy.c:2421`, which handles `-n` and `-i` together because
+/// one block at `copy.c:2422`, which handles `-n` and `-i` together because
 /// they are two values of one field.
 ///
 /// Returns `true` when the copy should go ahead. The two refusals differ in
@@ -1757,7 +1757,7 @@ fn overwrite_allowed<O: Write, E: Write>(
         // rather than folded into a catch-all so that adding `cp --update` is a
         // compile error here — and it has to be, because the `bool` this
         // function returns cannot say what `AlwaysSkip` means. Upstream's
-        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2429`) is a
+        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2430`) is a
         // *skip that succeeds*, so implementing `cp -u` means widening this
         // return type, exactly as `mv`'s [`Verdict`] was widened. Answering
         // `false` in the meantime would be the same wrong exit status `mv` had
@@ -1783,7 +1783,7 @@ fn overwrite_allowed<O: Write, E: Write>(
 ///
 /// **A destination that `--backup` is about to move aside is left alone.**
 /// Upstream this unlink is not a separate step but the `else if` of the backup
-/// block (`copy.c:2568`), and reading the two as independent removes the very
+/// block (`copy.c:2570`), and reading the two as independent removes the very
 /// file the backup exists to keep: `cp --remove-destination -b a b` would
 /// delete `b`, find nothing to rename, and report a plain copy — which is
 /// `--backup` silently doing nothing at all. See [`backup_takes_destination`],
@@ -2021,8 +2021,8 @@ fn copy_one<O: Write, E: Write>(
     }
 
     // `--remove-destination`, at GNU's point in the order: after the
-    // just-created *file* guard above (`copy.c:2470`) and before the
-    // just-created *symlink* one below (`copy.c:2591`). Which is observable —
+    // just-created *file* guard above (`copy.c:2473`) and before the
+    // just-created *symlink* one below (`copy.c:2592`). Which is observable —
     // the symlink guard re-`lstat`s, so a link this command created and then
     // unlinked here is not there to be complained about.
     if !remove_destination_first(src_path, &target, &mut dest_state, job) {
@@ -2191,7 +2191,7 @@ enum TreeResult {
 /// `Linked` is not a variety of `Copied` that the caller may round off, and the
 /// reason is a measured GNU behaviour rather than a tidiness argument: a
 /// destination reached by hard-linking is **not** recorded in GNU's `dest_info`,
-/// because its `earlier_file` branch returns at `copy.c:2748`, well before the
+/// because its `earlier_file` branch returns at `copy.c:2751`, well before the
 /// `record_file` at `copy.c:3217`. The consequence is visible —
 ///
 /// ```text
@@ -3069,7 +3069,7 @@ enum DestError {
 /// Open `dst` for writing, creating it with the source's mode if it is new and
 /// leaving its mode entirely alone if it is not.
 ///
-/// This is GNU's `copy_reg` (`copy.c:1280`–`1348`) and the shape is load-bearing
+/// This is GNU's `copy_reg` (`copy.c:1287`–`1349`) and the shape is load-bearing
 /// in three places, all of which are `-f`:
 ///
 /// * **Which open is tried first is decided by `dest_exists`, not by what the
@@ -3645,7 +3645,7 @@ mod tests {
 
     /// `-p` names three attributes; it does not un-name a fourth.
     ///
-    /// GNU's `case 'p'` is three assignments (`cp.c:1104`) and never mentions
+    /// GNU's `case 'p'` is three assignments (`cp.c:1094`) and never mentions
     /// `preserve_links`, so the two halves of `cp -d -p` do not fight. An
     /// assignment of the whole [`Preserve`] passes every test above — each
     /// gives one option — and fails only here, where the observable difference

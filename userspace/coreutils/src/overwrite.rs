@@ -68,7 +68,7 @@ pub enum Interactive {
     /// [`writable_destination`] and `isatty(0)`, because GNU asks before
     /// clobbering a file the mode says you may not write **even with no `-i`**
     /// — as long as there is a human there to answer. See `abandon_move`
-    /// (`copy.c:2069`).
+    /// (`copy.c:2071`).
     #[default]
     Unspecified,
     /// `-n` / `--no-clobber`: leave an existing destination alone, and *fail*.

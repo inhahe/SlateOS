@@ -1304,7 +1304,7 @@ diff_setfacl() {
 # `failed to preserve ownership for %s` is the one diagnostic in the copy family
 # that no case here could provoke, and a divergence lived in it undetected for
 # that reason: GNU quotes the name for a file and leaves it *bare* for a symlink
-# (`copy.c:961` against `copy.c:3186`) and ours quoted all three.
+# (`copy.c:960` against `copy.c:3186`) and ours quoted all three.
 #
 # It is unreachable by the obvious route because `chown_failure_ok` swallows it.
 # An unprivileged `cp -p` of a root-owned file fails its chown with EPERM, and

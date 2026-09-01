@@ -1112,7 +1112,213 @@ TREE='mktree; printf hl > a; ln a b'
 run_case --update=none a b
 
 # =============================================================================
-# 18. --help and --version
+# 18. -b, --backup, -S, and the two environment variables
+# =============================================================================
+# Every case here needs something at the destination, because a backup is a
+# rename of the file that is about to be destroyed and a move onto a free name
+# destroys nothing. So `TREE` carries `printf old > dst` almost throughout, and
+# `dst` is given bytes rather than being touched empty: the whole question is
+# *which* of two files ended up under which name, and two empty files answer it
+# the same way whatever happened.
+#
+# `-v` is on wherever the backup's *name* is the thing being measured. The name
+# is otherwise only visible in the tree column, which says a file called `dst~`
+# exists but not that `mv` chose to call it that — and for the numbered forms,
+# which number it picked is the entire behaviour.
+#
+# Four spellings ask for a backup, not two: `-S`/`--suffix` set `make_backups`
+# as well as the suffix (`mv.c:405`), so `-S .bak` alone backs up. That is the
+# one fact about this option a from-memory implementation gets wrong, and the
+# first four cases pin it.
+TREE='mktree; printf old > dst'
+run_case -v -b file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v -S .bak file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --suffix=.bak file.txt dst
+
+# The four control words and the four aliases of them, each of which has to be
+# spelled out because they are a table lookup and a table can be mistyped.
+# `none` and `off` really do nothing at all, `--backup` given or not.
+TREE='mktree; printf old > dst'
+run_case -v --backup=none file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup=off file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup=numbered file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup=t file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup=simple file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup=never file.txt dst
+# `existing`/`nil` is the one whose answer depends on the tree rather than on
+# the command line, so it is run both ways round: with a numbered backup already
+# there it numbers, and without one it falls back to the simple suffix.
+TREE='mktree; printf old > dst'
+run_case -v --backup=existing file.txt dst
+TREE='mktree; printf old > dst; printf b1 > dst.~1~'
+run_case -v --backup=existing file.txt dst
+TREE='mktree; printf old > dst; printf b1 > dst.~1~'
+run_case -v --backup=nil file.txt dst
+
+# The word is matched by unambiguous prefix and so is the option name, because
+# both go through gnulib's `argmatch`/`getopt_long`. An unknown word is an
+# error that prints the whole table, which is four lines of quoted words this
+# `mv` has to reproduce exactly.
+TREE='mktree; printf old > dst'
+run_case -v --backup=num file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --back=numbered file.txt dst
+TREE='mktree; printf old > dst'
+run_case --backup=nosuchword file.txt dst
+# An empty word is not the same as an unknown one: `argmatch` is not reached at
+# all, because gnulib's `xget_version` sends an empty string on to
+# `$VERSION_CONTROL` (`backup-find.c:87`), which is unset here, and
+# `get_version` answers `numbered_existing` for a null one. So this ends up
+# making a plain `dst~` rather than the error it looks like.
+TREE='mktree; printf old > dst'
+run_case -v --backup= file.txt dst
+# An empty suffix falls back to `~` rather than backing a file up onto itself.
+TREE='mktree; printf old > dst'
+run_case -v -S '' -b file.txt dst
+
+# The two environment variables. Each supplies what its option did not, and
+# each is *overridden* by that option — so the pairs are the cases, not the
+# variables on their own. Neither is consulted at all unless a backup was asked
+# for, which is why an invalid `$VERSION_CONTROL` is fatal with `-b` and
+# invisible without it.
+TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=numbered)
+run_case -v -b file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=numbered)
+run_case -v --backup=simple file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=numbered)
+run_case -v file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=nosuchword)
+run_case -b file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=nosuchword)
+run_case -v file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(SIMPLE_BACKUP_SUFFIX=.bk)
+run_case -v -b file.txt dst
+TREE='mktree; printf old > dst'; ENVV=(SIMPLE_BACKUP_SUFFIX=.bk)
+run_case -v -b -S .cli file.txt dst
+
+# Two of the family on one line. A later bare `-b` does not erase an earlier
+# `--backup=WORD`, because `-b` writes only the flag and the word is a separate
+# variable that nothing clears (`mv.c:344`). `--backup=none` after `-b` does
+# clear it, since that one *is* a word.
+TREE='mktree; printf old > dst'
+run_case -v --backup=numbered -b file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v -b --backup=numbered file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v -b --backup=none file.txt dst
+
+# `--backup` and `--no-clobber` are refused together, and the check is on
+# whether a backup was *asked for*, not on what it resolved to — so
+# `--backup=none -n` is refused even though it would have done nothing. `-S`
+# reaches the same check. `--update=none` skips like `-n` but is a different
+# value of the same field, so it is not caught and the line is legal.
+TREE='mktree; printf old > dst'
+run_case -b -n file.txt dst
+TREE='mktree; printf old > dst'
+run_case -n -b file.txt dst
+TREE='mktree; printf old > dst'
+run_case -S .bak -n file.txt dst
+TREE='mktree; printf old > dst'
+run_case --backup=none -n file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v --backup --update=none file.txt dst
+
+# The prompt comes *before* the backup, so answering no leaves the tree exactly
+# as it was — no `dst~` either. `-f` skips the prompt and backs up as usual.
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -v -b -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -v -b -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=''
+run_case -v -b -i file.txt dst
+TREE='mktree; printf old > dst'
+run_case -v -b -f file.txt dst
+
+# Nothing at the destination is not an error and not a backup: the verbose line
+# has no `(backup: …)` clause at all.
+run_case -v -b file.txt nonexistent
+# A backup name already in use is overwritten without a word, which is the
+# behaviour the numbered forms exist to avoid.
+TREE='mktree; printf old > dst; printf prev > dst~'
+run_case -v -b file.txt dst
+TREE='mktree; printf old > dst; printf b1 > dst.~1~; printf b2 > dst.~2~'
+run_case -v --backup=numbered file.txt dst
+
+# Moving a file onto the thing that would become its own backup destroys the
+# source, so it is refused — except under `--backup=numbered`, where the backup
+# gets a fresh name and the source survives. The refusal is on the *name*, so a
+# same-named file in another directory is fine.
+TREE='mktree; printf old > dst; printf bk > dst~'
+run_case -b dst~ dst
+TREE='mktree; printf old > dst; printf bk > dst~'
+run_case -v --backup=numbered dst~ dst
+TREE='mktree; printf old > dst; printf bk > dst.bak'
+run_case -b -S .bak dst.bak dst
+TREE='mktree; printf old > dst; mkdir other; printf bk > other/dst~'
+run_case -v -b other/dst~ dst
+
+# The two refusals `--backup` lifts. A directory onto a non-directory and a
+# non-directory onto a directory are both refused outright, because the rename
+# would destroy the one that is a directory — unless there is a backup, which
+# is exactly what stops it being destroyed. `-T` is needed for the second:
+# without it the directory is a place to move *into* rather than a thing to
+# overwrite.
+TREE='mktree; printf old > dst'
+run_case -v -b dir dst
+TREE='mktree; printf old > dst'
+run_case -v dir dst
+run_case -v -T -b file.txt dir
+run_case -v -T file.txt dir
+# Directory onto directory needs no backup to be allowed when the destination
+# is empty, but with one the destination survives under its new name.
+run_case -v -T -b tree dir
+run_case -v -T --backup=numbered tree dir
+
+# The just-created refusal is lifted only by *numbered* backups, and the reason
+# is that a simple backup of `into/f` is `into/f~` every time: the second source
+# would back the first source's arrival up over the first source's own backup,
+# which is the destruction the refusal exists to prevent. `existing` is not
+# numbered even where it would number, because the check reads the type that
+# was asked for.
+TREE='mktree; mkdir -p from1 from2 into; printf 1 > from1/f; printf 2 > from2/f'
+run_case -v from1/f from2/f into
+TREE='mktree; mkdir -p from1 from2 into; printf 1 > from1/f; printf 2 > from2/f'
+run_case -v -b from1/f from2/f into
+TREE='mktree; mkdir -p from1 from2 into; printf 1 > from1/f; printf 2 > from2/f'
+run_case -v --backup=existing from1/f from2/f into
+TREE='mktree; mkdir -p from1 from2 into; printf 1 > from1/f; printf 2 > from2/f'
+run_case -v --backup=numbered from1/f from2/f into
+
+# Several sources into a directory: each gets its own backup, named inside the
+# destination directory rather than beside the source.
+TREE='mktree; mkdir into; printf x > into/file.txt; printf y > into/a.txt'
+run_case -v -b file.txt tree/a.txt into
+# And a destination in a subdirectory, where the backup has to land in that
+# subdirectory and not in the working one.
+TREE='mktree; printf old > tree/sub/dst'
+run_case -v -b file.txt tree/sub/dst
+
+# A backup that cannot be made stops the move, and the file that was going to be
+# overwritten is still there afterwards. Backing up is the *first* thing that
+# writes, so a failure here costs nothing.
+TREE='mktree; mkdir ro; printf old > ro/dst; chmod 0555 ro'
+run_case -b file.txt ro/dst
+# The last operand still has to be a directory when there are three of them,
+# whatever `-b` says.
+TREE='mktree; printf old > dst'
+run_case -b file.txt dst dst2
+
+# =============================================================================
+# 19. --help and --version
 # =============================================================================
 # The family's two deliberate differences: `--help` omits the GNU project's
 # `Report bugs to:` block, and `--version` names SlateOS.
@@ -1124,7 +1330,7 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help file.txt dst
 xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 
 # =============================================================================
-# 19. Options GNU has and this mv has not
+# 20. Options GNU has and this mv has not
 # =============================================================================
 # An inventory, not a permission. Each entry names its option and turns into an
 # XPASS the moment the option lands, which is what forces it to be promoted to a
@@ -1135,41 +1341,9 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 # thirty-three; `-u`/`--update` became §17, where six turned into thirty-seven —
 # nearly all of them about the *order* two options were given in, because
 # `--update`'s three words write the same two fields `-i`/`-f`/`-n` do.
-
-# -b, --backup, -S, and the two environment variables they override.
-TREE='mktree; printf old > dst'
-missing -b file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup=simple file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup=numbered file.txt dst
-TREE='mktree; printf old > dst; printf b1 > dst.~1~'
-missing --backup=existing file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup=none file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup=nosuchword file.txt dst
-TREE='mktree; printf old > dst'
-missing -S .bak file.txt dst
-TREE='mktree; printf old > dst'
-missing --suffix=.bak -b file.txt dst
-TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=numbered)
-missing -b file.txt dst
-TREE='mktree; printf old > dst'; ENVV=(VERSION_CONTROL=numbered)
-missing --backup=simple file.txt dst
-TREE='mktree; printf old > dst'; ENVV=(SIMPLE_BACKUP_SUFFIX=.bk)
-missing -b file.txt dst
-TREE='mktree; printf old > dst'; ENVV=(SIMPLE_BACKUP_SUFFIX=.bk)
-missing -b -S .cli file.txt dst
-# `--backup` and `--no-clobber` are mutually exclusive, and the check is on
-# whether the option was *given*, not on what it resolved to — so
-# `--backup=none -n` is refused too.
-TREE='mktree; printf old > dst'
-missing -b -n file.txt dst
-TREE='mktree; printf old > dst'
-missing --backup=none -n file.txt dst
+# `-b`/`--backup`/`-S` became §18, where fifteen turned into fifty-eight: a backup
+# is a second file with a chosen name, so every case has a name to check as well
+# as a tree, and the option lifts three of §13's refusals besides.
 
 # --strip-trailing-slashes, which changes what a source ending in `/` names.
 missing --strip-trailing-slashes tree/ dir

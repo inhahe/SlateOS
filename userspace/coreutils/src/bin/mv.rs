@@ -2492,7 +2492,7 @@ fn copy_across_devices<E: Write>(
                 e,
             )
         })?;
-        preserve_onto_link(target, metadata, err);
+        preserve_onto_link(src, target, metadata, err);
         return remove_source(src);
     }
 
@@ -2531,7 +2531,7 @@ fn copy_across_devices<E: Write>(
     io::copy(&mut source, &mut dest)
         .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
 
-    preserve_onto_file(&source, &dest, target, metadata, mode, err);
+    preserve_onto_file(&source, &dest, src, target, metadata, mode, err);
     remove_source(src)
 }
 
@@ -2552,12 +2552,30 @@ fn copy_across_devices<E: Write>(
 /// created between the unlink and the open would be opened and truncated, which
 /// is the very thing the unlink was there to prevent.
 ///
-/// GNU also ORs in `S_IWUSR` here when it is about to copy extended attributes
-/// as a non-owner, "to allow copying xattrs on read-only files" — the kernel's
-/// `xattr_permission` wants write access to the inode. That bit is not added
-/// because this fallback does not carry extended attributes yet; it belongs
-/// with the change that does, and until then it would only widen a mode nobody
-/// reads.
+/// The `S_IWUSR` that goes the other way is GNU's too, and it is there for the
+/// extended attributes rather than for the bytes: Linux's `xattr_permission`
+/// (`fs/xattr.c`) demands write access to the *inode* before it will set an
+/// attribute on it, so a read-only source — mode `0444` — would otherwise
+/// produce a copy that no `setxattr` could write to. `copy.c:1450` widens the
+/// open mode by exactly that bit, and only for a non-root caller, root's
+/// `setxattr` not being subject to the check. That condition is
+/// [`fsattr::chown_privileges`], which is upstream's `x->owner_privileges`
+/// under its other name; the `preserve_xattr &&` half of upstream's test is
+/// constant here, because `mv.c:145` sets it and mv's getopt never clears it.
+///
+/// It costs no exposure, which is why it can be ORed in beside a withholding
+/// that exists to prevent some. The bit is the *owner's* write bit, and the
+/// owner at this instant is the process doing the copying — which already holds
+/// a writable descriptor to the file it just created. Nothing is granted to
+/// anyone who did not have it.
+///
+/// GNU tracks it as `extra_permissions` so that its `omitted_permissions`
+/// fallback can take it off again; nothing here has to, because a move never
+/// reaches that branch. `if (x->preserve_mode || x->move_mode)` (`copy.c:1672`)
+/// claims the chain first and calls `copy_acl` with `src_mode`, which writes the
+/// mode absolutely. The final [`fsattr::copy_permissions`] in
+/// [`preserve_onto_file`] is that call, and it starts with the same absolute
+/// `set_mode`, so the extra bit leaves with the rest of the temporary mode.
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
     let mut opts = fs::OpenOptions::new();
@@ -2565,7 +2583,12 @@ fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(mode & !GROUP_AND_OTHER);
+        let extra = if fsattr::chown_privileges() {
+            0
+        } else {
+            OWNER_WRITE
+        };
+        opts.mode((mode & !GROUP_AND_OTHER) | extra);
     }
     opts.open(target)
 }
@@ -2574,6 +2597,11 @@ fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
 /// owner is settled.
 #[cfg_attr(not(unix), allow(dead_code))]
 const GROUP_AND_OTHER: u32 = 0o077;
+
+/// `S_IWUSR` — the bit [`create_destination`] adds so the extended attributes
+/// can be written onto a read-only file.
+#[cfg_attr(not(unix), allow(dead_code))]
+const OWNER_WRITE: u32 = 0o200;
 
 /// Carry the source's times, owner and mode onto the copy, reporting what would
 /// not go and failing at none of it.
@@ -2586,6 +2614,7 @@ const GROUP_AND_OTHER: u32 = 0o077;
 fn preserve_onto_file<E: Write>(
     source: &fs::File,
     dest: &fs::File,
+    src: &Path,
     target: &Path,
     metadata: &fs::Metadata,
     mode: u32,
@@ -2626,6 +2655,14 @@ fn preserve_onto_file<E: Write>(
         }
     }
 
+    // `copy.c:1662`, and the position is upstream's comment rather than an
+    // arrangement of convenience: "Set ownership before xattrs as changing
+    // owners will clear capabilities" (`copy.c:1643`). A file capability lives
+    // in `security.capability`, and the kernel drops that attribute when the
+    // file changes hands — so a `chown` after this call would silently undo it,
+    // and the copy would arrive without the privilege its source carried.
+    preserve_xattrs(On::File(source), on, src, target, err);
+
     // GNU's `copy_acl (src_name, source_desc, dst_name, dest_desc, src_mode)`,
     // reached because `x->move_mode` is true — the mode *and* the access-control
     // lists, because on this kernel an ACL entry grants access no mode bit shows
@@ -2654,7 +2691,16 @@ fn preserve_onto_file<E: Write>(
 /// The `lchown` gets no group-only retry, which is the same asymmetry `cp` has
 /// to reproduce: that call is a bare `lchownat` while `copy_reg`'s and the
 /// tail's both retry. It is visible in `ls -l` on the moved link.
-fn preserve_onto_link<E: Write>(target: &Path, metadata: &fs::Metadata, err: &mut E) {
+///
+/// The extended attributes *are* carried, which reads like a contradiction of
+/// the paragraph above and is not. `copy_attr` sits at `copy.c:3280`, *before*
+/// the `if (dest_is_symlink) return delayed_ok;` that ends the tail early at
+/// 3285–3286 — so a symlink passes through it on the way to the return. The
+/// mode block is after the return and a link therefore never reaches it. Whether
+/// a link can hold an attribute at all is the filesystem's business: on Linux
+/// only the `trusted.` and `security.` namespaces may be set on one, so the
+/// ordinary case copies nothing and the call is free.
+fn preserve_onto_link<E: Write>(src: &Path, target: &Path, metadata: &fs::Metadata, err: &mut E) {
     let on = On::Path(target, Link::NoFollow);
 
     if let Ownership::Failed(e) =
@@ -2675,6 +2721,55 @@ fn preserve_onto_link<E: Write>(target: &Path, metadata: &fs::Metadata, err: &mu
 
     if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
         preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
+    }
+
+    // After the times and not before, because that is the order of the shared
+    // tail: `utimensat` at `copy.c:3254`, `copy_attr` at 3280. Both sides are
+    // named `l*`, which for a symlink destination is the whole meaning of the
+    // call — following it would put the source's attributes on whatever the
+    // link points at.
+    preserve_xattrs(On::Path(src, Link::NoFollow), on, src, target, err);
+}
+
+/// Carry the source's extended attributes onto the copy, reporting what would
+/// not go and failing at none of it.
+///
+/// [`fsattr::Xattrs::Ordinary`] and not the permission class, because the two
+/// halves have separate owners here: `system.posix_acl_access` and its default
+/// counterpart are the file's *permissions* on this kernel, and they are carried
+/// by the [`fsattr::copy_permissions`] that follows this call in
+/// [`preserve_onto_file`]. Copying them here as well would write the access
+/// list twice and — worse — write it before the mode that must precede it.
+///
+/// **Which failures are printed is a three-way choice upstream, and `mv` cannot
+/// leave the row it is on.** gnulib's `attr_copy_*` takes a callback deciding
+/// per-attribute whether an error is worth a word, and coreutils supplies three:
+///
+/// | Caller | Prints | Exit |
+/// |---|---|---|
+/// | `cp --preserve=xattr` (`require_preserve_xattr`) | every failure | 1 |
+/// | `cp --preserve=all`, **and all of `mv`** | all but `ENOTSUP`/`ENODATA` | 0 |
+/// | `cp -a` (`reduce_diagnostics`) | nothing | 0 |
+///
+/// `mv` is the middle row by construction: `cp_option_init` sets
+/// `require_preserve_xattr = false` (`mv.c:146`) and `reduce_diagnostics = false`
+/// (`mv.c:141`), and mv's getopt writes neither — there is no option that moves
+/// it. So the two flags that `cp` has to carry are absent here, and the row is
+/// spelled out in code rather than looked up: report unless
+/// [`fsattr::errno_unsupported`], and never touch the exit status.
+///
+/// The suppressed pair is not a courtesy. `ENOTSUP` is what a filesystem with no
+/// extended-attribute support answers — every attempt on it fails, so reporting
+/// would turn one move onto a FAT volume into a screenful — and `ENODATA` is the
+/// attribute vanishing between the listing and the read, which is a race with
+/// another process rather than a fault of this one.
+fn preserve_xattrs<E: Write>(from: On<'_>, to: On<'_>, src: &Path, target: &Path, err: &mut E) {
+    for failure in fsattr::copy_xattrs(from, to, fsattr::Xattrs::Ordinary) {
+        if !fsattr::errno_unsupported(&failure.err) {
+            let what = failure.at.sentence(src, target);
+            let why = strerror(&failure.err);
+            let _ = writeln!(err, "mv: {what}: {why}");
+        }
     }
 }
 
@@ -4346,6 +4441,96 @@ mod tests {
 
         let got = fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777;
         assert_eq!(got, 0o4741, "every bit, set-user-ID included");
+    }
+
+    /// Put a `user.` attribute on a file, or say the filesystem underneath the
+    /// scratch directory has none. `/tmp` is usually ext4 and usually does; a
+    /// tmpfs built without `CONFIG_TMPFS_XATTR` does not, and a test that failed
+    /// there would be reporting the kernel's build options rather than this
+    /// `mv`. Same helper, same reasoning, as `cp`'s.
+    #[cfg(unix)]
+    fn seed_xattr(path: &Path, name: &[u8], value: &[u8]) -> bool {
+        fsattr::set_xattr(On::Path(path, Link::NoFollow), name, value).is_ok()
+    }
+
+    /// What `path` has under `name`, or `None` if it has nothing.
+    #[cfg(unix)]
+    fn xattr_of(path: &Path, name: &[u8]) -> Option<Vec<u8>> {
+        fsattr::get_xattr(On::Path(path, Link::NoFollow), name).ok()
+    }
+
+    /// The unit `known-issues.md` →
+    /// `B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` asked for. A
+    /// rename carries every attribute by not touching the inode at all, so the
+    /// fallback that stands in for it has to put them back by hand.
+    ///
+    /// The value is deliberately not text. An attribute's value is arbitrary
+    /// bytes, and a copy that round-tripped it through UTF-8 would corrupt
+    /// exactly this while passing any test written with a printable string.
+    #[test]
+    #[cfg(unix)]
+    fn the_cross_device_fallback_carries_an_extended_attribute() {
+        const VALUE: &[u8] = b"\x00\xff\x80not text";
+        let dir = scratch("xdev_xattr");
+        let (a, b) = (dir.path("a"), dir.path("b"));
+        fs::write(&a, b"bytes").unwrap();
+        if !seed_xattr(&a, b"user.tag", VALUE) {
+            return;
+        }
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        let mut err = Vec::new();
+        copy_across_devices(&a, &b, &meta, &mut err).unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&err), "");
+        assert_eq!(
+            xattr_of(&b, b"user.tag").as_deref(),
+            Some(VALUE),
+            "the attribute must arrive with the bytes"
+        );
+    }
+
+    /// The unit for the `S_IWUSR` that [`create_destination`] ORs in. A `0444`
+    /// source produces a `0444` destination, and Linux's `xattr_permission`
+    /// wants *write* access to an inode before it will set an attribute on it —
+    /// so without the widening this `setxattr` fails with `EACCES`, the
+    /// attribute is silently absent and the failure is printed.
+    ///
+    /// Both halves are asserted, because the widening would be just as wrong if
+    /// it leaked: the mode at the end has to be the source's `0444` again, the
+    /// extra bit having left with the rest of the temporary mode when
+    /// [`fsattr::copy_permissions`] wrote the real one.
+    ///
+    /// As root the widening is skipped and `setxattr` bypasses the check, so
+    /// this passes either way there. It discriminates as an ordinary user, which
+    /// is who runs the suite.
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_source_still_gets_its_attributes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("xdev_xattr_ro");
+        let (a, b) = (dir.path("a"), dir.path("b"));
+        fs::write(&a, b"bytes").unwrap();
+        if !seed_xattr(&a, b"user.tag", b"v") {
+            return;
+        }
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        let mut err = Vec::new();
+        copy_across_devices(&a, &b, &meta, &mut err).unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&err), "");
+        assert_eq!(
+            xattr_of(&b, b"user.tag").as_deref(),
+            Some(&b"v"[..]),
+            "a read-only file must still receive its attributes"
+        );
+        assert_eq!(
+            fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777,
+            0o444,
+            "and the write bit that allowed it must not survive"
+        );
     }
 
     /// A symlink has its own modification time, and `mv` carries it: the

@@ -105014,7 +105014,7 @@ keeps measuring something after the refusal is lifted.
 
 ---
 
-## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — FIXED 2026-09-01
 
 **In short:** a file moved across a filesystem boundary arrives without its
 extended attributes. Its times, owner, mode and access-control lists are carried
@@ -105055,6 +105055,99 @@ would also cover `cp`'s xattr cases, currently unmeasured for the same reason.
 Until then the unit tests in `mv.rs` are the place: they drive
 `copy_across_devices` directly and can set an attribute on the source and assert
 it on the destination, on a `/tmp` that supports one.
+
+**Status:** FIXED 2026-09-01. `preserve_onto_file` gained a `preserve_xattrs`
+call between the ownership step and the permissions step, `preserve_onto_link`
+gained one after its `set_times`, and `create_destination` gained the `S_IWUSR`.
+mv's own suite went 126 → 128 passed; `scripts/mv-diff.sh` is unchanged at 341
+passed, 0 differed, 11 differ on purpose, which is what "the harness cannot see
+this" above predicted and is therefore evidence rather than a shrug.
+
+Three corrections to what this entry prescribed, all found by reading rather
+than by assuming:
+
+* **`Xattrs::All` does not exist**, and inventing it would have been wrong
+  rather than merely unavailable. The right variant is `Xattrs::Ordinary` —
+  everything *except* the permission class — because the permission class is
+  `system.posix_acl_access` and its default counterpart, which the
+  `copy_permissions` on the next line already carries. Copying them here as
+  well would write the access list twice, and the second write would land
+  *before* the mode that has to precede it.
+* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:145`,
+  not `129`; the `preserve_xattr = true` inside it is `mv.c:145`; `copy_attr`
+  is `copy.c:1662`, `copy_acl`'s arm is `copy.c:1672` rather than `1668`, and
+  the `S_IWUSR` is `copy.c:1450` rather than `1457`.
+  The claim they support is right; the citations were not, and a citation that
+  does not resolve is worse than none.
+* **`preserve_onto_link` needed one too, which reads like a contradiction of
+  mv.rs's own doc and is not.** That doc explains at length that a symlink
+  returns early at `copy.c:3285` and so never reaches the mode block. But
+  `copy_attr` is at 3280 — *before* that return, at 3285–3286 — so a link passes
+  through it on the way out. Whether anything is then carried is the
+  filesystem's business (Linux permits only `trusted.` and `security.` on a
+  link), so in the ordinary case the call copies nothing and costs nothing;
+  what it buys is that the one namespace that *can* be set on a link is not
+  silently dropped.
+
+**The `S_IWUSR` is not decoration, and the test proves it.** With the widening
+removed, `a_read_only_source_still_gets_its_attributes` fails with
+`mv: setting attribute 'user.tag' for '…/b': Permission denied` — a `0444`
+destination that Linux's `xattr_permission` will not let its own creator write
+an attribute to. The same test asserts the bit does not *survive*: the mode at
+the end is `0444` again, because a move takes `copy.c:1672`'s
+`if (x->preserve_mode || x->move_mode)` arm and `copy_acl` writes `src_mode`
+absolutely — so GNU's `extra_permissions` cleanup branch is unreachable for
+`mv`, and ours needs no bookkeeping either, `copy_permissions` beginning with
+the same absolute `set_mode`.
+
+Both new tests were checked for discrimination rather than assumed to
+discriminate: with the `preserve_xattrs` call removed both fail, and with only
+the widening removed exactly the read-only one does.
+
+**Still open, and deliberately not done here:** teaching `snapshot` in the diff
+harnesses to run `getfattr -d -m -`. The paragraph above is still the argument
+for it, and it is still worth doing — it is what would let the *harness* catch a
+regression here instead of the unit tests, and it would cover `cp`'s xattr cases
+too. Left out because it changes the harness for both utilities and belongs in
+its own change; tracked as
+`B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` below.
+
+---
+
+## B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+
+**In short:** the two differential harnesses that compare our `cp` and `mv`
+against the real GNU ones cannot see extended attributes — small named blobs a
+filesystem stores alongside a file (a SELinux label, a `user.mime_type`, a
+backup tool's bookkeeping). So a change that silently stopped carrying them
+would show up as "0 differed". Both utilities *do* carry them, and both have
+unit tests that say so; what is missing is the whole-program check.
+
+**Where.** `scripts/cp-diff.sh` and `scripts/mv-diff.sh`, the `snapshot`
+function in each. It records the tree, each file's bytes, its mode, and the
+hard-link groups — everything an attribute is not.
+
+**The proper fix.** Add `getfattr -d -m - --absolute-names` per file to
+`snapshot`, with its output sorted and folded into the same text blob the rest
+of the snapshot goes into, so a difference in attributes fails a case the same
+way a difference in bytes does. Two things to get right:
+
+* **`getfattr` may not be installed.** It is part of `attr`, which is not
+  guaranteed. The harness should probe once and, if it is absent, say so in the
+  summary line rather than silently comparing nothing — a harness that quietly
+  stops checking something is worse than one that never checked it.
+* **`security.selinux` will differ on a machine with SELinux enforcing**, for
+  the same uninteresting reason the owner does. It belongs in the same category
+  as the fields `snapshot` already elides.
+
+Then add cases that actually set one: `setfattr -n user.tag -v v` in a `TREE`,
+for both a plain file and a hard-linked pair, and — for `mv` — a `FAR` case, the
+only shape where the fallback runs at all.
+
+**How it would be caught.** It is the catcher; nothing catches it. The evidence
+it is needed is that
+`B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` above was fixed with the
+harness reporting an identical 341/0/11 before and after.
 
 ---
 

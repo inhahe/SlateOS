@@ -4862,10 +4862,18 @@ mod tests {
         // `Filter` carries its filter, so a panel that drew every row with the
         // same payload -- or with the row index of a *different* list -- would
         // still draw the right number of rows in the right places.
+        // The row is found by the words in it and not by `rect_of`, for the
+        // reason `text_point` gives: a pass that recorded each row's box under
+        // its *neighbour's* filter would answer "where is Sepia?" with the row
+        // reading Grayscale, and clicking there would select Sepia and look
+        // right. Reading the label is the only question the picture cannot
+        // answer with its own mistake.
         for filter in ImageFilter::all().iter().copied() {
             let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
             app.set_sidebar_panel(SidebarPanel::Filters);
-            probe::click(&mut app, Target::Filter(filter));
+            let (x, y) = text_point(&app, filter.label())
+                .unwrap_or_else(|| panic!("no row reads {}", filter.label()));
+            app.click_at(x, y, MouseButton::Left, (WINDOW_WIDTH, WINDOW_HEIGHT));
             assert_eq!(
                 app.settings.active_filter,
                 filter,
@@ -5047,6 +5055,42 @@ mod tests {
         }
     }
 
+    /// Where the picture drew a given run of text, as a point inside it.
+    ///
+    /// This is how a row is found when the point of the test is *which* row a
+    /// click lands on. Asking `probe::rect_of` for a `Target` would ask the
+    /// drawing pass to say where its own labels are, and a pass that recorded
+    /// every row's box one row off would answer with the same offset it made
+    /// the mistake with -- so finding and clicking would cancel out and the
+    /// test would pass over a panel where every label chose its neighbour.
+    /// The label is the only thing in the frame the user can actually read.
+    fn text_point(app: &CameraApp, wanted: &str) -> Option<(f32, f32)> {
+        let frame = app.frame(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let found: Vec<(f32, f32)> = frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    ..
+                } if text == wanted => Some((x + 1.0, y + font_size * 0.5)),
+                _ => None,
+            })
+            .collect();
+        // Two runs reading the same words would make "click the row that says
+        // X" ambiguous, and the caller would silently get whichever came
+        // first. Better to stop and be told than to test the wrong rectangle.
+        assert!(
+            found.len() <= 1,
+            "{} runs of text read {wanted:?}",
+            found.len()
+        );
+        found.first().copied()
+    }
+
     #[test]
     fn the_device_panel_chooses_the_resolution_and_rate_it_names() {
         for idx in 0..RESOLUTIONS.len() {
@@ -5058,27 +5102,29 @@ mod tests {
             let Some(wanted) = wanted else {
                 continue;
             };
-            if probe::rect_of(&app, Target::Resolution(idx)).is_none() {
+            let Some((x, y)) = text_point(&app, &wanted.label()) else {
                 continue;
-            }
-            probe::click(&mut app, Target::Resolution(idx));
+            };
+            app.click_at(x, y, MouseButton::Left, (WINDOW_WIDTH, WINDOW_HEIGHT));
             assert_eq!(
                 app.active_camera().map(CameraDevice::current_resolution),
                 Some(wanted),
-                "row {idx} chose the wrong resolution"
+                "the row reading {} chose a different resolution",
+                wanted.label()
             );
         }
-        for (idx, fps) in FRAME_RATES.iter().copied().enumerate() {
+        for fps in FRAME_RATES.iter().copied() {
             let mut app = CameraApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
             app.set_sidebar_panel(SidebarPanel::DeviceInfo);
-            if probe::rect_of(&app, Target::Framerate(idx)).is_none() {
+            let label = format!("{fps} fps");
+            let Some((x, y)) = text_point(&app, &label) else {
                 continue;
-            }
-            probe::click(&mut app, Target::Framerate(idx));
+            };
+            app.click_at(x, y, MouseButton::Left, (WINDOW_WIDTH, WINDOW_HEIGHT));
             assert_eq!(
                 app.active_camera().map(|c| c.framerate),
                 Some(fps),
-                "row {idx} chose the wrong frame rate"
+                "the row reading {label} chose a different frame rate"
             );
         }
     }

@@ -106291,11 +106291,17 @@ Two corrections to what is written below:
   The block was never the version string; it is a capacity-1 `Vec<TaskInfo>`,
   and `TaskInfo` is 176 bytes.
 
-The `/proc/heapinfo` readdir-vs-stat size disagreement is a **separate, real**
-bug and is not fixed by this — it persisted in a boot with zero heap violations.
-Cause: `gen_heapinfo` prints `slab_allocs`/`total_allocs`/etc., which the
-harness's own allocations increment between the `readdir` and the `stat`, moving
-a decimal digit and changing the byte length. Tracked separately.
+The `/proc/heapinfo` readdir-vs-stat size disagreement is a **separate** bug and
+is not fixed by this — it persisted in boot `bv39hyr6h`, which had zero heap
+violations and still reported `2507 clause(s) held, 1 broke`. Cause:
+`gen_heapinfo` prints `slab_allocs`/`total_allocs`/etc., which the harness's own
+allocations increment between the `readdir` and the `stat`, moving a decimal
+digit and changing the byte length. **The defect was in the harness, not in
+procfs** — both sizes were true when they were taken, and the clause asserted
+that the file held still without ever establishing that it had. Fixed in
+`707defe2b` by bracketing the stat between two listings and voiding, rather than
+passing, a comparison whose two readings saw different states; see
+`design-decisions.md` §673.
 
 **In short:** reading two files under `/proc` — `version` and `loadavg` — each
 hands the same 256-byte block of memory back to the allocator twice. The

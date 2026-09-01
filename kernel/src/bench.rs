@@ -6724,33 +6724,81 @@ fn bench_vfs_read_write() {
     );
 }
 
-/// Benchmark VFS readdir on root directory.
+/// Number of entries in the directory [`bench_vfs_readdir`] builds and scores.
 ///
-/// Measures the cost of listing all entries in the root directory.
-/// This exercises the VFS directory iteration path.
+/// Chosen to sit inside the span `bench_vfs_readdir_breakdown` actually
+/// measured (8..64 entries), so the ~10us-fixed + ~0.44us/entry cost model
+/// describes it without extrapolation, and high enough that the per-entry term
+/// (~14us) outweighs the fixed term — a smaller directory would score mostly
+/// the constant overhead and barely move when iteration itself regressed.
 ///
-/// # The workload is not a constant, and that is now instrumented
+/// [`READDIR_FIXED_NAME`] hardcodes this number, and the assertion below binds
+/// them together on purpose: see that constant for why.
+const READDIR_FIXED_ENTRIES: usize = 32;
+
+/// Name of the scored series [`bench_vfs_readdir`] publishes.
 ///
-/// This benchmark lists `/`, whose contents are whatever the boot happened to
-/// put there — mounts, service directories, anything an earlier benchmark
-/// left behind. Nothing pins the entry count, so it can change with a commit
-/// that never touches the filesystem at all.
+/// The count is in the name, and `READDIR_FIXED_NAME_MATCHES_COUNT` below fails
+/// the build if [`READDIR_FIXED_ENTRIES`] is changed without changing it. That
+/// is not pedantry about labels. `bench/history.jsonl` keys a series by name and
+/// nothing else, and there is no mechanism anywhere in this harness for saying
+/// "this series still exists but now measures something different" —
+/// `MEASURED-AS` pairs a scored name with its live window and cannot express a
+/// redefinition. So renaming is the *only* honest signal available, and the
+/// compile error is what makes it unavoidable: listing 64 entries under a name
+/// whose history is 32 would silently republish a doubled workload as a 2x
+/// regression, which is the exact failure this whole benchmark was rewritten to
+/// stop. See the module history in `known-issues.md`
+/// A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.
+const READDIR_FIXED_NAME: &str = "vfs_readdir_32";
+
+const _: () = assert!(
+    READDIR_FIXED_ENTRIES == 32,
+    "READDIR_FIXED_ENTRIES changed but READDIR_FIXED_NAME still says 32 — pick a new series \
+     name rather than redefining the old one; see READDIR_FIXED_NAME"
+);
+
+/// Benchmark VFS readdir on a directory of known, fixed size.
 ///
-/// That matters because the series has stepped between binaries without a
-/// plausible cause: 16.3us -> 50.2us -> 84.3us -> 50.9us across four builds
-/// (`known-issues.md` A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER). Two
-/// mechanisms were proposed and both were then measured and refuted — inode
-/// table size moves a 64-entry listing by 1%, heap warmth by 0.4%, where the
-/// series moved by 200%. Meanwhile `bench_vfs_readdir_breakdown` prices a
-/// listing at roughly 10us fixed plus 0.46us per entry, so a root that gained
-/// ~70 entries would account for the entire step on its own.
+/// Exercises the VFS directory iteration path over
+/// [`READDIR_FIXED_ENTRIES`] entries this function creates itself, and
+/// additionally lists `/` as an unscored diagnostic.
 ///
-/// So the count and the names are logged before the timing. If they move with
-/// the number, the "regression" is a workload change and the fix is to list a
-/// directory this benchmark builds itself; if they are identical across the
-/// binaries that disagree, that is ruled out and the cause is elsewhere. This
-/// is deliberately printed rather than asserted: one boot's count means
-/// nothing, and the comparison is against the *next* boot's log.
+/// # Why this no longer scores the root directory
+///
+/// It used to, and that was a defect rather than a simplification. `/` holds
+/// whatever the boot happened to put there — mounts, service directories, and
+/// anything an earlier self-test left behind — so nothing pinned the entry
+/// count, and it could change with a commit that never touched the filesystem
+/// at all.
+///
+/// That was not theoretical. The series stepped 16.3us -> 50.2us -> 84.3us ->
+/// 50.9us across four builds (`known-issues.md`
+/// A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER); two mechanisms were
+/// proposed for it and controlled measurement refuted both — inode table size
+/// moves a 64-entry listing by ~1%, allocator warmth by ~2%, where the series
+/// moved by 200%. Meanwhile [`bench_vfs_readdir_breakdown`] prices a listing at
+/// roughly 10us fixed plus 0.44us per entry, so a root that gained ~70 entries
+/// accounts for the whole step with no performance change whatsoever. And when
+/// the count was finally logged, six of the twenty-one entries in `/` turned
+/// out to be self-test litter (`cwdtest`, `globdir`, `handle_dir_test`,
+/// `reltest`, `slateos-b2-beneath`, `slateos-b2-decoy`) — directories any lane
+/// can add, in trees this lane does not own, moving a kernel benchmark.
+///
+/// So the scored workload is now built here and torn down after, and is a
+/// constant by construction. The root listing is kept, because losing it would
+/// discard the only measurement of a *merged* listing — `/` costs ~1843ns/entry
+/// against a plain memfs directory's ~441ns/entry, and on the boot-test both are
+/// the same filesystem (`main.rs` falls back to memfs when vda carries no FAT),
+/// so that 4x is real rather than a filesystem-type difference. Roughly a third
+/// of it is `Vfs::finish_listing` paying a full stat per mount point; the rest
+/// is unattributed. See `known-issues.md`, "readdir(\"/\") costs 4x per entry".
+/// The series is `track`ed rather than scored: worth diffing run-over-run, not
+/// worth grading, because its workload still is not ours.
+///
+/// The count and names stay logged for the same reason they were added — so
+/// that a future step in the *tracked* series can be attributed to the workload
+/// by eye, from the log, without another two-day investigation.
 fn bench_vfs_readdir() {
     use crate::fs::vfs::Vfs;
 
@@ -6777,16 +6825,95 @@ fn bench_vfs_readdir() {
     drop(names);
     drop(entries);
 
-    let result = run("vfs_readdir_root", 200, || {
+    let root_result = run("vfs_readdir_root", 200, || {
         let _ = core::hint::black_box(Vfs::readdir("/"));
     });
 
     serial_println!(
-        "[bench]   vfs_readdir_root: min {}ns ({}ns mean)",
-        result.min_ns,
-        result.mean_ns
+        "[bench]   vfs_readdir_root: min {}ns ({}ns mean, unscored — workload is not fixed)",
+        root_result.min_ns,
+        root_result.mean_ns
     );
-    score("vfs_readdir", &result, 50000);
+    track("vfs_readdir_root", &root_result);
+
+    // The scored arm. `/tmp` is the memfs mount, and a memfs directory is what
+    // the breakdown benchmark's cost model was measured on, so the two are
+    // directly comparable.
+    const FIXED_DIR: &str = "/tmp/_rdfix";
+
+    // A leftover tree from an aborted previous boot would make the entry count
+    // wrong — which is precisely the failure this rewrite exists to prevent —
+    // so clear it before creating it rather than trusting it to be absent.
+    readdir_cleanup_dir(FIXED_DIR);
+
+    if Vfs::mkdir_all(FIXED_DIR).is_err() {
+        serial_println!(
+            "[bench] {}: SKIP (cannot create {})",
+            READDIR_FIXED_NAME,
+            FIXED_DIR
+        );
+        return;
+    }
+    for i in 0..READDIR_FIXED_ENTRIES {
+        // Built outside the measured window: `format!` allocates, and an
+        // allocation inside `run`'s closure would be charged to readdir.
+        let leaf = alloc::format!("{}/f{:03}", FIXED_DIR, i);
+        if Vfs::write_file(&leaf, b"").is_err() {
+            serial_println!(
+                "[bench] {}: SKIP (cannot populate {})",
+                READDIR_FIXED_NAME,
+                FIXED_DIR
+            );
+            readdir_cleanup_dir(FIXED_DIR);
+            return;
+        }
+    }
+
+    // Assert the workload rather than assume it. The whole point of this series
+    // is that its size is known; if the directory does not hold what was just
+    // written to it, the number is not comparable to the history and must not
+    // be published under a name that claims it is.
+    match Vfs::readdir(FIXED_DIR) {
+        Ok(check) if check.len() == READDIR_FIXED_ENTRIES => {}
+        Ok(check) => {
+            serial_println!(
+                "[bench] {}: SKIP (built {} entries but {} lists {} — workload not as declared)",
+                READDIR_FIXED_NAME,
+                READDIR_FIXED_ENTRIES,
+                FIXED_DIR,
+                check.len()
+            );
+            readdir_cleanup_dir(FIXED_DIR);
+            return;
+        }
+        Err(_) => {
+            serial_println!(
+                "[bench] {}: SKIP (cannot list {} after building it)",
+                READDIR_FIXED_NAME,
+                FIXED_DIR
+            );
+            readdir_cleanup_dir(FIXED_DIR);
+            return;
+        }
+    }
+
+    let result = run(READDIR_FIXED_NAME, 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(FIXED_DIR));
+    });
+
+    readdir_cleanup_dir(FIXED_DIR);
+
+    serial_println!(
+        "[bench]   {}: min {}ns ({}ns mean) over exactly {} entries",
+        READDIR_FIXED_NAME,
+        result.min_ns,
+        result.mean_ns,
+        READDIR_FIXED_ENTRIES
+    );
+    // Same 50us budget the root listing carried: nothing measured since
+    // justifies tightening it, and the breakdown's model predicts ~24us here,
+    // so the headroom is roughly 2x. See `bench/baselines.toml`.
+    score(READDIR_FIXED_NAME, &result, 50000);
 }
 
 /// Number of ballast files created by [`bench_vfs_readdir_breakdown`].
@@ -6969,7 +7096,7 @@ fn bench_vfs_readdir_breakdown() {
             }
         }
     }
-    readdir_breakdown_cleanup_dir(dir_ballast);
+    readdir_cleanup_dir(dir_ballast);
 
     let n0 = run("vfs_readdir_n0", 200, || {
         let _ = core::hint::black_box(Vfs::readdir(dir_empty));
@@ -7136,8 +7263,9 @@ fn bench_vfs_readdir_breakdown() {
 /// Delete every file in `dir` and then `dir` itself. Best-effort throughout —
 /// see [`readdir_breakdown_cleanup`], which this is factored out of so the
 /// warm-up phase can drop the ballast without disturbing the three measured
-/// directories.
-fn readdir_breakdown_cleanup_dir(dir: &str) {
+/// directories. [`bench_vfs_readdir`] uses it for its own fixed-size directory
+/// on the same terms.
+fn readdir_cleanup_dir(dir: &str) {
     use crate::fs::vfs::Vfs;
 
     if let Ok(entries) = Vfs::readdir(dir) {
@@ -7166,7 +7294,7 @@ fn readdir_breakdown_cleanup(root: &str) {
 
     // Depth-first by construction: the four leaf directories, then the root.
     for sub in ["n0", "n8", "n64", "ballast"] {
-        readdir_breakdown_cleanup_dir(&alloc::format!("{}/{}", root, sub));
+        readdir_cleanup_dir(&alloc::format!("{}/{}", root, sub));
     }
     let _ = Vfs::rmdir(root); // Best-effort: see fn doc.
 }

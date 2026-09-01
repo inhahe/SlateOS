@@ -806,7 +806,10 @@ BENCH_COVERAGE=(
     # no instruction from that file is inside the measured window.
 
     # -- fs: 3 of 467 files ------------------------------------------------
-    "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
+    # `vfs_readdir` was renamed to `vfs_readdir_32` and split from the unscored
+    # `vfs_readdir_root`; both are listed because both are recorded and both
+    # time Vfs::readdir.  See bench/baselines.toml [vfs_readdir_32].
+    "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir_32 vfs_readdir_root vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
     "kernel/src/fs/path.rs|vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve"
     "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB http_build_response_gzip_1KiB"
     # fs/ext4, fs/zfs, fs/btrfs, fs/f2fs, fs/ntfs and the other ~460 files have

@@ -14508,7 +14508,12 @@ EROFS). Regression test: Path Z Part 28 (`self_test_linux_link`) hard-links
 `/mnt/lnk-dst` to a pre-staged `/mnt/lnk-src` from ring 3 and reads the byte
 back through it.
 
-**memfs does not support hard links (deferred):** the test runs on the **ext4**
+**memfs does not support hard links (deferred):** *— no longer true as of
+2026-09-01; memfs was refactored to a flat inode table and implements
+`link`/`link_no_follow`. See `design-decisions.md` §665 and
+`A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK`. The paragraph is
+kept because the fidelity-gap history after it is still accurate.* The test
+runs on the **ext4**
 mount at `/mnt`, not the in-memory root (`/`, `/tmp`). memfs stores file data
 inline in by-value tree nodes (`MemFsNodeKind::File(Vec<u8>)` owned by the
 parent's `BTreeMap`), so two directory entries cannot share one inode — which
@@ -49661,6 +49666,42 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+### CORRECTION 2026-08-31 — the fix landed, and the stated cause was wrong
+
+**Status: CLOSED (fixed), with one paragraph above retracted.**
+
+Two separate things need saying, because only one of them is "this got fixed".
+
+**The fix.** `boot-test.sh` now documents and budgets the outer window itself
+(`scripts/boot-test.sh:30-57`): **7200 s**, derived as ~3000 s observed pre-QEMU
++ 2400 s inner QEMU timeout + headroom. The entry's "Proper fix" offered a
+choice between raising the budget to ~2700 s and splitting build from boot; the
+budget was raised, to nearly 3× what this entry proposed, because the pre-QEMU
+phase was re-measured on 2026-08-31 at ~3000 s with another lane building
+concurrently — so 2700 s would itself have been too tight. The comment there
+also records the reason a *generous* outer budget is not laziness: an outer
+timeout that fires first replaces the inner one's SYSTEM HANG diagnostic
+(faulting RIP over HMP, task table, marker) with an anonymous exit 124, on
+exactly the runs where the diagnostic matters. That destroyed two runs on
+2026-08-31 before the comment was rewritten.
+
+**The retraction.** The paragraph above titled *"Why the cache is cold more
+often than it looks"* — claiming a preceding `cargo clippy` evicts the build's
+fingerprints, so that "lint, then boot-test" guarantees a cold build — **is
+false, and was reasoning rather than measurement.** `cargo clippy` sets
+`RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace unit's
+fingerprint, so clippy's artifacts occupy their own cache entries and leave the
+build's untouched. Measured 2026-08-24 and recorded at
+`scripts/boot-test.sh:4055-4067`: a `cargo build` run *immediately after* a cold
+200 s clippy took **4.7 s** — i.e. not invalidated at all.
+
+That retraction matters beyond this entry, because the same false belief had
+already been used once to *defer* adding the clippy gate on cost grounds. A
+plausible mechanism, asserted without measurement, cost a real gate and then
+survived long enough to be written down here as an explanation for an unrelated
+timeout. The actual cause of the 2026-08-20 overrun was simply that the build
+is long and the budget was short — no eviction required.
 
 ## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
 
@@ -103466,7 +103507,51 @@ of these eight were one line in a helper shared by six crates.
 and a trailing `remove_dir_all` that an unwind skips, were converted to
 `ScratchDir` in the same commit — 264 call sites, 121 cleanup tails removed.
 
-## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
+## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK — FIXED 2026-09-01 (lane A, filed 2026-08-31)
+
+**Status: FIXED.** memfs now keeps a flat inode table (`BTreeMap<ino, node>`)
+with directories holding `name -> ino`, and implements `link` /
+`link_no_follow`. See `design-decisions.md` §665, which also reverses §30's
+June decision to defer exactly this refactor.
+
+What that changed, in the terms this entry was filed in:
+
+- The recorded skip (`pinned linkat: the positive same-inode/nlinks
+  assertion`) is **deleted**, not merely unreached — the assertion is stated
+  unconditionally, so a regression fails the boot rather than restoring the
+  skip.
+- `nlink` and `st_ino` now mean on memfs what the entry below notes they were
+  only half-promising: `nlink` counts the names, and `drop_link` frees the
+  object when the last one goes.
+- `self_test_linux_link` (ring 3) falls back from `/mnt` to `/tmp` when there
+  is no ext4 mount. Insurance, not a repair — see the correction below.
+- `memfs::self_test` gained direct coverage: shared inode, shared data, unlink
+  decrementing rather than deleting, follow vs no-follow, and no inode leak.
+
+**Correction to this entry's own title and premise, 2026-09-01.** The title
+says "NO BOOT EVER TESTS A HARD LINK", and the report below says "no boot has
+ever exercised a hard link". Both are **false**, and were false when filed.
+Checked against the serial log and `scripts/check-boot-skips.py --list`:
+
+- `scripts/boot-test.sh` attaches `rootfs.ext4` as vdb; `main.rs` probes vdb/vdc
+  and mounts the first ext4 it finds at `/mnt`. So `/mnt` exists on every boot
+  the harness runs.
+- `self_test_linux_link` therefore ran, on ext4, in **all 14** boots in the skip
+  window — it records no skip. The serial log for this very boot reads
+  `Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)... OK`.
+
+What *was* true is narrower and still worth the fix: the assertions that need
+the **root** filesystem to have hard links could not run. `pinned linkat`'s
+positive same-inode/`nlinks` half skipped in **7 of those 14 boots** because it
+works in `/tmp`, and memfs had no hard-link coverage of its own because it had
+no hard links. That is the gap this refactor closed; "no boot ever tests a hard
+link" overstated it, and the overstatement was in the direction that made the
+work look more necessary than it was. The title is left as filed so the ID
+stays stable and searchable.
+
+The original report follows unedited (including the false sentence above).
+
+---
 
 **What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
 `FileSystem::link`'s default applies and every hard link on a memfs mount
@@ -103644,3 +103729,183 @@ yet, because it would regress the one thing the index accidentally gets right
 `ls -i` of one directory look plausible), and because the field is expected to
 land before 664 is wired. If lane A declines the widening, apply the `0` and note
 it here.
+
+## A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS (lane A, 2026-08-31)
+
+**What:** On the four filesystems that have no per-object identity —
+`procfs`, `sysfs`, `devfs`, `iso9660`, plus FAT files with no allocated
+cluster — the Linux-ABI `getdents64` reports a `d_ino` that a `stat` of the
+same name will not confirm. `stat` answers 0 (`FileMeta::minimal`'s `ino`,
+which those filesystems never override); `getdents64` answers
+`synth_inode`, the FNV-1a hash of the path.
+
+**Where:** `kernel/src/syscall/linux.rs`, the `d_ino` selection in
+`sys_getdents64` and `synth_inode` below it; `fill_stat_from_meta`'s
+`put_u64(buf, 8, meta.ino)` is the other half.
+
+**Why it is here and not fixed:** this is the deliberate residual of §662,
+not an oversight. Making the two agree means emitting a literal `0` for
+`d_ino`, and a `getdents64` caller is entitled to read `d_ino == 0` as a
+deleted entry and skip the name — which would drop entries from
+`readdir("/proc")` and `readdir("/dev")` outright. Losing a name is worse
+than reporting an identity a stat will not confirm, so the hash stays. Every
+filesystem with a real inode (ext4, btrfs, f2fs, zfs, ntfs, memfs, and FAT
+files with a cluster) now agrees exactly, which is where the cross-checks in
+`tar`, `rsync`, `du`, `cp` and `find -inum` actually bite.
+
+**Reproduce:** boot, then compare `ls -i /proc/self` against
+`stat -c %i /proc/self/<name>` for any name in it. The first prints a large
+hash, the second prints 0.
+
+**The proper fix, when it is worth doing:** give the pseudo-filesystems real
+inode numbers. `procfs` and `sysfs` generate their trees from static tables
+(`SYS_DIRS`/`SYS_FILES` and the sysfs equivalents), so a number derived from
+the table index plus the PID for per-process nodes would be stable, unique,
+and reportable from *both* `metadata()` and `readdir()` — which is the actual
+requirement. `devfs` already has a node registry to key off. That closes the
+gap properly rather than choosing which of two wrong answers to give, and it
+is the same shape as the fix for the `nlinks` and `permissions` those
+filesystems also report as placeholders. Until then the disagreement is
+documented rather than silent, which is the difference that matters.
+
+---
+
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN (the three instances are FIXED; the hole that produced them is not)**
+
+**Lane:** A
+
+**What happened.** `FileMeta::permissions` documents itself as twelve bits —
+"setuid setgid sticky rwxrwxrwx", `0o7777`. ext4 delivers twelve
+(`vfs_impl.rs:56`, `i_mode & 0o7777`), iso9660 delivers twelve
+(`iso9660.rs:450`), memfs stores the `u16` whole. btrfs, zfs and f2fs masked
+to `0o777` first and delivered nine.
+
+So the same file, with the same bits on disk, reported a different mode
+depending on which driver read it. `cp -a` and `tar` reading off a
+btrfs/zfs/f2fs mount silently dropped setuid, setgid and sticky from
+everything they copied — silently in the strict sense: there is no error, and
+"the bit is missing" is indistinguishable from "the bit was never set."
+
+Fixed 2026-09-01 in all three (`& 0o7555` — twelve bits minus the three write
+bits the read-only mount genuinely justifies dropping). See
+`design-decisions.md` §663.
+
+**Why this entry exists even though the bug is fixed.** Nothing was wrong in a
+way any *single* backend's tests could detect. Each of the three was
+internally consistent: it masked on read, nothing wrote, and every assertion
+about it used a mode inside `0o777`. The divergence only exists *between*
+implementations, and there is no test that looks between them.
+
+The same is true of every other field `FileMeta` promises. Spot-checked while
+fixing the above and **not** yet run down:
+
+- `nlinks` — procfs/sysfs/devfs report a placeholder (noted in
+  `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS`).
+- `ino` — now uniform by construction after §662, but by inspection of all
+  thirteen backends one at a time, not by a test.
+- `created_ns` / `modified_ns` / `accessed_ns` — units are nanoseconds; each
+  backend converts from its own on-disk representation with its own
+  arithmetic, and a backend that returned seconds would look plausible.
+
+**The proper fix.** One test, parameterised over every registered backend,
+that mounts a fixture image and asserts the *contract* rather than the
+implementation: that a file with known bits on disk reports the same
+`FileMeta` from every driver that can read it. That requires a small fixture
+per filesystem, which is the reason it does not exist yet and the reason it is
+worth doing once rather than thirteen times. Failing that, a much cheaper
+partial: a compile-time or boot-time assertion that no `metadata()`
+implementation masks `permissions` more narrowly than `0o7777` — which would
+have caught this specific class on the day it was written.
+
+**Reproduce (before the fix):** mount any btrfs/zfs/f2fs image containing a
+sticky or setuid file and `stat` it; the special bits read back as 0 while the
+same file on ext4 reports them.
+
+### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
+
+**Status:** OPEN. **Lane:** A. **Found:** 2026-09-01, while making
+"a listing contains no volume label" a VFS invariant.
+
+`FileSystem::readdir_at` (`kernel/src/fs/vfs.rs:483`) is declared with a
+default implementation that calls `readdir` and slices, and the doc comment
+tells implementors that "filesystem implementations with native pagination
+(e.g., ext4 htree) should override for efficiency". Two of them did:
+
+| Override | What it does |
+|---|---|
+| `FatFs::readdir_at` (`fs/fat.rs:3134`) | skips `to_vfs_entry`'s name/date formatting for entries outside the window |
+| `Ext4Fs::readdir_at` (`fs/ext4/vfs_impl.rs:194`) | native paginated walk |
+
+**Nothing calls it.** `Vfs::readdir_at_resolved` — the only path from a
+syscall to a paginated listing — open-codes the default instead: it calls
+`fs.lock().readdir(&relative)`, collects the entire directory, and slices.
+So `SYS_FS_READDIR_AT` (647) on a 100k-entry directory reads and formats all
+100k entries to return 32, and the two overrides written to prevent exactly
+that have never executed.
+
+**Why it is open-coded, which is also why this is not a one-line fix.**
+`readdir_at_resolved` has to inject *submount* directories — a filesystem
+mounted at `/mnt/usb` must appear as an entry in a listing of `/mnt` even
+though the underlying filesystem has no such directory — and it must not
+inject one whose name a real entry already occupies. That dedup is
+`!entries.iter().any(|e| e.name == name)` over the **whole** listing. A
+paginated driver call returns one page, so the dedup cannot be evaluated
+without the rest, and the submounts' position in the combined ordering
+depends on the driver's `total`. Delegating therefore needs a real design:
+either (a) submounts are numbered after the driver's `total` and the dedup is
+resolved by mount-time rejection of a colliding name rather than at listing
+time, or (b) directories with submount children fall back to the unpaginated
+path and everything else delegates.
+
+**The proper fix** is (a): reject a mount whose mount-point name collides
+with an existing entry in the parent, at mount time where it is one lookup,
+and then `readdir_at_resolved` can delegate straight through and pagination
+becomes real. (b) is the cheap version and leaves the pathological case —
+listing `/` — on the slow path forever.
+
+**Until then the doc comment is a trap**: it invites the next filesystem
+author to write a paginated `readdir_at` that will never run. Whichever fix
+lands, that sentence must stop promising something untrue.
+
+### A-READDIR-PINNED-DOES-NOT-INJECT-SUBMOUNTS — ✅ FIXED 2026-09-01
+
+**Status:** FIXED in the commit that logged it. **Lane:** A. **Found:**
+2026-09-01, alongside the above.
+
+**The fix:** `Vfs::finish_listing(path, entries)` — one helper that drops
+volume labels and injects submounts — is now the single route by which a raw
+driver listing becomes a VFS listing, and `readdir`, `readdir_at_resolved` and
+`readdir_pinned` all go through it. `readdir_pinned` scopes its `fs` guard so
+the guard is released before `finish_listing` takes `VFS`, preserving the lock
+order the other two establish. `fat::mkfs_self_test` now mounts a memfs at
+`/_fmt_selftest/MNT` — a mount point with no physical directory behind it, so
+the entry can *only* come from injection — and asserts all three routes list
+it and agree on the whole set of names.
+
+The description below is kept because the failure mode is worth having on
+record: it is the second instance in two days of a rule written down in two
+places and forgotten in a third.
+
+`Vfs::readdir` and `Vfs::readdir_at_resolved` both inject submount
+directories into a listing. `Vfs::readdir_pinned` (`fs/vfs.rs`) does not — it
+verifies the handle and returns `guard.readdir(&dir_rel)` unchanged.
+
+So `SYS_FS_GETDENTS_PINNED` (664) omits a mount point that
+`SYS_FS_READDIR_AT` (647) and `SYS_FS_LIST_DIR` (603) both show. Listing `/`
+by path shows `tmp`, `proc`, `sys`, `dev`; listing the same directory through
+a pinned handle shows only what the root filesystem physically contains.
+
+**This is the same defect class the volume-label work just closed, in the
+same pair of calls, in the opposite direction** — 664 is meant to be the
+race-free substitute for a listing taken by path, so a program that swaps
+routes to close a race must not thereby lose entries. It has no callers yet
+(lane B has not wired 664), which is why nothing has reported it.
+
+**Why the three-route agreement test did not catch it on its own**: the check
+first written for the volume-label work compares `readdir` / `readdir_at` /
+`readdir_pinned` on the FAT volume's root, and that directory had no
+submounts. Three routes that all omit the same thing agree perfectly. The
+test only became able to see this defect once it mounted something — which is
+the same lesson as §663's "a mask can only be tested by a value outside it",
+in a different costume: **an agreement test proves nothing about a case none
+of the parties encounters.**

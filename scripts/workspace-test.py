@@ -51,10 +51,19 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # compiles into the OS, and `slateos` has no test harness to run them with.
 DEFAULT_TARGET = "x86_64-pc-windows-gnu"
 
-# Generous: a full cold workspace build plus ~3000 test targets took ~13 min on
-# the dev machine, and this needs to be a bound on genuine hangs rather than a
-# bet on machine speed.
-DEFAULT_TIMEOUT = 2400
+# Measured, not guessed: a cold run on 2026-09-01 — 1910 crates compiled, ~2240
+# test targets, ~20600 tests — took **4468 s (74 min)** wall clock while the
+# other two lanes were building concurrently.  The previous value here was 2400,
+# derived from a ~13 min run on an otherwise idle machine, i.e. it was set from
+# the best case and would have killed that run at 54% complete and reported it
+# as a hang.
+#
+# 9000 is 2x the measured worst case.  A timeout must bound *genuine hangs*, and
+# a genuine hang is unbounded — so the only cost of setting this too high is
+# waiting longer to learn about a deadlock, whereas setting it too low
+# manufactures failures that look exactly like the thing it is watching for.
+# Prefer raising it again over trimming it toward the observed time.
+DEFAULT_TIMEOUT = 9000
 
 # `test result: FAILED. 82 passed; 1 failed; …` — the per-target summary.
 RESULT_FAILED = re.compile(r"^test result: FAILED", re.MULTILINE)

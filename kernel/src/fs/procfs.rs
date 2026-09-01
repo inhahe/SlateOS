@@ -14470,6 +14470,7 @@ fn sys_children(dir: &str) -> Vec<DirEntry> {
     for &d in SYS_DIRS {
         if let Some(name) = sys_immediate_child(dir, d) {
             entries.push(DirEntry {
+                ino: 0,
                 name: PathBuf::from(name),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -14480,6 +14481,7 @@ fn sys_children(dir: &str) -> Vec<DirEntry> {
         if let Some(name) = sys_immediate_child(dir, f) {
             let size = gen_sys(f).map_or(0, |data| data.len() as u64);
             entries.push(DirEntry {
+                ino: 0,
                 name: PathBuf::from(name),
                 entry_type: EntryType::File,
                 size,
@@ -14756,6 +14758,7 @@ impl FileSystem for ProcFs {
                     .map(|name| {
                         let size = generate(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -14765,6 +14768,7 @@ impl FileSystem for ProcFs {
 
                 // "self" — magic symlink to the current task's PID directory.
                 entries.push(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("self"),
                     entry_type: EntryType::Symlink,
                     size: 0,
@@ -14772,6 +14776,7 @@ impl FileSystem for ProcFs {
 
                 // "sys" — the sysctl tree (a directory, not in ROOT_FILES).
                 entries.push(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("sys"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -14780,6 +14785,7 @@ impl FileSystem for ProcFs {
                 // Add per-PID directories for all live tasks.
                 for task in &crate::sched::task_list() {
                     entries.push(DirEntry {
+                        ino: 0,
                         name: PathBuf::from(format!("{}", task.id)),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -14798,6 +14804,7 @@ impl FileSystem for ProcFs {
                     .map(|name| {
                         let size = generate_pid(pid, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -14807,6 +14814,7 @@ impl FileSystem for ProcFs {
                 // Per-PID symbolic links (cwd, root).
                 for name in PID_LINKS {
                     entries.push(DirEntry {
+                        ino: 0,
                         name: PathBuf::from(*name),
                         entry_type: EntryType::Symlink,
                         size: 0,
@@ -14814,18 +14822,21 @@ impl FileSystem for ProcFs {
                 }
                 // The `task/` subdirectory (per-thread view).
                 entries.push(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("task"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
                 // The `fd/` subdirectory (open file descriptors).
                 entries.push(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("fd"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 });
                 // The `fdinfo/` subdirectory (per-fd pos/flags).
                 entries.push(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("fdinfo"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -14847,6 +14858,7 @@ impl FileSystem for ProcFs {
                         // re-lock PROCESS_TABLE per fd via gen_pid_fdinfo.
                         let size = fdinfo_from_entry(&entry).len() as u64;
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(format!("{fd}")),
                             entry_type: EntryType::File,
                             size,
@@ -14867,6 +14879,7 @@ impl FileSystem for ProcFs {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|(fd, _entry)| DirEntry {
+                        ino: 0,
                         name: PathBuf::from(format!("{fd}")),
                         entry_type: EntryType::Symlink,
                         size: 0,
@@ -14880,6 +14893,7 @@ impl FileSystem for ProcFs {
                 let entries = threads
                     .iter()
                     .map(|tid| DirEntry {
+                        ino: 0,
                         name: PathBuf::from(format!("{tid}")),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -14897,6 +14911,7 @@ impl FileSystem for ProcFs {
                     .map(|name| {
                         let size = generate_task(pid, tid, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -14984,6 +14999,7 @@ impl FileSystem for ProcFs {
 
         match classify_path(rel) {
             ProcPath::Root => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -14991,6 +15007,7 @@ impl FileSystem for ProcFs {
             ProcPath::RootFile(name) => {
                 let size = generate(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
@@ -15001,6 +15018,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(format!("{pid}")),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -15012,6 +15030,7 @@ impl FileSystem for ProcFs {
                 }
                 let size = generate_pid(pid, file_name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(file_name),
                     entry_type: EntryType::File,
                     size,
@@ -15022,12 +15041,14 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(link_name),
                     entry_type: EntryType::Symlink,
                     size: 0,
                 })
             }
             ProcPath::SelfLink => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("self"),
                 entry_type: EntryType::Symlink,
                 size: 0,
@@ -15037,6 +15058,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("task"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -15047,6 +15069,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(format!("{tid}")),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -15058,6 +15081,7 @@ impl FileSystem for ProcFs {
                 }
                 let size = generate_task(pid, tid, file_name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(file_name),
                     entry_type: EntryType::File,
                     size,
@@ -15068,6 +15092,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("fd"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -15078,6 +15103,7 @@ impl FileSystem for ProcFs {
                 // fd (or a process with no kernel fd table) is NotFound.
                 crate::proc::pcb::linux_fd_lookup(pid, fd).ok_or(KernelError::NotFound)?;
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(format!("{fd}")),
                     entry_type: EntryType::Symlink,
                     size: 0,
@@ -15088,6 +15114,7 @@ impl FileSystem for ProcFs {
                     return Err(KernelError::NotFound);
                 }
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from("fdinfo"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -15097,12 +15124,14 @@ impl FileSystem for ProcFs {
                 // A regular file, present only for a currently-open fd.
                 let size = gen_pid_fdinfo(pid, fd)?.len() as u64;
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(format!("{fd}")),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             ProcPath::SysDir(rel) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from(sys_basename(rel)),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -15110,6 +15139,7 @@ impl FileSystem for ProcFs {
             ProcPath::SysFile(rel) => {
                 let size = gen_sys(rel).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(sys_basename(rel)),
                     entry_type: EntryType::File,
                     size,

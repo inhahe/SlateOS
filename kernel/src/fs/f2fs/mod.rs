@@ -339,6 +339,9 @@ impl FileSystem for F2fsFs {
                 name: PathBuf::from(entry.name.as_slice()),
                 entry_type,
                 size,
+                // Free: the directory entry already carries the node number,
+                // and it is the same one `metadata` reports as `st_ino`.
+                ino: u64::from(entry.ino),
             });
         }
         Ok(out)
@@ -368,7 +371,7 @@ impl FileSystem for F2fsFs {
 
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         self.ops = self.ops.saturating_add(1);
-        let (_, inode) = self.resolve(path)?;
+        let (ino, inode) = self.resolve(path)?;
         let entry_type = Self::entry_type_of(&inode);
         let name = path
             .file_name()
@@ -381,6 +384,7 @@ impl FileSystem for F2fsFs {
             } else {
                 inode.size
             },
+            ino: u64::from(ino),
         })
     }
 
@@ -403,7 +407,14 @@ impl FileSystem for F2fsFs {
         // F2FS stores a real POSIX mode, so it is reported as-is — with the
         // write bits masked off, because the mount refuses every write and a
         // mode that says otherwise is a lie userspace will act on.
-        let permissions = (inode.mode & 0o777) & 0o555;
+        //
+        // `0o7555`, not `0o555`: the read-only argument reaches the three
+        // *write* bits and stops there.  setuid/setgid/sticky survive, because
+        // `FileMeta::permissions` is documented as carrying twelve and ext4
+        // and iso9660 deliver twelve; reporting nine here meant a mode that
+        // changed depending on which filesystem the file was read from, in the
+        // silent direction.  See `design-decisions.md` §663.
+        let permissions = (inode.mode & 0o7777) & 0o7555;
         let ns = |t: (u64, u32)| {
             t.0.saturating_mul(1_000_000_000)
                 .saturating_add(u64::from(t.1))

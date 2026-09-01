@@ -180,6 +180,10 @@ impl FileSystem for Ext4Fs {
                     name,
                     entry_type,
                     size,
+                    // The number the directory block itself stores, which is
+                    // also what `stat` reports for this child — the two must
+                    // agree or `find -inum` and hard-link detection break.
+                    ino: u64::from(child_ino),
                 }
             })
             .collect();
@@ -233,6 +237,7 @@ impl FileSystem for Ext4Fs {
                     name,
                     entry_type,
                     size,
+                    ino: u64::from(child_ino),
                 }
             })
             .collect();
@@ -274,6 +279,7 @@ impl FileSystem for Ext4Fs {
             name: name.to_path_buf(),
             entry_type,
             size,
+            ino: u64::from(ino),
         })
     }
 
@@ -1234,6 +1240,7 @@ impl FileSystem for Ext4Fs {
             name: name.to_path_buf(),
             entry_type,
             size,
+            ino: u64::from(ino),
         })
     }
 

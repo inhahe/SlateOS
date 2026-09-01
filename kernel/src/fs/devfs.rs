@@ -567,6 +567,7 @@ fn children_of(dir: &str) -> Vec<DirEntry> {
         .iter()
         .filter(|n| n.parent() == dir)
         .map(|n| DirEntry {
+            ino: 0,
             name: PathBuf::from(n.name()),
             entry_type: n.entry_type,
             // Special files have no meaningful static size.
@@ -584,6 +585,7 @@ fn children_of(dir: &str) -> Vec<DirEntry> {
                 continue; // shadowed by a fixed node; see `find_block`
             }
             entries.push(DirEntry {
+                ino: 0,
                 name: PathBuf::from(info.name.as_str()),
                 entry_type: EntryType::BlockDevice,
                 // Unlike every other node here, this size is real, and it is
@@ -849,6 +851,7 @@ impl FileSystem for DevFs {
 
         if rel.is_empty() {
             return Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -857,6 +860,7 @@ impl FileSystem for DevFs {
 
         if let Some(info) = find_block(rel) {
             return Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from(info.name.as_str()),
                 entry_type: EntryType::BlockDevice,
                 size: block_size_bytes(&info),
@@ -865,6 +869,7 @@ impl FileSystem for DevFs {
 
         let node = find_node(rel).ok_or(KernelError::NotFound)?;
         Ok(DirEntry {
+            ino: 0,
             name: PathBuf::from(node.name()),
             entry_type: node.entry_type,
             size: 0,

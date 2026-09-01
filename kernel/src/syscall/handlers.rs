@@ -8754,8 +8754,10 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
             break;
         }
 
-        // Decided before reserving the slot: a volume label is metadata, not a
-        // directory entry, and must not consume a record.
+        // A volume label is metadata, not a directory entry, and must not
+        // consume a record.  `Vfs::readdir` now drops them, so this `continue`
+        // is unreachable; it stays because it is the only arm that would be
+        // *wrong* to write as a type byte, and leaving it costs nothing.
         let type_byte = match entry.entry_type {
             crate::fs::EntryType::File => 0u8,
             crate::fs::EntryType::Directory => 1u8,
@@ -8863,19 +8865,35 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
     // arg2 = directory create mode (already umask-masked).  Zero → historical
     // 0o755 default.
     //
-    // Twelve bits, not nine.  This masked to `0o777` until 2026-08-30, which
-    // silently dropped the sticky bit — and the sticky bit is not an exotic
-    // corner of `mkdir`: it is what makes `/tmp` safe, and `mkdir(path,
-    // 0o1777)` is the single most common place anyone sets it.  The mask was
-    // never a limit of the filesystem (ext4's `set_permissions_ino` masks to
-    // `0o7777` and `stat` reads twelve back), only of this line.  See
-    // `design-decisions.md` §639.
+    // Ten bits: the nine permission bits plus sticky.  This masked to `0o777`
+    // until 2026-08-30 and then to `0o7777` until 2026-09-01; `0o1777` is
+    // Linux's own `vfs_mkdir` mask (`mode &= (S_IRWXUGO|S_ISVTX)`) and is the
+    // width that is actually right for a *directory create*.
+    //
+    // Sticky is in because it is not an exotic corner of `mkdir`: it is what
+    // makes `/tmp` safe, and it is the one bit where creating it in one step
+    // is worth something — the two-step alternative leaves a window in which
+    // the directory is world-writable and anyone may delete anyone's files.
+    //
+    // setuid/setgid are out because `mkdir(2)` has no channel for them: a new
+    // directory's setgid bit is *inherited from the parent*, never taken from
+    // the mode word, so honouring it here would offer an authority Linux does
+    // not — in the one bit that decides who owns files created in that
+    // directory later.  We do not implement that inheritance either, so the
+    // bit would be metadata asserting a semantic the kernel does not perform.
+    //
+    // This is narrower than the file-create path's `0o7777` on purpose, and
+    // Linux splits it the same way (`vfs_create` keeps `S_IALLUGO`).  §639
+    // widened this line to twelve while reasoning about `openat2` and swept
+    // `mkdir` along "to match"; the match was the mistake.  `fchmodat` (665)
+    // still takes twelve, so a caller that genuinely wants a setgid directory
+    // asks for it explicitly and separately.  See `design-decisions.md` §663.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg2 as u16;
     let mode = if mode_raw == 0 {
         crate::fs::Vfs::DEFAULT_DIR_MODE
     } else {
-        mode_raw & 0o7777
+        mode_raw & 0o1777
     };
 
     match crate::fs::Vfs::mkdir_mode(&path, mode) {
@@ -9328,7 +9346,7 @@ pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// Bytes one `SYS_FS_GETDENTS_PINNED` record occupies for a name of this
-/// length: `[u8 type][u32 name_len][name bytes][u64 size]`.
+/// length: `[u8 type][u32 name_len][name bytes][u64 size][u64 ino]`.
 ///
 /// Shared by the size computation and the packing loop so the two cannot
 /// disagree — a requirement reported from one formula and satisfied by
@@ -9337,7 +9355,8 @@ fn entry_record_len(name_len: usize) -> usize {
     1usize
         .saturating_add(4)
         .saturating_add(name_len)
-        .saturating_add(8)
+        .saturating_add(8) // size
+        .saturating_add(8) // ino
 }
 
 /// Recover the caller's `dirfd` argument as a [`crate::fs::PinnedDir`].
@@ -9518,15 +9537,19 @@ pub fn sys_fs_fchmodat_pinned(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: directory handle; `0` is not the cwd and is rejected as
 /// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
-/// `arg3`: mode (nine bits, already umask-masked by the caller).
+/// `arg3`: mode (ten bits, already umask-masked by the caller).
 /// `arg4`: flags — must be `0`.
 ///
-/// Nine bits, not the twelve `sys_fs_fchmodat_pinned` takes. That is not an
-/// inconsistency: `SYS_FS_MKDIR_MODE` masks to nine, and a *creation* mode is
-/// the one place the extra three are least defensible — a directory that is
-/// setgid or sticky from the instant it exists is a policy decision, and the
-/// caller can still make it one with a following `fchmodat`, where the request
-/// is explicit and separately auditable.
+/// Ten bits — `0o1777` — which is what `SYS_FS_MKDIR_MODE` masks to, because
+/// one operation with two masks depending on which route ran is worse than
+/// either mask. Not the twelve `sys_fs_fchmodat_pinned` takes: setuid/setgid
+/// have no meaning in a directory *creation* mode, and sticky does. See
+/// `design-decisions.md` §663 for the full argument.
+///
+/// This said "nine bits, not twelve" and justified it on the grounds that
+/// "`SYS_FS_MKDIR_MODE` masks to nine" — which stopped being true on
+/// 2026-08-30, when §639 widened it and left this note behind. The claim was
+/// load-bearing for the conclusion, so the conclusion did not survive it.
 pub fn sys_fs_mkdirat_pinned(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -9542,7 +9565,7 @@ pub fn sys_fs_mkdirat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    let mode = (args.arg3 as u16) & 0o777;
+    let mode = (args.arg3 as u16) & 0o1777;
 
     let name = match read_user_path(args.arg1, args.arg2 as usize) {
         Ok(n) => n,
@@ -9758,6 +9781,10 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                     // one to a decoder that trusts its own length field.
                     break;
                 }
+                // Byte 2 is reserved and unreachable — `Vfs::readdir_pinned`
+                // drops volume labels, and it drops them before `needed` is
+                // folded above, so the byte requirement this call reports
+                // counts exactly the records it will write.
                 let type_byte = match entry.entry_type {
                     crate::fs::EntryType::File => 0u8,
                     crate::fs::EntryType::Directory => 1,
@@ -9784,6 +9811,14 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                 put(&(name_bytes.len() as u32).to_le_bytes());
                 put(name_bytes);
                 put(&entry.size.to_le_bytes());
+                // The inode the backing filesystem reports for this name, or
+                // 0 where it has none. A caller must use this rather than
+                // invent one: `d_ino` and `st_ino` are cross-checked by
+                // `find -inum`, by `ls -i` against `stat`, and by the
+                // hard-link detection in `tar`/`rsync`/`du`, and a synthetic
+                // value that never equals the real inode makes all of those
+                // silently wrong.
+                put(&entry.ino.to_le_bytes());
                 pos = pos.saturating_add(entry_size);
             }
             Ok(pos)
@@ -11682,11 +11717,17 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Each entry is serialized as:
 ///   `u8 entry_type | u32 name_len | name bytes | u64 size`
 ///
-/// `entry_type` is `0=file, 1=dir, 2=volume_label, 3=symlink, 4=char_device`
-/// — the same encoding `SYS_FS_READDIR` and `SYS_FS_STAT` use, so one decoder
-/// serves all three. The record *layout* differs between them (this one is
-/// variable-length, `SYS_FS_READDIR`'s is fixed-size); only the type byte is
-/// shared, and it is shared deliberately.
+/// `entry_type` is `0=file, 1=dir, 2=volume_label, 3=symlink, 4=char_device,
+/// 5=block_device` — the same encoding `SYS_FS_READDIR` and `SYS_FS_STAT`
+/// use, so one decoder serves all three. The record *layout* differs between
+/// them (this one is variable-length, `SYS_FS_READDIR`'s is fixed-size); only
+/// the type byte is shared, and it is shared deliberately.
+///
+/// The list ended at `4=char_device` until 2026-08-31, which is the same
+/// omission `SYS_FS_READDIR_AT`'s note in `number.rs` carried and matters for
+/// the same reason: `devfs` produces block devices, 603 has emitted `5` since
+/// it was written, and a decoder built from a truncated table maps the byte
+/// it has never heard of onto whatever its own fallback is.
 ///
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -11724,39 +11765,48 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
 
     let mut written = 0u32;
 
-    // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
+    // Format: [u8 type][u32 name_len][name bytes][u64 size][u64 ino] per
+    // entry.
     let copied =
         match crate::mm::user::with_user_out_buf(args.arg3, out_cap, READDIR_BUF_MAX, |out_slice| {
             let mut pos = 0usize;
             for entry in &entries {
                 let name_bytes = entry.name.as_bytes();
-                // Each entry needs: 1 + 4 + name_len + 8 bytes.
-                let entry_size = 1usize
-                    .saturating_add(4)
-                    .saturating_add(name_bytes.len())
-                    .saturating_add(8);
+                // `entry_record_len` rather than a second copy of the
+                // formula: `SYS_FS_GETDENTS_PINNED`'s ABI note defines its
+                // record as "the same encoding `SYS_FS_READDIR_AT` uses", so
+                // the two must agree by construction and not by two authors
+                // remembering to edit both. This function carried its own
+                // inline `1 + 4 + name_len + 8` until the inode was appended,
+                // which is exactly the drift that helper's doc comment warns
+                // about.
+                let entry_size = entry_record_len(name_bytes.len());
 
                 if pos.saturating_add(entry_size) > out_cap {
                     break; // Buffer full — stop writing (not an error).
                 }
 
                 // Entry type: 0=file, 1=dir, 2=volume_label, 3=symlink,
-                // 4=char_device — the same byte `SYS_FS_READDIR` and
-                // `SYS_FS_STAT` use. This encoder used to swap 2 and 3 while
-                // agreeing on 0, 1 and 4, which is the worst shape an ABI byte
-                // can have: a decoder written against either syscall looks
+                // 4=char_device, 5=block_device — the same byte
+                // `SYS_FS_READDIR` and `SYS_FS_STAT` use. This encoder used to
+                // swap 2 and 3 while agreeing on the rest, which is the worst
+                // shape an ABI byte can have: a decoder written against
+                // either syscall looks
                 // correct on every ordinary file and silently mistakes a
                 // symlink for a volume label. Aligned before any client existed
                 // to depend on the old numbering — nothing outside the kernel
                 // decodes this record today, and `strace` only names the call.
                 //
-                // A volume label still consumes a record here, unlike in
-                // `SYS_FS_READDIR`, which skips it. This call is paginated by
-                // an offset into the directory, so dropping an entry would make
-                // `entries_written` disagree with how far the offset actually
-                // advanced, and the caller's next page would step over a real
-                // neighbour. Filtering belongs where the offset is computed,
-                // not where the record is packed.
+                // Byte 2 is reserved and unreachable: `Vfs::readdir_at` drops
+                // volume labels before it takes `total` and slices the page,
+                // so none arrives here. This arm used to be justified on the
+                // grounds that dropping an entry *here* would make
+                // `entries_written` disagree with how far the offset advanced
+                // — which is true, and is exactly why the filter is at the
+                // point the offset is computed instead. Filtering belongs
+                // where the offset is computed, not where the record is
+                // packed; that argument was always for a location, never for
+                // passing labels through.
                 if let Some(b) = out_slice.get_mut(pos) {
                     *b = match entry.entry_type {
                         crate::fs::vfs::EntryType::File => 0,
@@ -11785,6 +11835,21 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 // Size (u64 LE).
                 if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(8)) {
                     dst.copy_from_slice(&entry.size.to_le_bytes());
+                }
+                pos = pos.saturating_add(8);
+
+                // Inode (u64 LE), or 0 where the backing filesystem has no
+                // stable per-object identity. Appended 2026-08-31, while
+                // neither this call nor `SYS_FS_GETDENTS_PINNED` had a
+                // decoder outside the kernel — the only moment a record
+                // layout is free to change. It is here because the
+                // alternative userspace has to fall back on is inventing a
+                // number, and an invented `d_ino` is worse than an absent
+                // one: it is never equal to `st_ino`, so `find -inum`
+                // matches nothing, `ls -i` contradicts `stat`, and `tar`,
+                // `rsync` and `du` fail to recognise two names for one file.
+                if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(8)) {
+                    dst.copy_from_slice(&entry.ino.to_le_bytes());
                 }
                 pos = pos.saturating_add(8);
 

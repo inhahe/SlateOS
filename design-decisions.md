@@ -59474,6 +59474,7 @@ that reports success.
 ## §672 — a free-slot signature is tied to the slot's own address, because a constant is a value the allocator itself leaks
 
 **Date:** 2026-09-01
+**Lane:** A
 **Decided by:** Claude (autonomous)
 
 **In short:** The kernel's heap marks every freed block with a fixed magic

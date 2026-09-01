@@ -407,7 +407,14 @@ impl FileSystem for F2fsFs {
         // F2FS stores a real POSIX mode, so it is reported as-is — with the
         // write bits masked off, because the mount refuses every write and a
         // mode that says otherwise is a lie userspace will act on.
-        let permissions = (inode.mode & 0o777) & 0o555;
+        //
+        // `0o7555`, not `0o555`: the read-only argument reaches the three
+        // *write* bits and stops there.  setuid/setgid/sticky survive, because
+        // `FileMeta::permissions` is documented as carrying twelve and ext4
+        // and iso9660 deliver twelve; reporting nine here meant a mode that
+        // changed depending on which filesystem the file was read from, in the
+        // silent direction.  See `design-decisions.md` §663.
+        let permissions = (inode.mode & 0o7777) & 0o7555;
         let ns = |t: (u64, u32)| {
             t.0.saturating_mul(1_000_000_000)
                 .saturating_add(u64::from(t.1))

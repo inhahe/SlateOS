@@ -622,7 +622,18 @@ impl FileSystem for BtrfsFs {
         // as-is — with the write bits masked off, because the mount refuses
         // every write and a mode that says otherwise is a lie userspace will
         // act on.
-        let permissions = u16::try_from(inode.mode & 0o777).unwrap_or(0o444) & 0o555;
+        //
+        // `0o7555`, not `0o555`: twelve bits minus the three write bits.  The
+        // read-only argument justifies dropping *write* permission and nothing
+        // else, and setuid/setgid/sticky are not write permission — a
+        // read-only mount does not make a setuid binary not-setuid, it makes
+        // it unmodifiable.  This masked to `0o777` first until 2026-09-01,
+        // which silently contradicted the `FileMeta::permissions` contract
+        // ("twelve: setuid setgid sticky rwxrwxrwx") that ext4 and iso9660
+        // both honour, so `cp -a` or `tar` reading off a Btrfs mount dropped
+        // those three bits with nothing to say a bit had gone.  See
+        // `design-decisions.md` §663 for the general shape.
+        let permissions = u16::try_from(inode.mode & 0o7777).unwrap_or(0o444) & 0o7555;
 
         Ok(FileMeta {
             size,

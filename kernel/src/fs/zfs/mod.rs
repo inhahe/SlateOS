@@ -751,7 +751,14 @@ impl FileSystem for ZfsFs {
         // ZFS stores a real POSIX mode, reported as-is with the write bits
         // masked off: the mount refuses every write, and a mode claiming
         // otherwise is a lie userspace will act on.
-        let permissions = u16::try_from(zn.mode & 0o777).unwrap_or(0o444) & 0o555;
+        //
+        // `0o7555`, not `0o555`: the read-only argument justifies dropping
+        // *write* permission and nothing else.  setuid/setgid/sticky are not
+        // write permission, and `FileMeta::permissions` is documented as
+        // twelve bits — ext4 and iso9660 report all twelve, so a nine-bit mask
+        // here made the same file's mode depend on which filesystem it was
+        // read from.  See `design-decisions.md` §663.
+        let permissions = u16::try_from(zn.mode & 0o7777).unwrap_or(0o444) & 0o7555;
         Ok(FileMeta {
             size,
             entry_type,

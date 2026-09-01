@@ -103524,3 +103524,56 @@ gap properly rather than choosing which of two wrong answers to give, and it
 is the same shape as the fix for the `nlinks` and `permissions` those
 filesystems also report as placeholders. Until then the disagreement is
 documented rather than silent, which is the difference that matters.
+
+---
+
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN (the three instances are FIXED; the hole that produced them is not)**
+
+**Lane:** A
+
+**What happened.** `FileMeta::permissions` documents itself as twelve bits —
+"setuid setgid sticky rwxrwxrwx", `0o7777`. ext4 delivers twelve
+(`vfs_impl.rs:56`, `i_mode & 0o7777`), iso9660 delivers twelve
+(`iso9660.rs:450`), memfs stores the `u16` whole. btrfs, zfs and f2fs masked
+to `0o777` first and delivered nine.
+
+So the same file, with the same bits on disk, reported a different mode
+depending on which driver read it. `cp -a` and `tar` reading off a
+btrfs/zfs/f2fs mount silently dropped setuid, setgid and sticky from
+everything they copied — silently in the strict sense: there is no error, and
+"the bit is missing" is indistinguishable from "the bit was never set."
+
+Fixed 2026-09-01 in all three (`& 0o7555` — twelve bits minus the three write
+bits the read-only mount genuinely justifies dropping). See
+`design-decisions.md` §663.
+
+**Why this entry exists even though the bug is fixed.** Nothing was wrong in a
+way any *single* backend's tests could detect. Each of the three was
+internally consistent: it masked on read, nothing wrote, and every assertion
+about it used a mode inside `0o777`. The divergence only exists *between*
+implementations, and there is no test that looks between them.
+
+The same is true of every other field `FileMeta` promises. Spot-checked while
+fixing the above and **not** yet run down:
+
+- `nlinks` — procfs/sysfs/devfs report a placeholder (noted in
+  `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS`).
+- `ino` — now uniform by construction after §662, but by inspection of all
+  thirteen backends one at a time, not by a test.
+- `created_ns` / `modified_ns` / `accessed_ns` — units are nanoseconds; each
+  backend converts from its own on-disk representation with its own
+  arithmetic, and a backend that returned seconds would look plausible.
+
+**The proper fix.** One test, parameterised over every registered backend,
+that mounts a fixture image and asserts the *contract* rather than the
+implementation: that a file with known bits on disk reports the same
+`FileMeta` from every driver that can read it. That requires a small fixture
+per filesystem, which is the reason it does not exist yet and the reason it is
+worth doing once rather than thirteen times. Failing that, a much cheaper
+partial: a compile-time or boot-time assertion that no `metadata()`
+implementation masks `permissions` more narrowly than `0o7777` — which would
+have caught this specific class on the day it was written.
+
+**Reproduce (before the fix):** mount any btrfs/zfs/f2fs image containing a
+sticky or setuid file and `stat` it; the special bits read back as 0 while the
+same file on ext4 reports them.

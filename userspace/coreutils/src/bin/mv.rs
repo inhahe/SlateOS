@@ -110,7 +110,7 @@
 //!
 //! The harness is the artifact to keep, not the fix list: it is 226 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
-//! Thirty-two of its cases are marked as differing on purpose — every one is an
+//! Twenty-six of its cases are marked as differing on purpose — every one is an
 //! option this file does not implement yet, so implementing one is expected to
 //! *promote* a case rather than to add one. `-v` was the first to be promoted
 //! that way; its five entries became §14 and gained four more, which is the
@@ -120,14 +120,16 @@
 //! not exist. `-t`/`-T` was the third and the widest so far: eleven entries
 //! became §16 and gained twenty-two more, because those two options are about
 //! *which operand is the destination*, so every operand-count and wrong-shape
-//! diagnostic acquires a second spelling.
+//! diagnostic acquires a second spelling. `-u`/`--update` was the fourth: six
+//! entries became §17 and gained thirty-one more, nearly all of them about the
+//! *order* two options were given in, because `--update`'s three words write
+//! the same two fields `-i`/`-f`/`-n` do.
 //!
 //! # Options this implementation does not have
 //!
-//! `-b`/`--backup`, `-u`/`--update`, `-S`/`--suffix`, `-Z`/`--context`,
-//! `--debug`, `--no-copy` and `--strip-trailing-slashes` are recognised and
-//! rejected with a message saying they are not implemented, rather than
-//! ignored. Silently ignoring `-b` would lose the copy the user asked to be
+//! `-b`/`--backup`, `-S`/`--suffix`, `-Z`/`--context`, `--debug`, `--no-copy`
+//! and `--strip-trailing-slashes` are recognised and rejected with a message
+//! saying they are not implemented, rather than ignored. Silently ignoring `-b` would lose the copy the user asked to be
 //! kept; for this utility that mistake is unrecoverable, and an error costs
 //! only a retype.
 //!
@@ -145,7 +147,7 @@ use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
-use coreutils::quote::{quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
 use std::ffi::OsString;
@@ -203,6 +205,32 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
+/// What `--update`'s argument can say — GNU's `update_type_string` paired with
+/// `update_type` (`mv.c:55-63`), in that order, which is the order the
+/// `Valid arguments are:` list is printed in.
+///
+/// Three words for what is really two fields, and the mapping is not the
+/// obvious one: `all` and `none` both turn [`MvFlags::update`] *off*, differing
+/// in what they set [`MvFlags::interactive`] to. See the parse arm.
+const UPDATE_TYPES: &[(&str, UpdateType)] = &[
+    ("all", UpdateType::All),
+    ("none", UpdateType::None),
+    ("older", UpdateType::Older),
+];
+
+/// GNU's `enum Update_type` (`copy.h:61`). Not stored — it is resolved into
+/// [`MvFlags`]'s two fields at parse time, exactly as `mv.c:381-397` does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UpdateType {
+    /// `--update=all`: the default behaviour, spelled out. Cancels an earlier
+    /// `-u` *and* an earlier `-i`.
+    All,
+    /// `--update=none`: leave every existing destination, and succeed.
+    None,
+    /// `--update=older`, and the meaning of a bare `-u`.
+    Older,
+}
+
 /// The options that change what a move *does*.
 #[derive(Default, Clone, Copy)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
@@ -219,6 +247,18 @@ struct MvFlags {
     /// cancels it, and `-f` on its own suppresses the *unwritable-destination*
     /// question that [`abandon_move`] asks with no option given at all.
     interactive: Interactive,
+    /// `-u` / `--update=older`: leave a destination that is **not older** than
+    /// the source, and call that success. GNU's `x.update` (`copy.h:196`), read
+    /// only by [`destination_is_older`].
+    ///
+    /// A separate field from [`MvFlags::interactive`] and not a fifth value of
+    /// it, because upstream keeps them separate and `--update`'s three words
+    /// write *both*: `none` is `interactive = AlwaysSkip` with `update` off,
+    /// `older` is `update` on with `interactive` untouched, and `all` clears
+    /// both. Folding them together would have to invent an ordering between
+    /// "skip whatever is there" and "skip only what is newer", and the command
+    /// line never expresses both at once.
+    update: bool,
     /// Whether descriptor 0 is a terminal, sampled once at startup rather than
     /// per operand.
     ///
@@ -350,9 +390,20 @@ Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
 If you specify more than one of -i, -f, -n, only the final one takes effect.
   -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY
   -T, --no-target-directory  treat DEST as a normal file
+      --update[=UPDATE]  control which existing files are updated;
+                       UPDATE={all,none,older(default)}.  See below
+  -u                 equivalent to --update[=older]
   -v, --verbose      explain what is being done
       --help         display this help and exit
       --version      output version information and exit
+
+UPDATE controls which existing files in the destination are replaced.
+'all' is the default operation when an --update option is not specified,
+and results in all existing files in the destination being replaced.
+'none' is similar to the --no-clobber option, in that no files in the
+destination are replaced, but also skipped files do not induce a failure.
+'older' is the default operation when --update is specified, and results
+in files being replaced if they're older than the corresponding source file.
 
 To move a file whose name starts with a '-', for example '-foo',
 use one of these commands:
@@ -417,6 +468,50 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 flags.interactive = Interactive::AlwaysNo;
             }
             Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            // `mv.c:376`. One arm for both spellings because upstream has one:
+            // `u` carries no colon in [`SHORT_OPTIONS`] and `--update` is
+            // `Takes::Optional`, so a `None` here is either a bare `-u` or a
+            // bare `--update`, and GNU treats those identically.
+            Opt::Short(b'u', value) | Opt::Long("update", value) => match value {
+                None => flags.update = true,
+                // **The guard is on the long form only**, and that asymmetry is
+                // upstream's `else if (x->interactive != I_ALWAYS_NO)` with the
+                // comment `/* -n takes precedence.  */`. It is observable, and
+                // only because a *later* option can move `interactive` off
+                // `AlwaysNo` again:
+                //
+                // ```text
+                // mv -n --update=older -i a b    # update off — the guard ate it
+                // mv -n -u -i a b                # update on  — no guard on -u
+                // ```
+                //
+                // The two command lines differ in a spelling the --help text
+                // calls equivalent. Measured against 9.4, not deduced.
+                //
+                // Note also *where* the guard sits: upstream's `XARGMATCH` is
+                // inside the guarded block, so under `-n` the word is never
+                // looked at and `mv -n --update=nosuchword a b` is accepted in
+                // silence. That is not an oversight worth improving on — a
+                // stricter check here would reject a command line GNU runs.
+                Some(word) => {
+                    if flags.interactive != Interactive::AlwaysNo {
+                        match MV.argmatch(&os_bytes(&word), "--update", UPDATE_TYPES)? {
+                            UpdateType::All => {
+                                flags.update = false;
+                                flags.interactive = Interactive::Unspecified;
+                            }
+                            UpdateType::None => {
+                                flags.update = false;
+                                flags.interactive = Interactive::AlwaysSkip;
+                            }
+                            UpdateType::Older => {
+                                flags.update = true;
+                                flags.interactive = Interactive::Unspecified;
+                            }
+                        }
+                    }
+                }
+            },
             Opt::Short(b't', value) | Opt::Long("target-directory", value) => {
                 // Refused here rather than at use, and refused without
                 // comparing the two directories — GNU asks only whether one was
@@ -447,6 +542,15 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(flag, _) => return Err(unimplemented_short(flag)),
             Opt::Long(name, _) => return Err(unimplemented_long(name)),
         }
+    }
+
+    // `mv.c:509`. The guard in the `-u` arm above catches only a `-n` that came
+    // *earlier*; this catches one that came later, and it is the reason `-n`
+    // beats `-u` in both orders even though neither of them writes the other's
+    // field. Both halves are needed: drop this and `mv -u -n a b` would ask
+    // `-u`'s question of a destination `-n` has already declined to touch.
+    if flags.interactive == Interactive::AlwaysNo {
+        flags.update = false;
     }
 
     Ok(Request::Run(flags, dest, paths))
@@ -837,10 +941,19 @@ fn move_one<O: Write, E: Write>(
 
     // The refusals are asked only of a destination that is actually there —
     // there is nothing to refuse to overwrite otherwise.
-    if let Some(dst_meta) = &dst_meta
-        && !refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, job)
-    {
-        return false;
+    if let Some(dst_meta) = &dst_meta {
+        match refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, job) {
+            Verdict::Proceed => {}
+            Verdict::Refused => return false,
+            // Deliberately *not* [`record_move`]: upstream's `skip:` label
+            // returns before `record_file` (`copy.c:2445`), so a destination
+            // that was left alone is not one this command line "just created"
+            // and the later `will not overwrite just-created` cannot fire on
+            // it. `mv --update=none a/f b/f dir`, with `dir/f` already present,
+            // therefore skips twice and exits 0 rather than refusing the
+            // second.
+            Verdict::Skipped => return true,
+        }
     }
 
     // Now the real rename, the one allowed to replace what is there. Keyed on
@@ -1017,8 +1130,29 @@ fn record_move(
     true
 }
 
+/// What the checks below decided about a destination that is already there.
+///
+/// Three outcomes and not a `bool`, because two of GNU's paths leave the
+/// destination alone and they disagree about the exit status. Upstream carries
+/// this as two locals — `skipped` and `return_val` (`copy.c:2341`) — and the
+/// second is written `return_val = x->interactive == I_ALWAYS_SKIP`, which is
+/// exactly the distinction this enum names.
+///
+/// It was a `bool` until `--update` arrived, and the reason it could be is that
+/// every refusal `mv` had was a *failure*. `--update=none` and `--update=older`
+/// are the first two that are not.
+#[derive(PartialEq, Eq, Debug)]
+enum Verdict {
+    /// Nothing stands in the way; go on to the rename.
+    Proceed,
+    /// Reported, and this operand counts against the exit status.
+    Refused,
+    /// Left alone on purpose, silently, and the command still succeeds.
+    Skipped,
+}
+
 /// The refusals that stand between "something is at the destination" and the
-/// rename that would replace it. Returns `false` once one has been reported.
+/// rename that would replace it.
 ///
 /// The order is GNU's, and it is observable: a request that trips two of these
 /// gets the first one's wording. Two of the orderings look wrong until measured
@@ -1033,11 +1167,17 @@ fn record_move(
 ///   check is skipped — see step 1. So `mv -n s f`, where `s` is a symlink to
 ///   `f`, prints `not replacing 'f'` rather than `'s' and 'f' are the same
 ///   file`.
+/// * `-u` comes **between** the two: after the same-file check and before
+///   `abandon_move`. So `mv -u f l` on a hard-link pair still says `are the
+///   same file` — the mtimes are equal, so `-u` would have skipped it, but it
+///   never gets the chance.
 ///
 /// Unlike `cp`'s, none of this exempts a **directory source**: `cp`'s block is
 /// guarded by `! S_ISDIR (src_mode)` because `cp -r` descends and asks about the
 /// files inside, while `mv` renames the tree in one operation and so has one
-/// question to put about it.
+/// question to put about it. Step 2 is the exception, and it is upstream's:
+/// `x->update && !S_ISDIR (src_mode)` exempts a directory source there, so
+/// `mv -u dir existing-dir` is not skipped for being no newer.
 fn refuse_overwrite_checks<O: Write, E: Write>(
     src: &Path,
     src_meta: &fs::Metadata,
@@ -1046,16 +1186,19 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
     relname: &OsString,
     seen: &Option<DestInfo>,
     job: &mut Job<'_, O, E>,
-) -> bool {
+) -> Verdict {
     // 1. Is the destination the source? (`copy.c:2345`)
     //
-    //    Skipped entirely under `-n`, which is upstream's `x->interactive !=
-    //    I_ALWAYS_NO &&` guard on the call and not an optimisation: the two
-    //    produce different sentences for the same command line, and `-n`'s is
-    //    the one GNU prints. Measured — `mv -n f l` on a hard link pair says
-    //    `not replacing 'l'`.
-    if job.flags.interactive != Interactive::AlwaysNo
-        && !same_file_ok(src, src_meta, target, dst_meta)
+    //    Skipped entirely under `-n` and `--update=none`, which is upstream's
+    //    `x->interactive != I_ALWAYS_NO && x->interactive != I_ALWAYS_SKIP`
+    //    guard on the call and not an optimisation: the two produce different
+    //    sentences for the same command line, and `-n`'s is the one GNU prints.
+    //    Measured — `mv -n f l` on a hard link pair says `not replacing 'l'`,
+    //    and `mv --update=none f l` says nothing at all and exits 0.
+    if !matches!(
+        job.flags.interactive,
+        Interactive::AlwaysNo | Interactive::AlwaysSkip
+    ) && !same_file_ok(src, src_meta, target, dst_meta)
     {
         let _ = writeln!(
             job.err,
@@ -1063,24 +1206,41 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
             quoteaf_os(src),
             quoteaf_os(target)
         );
-        return false;
+        return Verdict::Refused;
     }
 
-    // 2. Is this destination to be left alone? (`copy.c:2407-2431`)
+    // 2. Is the destination already at least as new as the source? (`-u`,
+    //    `copy.c:2353`.) Silent, and a success.
+    if job.flags.update && !src_meta.is_dir() && !destination_is_older(src_meta, dst_meta) {
+        return Verdict::Skipped;
+    }
+
+    // 3. Is this destination to be left alone? (`copy.c:2407-2431`)
     if abandon_move(target, dst_meta, job) {
         // GNU sets `*rename_succeeded = true` here so that `mv` does not go on
         // to `rm` the source. This `mv` has no such flag to set: the caller
-        // returns on `false` without reaching either the rename or the
-        // cross-device `rm`, so the source survives by construction.
+        // returns without reaching either the rename or the cross-device `rm`,
+        // so the source survives by construction.
+        //
+        // Which of the two verdicts this is, is upstream's `return_val =
+        // x->interactive == I_ALWAYS_SKIP`, and the sentence goes with it: only
+        // `-n` says anything, because only `-n` is a failure. `-i` prints
+        // nothing beyond the question it already asked, and `--update=none`
+        // prints nothing at all.
         if job.flags.interactive == Interactive::AlwaysNo {
             let _ = writeln!(job.err, "mv: not replacing {}", quoteaf_os(target));
+            return Verdict::Refused;
         }
-        return false;
+        return if job.flags.interactive == Interactive::AlwaysSkip {
+            Verdict::Skipped
+        } else {
+            Verdict::Refused
+        };
     }
 
     let (src_dir, dst_dir) = (src_meta.is_dir(), dst_meta.is_dir());
 
-    // 3. A directory onto a non-directory (`copy.c:2455`). The destination is
+    // 4. A directory onto a non-directory (`copy.c:2455`). The destination is
     //    named first, which reads oddly until you notice the sentence is about
     //    what is being destroyed.
     if !dst_dir && src_dir {
@@ -1090,10 +1250,10 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
             quoteaf_os(target),
             quoteaf_os(src)
         );
-        return false;
+        return Verdict::Refused;
     }
 
-    // 4. A destination this same command line just created (`copy.c:2473`).
+    // 5. A destination this same command line just created (`copy.c:2473`).
     //    GNU's comment: "Don't let the user destroy their data, even if they
     //    try hard: this mv command must fail: mv a/f b/f c".
     if !dst_dir
@@ -1107,10 +1267,10 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
             quoteaf_os(target),
             quoteaf_os(src)
         );
-        return false;
+        return Verdict::Refused;
     }
 
-    // 5. A non-directory onto a directory (`copy.c:2485`), which unlike 3 does
+    // 6. A non-directory onto a directory (`copy.c:2485`), which unlike 4 does
     //    not name the source at all.
     if !src_dir && dst_dir {
         let _ = writeln!(
@@ -1118,11 +1278,11 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
             "mv: cannot overwrite directory {} with non-directory",
             quoteaf_os(target)
         );
-        return false;
+        return Verdict::Refused;
     }
 
-    // 6. `copy.c:2504`. Unreachable while 3 stands above it — it is GNU's
-    //    belt-and-braces for the `--backup` path that lets 2 through — and kept
+    // 7. `copy.c:2504`. Unreachable while 4 stands above it — it is GNU's
+    //    belt-and-braces for the `--backup` path that lets 3 through — and kept
     //    so that adding `-b` does not silently lose the guard.
     if src_dir && !dst_dir {
         let _ = writeln!(
@@ -1131,10 +1291,49 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
             quotef_os(src),
             quotef_os(target)
         );
-        return false;
+        return Verdict::Refused;
     }
 
-    true
+    Verdict::Proceed
+}
+
+/// `-u`'s question: is the destination **older** than the source, and so worth
+/// replacing? GNU asks it as `0 <= utimecmpat (…)` and skips when that holds,
+/// which is the same question with the sign flipped (`copy.c:2378`).
+///
+/// Modification times only — `-u` has never consulted `st_ctime` or the size —
+/// and equal counts as **not** older, so `mv -u a b` between two files stamped
+/// the same second-and-nanosecond leaves `b` alone. That is the case `touch -r`
+/// produces and the one a rerun of the same `mv` produces, so it is the common
+/// one rather than a corner.
+///
+/// # What this leaves out, and when it would matter
+///
+/// Upstream passes `UTIMECMP_TRUNCATE_SOURCE` when the move is **across
+/// devices** (`mv` sets `preserve_timestamps`, so the flag is on unless
+/// `move_mode && dst_sb.st_dev == src_sb.st_dev`). Under it, gnulib rounds the
+/// source's timestamp down to the destination filesystem's resolution before
+/// comparing, so a source at `.5` seconds does not count as newer than a
+/// destination at `.0` on a filesystem that cannot store the half. Discovering
+/// that resolution means writing timestamps to the destination and reading them
+/// back (`lib/utimecmp.c`), and it can only change the answer when the two
+/// stamps are already within two seconds of each other *and* the filesystems'
+/// resolutions differ.
+///
+/// It is not implemented here, and the reason it is not yet reachable is
+/// separate: this `mv`'s cross-device fallback is `fs::copy`, which does not
+/// carry the source's mtime over at all, so there is no preserved timestamp for
+/// the truncation to be about. Both halves are logged in `known-issues.md`, and
+/// the truncation belongs with whichever of them is done first.
+fn destination_is_older(src_meta: &fs::Metadata, dst_meta: &fs::Metadata) -> bool {
+    match (dst_meta.modified(), src_meta.modified()) {
+        (Ok(dst), Ok(src)) => dst < src,
+        // A filesystem that cannot say when a file changed cannot answer `-u`'s
+        // question, so nothing is skipped for want of an answer: the move goes
+        // ahead, which is what `mv` without `-u` would have done. Preferring the
+        // skip would silently discard a source on no evidence.
+        _ => true,
+    }
 }
 
 /// GNU's `abandon_move` (`copy.c:2062`): should this move be given up rather
@@ -1147,7 +1346,9 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
 /// **The `-i`/`-n`/`-f` half is the ordinary one.** `-n` abandons without
 /// asking, `-i` asks, `-f` never abandons. All three are one field, so the last
 /// one on the command line decides -- `mv -in` is `-n`, `mv -ni` is `-i`,
-/// `mv -if` is `-f`. All measured.
+/// `mv -if` is `-f`. All measured. `--update=none` is a fourth spelling in the
+/// same field and abandons exactly as `-n` does; what it does *not* share is
+/// the sentence and the exit status, and neither of those is decided here.
 ///
 /// **The fourth arm is the one nobody expects, and it fires with no option at
 /// all.** With [`Interactive::Unspecified`], if stdin is a terminal *and* the
@@ -1178,7 +1379,10 @@ fn abandon_move<O: Write, E: Write>(
     job: &mut Job<'_, O, E>,
 ) -> bool {
     let ask = match job.flags.interactive {
-        Interactive::AlwaysNo => return true,
+        // The two "skip" values are one arm because upstream's `||` makes them
+        // one: `abandon_move` answers *whether* to give up, and the difference
+        // between failing and succeeding afterwards is the caller's.
+        Interactive::AlwaysNo | Interactive::AlwaysSkip => return true,
         Interactive::AlwaysYes => return false,
         Interactive::AskUser => true,
         Interactive::Unspecified => {
@@ -1670,10 +1874,11 @@ mod tests {
     /// they were implemented, which is what a promotion out of it looks like:
     /// the letters move to [`the_last_of_minus_i_f_n_wins`] and the harness's
     /// `missing` markers move to its own section. `-t` and `-T` left the same
-    /// way, to [`a_target_directory_is_taken_out_of_the_operands`] and §16.
+    /// way, to [`a_target_directory_is_taken_out_of_the_operands`] and §16, and
+    /// `-u`/`--update` to [`the_three_update_words_write_two_fields`] and §17.
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in ["-b", "-u", "-S", "-Z"] {
+        for flag in ["-b", "-S", "-Z"] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -1688,7 +1893,6 @@ mod tests {
         for name in [
             "--backup",
             "--strip-trailing-slashes",
-            "--update",
             "--no-copy",
             "--debug",
             "--context",
@@ -2912,5 +3116,339 @@ mod tests {
         assert!(is_cross_device(&io::Error::from_raw_os_error(
             CROSS_DEVICE_ERRNO
         )));
+    }
+
+    // ------------------------------------------------------- -u / --update --
+
+    /// Stamp `p`'s modification time at `secs` past the epoch.
+    ///
+    /// The nanoseconds are deliberately non-zero and *identical* for every
+    /// stamp, so that "the same second" here means the same instant to the
+    /// nanosecond. A comparison that silently truncated to whole seconds would
+    /// pass either way and is what this rules out when a test stamps two files
+    /// the same.
+    fn stamp(p: &Path, secs: u64) {
+        use std::fs::FileTimes;
+        let t = std::time::UNIX_EPOCH + std::time::Duration::new(secs, 246_813_579);
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_times(FileTimes::new().set_accessed(t).set_modified(t))
+            .unwrap();
+    }
+
+    /// `-u`, as flags.
+    fn updating() -> MvFlags {
+        MvFlags {
+            update: true,
+            ..MvFlags::default()
+        }
+    }
+
+    /// Two files, `src` stamped at `src_secs` and `dst` at `dst_secs`, moved
+    /// under `flags`: `(ok, err, dst contents)`.
+    fn timed_move(
+        stem: &str,
+        flags: MvFlags,
+        src_secs: u64,
+        dst_secs: u64,
+    ) -> (bool, String, Vec<u8>) {
+        let dir = scratch(stem);
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        stamp(&a, src_secs);
+        stamp(&b, dst_secs);
+        let (ok, out, err) = mv_flags(flags, &[&a, &b]);
+        assert_eq!(out, "", "-u is silent without -v");
+        let dst = fs::read(&b).unwrap();
+        // Every outcome here is all-or-nothing: either the move happened, and
+        // then `b` holds the source's bytes and `a` is gone, or it did not, and
+        // then `b` is untouched and `a` is still there. Upstream's skip sets
+        // `*rename_succeeded = true` (`copy.c:2394`), which is precisely the
+        // flag that tells `mv` not to unlink the source afterwards — so a
+        // mistake there breaks this pairing rather than either half alone, and
+        // it is checked on every case rather than in one dedicated test.
+        assert_eq!(a.exists(), dst == b"old", "{stem}");
+        (ok, err, dst)
+    }
+
+    /// The whole of `--update`'s parse arm, as a table: which of the two fields
+    /// each spelling writes.
+    ///
+    /// The two rows worth reading twice are `all` and `none`, which both turn
+    /// `update` **off** — `--update=all` is "replace everything", which is what
+    /// no option at all already means, and it is here so that it can *cancel* an
+    /// earlier `-u` or `-i`.
+    #[test]
+    fn the_three_update_words_write_two_fields() {
+        for (argv, update, interactive) in [
+            (&["-u"][..], true, Interactive::Unspecified),
+            (&["--update"][..], true, Interactive::Unspecified),
+            (&["--update=older"][..], true, Interactive::Unspecified),
+            (&["--update=all"][..], false, Interactive::Unspecified),
+            (&["--update=none"][..], false, Interactive::AlwaysSkip),
+            // gnulib's `argmatch` is a prefix match, so a unique prefix of any
+            // of the three works — the same rule that makes `--up` resolve to
+            // `--update`, applied one level down to its argument.
+            (&["--update=o"][..], true, Interactive::Unspecified),
+            (&["--update=n"][..], false, Interactive::AlwaysSkip),
+            (&["--update=a"][..], false, Interactive::Unspecified),
+            // Last wins, as for the `-i`/`-f`/`-n` field, and across the two
+            // spellings: `--update=all` cancels an earlier `-u`.
+            (&["-u", "--update=all"][..], false, Interactive::Unspecified),
+            (&["--update=all", "-u"][..], true, Interactive::Unspecified),
+            (&["--update=none", "-u"][..], true, Interactive::AlwaysSkip),
+            // `--update=all` writes `interactive` too, so it cancels a `-i`
+            // that came before it and not one that comes after.
+            (&["-i", "--update=all"][..], false, Interactive::Unspecified),
+            (&["--update=all", "-i"][..], false, Interactive::AskUser),
+            (
+                &["-i", "--update=older"][..],
+                true,
+                Interactive::Unspecified,
+            ),
+        ] {
+            let mut items: Vec<&str> = argv.to_vec();
+            items.extend_from_slice(&["a", "b"]);
+            let (flags, _, paths) = run_parse_dest(&items);
+            assert_eq!(flags.update, update, "{argv:?}");
+            assert_eq!(flags.interactive, interactive, "{argv:?}");
+            assert_eq!(paths, ["a", "b"], "{argv:?}");
+        }
+    }
+
+    /// `-n` beats `-u` in **both** orders, and by two different mechanisms —
+    /// which is the only reason it is worth a test of its own rather than a row
+    /// in the table above.
+    ///
+    /// A `-n` that came *first* is a guard on the `--update` arm
+    /// (`mv.c:378`, `/* -n takes precedence.  */`); a `-n` that came *last* is
+    /// the clamp after the loop (`mv.c:509`). Either alone would leave one of
+    /// these two orders wrong.
+    #[test]
+    fn no_clobber_beats_update_in_both_orders() {
+        for argv in [
+            &["-n", "-u"][..],
+            &["-u", "-n"][..],
+            &["-n", "--update=older"][..],
+            &["--update=older", "-n"][..],
+            &["-n", "--update=none"][..],
+            &["--update=none", "-n"][..],
+        ] {
+            let mut items: Vec<&str> = argv.to_vec();
+            items.extend_from_slice(&["a", "b"]);
+            let (flags, _, _) = run_parse_dest(&items);
+            assert!(!flags.update, "{argv:?}");
+            assert_eq!(flags.interactive, Interactive::AlwaysNo, "{argv:?}");
+        }
+    }
+
+    /// The one place the two mechanisms come apart, and it makes `-u` and
+    /// `--update=older` — which `--help` calls equivalent — behave differently.
+    ///
+    /// With a later `-i` to lift `interactive` back off `AlwaysNo`, the clamp no
+    /// longer fires, so what survives is whatever the guard let through. The
+    /// guard is on the long form only, so the long form loses its `update` and
+    /// the short one keeps it. Measured against 9.4.
+    #[test]
+    fn the_precedence_guard_is_on_the_long_form_only() {
+        let (long, _, _) = run_parse_dest(&["-n", "--update=older", "-i", "a", "b"]);
+        assert!(!long.update, "the guard swallowed --update=older");
+        assert_eq!(long.interactive, Interactive::AskUser);
+
+        let (short, _, _) = run_parse_dest(&["-n", "-u", "-i", "a", "b"]);
+        assert!(short.update, "-u is not guarded");
+        assert_eq!(short.interactive, Interactive::AskUser);
+    }
+
+    /// An argument that names no word is `argmatch`'s error, listing the three.
+    #[test]
+    fn an_unknown_update_word_is_refused_with_the_list() {
+        let e = fail(&["--update=sometimes", "a", "b"]);
+        assert!(
+            e.sentence.contains("invalid argument") && e.sentence.contains("--update"),
+            "{e:?}"
+        );
+        for word in ["all", "none", "older"] {
+            assert!(e.sentence.contains(word), "{word} missing from {e:?}");
+        }
+        // An empty argument is a prefix of all three, which disagree, so it is
+        // the *ambiguous* message and not the invalid one.
+        let e = fail(&["--update=", "a", "b"]);
+        assert!(e.sentence.contains("ambiguous argument"), "{e:?}");
+    }
+
+    /// …except under `-n`, where upstream never looks at the word at all,
+    /// because `XARGMATCH` sits inside the block the precedence guard skips.
+    /// So a typo that would be fatal on its own is accepted in silence.
+    #[test]
+    fn no_clobber_makes_an_unknown_update_word_pass_unread() {
+        let (flags, _, paths) = run_parse_dest(&["-n", "--update=sometimes", "a", "b"]);
+        assert_eq!(flags.interactive, Interactive::AlwaysNo);
+        assert!(!flags.update);
+        assert_eq!(paths, ["a", "b"]);
+    }
+
+    /// The skip: a destination newer than the source is left, the source is
+    /// left, nothing is said, and the command **succeeds**. The exit status is
+    /// the whole difference from `-n`.
+    #[test]
+    fn update_leaves_a_newer_destination_and_succeeds() {
+        let (ok, err, dst) = timed_move("u_newer", updating(), 1_000_000, 2_000_000);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(dst, b"old");
+    }
+
+    /// Equal counts as "not older", which is what makes running the same
+    /// `mv -u` twice a no-op rather than a move back and forth.
+    #[test]
+    fn update_leaves_a_destination_of_the_same_age() {
+        let (ok, err, dst) = timed_move("u_equal", updating(), 1_000_000, 1_000_000);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(dst, b"old");
+    }
+
+    /// And the other half: an older destination is replaced exactly as it would
+    /// be without the option.
+    #[test]
+    fn update_replaces_an_older_destination() {
+        let (ok, err, dst) = timed_move("u_older", updating(), 2_000_000, 1_000_000);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(dst, b"new");
+    }
+
+    /// `--update=none` against `-n`, on the same fixture, which is the pair the
+    /// `--help` text is describing when it says "skipped files do not induce a
+    /// failure".
+    #[test]
+    fn update_none_skips_where_no_clobber_fails() {
+        let (ok, err, dst) = timed_move(
+            "u_none",
+            overwrite(Interactive::AlwaysSkip),
+            2_000_000,
+            1_000_000,
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, "", "--update=none is silent");
+        assert_eq!(dst, b"old", "and it does not replace, newer source or not");
+
+        let (ok, err, dst) = timed_move(
+            "n_none",
+            overwrite(Interactive::AlwaysNo),
+            2_000_000,
+            1_000_000,
+        );
+        assert!(!ok);
+        assert!(err.contains("not replacing"), "{err}");
+        assert_eq!(dst, b"old");
+    }
+
+    /// `-u` sits *after* the same-file check, so a hard-link pair still gets the
+    /// sentence about it even though the two stamps are necessarily equal and
+    /// `-u` would have skipped the move silently.
+    #[cfg(unix)]
+    #[test]
+    fn update_does_not_reach_a_hard_link_pair() {
+        let dir = scratch("u_samefile");
+        let f = dir.path("f");
+        let l = dir.path("l");
+        fs::write(&f, b"x").unwrap();
+        fs::hard_link(&f, &l).unwrap();
+        let (ok, _, err) = mv_flags(updating(), &[&f, &l]);
+        assert!(!ok);
+        assert!(err.contains("are the same file"), "{err}");
+        assert!(f.exists() && l.exists());
+    }
+
+    /// `--update=none` *does* skip it, because it is one of the two values the
+    /// same-file check is guarded against — and it says nothing, where `-n` on
+    /// the same pair says `not replacing`.
+    #[cfg(unix)]
+    #[test]
+    fn update_none_swallows_the_same_file_sentence() {
+        let dir = scratch("none_samefile");
+        let f = dir.path("f");
+        let l = dir.path("l");
+        fs::write(&f, b"x").unwrap();
+        fs::hard_link(&f, &l).unwrap();
+        let (ok, _, err) = mv_flags(overwrite(Interactive::AlwaysSkip), &[&f, &l]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert!(f.exists() && l.exists());
+    }
+
+    /// A **directory** source is exempt from `-u`'s skip — upstream's
+    /// `!S_ISDIR (src_mode)` — so an old directory still replaces an empty new
+    /// one rather than being silently left behind.
+    #[test]
+    fn update_does_not_skip_a_directory_source() {
+        let dir = scratch("u_dir");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dst).unwrap();
+        fs::write(src.join("inside"), b"x").unwrap();
+
+        let (ok, _, err) = mv_flags(updating(), &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert!(!src.exists());
+        assert!(dst.join("src").join("inside").is_file());
+    }
+
+    /// A skipped destination is not recorded as one this command line created,
+    /// so the `will not overwrite just-created` check cannot fire on it —
+    /// upstream returns at `skip:` before `record_file` (`copy.c:2445`).
+    ///
+    /// Without that, `mv --update=none one/same two/same dir` would skip the
+    /// first and *fail* on the second, which is the one thing `--update=none`
+    /// promises not to do.
+    #[test]
+    fn a_skipped_destination_is_not_recorded_as_just_created() {
+        let dir = scratch("skip_norecord");
+        let dest = dir.path("dest");
+        let one = dir.path("one");
+        let two = dir.path("two");
+        for d in [&dest, &one, &two] {
+            fs::create_dir(d).unwrap();
+        }
+        fs::write(one.join("same"), b"1").unwrap();
+        fs::write(two.join("same"), b"2").unwrap();
+        fs::write(dest.join("same"), b"kept").unwrap();
+
+        let (ok, _, err, _) = mv_to(
+            overwrite(Interactive::AlwaysSkip),
+            into_dir(&dest),
+            &[],
+            &[&one.join("same"), &two.join("same")],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(dest.join("same")).unwrap(), b"kept");
+        // Both sources survive: a skip moves nothing.
+        assert!(one.join("same").is_file() && two.join("same").is_file());
+    }
+
+    /// `-u` over a destination that is *not there* is not a skip at all — the
+    /// speculative rename succeeds and the question never arises. Pinned
+    /// because the obvious implementation of "is the destination older" has to
+    /// invent an answer for a destination with no timestamp.
+    #[test]
+    fn update_over_nothing_is_an_ordinary_move() {
+        let dir = scratch("u_fresh");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"A").unwrap();
+        let (ok, _, err) = mv_flags(updating(), &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(&b).unwrap(), b"A");
+        assert!(!a.exists());
     }
 }

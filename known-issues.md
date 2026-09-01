@@ -105066,6 +105066,44 @@ share the walk rather than to write a second one, and it should follow
 recursive copy that does not preserve attributes would only multiply that defect
 by the number of files in the tree.
 
+**Both prerequisites are now closed** (times/owner, and
+`B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` on 2026-09-01), so
+nothing gates this but the work itself.
+
+**"Share the walk" is measured to be bigger than it sounds — read this before
+starting.** `copy_tree` (`cp.rs:2709`) is only a `make_dir` plus a loop over
+`copy_entry`, and it looks liftable on its own. It is not: `copy_entry`
+(`cp.rs:2863`) calls `stat_destination`, `overwrite_allowed`,
+`remove_destination_first` and `place_entity`, reads `job.flags.follow_walked()`
+and consults `job.copied` — and `place_entity` is the whole per-entity dispatch,
+which reaches the file copy, the symlink recreation, the preserve tail and back
+into `copy_tree`. Lifting the walk therefore means lifting cp's copy *core*, not
+a walk. `cp.rs` is 8411 lines; the flag coupling is the shallow part (33
+`job.flags.` sites).
+
+That is still the right shape, because it is GNU's: there is one
+`copy_internal`, parameterised by `struct cp_options`, and `mv` is that engine
+with `move_mode = true` and `preserve_*` forced on (`mv.c:119-146`). Two
+independent walks would be two places for the same bug.
+
+**Do it in stages that each leave the tree green**, because a half-extracted
+engine is a red `main` for all three lanes:
+
+1. Leaf helpers that are already pure (`read_dir_fastread`, `make_dir`,
+   `create_dir_with_mode`, `ModeDebt`) into a library module.
+2. The per-file copy and its preserve tail — the `copy_reg` equivalent — which
+   is where `mv`'s existing `preserve_onto_file` should end up being the same
+   code rather than a parallel one.
+3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
+   struct.
+4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
+
+Each stage is certifiable the same way the `fsattr` moves in this chain were:
+`scripts/cp-diff.sh` must stay byte-identical at its current 557 passed, 0
+differed, 33 differ on purpose, and `scripts/mv-diff.sh` at 341/0/11. A stage
+that moves code without changing behaviour and *does* move those numbers has a
+bug in the move.
+
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case
 keeps measuring something after the refusal is lifted.

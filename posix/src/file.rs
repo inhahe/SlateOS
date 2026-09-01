@@ -2974,11 +2974,22 @@ pub(crate) fn resolve_dirfd_path(
 // destination directory partway through the walk is a write primitive rather
 // than a disclosure: every remaining entry in the tree is created somewhere the
 // caller never named.  With those four wired, the destination side is closed.
-// The **source** side is not: the walk still re-derives each source directory by
-// name, because `SYS_FS_GETDENTS_PINNED` (664) has no caller yet.  That is a
-// read-side race — you read the wrong file — rather than a write-side one, which
-// is why it is the remaining half rather than the urgent one.  Tracked in
-// known-issues.md.
+//
+// The **source** side closed on 2026-09-01, when `SYS_FS_GETDENTS_PINNED` (664)
+// got its caller: every directory stream in [`crate::dirent`] — `opendir`,
+// `fdopendir` and the raw `getdents64` alike — now lists *through* the
+// descriptor rather than through the path the descriptor once had.  A recursive
+// walk therefore no longer re-derives a source directory by name between
+// deciding to descend into it and reading it.  This was a read-side race — you
+// read the wrong file, rather than writing one — which is why it was the
+// remaining half rather than the urgent one.
+//
+// The one thing 664 does not pin is [`pinned_base`]'s own precondition: it
+// translates an fd to a handle, so a stream over an fd this libc did not open
+// still works, but an fd with no kernel handle behind it (a pipe, a socket, an
+// emulated descriptor) is reported `ENOTDIR` rather than falling back to a
+// path.  Refusing is the point — a fallback there would reintroduce the race on
+// the exact descriptors least able to justify it.
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
@@ -3093,7 +3104,12 @@ fn pinned_answer(ret: i64) -> Option<i32> {
 /// working directory" — and the kernel's working directory is not this libc's
 /// (see [`openat2_forward`]). Real file handles are never 0, so this can only
 /// fire on a corrupt fd table, where falling back is the safe answer.
-fn pinned_base(dirfd: i32) -> Option<u64> {
+///
+/// `pub(crate)` because [`crate::dirent`] needs the same translation to hand a
+/// directory fd to `SYS_FS_GETDENTS_PINNED`. There the `None` case *is*
+/// diagnosed — as `ENOTDIR`, since no kernel handle means nothing the kernel
+/// can list — but the rule above still holds: this function does not set it.
+pub(crate) fn pinned_base(dirfd: i32) -> Option<u64> {
     let entry = crate::fdtable::get_fd(dirfd)?;
     if entry.kind != HandleKind::File || entry.handle == 0 {
         return None;

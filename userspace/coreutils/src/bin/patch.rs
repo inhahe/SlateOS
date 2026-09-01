@@ -1,5 +1,6 @@
 //! patch — apply a diff file to originals.
 //!
+//! ```text
 //! Usage: patch [-pNUM] [-i PATCHFILE] [-R] [--dry-run] [-s] [-b] [ORIGFILE]
 //!   -pNUM       strip NUM leading path components from file names
 //!   -p NUM      same as -pNUM, with space
@@ -9,14 +10,18 @@
 //!   -s          silent mode (suppress informational output)
 //!   -b          create a .orig backup before modifying
 //!   ORIGFILE    apply all hunks to this file (overrides filename in patch)
+//! ```
 //!
 //! Supports unified diff format (output of diff -u / git diff).
 //! Handles multiple files in a single patch.
 //!
 //! Exit codes:
-//!   0  all hunks applied successfully
-//!   1  some hunks failed
-//!   2  error (cannot read patch, etc.)
+//!
+//! ```text
+//! 0  all hunks applied successfully
+//! 1  some hunks failed
+//! 2  error (cannot read patch, etc.)
+//! ```
 
 use coreutils::diag;
 use coreutils::quote::quotef_os;

@@ -224,7 +224,7 @@ pub fn is_relative(name: &[u8]) -> bool {
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::InvalidInput`] if the name already contains a NUL. Refused
+/// [`std::io::ErrorKind::InvalidInput`] if the name already contains a NUL. Refused
 /// rather than truncated: the filesystem forbids the byte, a caller can
 /// nonetheless construct one, and passing it on would silently act on a
 /// *different, shorter* name than the one asked about.

@@ -2,7 +2,7 @@
 //! its extended attributes — and reading the same four off the source they are
 //! being copied from.
 //!
-//! `std` can read all three and write almost none of them. [`fs::set_permissions`]
+//! `std` can read all three and write almost none of them. [`std::fs::set_permissions`]
 //! is the one exception, and even it takes the mode through an opaque
 //! [`Permissions`](std::fs::Permissions) that cannot be constructed portably; there is
 //! no path form of `utimensat` at all — [`File::set_times`](std::fs::File::set_times)
@@ -18,7 +18,7 @@
 //!
 //! `cp -p` restores timestamps, ownership, extended attributes and mode, in
 //! that order and for the two reasons GNU gives where it does it: "chown turns
-//! off set[ug]id bits for non-root, so do the chmod last" (`copy.c:3245`), and
+//! off set\[ug\]id bits for non-root, so do the chmod last" (`copy.c:3245`), and
 //! "set xattrs after ownership as changing owners will clear capabilities"
 //! (`copy.c:3279`). Splitting them across four modules would put the halves of
 //! one ordering constraint in four files, and the ordering is the part that is

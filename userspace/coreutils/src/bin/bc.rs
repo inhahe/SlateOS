@@ -407,7 +407,7 @@ impl<'a> Lexer<'a> {
     /// between the quotes — there is no escape here, not even for the quote
     /// itself, so `"a\"b"` is the string `a\` followed by the syntax error
     /// GNU `bc` reports for the stray `b"`. Escapes are a property of
-    /// `print`, not of the literal (see [`Interp::print_escaped`]), which is
+    /// `print`, not of the literal (see [`print_escaped`]), which is
     /// why `"a\nb"` on its own line writes four characters while
     /// `print "a\nb"` writes three.
     fn read_string(&mut self) -> Token {
@@ -650,7 +650,7 @@ impl Parser {
         self.skip_newlines();
         match self.peek().clone() {
             Token::Eof => None,
-            // `quit` should never reach the parser: [`run_chunk`] asks
+            // `quit` should never reach the parser: [`run_text`] asks
             // [`Self::saw_quit`] first and throws the chunk away. Treating it as
             // `halt` is the backstop for a caller that forgets — it stops the
             // session, which is at least the same direction, where a syntax
@@ -1155,7 +1155,7 @@ enum LoopFlow {
     Halt,
 }
 
-/// Whether the caller of [`run_chunk`] has any more work to do.
+/// Whether the caller of [`run_text`] has any more work to do.
 ///
 /// The stop is carried back as a value rather than taken with `process::exit`,
 /// because the exit status is decided in `main`: exiting from inside the
@@ -1167,7 +1167,7 @@ enum LoopFlow {
 /// One variant covers both keywords, because from the caller's side they ask
 /// for the same thing — read no more input. What differs is *when* each is
 /// decided, and that is settled before this type is produced: `quit` in
-/// [`run_chunk`], from the tokens; `halt` in [`Interpreter::run`], from
+/// [`run_text`], from the tokens; `halt` in [`Interpreter::run`], from
 /// execution.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Session {

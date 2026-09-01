@@ -330,7 +330,7 @@ struct MvFlags {
     interactive: Interactive,
     /// `-u` / `--update=older`: leave a destination that is **not older** than
     /// the source, and call that success. GNU's `x.update` (`copy.h:196`), read
-    /// only by [`destination_is_older`].
+    /// only by [`destination_is_up_to_date`].
     ///
     /// A separate field from [`MvFlags::interactive`] and not a fifth value of
     /// it, because upstream keeps them separate and `--update`'s three words
@@ -2521,7 +2521,7 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 ///    non-root process and a mode written before it would be silently undone.
 ///
 /// GNU's comment at the top of that sequence is the whole of the argument:
-/// *"chown turns off set[ug]id bits for non-root, so do the chmod last"*
+/// *"chown turns off set\[ug\]id bits for non-root, so do the chmod last"*
 /// (`copy.c:3245`).
 ///
 /// None of steps 2–4 is fatal. `mv` leaves `require_preserve` false

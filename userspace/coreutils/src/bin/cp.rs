@@ -102,7 +102,7 @@
 //!      then `chmod`s it to the source's mode, so a 0777 source produced a 0777
 //!      copy. GNU passes the mode to `open` and lets the kernel subtract the
 //!      umask, so under the ordinary 022 the copy is 0755. Measured, both ways,
-//!      across three umasks — see [`mode_of_a_new_file_is_narrowed_by_umask`].
+//!      across three umasks — see `mode_of_a_new_file_is_narrowed_by_umask`.
 //!    * *An existing destination had its mode overwritten.* `cp public private`
 //!      — a 0777 source over somebody's 0600 file — left that file 0777. GNU
 //!      reopens an existing destination **without** a mode argument, so its

@@ -411,7 +411,7 @@ impl<'a> Source<'a> {
 /// **The order is correctness, not arrangement**, and GNU leaves the reason for
 /// each step in a line above it. Two reasons, and they point the same way:
 ///
-/// * `copy.c:3245` — "chown turns off set[ug]id bits for non-root, so do the
+/// * `copy.c:3245` — "chown turns off set\[ug\]id bits for non-root, so do the
 ///   chmod last". A `chmod` written before the `chown` compiles, runs, and
 ///   quietly drops the set-user-ID bit off every copy a non-root user makes.
 /// * `copy.c:3279` — "Set xattrs after ownership as changing owners will clear

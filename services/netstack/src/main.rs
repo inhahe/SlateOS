@@ -181,7 +181,9 @@ fn exit(code: i64) -> ! {
     syscall1(SYS_EXIT, code as u64);
     loop {
         // SAFETY: `hlt` after exit; the process is already being torn down.
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }
 
@@ -517,8 +519,7 @@ fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req: &icmp::Echo, me: &I
         dst: *src_ip,
     }
     .build_header(icmp_len as u16);
-    buf[ethernet::HEADER_LEN..ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN]
-        .copy_from_slice(&ip_hdr);
+    buf[ethernet::HEADER_LEN..ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN].copy_from_slice(&ip_hdr);
 
     // Ethernet header: unicast the reply straight back to the requester's MAC.
     ethernet::write_header(&mut buf, dst_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
@@ -659,7 +660,11 @@ fn ndp_advert_mac(frame: &[u8], target_ip6: &[u8; 16]) -> Option<[u8; 6]> {
         return None;
     }
     let na = icmpv6::parse_neighbor_advertisement(ip.payload, &ip.src, &ip.dst)?;
-    if na.target == *target_ip6 { na.link_addr } else { None }
+    if na.target == *target_ip6 {
+        na.link_addr
+    } else {
+        None
+    }
 }
 
 /// Frame a DNS query payload `qbuf` as Ethernet | IPv4 | UDP toward `me.dns`
@@ -668,7 +673,14 @@ fn ndp_advert_mac(frame: &[u8], target_ip6: &[u8; 16]) -> Option<[u8; 6]> {
 fn tx_dns_query(qbuf: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, id: u16) -> bool {
     let mut frame = [0u8; MAX_FRAME];
     let udp_off = ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN;
-    let udp_len = match udp::write(&mut frame[udp_off..], &me.ip, &me.dns, EPHEMERAL_PORT, 53, qbuf) {
+    let udp_len = match udp::write(
+        &mut frame[udp_off..],
+        &me.ip,
+        &me.dns,
+        EPHEMERAL_PORT,
+        53,
+        qbuf,
+    ) {
         Some(l) => l,
         None => return false,
     };
@@ -878,7 +890,14 @@ fn send_tcp(
 ) -> bool {
     // TCP segment sits inside the IPv4 payload; bound it by the framing headroom.
     let mut seg = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
-    let builder = tcp::Builder { src_port, dst_port, seq, ack, flags, window: TCP_WINDOW };
+    let builder = tcp::Builder {
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        window: TCP_WINDOW,
+    };
     let n = match builder.write(&mut seg, &me.ip, dst_ip, payload) {
         Some(n) => n,
         None => return false,
@@ -933,7 +952,14 @@ fn send_tcp6(
 ) -> bool {
     // TCP segment sits inside the IPv6 payload; bound it by the framing headroom.
     let mut seg = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv6::HEADER_LEN)];
-    let builder = tcp::Builder { src_port, dst_port, seq, ack, flags, window: TCP_WINDOW };
+    let builder = tcp::Builder {
+        src_port,
+        dst_port,
+        seq,
+        ack,
+        flags,
+        window: TCP_WINDOW,
+    };
     let n = match builder.write_v6(&mut seg, &me.ip6, dst_ip6, payload) {
         Some(n) => n,
         None => return false,
@@ -975,7 +1001,12 @@ fn recv_tcp_seg(
     }
     let cplen = seg.payload.len().min(pl.len());
     pl[..cplen].copy_from_slice(&seg.payload[..cplen]);
-    Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
+    Some(TcpRx {
+        seq: seg.seq,
+        ack: seg.ack,
+        flags: seg.flags,
+        payload_len: cplen,
+    })
 }
 
 /// The IPv6 sibling of [`recv_tcp_seg`]: receive one TCP segment carried in an
@@ -1011,7 +1042,12 @@ fn recv_tcp_seg6(
     }
     let cplen = seg.payload.len().min(pl.len());
     pl[..cplen].copy_from_slice(&seg.payload[..cplen]);
-    Some(TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen })
+    Some(TcpRx {
+        seq: seg.seq,
+        ack: seg.ack,
+        flags: seg.flags,
+        payload_len: cplen,
+    })
 }
 
 /// Outcome of one non-filtered NIC read for the multiplexed RX pump.
@@ -1057,16 +1093,24 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
                 }
                 let seg = tcp::Segment::parse(ip.payload, &ip.src, &ip.dst)?;
                 let cplen = seg.payload.len().min(pl.len());
-                pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
+                pl.get_mut(..cplen)?
+                    .copy_from_slice(seg.payload.get(..cplen)?);
                 Some((
                     ip.src,
                     seg.src_port,
                     seg.dst_port,
-                    TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
+                    TcpRx {
+                        seq: seg.seq,
+                        ack: seg.ack,
+                        flags: seg.flags,
+                        payload_len: cplen,
+                    },
                 ))
             })();
             match parsed {
-                Some((src_ip, src_port, dst_port, rx)) => RawRx::Seg(src_ip, src_port, dst_port, rx),
+                Some((src_ip, src_port, dst_port, rx)) => {
+                    RawRx::Seg(src_ip, src_port, dst_port, rx)
+                }
                 None => RawRx::Ignore,
             }
         }
@@ -1078,12 +1122,18 @@ fn recv_tcp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> RawRx {
                 }
                 let seg = tcp::Segment::parse_v6(ip.payload, &ip.src, &ip.dst)?;
                 let cplen = seg.payload.len().min(pl.len());
-                pl.get_mut(..cplen)?.copy_from_slice(seg.payload.get(..cplen)?);
+                pl.get_mut(..cplen)?
+                    .copy_from_slice(seg.payload.get(..cplen)?);
                 Some((
                     ip.src,
                     seg.src_port,
                     seg.dst_port,
-                    TcpRx { seq: seg.seq, ack: seg.ack, flags: seg.flags, payload_len: cplen },
+                    TcpRx {
+                        seq: seg.seq,
+                        ack: seg.ack,
+                        flags: seg.flags,
+                        payload_len: cplen,
+                    },
                 ))
             })();
             match parsed {
@@ -1137,7 +1187,8 @@ fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
             }
             let dg = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
             let cplen = dg.payload.len().min(pl.len());
-            pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
+            pl.get_mut(..cplen)?
+                .copy_from_slice(dg.payload.get(..cplen)?);
             let mut src_ip = [0u8; 16];
             src_ip[..4].copy_from_slice(&ip.src);
             Some(UdpRx {
@@ -1155,7 +1206,8 @@ fn recv_udp_any(me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<UdpRx> {
             }
             let dg = udp::Datagram::parse_v6(ip.payload, &ip.src, &ip.dst)?;
             let cplen = dg.payload.len().min(pl.len());
-            pl.get_mut(..cplen)?.copy_from_slice(dg.payload.get(..cplen)?);
+            pl.get_mut(..cplen)?
+                .copy_from_slice(dg.payload.get(..cplen)?);
             Some(UdpRx {
                 family: netipc::ring::UDP_AF_INET6,
                 src_ip: ip.src,
@@ -1236,8 +1288,9 @@ struct TcpConn {
     passive: bool,
     /// `true` once `shutdown(SHUT_WR)`/`SHUT_RDWR` has closed the write side: our
     /// FIN has been emitted and subsequent [`OP_SEND`] submissions are rejected
-    /// with [`ERR_BROKEN_PIPE`](netipc::ring::ERR_BROKEN_PIPE). The read side stays
-    /// open, so `recv` keeps delivering buffered/inbound bytes until the peer FIN.
+    /// with [`ERR_BROKEN_PIPE`](netipc::ring::ERR_BROKEN_PIPE). The read side
+    /// stays open, so `recv` keeps delivering buffered/inbound bytes until the
+    /// peer FIN.
     write_shut: bool,
     /// `true` once `shutdown(SHUT_RD)`/`SHUT_RDWR` has closed the read side:
     /// subsequent [`OP_RECV`] completes with EOF (`0`) without waiting. The write
@@ -1286,9 +1339,7 @@ impl TcpConn {
     /// one connection (the multiplexed ring path uses [`recv_tcp_any`] instead).
     fn recv_one_seg(&self, me: &IfInfo, frame: &mut [u8], pl: &mut [u8]) -> Option<TcpRx> {
         match self.dst6 {
-            Some(ref dst6) => {
-                recv_tcp_seg6(me, dst6, self.local_port, self.dst_port, frame, pl)
-            }
+            Some(ref dst6) => recv_tcp_seg6(me, dst6, self.local_port, self.dst_port, frame, pl),
             None => recv_tcp_seg(me, &self.dst_ip, self.local_port, self.dst_port, frame, pl),
         }
     }
@@ -1321,11 +1372,24 @@ impl TcpConn {
         let mut established = false;
         'syn: for _ in 0..TCP_SYN_ATTEMPTS {
             ipid = ipid.wrapping_add(1);
-            if !send_tcp(me, &mac, &dst_ip, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[], ipid) {
+            if !send_tcp(
+                me,
+                &mac,
+                &dst_ip,
+                dst_port,
+                local_port,
+                isn,
+                0,
+                tcp::FLAG_SYN,
+                &[],
+                ipid,
+            ) {
                 return None;
             }
             for _ in 0..RESOLVE_POLL_ITERS {
-                while let Some(rx) = recv_tcp_seg(me, &dst_ip, local_port, dst_port, &mut frame, &mut pl) {
+                while let Some(rx) =
+                    recv_tcp_seg(me, &dst_ip, local_port, dst_port, &mut frame, &mut pl)
+                {
                     if rx.flags & tcp::FLAG_RST != 0 {
                         return None; // Connection refused.
                     }
@@ -1350,7 +1414,18 @@ impl TcpConn {
 
         // ACK the SYN-ACK, completing the handshake.
         ipid = ipid.wrapping_add(1);
-        send_tcp(me, &mac, &dst_ip, dst_port, local_port, snd_nxt, rcv_nxt, tcp::FLAG_ACK, &[], ipid);
+        send_tcp(
+            me,
+            &mac,
+            &dst_ip,
+            dst_port,
+            local_port,
+            snd_nxt,
+            rcv_nxt,
+            tcp::FLAG_ACK,
+            &[],
+            ipid,
+        );
 
         Some(TcpConn {
             dst_ip,
@@ -1397,7 +1472,18 @@ impl TcpConn {
         let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
         let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
         let ipid = seed_ipid.wrapping_add(1);
-        if !send_tcp(me, &mac, &dst_ip, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[], ipid) {
+        if !send_tcp(
+            me,
+            &mac,
+            &dst_ip,
+            dst_port,
+            local_port,
+            isn,
+            0,
+            tcp::FLAG_SYN,
+            &[],
+            ipid,
+        ) {
             return None;
         }
         Some(TcpConn {
@@ -1516,7 +1602,17 @@ impl TcpConn {
         let mut server_isn = 0u32;
         let mut established = false;
         'syn: for _ in 0..TCP_SYN_ATTEMPTS {
-            if !send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[]) {
+            if !send_tcp6(
+                me,
+                &mac,
+                &dst_ip6,
+                dst_port,
+                local_port,
+                isn,
+                0,
+                tcp::FLAG_SYN,
+                &[],
+            ) {
                 return None;
             }
             for _ in 0..RESOLVE_POLL_ITERS {
@@ -1544,7 +1640,17 @@ impl TcpConn {
 
         let snd_nxt = isn.wrapping_add(1);
         let rcv_nxt = server_isn.wrapping_add(1);
-        send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, snd_nxt, rcv_nxt, tcp::FLAG_ACK, &[]);
+        send_tcp6(
+            me,
+            &mac,
+            &dst_ip6,
+            dst_port,
+            local_port,
+            snd_nxt,
+            rcv_nxt,
+            tcp::FLAG_ACK,
+            &[],
+        );
 
         Some(TcpConn {
             dst_ip: [0; 4],
@@ -1582,7 +1688,17 @@ impl TcpConn {
     ) -> Option<Self> {
         let local_port = EPHEMERAL_PORT | (seed_ipid & 0x3FFF);
         let isn: u32 = 0x0001_0000u32.wrapping_add((seed_ipid as u32) << 8);
-        if !send_tcp6(me, &mac, &dst_ip6, dst_port, local_port, isn, 0, tcp::FLAG_SYN, &[]) {
+        if !send_tcp6(
+            me,
+            &mac,
+            &dst_ip6,
+            dst_port,
+            local_port,
+            isn,
+            0,
+            tcp::FLAG_SYN,
+            &[],
+        ) {
             return None;
         }
         Some(TcpConn {
@@ -1709,7 +1825,13 @@ impl TcpConn {
             return None; // Window occupied by an unacked segment; caller must wait/EAGAIN.
         }
         self.ipid = self.ipid.wrapping_add(1);
-        if !self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_PSH | tcp::FLAG_ACK, payload) {
+        if !self.emit(
+            me,
+            self.snd_nxt,
+            self.rcv_nxt,
+            tcp::FLAG_PSH | tcp::FLAG_ACK,
+            payload,
+        ) {
             return None;
         }
         // Retain for retransmit; `snd_nxt - snd_buf_len` recovers this seq.
@@ -1744,7 +1866,13 @@ impl TcpConn {
                 // the completing segment is not lost.
                 if rx.flags & tcp::FLAG_SYN != 0 && rx.flags & tcp::FLAG_ACK == 0 {
                     self.ipid = self.ipid.wrapping_add(1);
-                    self.emit(me, self.isn, self.rcv_nxt, tcp::FLAG_SYN | tcp::FLAG_ACK, &[]);
+                    self.emit(
+                        me,
+                        self.isn,
+                        self.rcv_nxt,
+                        tcp::FLAG_SYN | tcp::FLAG_ACK,
+                        &[],
+                    );
                     return;
                 }
                 if rx.flags & tcp::FLAG_ACK != 0 && rx.ack == self.isn.wrapping_add(1) {
@@ -1850,7 +1978,13 @@ impl TcpConn {
             *retransmits += 1;
             self.ipid = self.ipid.wrapping_add(1);
             let seq = self.snd_nxt.wrapping_sub(self.snd_buf_len as u32);
-            self.emit(me, seq, self.rcv_nxt, tcp::FLAG_PSH | tcp::FLAG_ACK, &self.snd_buf[..self.snd_buf_len]);
+            self.emit(
+                me,
+                seq,
+                self.rcv_nxt,
+                tcp::FLAG_PSH | tcp::FLAG_ACK,
+                &self.snd_buf[..self.snd_buf_len],
+            );
             true
         } else {
             false
@@ -1912,7 +2046,13 @@ impl TcpConn {
             // convention of not advancing `snd_nxt` — the FIN's one seq is tracked
             // locally as `snd_nxt + 1` there). Idempotent: `close` won't re-send.
             self.ipid = self.ipid.wrapping_add(1);
-            self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
+            self.emit(
+                me,
+                self.snd_nxt,
+                self.rcv_nxt,
+                tcp::FLAG_FIN | tcp::FLAG_ACK,
+                &[],
+            );
         }
     }
 
@@ -1923,7 +2063,13 @@ impl TcpConn {
     fn close(&mut self, me: &IfInfo) {
         if !self.write_shut {
             self.ipid = self.ipid.wrapping_add(1);
-            self.emit(me, self.snd_nxt, self.rcv_nxt, tcp::FLAG_FIN | tcp::FLAG_ACK, &[]);
+            self.emit(
+                me,
+                self.snd_nxt,
+                self.rcv_nxt,
+                tcp::FLAG_FIN | tcp::FLAG_ACK,
+                &[],
+            );
         }
         let fin_seq = self.snd_nxt.wrapping_add(1); // Our FIN consumed one seq.
 
@@ -1935,7 +2081,10 @@ impl TcpConn {
                 any = true;
                 // A late FIN from the peer still needs an ACK for a clean teardown.
                 if rx.flags & tcp::FLAG_FIN != 0 && rx.seq == self.rcv_nxt {
-                    self.rcv_nxt = self.rcv_nxt.wrapping_add(rx.payload_len as u32).wrapping_add(1);
+                    self.rcv_nxt = self
+                        .rcv_nxt
+                        .wrapping_add(rx.payload_len as u32)
+                        .wrapping_add(1);
                     self.ipid = self.ipid.wrapping_add(1);
                     self.emit(me, fin_seq, self.rcv_nxt, tcp::FLAG_ACK, &[]);
                 }
@@ -2014,8 +2163,22 @@ fn udp_exchange(
     out: &mut [u8],
 ) -> Option<usize> {
     let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
-    let dlen = udp::write(&mut dgram, &me.ip, dst_ip, EPHEMERAL_PORT, dst_port, payload)?;
-    if !send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_UDP, &dgram[..dlen], id) {
+    let dlen = udp::write(
+        &mut dgram,
+        &me.ip,
+        dst_ip,
+        EPHEMERAL_PORT,
+        dst_port,
+        payload,
+    )?;
+    if !send_ipv4(
+        me,
+        next_hop_mac,
+        dst_ip,
+        ipv4::PROTO_UDP,
+        &dgram[..dlen],
+        id,
+    ) {
         return None;
     }
     let mut frame = [0u8; MAX_FRAME];
@@ -2076,7 +2239,11 @@ const MSG_CAP: usize = 512;
 fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     // Register first (fast) so a waiting client can connect immediately and then
     // block on the reply, rather than spinning while we do slow network I/O.
-    let listener = syscall2(SYS_SERVICE_REGISTER, SERVICE_NAME.as_ptr() as u64, SERVICE_NAME.len() as u64);
+    let listener = syscall2(
+        SYS_SERVICE_REGISTER,
+        SERVICE_NAME.as_ptr() as u64,
+        SERVICE_NAME.len() as u64,
+    );
     if listener < 0 {
         print("[netstack] FAIL: could not register net.stack service\n");
         return 5;
@@ -2104,7 +2271,11 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     // Persistent mode ignores the idle deadline and serves for the system's
     // lifetime; bounded mode exits after SERVICE_IDLE_ITERS idle iterations.
     while persistent || idle_ticks < SERVICE_IDLE_ITERS {
-        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener as u64, ACCEPT_TIMEOUT_NS);
+        let ch = syscall2(
+            SYS_SERVICE_ACCEPT_TIMEOUT,
+            listener as u64,
+            ACCEPT_TIMEOUT_NS,
+        );
         if ch < 0 {
             idle_ticks += 1; // Timed out (or transient) — count toward idle exit.
             continue;
@@ -2124,9 +2295,20 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
         if rlen > 0 {
             let req = &req[..rlen as usize];
             let mut reply = [0u8; MSG_CAP];
-            let reply_len =
-                handle_request(req, &next_hop_mac, me, &mut txid, &mut ring_session, &mut reply);
-            let _ = syscall3(SYS_CHANNEL_SEND, ch, reply.as_ptr() as u64, reply_len as u64);
+            let reply_len = handle_request(
+                req,
+                &next_hop_mac,
+                me,
+                &mut txid,
+                &mut ring_session,
+                &mut reply,
+            );
+            let _ = syscall3(
+                SYS_CHANNEL_SEND,
+                ch,
+                reply.as_ptr() as u64,
+                reply_len as u64,
+            );
             served += 1;
         }
         syscall1(SYS_CHANNEL_CLOSE, ch);
@@ -2181,10 +2363,8 @@ fn handle_request(
                 None => None,
             };
             match name_len {
-                Some(w) => {
-                    netipc::encode_ok_name(out, name.get(..w).unwrap_or(&[]))
-                        .unwrap_or_else(|| fail(out))
-                }
+                Some(w) => netipc::encode_ok_name(out, name.get(..w).unwrap_or(&[]))
+                    .unwrap_or_else(|| fail(out)),
                 None => fail(out),
             }
         }
@@ -2291,10 +2471,7 @@ fn shm_ping(handle: u64, size: u32) -> bool {
         if req != netipc::SHM_PING_REQUEST_MAGIC {
             false
         } else {
-            core::ptr::write_unaligned(
-                base.add(8) as *mut u64,
-                netipc::SHM_PING_RESPONSE_MAGIC,
-            );
+            core::ptr::write_unaligned(base.add(8) as *mut u64, netipc::SHM_PING_RESPONSE_MAGIC);
             true
         }
     };
@@ -2361,7 +2538,11 @@ fn ring_echo_process(ring: &netring::Ring) -> bool {
             netipc::ring::OP_SEND => ring_send_transform(ring, &sqe),
             _ => -1, // unsupported opcode: report failure, still complete
         };
-        let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };
+        let cqe = netipc::ring::Cqe {
+            user_data: sqe.user_data,
+            result,
+            flags: 0,
+        };
         if !ring.cq_push(&cqe) {
             return false; // CQ full — would drop a completion; treat as failure
         }
@@ -2435,17 +2616,15 @@ fn ring_tcp(
     // contract.
     let (ok, stop) = unsafe {
         match netring::Ring::attach(base, session.size as usize) {
-            Some(ring) => {
-                ring_tcp_process(
-                    &ring,
-                    &mut session.conns,
-                    &mut session.listeners,
-                    &mut session.udp,
-                    me,
-                    next_hop_mac,
-                    &mut session.ipid,
-                )
-            }
+            Some(ring) => ring_tcp_process(
+                &ring,
+                &mut session.conns,
+                &mut session.listeners,
+                &mut session.udp,
+                me,
+                next_hop_mac,
+                &mut session.ipid,
+            ),
             None => (false, false),
         }
     };
@@ -2493,7 +2672,9 @@ struct RingConns {
 impl RingConns {
     /// An empty table (all slots free).
     fn new() -> Self {
-        Self { slots: core::array::from_fn(|_| None) }
+        Self {
+            slots: core::array::from_fn(|_| None),
+        }
     }
 
     /// Borrow the live connection registered under `id`, if any.
@@ -2587,7 +2768,8 @@ const UDP_QLEN: usize = 2;
 /// Maximum UDP payload we buffer per datagram (one Ethernet MTU minus the IPv4
 /// and UDP headers — a datagram that would exceed this on send is rejected with
 /// [`netipc::ring::ERR_MSG_SIZE`]).
-const UDP_DGRAM_MAX: usize = MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN + udp::HEADER_LEN);
+const UDP_DGRAM_MAX: usize =
+    MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN + udp::HEADER_LEN);
 /// First ephemeral local port handed out by [`UdpSocks::bind`] when a caller
 /// binds to port 0 (the IANA dynamic/ephemeral range base).
 const UDP_EPHEMERAL_BASE: u16 = 49152;
@@ -2636,7 +2818,12 @@ struct UdpSock {
 impl UdpSock {
     /// A freshly-bound socket on `local_port` with an empty receive queue.
     fn new(local_port: u16) -> Self {
-        Self { local_port, q: [UdpDatagram::empty(); UDP_QLEN], head: 0, count: 0 }
+        Self {
+            local_port,
+            q: [UdpDatagram::empty(); UDP_QLEN],
+            head: 0,
+            count: 0,
+        }
     }
 
     /// Buffer a received datagram. If the queue is full, the *oldest* datagram is
@@ -2693,7 +2880,9 @@ struct UdpSocks {
 impl UdpSocks {
     /// An empty table (no bound sockets).
     fn new() -> Self {
-        Self { slots: core::array::from_fn(|_| None) }
+        Self {
+            slots: core::array::from_fn(|_| None),
+        }
     }
 
     /// Bind a new datagram socket under `conn_id` to `port` (`0` = pick an unused
@@ -2727,7 +2916,10 @@ impl UdpSocks {
 
     /// True iff some bound socket already owns `port`.
     fn port_in_use(&self, port: u16) -> bool {
-        self.slots.iter().flatten().any(|(_, s)| s.local_port == port)
+        self.slots
+            .iter()
+            .flatten()
+            .any(|(_, s)| s.local_port == port)
     }
 
     /// Pick the lowest unused ephemeral port at/above [`UDP_EPHEMERAL_BASE`], or
@@ -2812,11 +3004,25 @@ fn udp_sock_send(
         return netipc::ring::ERR_MSG_SIZE;
     }
     let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv4::MIN_HEADER_LEN)];
-    let dlen = match udp::write(&mut dgram, &me.ip, dst_ip, sock.local_port, dst_port, payload) {
+    let dlen = match udp::write(
+        &mut dgram,
+        &me.ip,
+        dst_ip,
+        sock.local_port,
+        dst_port,
+        payload,
+    ) {
         Some(n) => n,
         None => return -1,
     };
-    if !send_ipv4(me, next_hop_mac, dst_ip, ipv4::PROTO_UDP, &dgram[..dlen], id) {
+    if !send_ipv4(
+        me,
+        next_hop_mac,
+        dst_ip,
+        ipv4::PROTO_UDP,
+        &dgram[..dlen],
+        id,
+    ) {
         return -1;
     }
     // On success the caller learns how many payload bytes were accepted.
@@ -2841,11 +3047,17 @@ fn udp_sock_send6(
         return netipc::ring::ERR_MSG_SIZE;
     }
     let mut dgram = [0u8; MAX_FRAME - (ethernet::HEADER_LEN + ipv6::HEADER_LEN)];
-    let dlen =
-        match udp::write_v6(&mut dgram, &me.ip6, dst_ip6, sock.local_port, dst_port, payload) {
-            Some(n) => n,
-            None => return -1,
-        };
+    let dlen = match udp::write_v6(
+        &mut dgram,
+        &me.ip6,
+        dst_ip6,
+        sock.local_port,
+        dst_port,
+        payload,
+    ) {
+        Some(n) => n,
+        None => return -1,
+    };
     if !send_ipv6(me, next_hop_mac, dst_ip6, ipv4::PROTO_UDP, &dgram[..dlen]) {
         return -1;
     }
@@ -2879,7 +3091,11 @@ struct Listener {
 
 impl Listener {
     fn new(port: u16, seed_ipid: u16) -> Self {
-        Self { port, backlog: core::array::from_fn(|_| None), ipid: seed_ipid }
+        Self {
+            port,
+            backlog: core::array::from_fn(|_| None),
+            ipid: seed_ipid,
+        }
     }
 
     /// Borrow the backlog connection whose 4-tuple matches an inbound frame's peer
@@ -2904,9 +3120,12 @@ impl Listener {
         src_port: u16,
         dst_port: u16,
     ) -> Option<&mut TcpConn> {
-        self.backlog.iter_mut().filter_map(|s| s.as_mut()).find(|c| {
-            c.dst6 == Some(*src_ip6) && c.dst_port == src_port && c.local_port == dst_port
-        })
+        self.backlog
+            .iter_mut()
+            .filter_map(|s| s.as_mut())
+            .find(|c| {
+                c.dst6 == Some(*src_ip6) && c.dst_port == src_port && c.local_port == dst_port
+            })
     }
 
     /// Register a freshly passive-opened connection in a free backlog slot. Returns
@@ -2924,7 +3143,10 @@ impl Listener {
     /// handed to the caller by `OP_ACCEPT`), or `None` if none is ready yet.
     fn take_established(&mut self) -> Option<TcpConn> {
         for slot in &mut self.backlog {
-            if slot.as_ref().is_some_and(|c| c.established && !c.connect_failed) {
+            if slot
+                .as_ref()
+                .is_some_and(|c| c.established && !c.connect_failed)
+            {
                 return slot.take();
             }
         }
@@ -2948,13 +3170,20 @@ struct Listeners {
 
 impl Listeners {
     fn new() -> Self {
-        Self { slots: core::array::from_fn(|_| None) }
+        Self {
+            slots: core::array::from_fn(|_| None),
+        }
     }
 
     /// Register a listener `id` bound to `port`. Rejects a duplicate id, a port
     /// already bound by another listener, or a full table (`false`).
     fn add(&mut self, id: u32, port: u16, seed_ipid: u16) -> bool {
-        if self.slots.iter().flatten().any(|(lid, l)| *lid == id || l.port == port) {
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|(lid, l)| *lid == id || l.port == port)
+        {
             return false; // duplicate id or port already bound
         }
         if let Some(slot) = self.slots.iter_mut().find(|s| s.is_none()) {
@@ -3249,7 +3478,8 @@ fn ring_tcp_process(
                 // whose frames are diverted by IP before hitting the wire), then run
                 // the same connect state machine as IPv4 via the v6 constructors.
                 let mut addr = [0u8; 16];
-                let ok = sqe.data_len as usize >= 16 && ring.read_data(sqe.data_off as usize, &mut addr);
+                let ok =
+                    sqe.data_len as usize >= 16 && ring.read_data(sqe.data_off as usize, &mut addr);
                 if !ok {
                     -1
                 } else {
@@ -3337,7 +3567,11 @@ fn ring_tcp_process(
                 // Bind a listener id to a local port (low 16 bits of aux).
                 let port = (sqe.aux & 0xFFFF) as u16;
                 *ipid = ipid.wrapping_add(0x10);
-                if listeners.add(sqe.conn_id, port, *ipid) { 0 } else { -1 }
+                if listeners.add(sqe.conn_id, port, *ipid) {
+                    0
+                } else {
+                    -1
+                }
             }
             netipc::ring::OP_ACCEPT => {
                 ring_tcp_accept(ring, conns, listeners, sqe.conn_id, me, next_hop_mac, &sqe)
@@ -3355,7 +3589,11 @@ fn ring_tcp_process(
                                 let mut addr = [0u8; 18];
                                 addr[..16].copy_from_slice(&me.ip6);
                                 addr[16..18].copy_from_slice(&c.local_port.to_be_bytes());
-                                if ring.write_data(sqe.data_off as usize, &addr) { 18 } else { -1 }
+                                if ring.write_data(sqe.data_off as usize, &addr) {
+                                    18
+                                } else {
+                                    -1
+                                }
                             } else {
                                 -1
                             }
@@ -3363,7 +3601,11 @@ fn ring_tcp_process(
                             let mut addr = [0u8; 6];
                             addr[..4].copy_from_slice(&me.ip);
                             addr[4..6].copy_from_slice(&c.local_port.to_be_bytes());
-                            if ring.write_data(sqe.data_off as usize, &addr) { 6 } else { -1 }
+                            if ring.write_data(sqe.data_off as usize, &addr) {
+                                6
+                            } else {
+                                -1
+                            }
                         } else {
                             -1
                         }
@@ -3410,9 +3652,15 @@ fn ring_tcp_process(
                     -1
                 } else {
                     match udp.get_mut(sqe.conn_id) {
-                        Some(sock) => {
-                            udp_sock_send(me, next_hop_mac, sock, &dst_ip, dst_port, &buf[..plen], id)
-                        }
+                        Some(sock) => udp_sock_send(
+                            me,
+                            next_hop_mac,
+                            sock,
+                            &dst_ip,
+                            dst_port,
+                            &buf[..plen],
+                            id,
+                        ),
                         None => -1, // not bound
                     }
                 }
@@ -3436,14 +3684,9 @@ fn ring_tcp_process(
                         -1
                     } else {
                         match udp.get_mut(sqe.conn_id) {
-                            Some(sock) => udp_sock_send6(
-                                me,
-                                next_hop_mac,
-                                sock,
-                                &hdr,
-                                dst_port,
-                                &buf[..plen],
-                            ),
+                            Some(sock) => {
+                                udp_sock_send6(me, next_hop_mac, sock, &hdr, dst_port, &buf[..plen])
+                            }
                             None => -1, // not bound
                         }
                     }
@@ -3467,9 +3710,7 @@ fn ring_tcp_process(
                         None => -1, // not bound
                         Some(sock) => match sock.pop(&mut payload[..room]) {
                             Some((family, ip16, src_port, n)) => {
-                                let hdr = netipc::ring::Sqe::pack_udp_addr(
-                                    family, &ip16, src_port,
-                                );
+                                let hdr = netipc::ring::Sqe::pack_udp_addr(family, &ip16, src_port);
                                 let off = sqe.data_off as usize;
                                 if ring.write_data(off, &hdr)
                                     && (n == 0 || ring.write_data(off + hdr_len, &payload[..n]))
@@ -3490,7 +3731,11 @@ fn ring_tcp_process(
             }
             _ => -1, // unsupported opcode: report failure, still complete
         };
-        let cqe = netipc::ring::Cqe { user_data: sqe.user_data, result, flags: 0 };
+        let cqe = netipc::ring::Cqe {
+            user_data: sqe.user_data,
+            result,
+            flags: 0,
+        };
         if !ring.cq_push(&cqe) {
             return (false, stop); // CQ full — would drop a completion; treat as failure
         }
@@ -3536,7 +3781,10 @@ fn ring_tcp_send(
     let nonblock = sqe.aux & netipc::ring::SEND_NONBLOCK != 0;
     // Drain any already-arrived ACKs so a window freed by the peer is visible.
     ring_pump(conns, listeners, me, next_hop_mac);
-    if conns.get_mut(target_id).is_some_and(|c| c.send_window_full()) {
+    if conns
+        .get_mut(target_id)
+        .is_some_and(|c| c.send_window_full())
+    {
         if nonblock {
             return netipc::ring::ERR_WOULD_BLOCK; // kernel → EAGAIN
         }
@@ -3566,7 +3814,10 @@ fn ring_tcp_send(
                 None => return -1, // connection vanished mid-send
             }
         }
-        if conns.get_mut(target_id).is_some_and(|c| c.send_window_full()) {
+        if conns
+            .get_mut(target_id)
+            .is_some_and(|c| c.send_window_full())
+        {
             return netipc::ring::ERR_WOULD_BLOCK; // deadline elapsed, still full
         }
     }
@@ -3630,7 +3881,13 @@ fn ring_pump(
                     // No established connection owns this segment: offer it to the
                     // listeners (backlog match, or a fresh SYN → passive open).
                     let _consumed = listeners.route_seg(
-                        me, &src_ip, src_port, dst_port, &rx, payload, next_hop_mac,
+                        me,
+                        &src_ip,
+                        src_port,
+                        dst_port,
+                        &rx,
+                        payload,
+                        next_hop_mac,
                     );
                     // Unmatched by both → drop (nothing to do).
                 }
@@ -3643,7 +3900,13 @@ fn ring_pump(
                     c.ingest_seg(me, &rx, payload);
                 } else {
                     let _consumed = listeners.route_seg6(
-                        me, &src_ip6, src_port, dst_port, &rx, payload, next_hop_mac,
+                        me,
+                        &src_ip6,
+                        src_port,
+                        dst_port,
+                        &rx,
+                        payload,
+                        next_hop_mac,
                     );
                 }
             }
@@ -3861,7 +4124,10 @@ fn ring_tcp_accept(
     }
     // Drive pending passive-open handshakes (and any already-queued data) forward.
     ring_pump(conns, listeners, me, next_hop_mac);
-    let mut conn = match listeners.get_mut(target_id).and_then(Listener::take_established) {
+    let mut conn = match listeners
+        .get_mut(target_id)
+        .and_then(Listener::take_established)
+    {
         Some(c) => c,
         None => return netipc::ring::ERR_WOULD_BLOCK, // accept queue empty
     };
@@ -3914,7 +4180,11 @@ fn ring_tcp_accept(
 /// by packed NUL-terminated argv strings, then envp strings.
 fn read_argv1(out: &mut [u8; 32]) -> usize {
     let mut raw = [0u8; 256];
-    let n = syscall2(SYS_PROCESS_GET_ARGS, raw.as_mut_ptr() as u64, raw.len() as u64);
+    let n = syscall2(
+        SYS_PROCESS_GET_ARGS,
+        raw.as_mut_ptr() as u64,
+        raw.len() as u64,
+    );
     if n < 16 {
         return 0; // No args or header didn't fit.
     }

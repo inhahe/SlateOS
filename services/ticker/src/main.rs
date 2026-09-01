@@ -87,7 +87,9 @@ fn print(s: &str) {
 fn exit(code: i64) -> ! {
     syscall1(SYS_EXIT, code as u64);
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }
 

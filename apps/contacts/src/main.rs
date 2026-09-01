@@ -2818,143 +2818,186 @@ impl ContactsApp {
     }
 
     /// Phones, emails, addresses, social, birthday, notes and group chips.
+    ///
+    /// The column is laid out into `lines` first and painted afterwards. That
+    /// is not tidiness: the panel does not scroll, so a contact with more
+    /// fields than the box is tall genuinely runs out of room, and the rule
+    /// "stop at the bottom edge" has to hold for every field type at once.
+    /// Written inline it was seven separate rules, and it was absent from all
+    /// seven -- `put_text` declines to emit a run the clip cannot show and
+    /// `Frame::hit` trims a hit box to nothing, so the overflow was invisible
+    /// and unclickable and looked handled, but a *fill* is pushed exactly as
+    /// asked, and at 640x480 the group chips were painting over the Edit /
+    /// Star / Delete buttons drawn below the box.
     fn draw_contact_fields(&self, f: &mut Frame<Target>, area: Rect, contact: &Contact) {
-        let mut y = area.y;
-        let section = |f: &mut Frame<Target>, y: &mut f32, title: &str| {
-            put_text(
-                f,
-                Rect::new(area.x, *y, area.w, 14.0),
-                title,
-                11.0,
-                OVERLAY0,
-                FontWeightHint::Bold,
-            );
-            *y += 16.0;
+        /// One laid-out line of the fields column, before it is given a `y`.
+        enum FieldLine {
+            /// A section title: small, bold, dim, flush with the left edge.
+            Heading(&'static str),
+            /// An indented line of detail. `height` is the box the run is
+            /// inked in; `advance` is what the cursor moves, which is larger
+            /// so consecutive lines are not touching.
+            Detail {
+                text: String,
+                color: Color,
+                size: f32,
+                height: f32,
+                advance: f32,
+            },
+            /// Blank space between sections.
+            Gap(f32),
+            /// The group chips, which wrap among themselves: `(id, name,
+            /// colour, width)`.
+            Chips(Vec<(u64, String, Color, f32)>),
+        }
+
+        let detail_w = (area.w - 8.0).max(0.0);
+        let mut lines: Vec<FieldLine> = Vec::new();
+
+        let detail = |lines: &mut Vec<FieldLine>, text: String, color: Color, advance: f32| {
+            lines.push(FieldLine::Detail {
+                text,
+                color,
+                size: 13.0,
+                height: 18.0,
+                advance,
+            });
         };
-        let line_box = |y: f32| Rect::new(area.x + 8.0, y, (area.w - 8.0).max(0.0), 18.0);
 
         if !contact.phones.is_empty() {
-            section(f, &mut y, "Phone numbers");
+            lines.push(FieldLine::Heading("Phone numbers"));
             for phone in &contact.phones {
                 let primary = if phone.primary { " (primary)" } else { "" };
                 let s = format!("{}: {}{primary}", phone.phone_type.label(), phone.number);
-                put_text(
-                    f,
-                    line_box(y),
-                    &s,
-                    13.0,
-                    TEXT_COLOR,
-                    FontWeightHint::Regular,
-                );
-                y += 20.0;
+                detail(&mut lines, s, TEXT_COLOR, 20.0);
             }
-            y += 6.0;
+            lines.push(FieldLine::Gap(6.0));
         }
         if !contact.emails.is_empty() {
-            section(f, &mut y, "Email addresses");
+            lines.push(FieldLine::Heading("Email addresses"));
             for email in &contact.emails {
                 let primary = if email.primary { " (primary)" } else { "" };
                 let s = format!("{}: {}{primary}", email.email_type.label(), email.email);
-                put_text(
-                    f,
-                    line_box(y),
-                    &s,
-                    13.0,
-                    TEXT_COLOR,
-                    FontWeightHint::Regular,
-                );
-                y += 20.0;
+                detail(&mut lines, s, TEXT_COLOR, 20.0);
             }
-            y += 6.0;
+            lines.push(FieldLine::Gap(6.0));
         }
         if !contact.addresses.is_empty() {
-            section(f, &mut y, "Addresses");
+            lines.push(FieldLine::Heading("Addresses"));
             for addr in &contact.addresses {
                 let s = format!("{}: {}", addr.address_type.label(), addr.display_line());
-                put_text(
-                    f,
-                    line_box(y),
-                    &s,
-                    13.0,
-                    TEXT_COLOR,
-                    FontWeightHint::Regular,
-                );
-                y += 20.0;
+                detail(&mut lines, s, TEXT_COLOR, 20.0);
             }
-            y += 6.0;
+            lines.push(FieldLine::Gap(6.0));
         }
         if !contact.social_accounts.is_empty() {
-            section(f, &mut y, "Social accounts");
+            lines.push(FieldLine::Heading("Social accounts"));
             for social in &contact.social_accounts {
                 let s = format!("{}: {}", social.platform.label(), social.handle);
-                put_text(f, line_box(y), &s, 13.0, LAVENDER, FontWeightHint::Regular);
-                y += 20.0;
+                detail(&mut lines, s, LAVENDER, 20.0);
             }
-            y += 6.0;
+            lines.push(FieldLine::Gap(6.0));
         }
         if let Some(ref bday) = contact.birthday {
-            section(f, &mut y, "Birthday");
-            put_text(
-                f,
-                line_box(y),
-                &bday.format_display(),
-                13.0,
-                TEXT_COLOR,
-                FontWeightHint::Regular,
-            );
-            y += 24.0;
+            lines.push(FieldLine::Heading("Birthday"));
+            detail(&mut lines, bday.format_display(), TEXT_COLOR, 24.0);
         }
         if !contact.notes.is_empty() {
-            section(f, &mut y, "Notes");
+            lines.push(FieldLine::Heading("Notes"));
             // `RenderCommand::Text` clips at `max_width` instead of wrapping,
             // so the notes used to show only their first line's worth of
             // characters -- silently, with nothing to say the rest was there.
-            let notes_w = (area.w - 8.0).max(1.0);
-            for line in &text::wrap(
+            let notes_w = detail_w.max(1.0);
+            for line in text::wrap(
                 &contact.notes,
                 notes_w,
                 NOTES_FONT_SIZE,
                 FontWeightHint::Regular,
             ) {
-                put_text(
-                    f,
-                    Rect::new(area.x + 8.0, y, notes_w, NOTES_LINE_HEIGHT),
-                    line,
-                    NOTES_FONT_SIZE,
-                    SUBTEXT0,
-                    FontWeightHint::Regular,
-                );
-                y += NOTES_LINE_HEIGHT;
+                lines.push(FieldLine::Detail {
+                    text: line,
+                    color: SUBTEXT0,
+                    size: NOTES_FONT_SIZE,
+                    height: NOTES_LINE_HEIGHT,
+                    advance: NOTES_LINE_HEIGHT,
+                });
             }
-            y += 6.0;
+            lines.push(FieldLine::Gap(6.0));
         }
         if !contact.groups.is_empty() {
-            section(f, &mut y, "Groups");
-            let mut chip_x = area.x;
+            lines.push(FieldLine::Heading("Groups"));
+            let mut chips: Vec<(u64, String, Color, f32)> = Vec::new();
             for &gid in &contact.groups {
                 let Some(group) = self.store.get_group(gid) else {
                     continue;
                 };
-                let chip_w =
-                    text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold).min(area.w);
-                if chip_x + chip_w > area.right() {
-                    // A chip that would run off the right edge starts a new
-                    // line instead of being drawn outside its own box.
-                    chip_x = area.x;
+                let w = text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold)
+                    .min(area.w.max(0.0));
+                chips.push((gid, group.name.clone(), group.color, w));
+            }
+            if !chips.is_empty() {
+                lines.push(FieldLine::Chips(chips));
+            }
+        }
+
+        let mut y = area.y;
+        for line in lines {
+            // The one place the bottom edge is honoured, for every field type.
+            if y >= area.bottom() {
+                return;
+            }
+            match line {
+                FieldLine::Heading(title) => {
+                    put_text(
+                        f,
+                        Rect::new(area.x, y, area.w, 14.0),
+                        title,
+                        11.0,
+                        OVERLAY0,
+                        FontWeightHint::Bold,
+                    );
+                    y += 16.0;
+                }
+                FieldLine::Detail {
+                    text,
+                    color,
+                    size,
+                    height,
+                    advance,
+                } => {
+                    put_text(
+                        f,
+                        Rect::new(area.x + 8.0, y, detail_w, height),
+                        &text,
+                        size,
+                        color,
+                        FontWeightHint::Regular,
+                    );
+                    y += advance;
+                }
+                FieldLine::Gap(h) => y += h,
+                FieldLine::Chips(chips) => {
+                    let mut chip_x = area.x;
+                    for (gid, name, color, chip_w) in chips {
+                        if chip_x + chip_w > area.right() {
+                            // A chip that would run off the right edge starts
+                            // a new line instead of being drawn outside its
+                            // own box -- and a new line can itself run off the
+                            // bottom, which is why the check is repeated here.
+                            chip_x = area.x;
+                            y += GROUP_CHIP_HEIGHT + 4.0;
+                        }
+                        if y + GROUP_CHIP_HEIGHT > area.bottom() {
+                            return;
+                        }
+                        let chip = Rect::new(chip_x, y, chip_w, GROUP_CHIP_HEIGHT);
+                        f.push(fill(chip, color, GROUP_CHIP_HEIGHT / 2.0));
+                        put_text(f, inset(chip, 8.0), &name, 11.0, BASE, FontWeightHint::Bold);
+                        f.hit(Target::Group(gid), chip);
+                        chip_x += chip_w + 8.0;
+                    }
                     y += GROUP_CHIP_HEIGHT + 4.0;
                 }
-                let chip = Rect::new(chip_x, y, chip_w, GROUP_CHIP_HEIGHT);
-                f.push(fill(chip, group.color, GROUP_CHIP_HEIGHT / 2.0));
-                put_text(
-                    f,
-                    inset(chip, 8.0),
-                    &group.name,
-                    11.0,
-                    BASE,
-                    FontWeightHint::Bold,
-                );
-                f.hit(Target::Group(gid), chip);
-                chip_x += chip_w + 8.0;
             }
         }
     }
@@ -2987,6 +3030,25 @@ impl ContactsApp {
             for field in FormField::ALL {
                 let tall = field == FormField::Notes;
                 let h = if tall { 72.0 } else { FIELD_HEIGHT };
+                // The form scrolls, so a field can sit wholly above the top of
+                // the box or wholly below its bottom. A clip is not enough on
+                // its own: `put_text` declines to emit a run the clip cannot
+                // show and `Frame::hit` trims a hit box to nothing, but a fill
+                // is pushed exactly as asked -- so the field's own box was
+                // being painted over the Save and Cancel buttons drawn under
+                // the form. Rows outside the box are skipped, not clipped.
+                // The test is the *box*, not the label above it: a label with
+                // no box under it is not a field, so a row whose box has run
+                // off the bottom is skipped whole even when its label would
+                // still have fitted.
+                let box_top = fy + 14.0;
+                if box_top >= form.bottom() {
+                    break;
+                }
+                if box_top + h <= form.y {
+                    fy += 14.0 + h + 6.0;
+                    continue;
+                }
                 put_text(
                     f,
                     Rect::new(form.x, fy, form.w, 12.0),
@@ -6315,6 +6377,45 @@ mod tests {
         found.first().copied()
     }
 
+    /// Every filled box, paired with the clip that was in force when it was
+    /// drawn -- the same rule `text_runs_clipped` applies to text.
+    fn fills_clipped(frame: &Frame<Target>, size: (f32, f32)) -> Vec<(Rect, Rect)> {
+        let window = Rect::new(0.0, 0.0, size.0, size.1);
+        let mut stack: Vec<Rect> = Vec::new();
+        let mut out = Vec::new();
+        for c in frame.commands() {
+            match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let next = Rect::new(*x, *y, *width, *height);
+                    let merged = stack
+                        .last()
+                        .map_or(next, |outer| outer.intersect(next).unwrap_or(Rect::EMPTY));
+                    stack.push(merged);
+                }
+                RenderCommand::PopClip => {
+                    stack.pop();
+                }
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => out.push((
+                    Rect::new(*x, *y, *width, *height),
+                    stack.last().copied().unwrap_or(window),
+                )),
+                _ => {}
+            }
+        }
+        out
+    }
+
     /// `text_point`, insisting the words are there.
     fn point(app: &ContactsApp, size: (f32, f32), wanted: &str) -> (f32, f32) {
         text_point(app, size, wanted)
@@ -6552,7 +6653,8 @@ mod tests {
                 if l.status.is_empty() {
                     continue;
                 }
-                for (target, rect) in app.frame(w, h).hits() {
+                let frame = app.frame(w, h);
+                for (target, rect) in frame.hits() {
                     // The *bottom* edge, not the top. Asking only where a
                     // control starts lets one through that starts above the
                     // line and ends below it, which is the whole shape of the
@@ -6564,6 +6666,157 @@ mod tests {
                          status line, which is drawn after it"
                     );
                 }
+                // Paint, too, and not only controls. A panel run down over the
+                // strip answers no press but does hide the line -- the last
+                // thing the app said about what it just did goes out from
+                // under the user with nothing to show it went.
+                for (rect, clip) in fills_clipped(&frame, (w, h)) {
+                    let Some(seen) = clip.intersect(rect) else {
+                        continue;
+                    };
+                    // The window background is the one fill that is allowed
+                    // to reach the bottom edge: it is what the strip is drawn
+                    // *on*. So is anything drawn inside the strip itself.
+                    if seen.contains(l.window.w / 2.0, 0.5)
+                        || l.status.intersect(seen) == Some(seen)
+                    {
+                        continue;
+                    }
+                    assert!(
+                        seen.bottom() < l.status.y + 0.01,
+                        "{name} at {w}x{h}: a filled box at {seen:?} is painted under the \
+                         status line at {:?}",
+                        l.status
+                    );
+                }
+                // And the clips, which are where the rule is actually kept.
+                // A box drawn under the strip is a symptom; a *clip* reaching
+                // under it is the permission, and the two do not appear
+                // together. Running the detail panel down to the bottom edge
+                // of the window moves nothing under the line at any size in
+                // the grid -- the panel's own 24-pixel padding is larger than
+                // the 22-pixel strip, so the content it holds stops just
+                // short every time. What changed is that it is now *allowed*
+                // to go under, and the next thing added to that panel would
+                // have done so with nothing to say it had.
+                for clip in clips(&frame) {
+                    assert!(
+                        clip.bottom() <= l.status.y + 0.01,
+                        "{name} at {w}x{h}: a clip of {clip:?} reaches under the status \
+                         line at {:?}, so whatever is drawn in it may too",
+                        l.status
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_painted_entirely_outside_the_clip_in_force() {
+        // A clip makes what is outside it invisible; it does not make it
+        // free, and it does not make a picture that claims to have painted a
+        // row three hundred pixels below the list into an honest picture.
+        // The list's cursor runs down over every contact whether or not the
+        // list has any room left, so this is the rule that stops it.
+        //
+        // *Entirely* outside, not partly: a row at the bottom edge is
+        // rightly half-drawn and half-cut, and so is the last letter of the
+        // A-Z rail. What nothing may be is wholly invisible.
+        //
+        // With one exemption, which is the rule rather than a hole in it:
+        // the unit of "do not draw this" is the *item*, and an item is drawn
+        // whole or not at all. The two-pixel sliver of a row at the bottom
+        // edge draws its avatar circle in full, forty pixels below the cut,
+        // and that is correct -- a row that starts inside the list is a row
+        // the list is showing. So a fill wholly outside the clip is excused
+        // exactly when some other fill drawn *under the same clip* encloses
+        // it and is itself partly visible. Nothing else is: a row three
+        // hundred pixels below the list has no such parent, because the only
+        // fill enclosing it is the row's own background, which is just as
+        // invisible as it is.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                let fills = fills_clipped(&frame, (w, h));
+                for (i, (rect, clip)) in fills.iter().enumerate() {
+                    if rect.is_empty() || clip.intersect(*rect).is_some() {
+                        continue;
+                    }
+                    let carried = fills.iter().enumerate().any(|(j, (outer, outer_clip))| {
+                        j != i
+                            && outer_clip == clip
+                            && outer_clip.intersect(*outer).is_some()
+                            && outer.intersect(*rect) == Some(*rect)
+                    });
+                    assert!(
+                        carried,
+                        "{name} at {w}x{h}: a filled box at {rect:?} is painted \
+                         entirely outside the clip {clip:?} that was in force, and \
+                         no item drawn under that clip carries it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_of_text_is_never_inked_outside_the_box_it_was_given() {
+        // Every run in the program is centred in a box by `ink_box`, and a
+        // run taller than its box centres to *outside* it at both ends. That
+        // is how the status line came to be drawn below the bottom edge of a
+        // thirty-pixel window: the strip was 22 tall, the run was asked for
+        // at 13, and the arithmetic was fine -- until the strip was 8.
+        for (bw, bh) in [
+            (100.0, 20.0),
+            (100.0, 4.0),
+            (100.0, 0.0),
+            (0.0, 20.0),
+            (3.0, 3.0),
+        ] {
+            for size in [1.0, 9.0, 11.0, 13.0, 20.0, 36.0] {
+                let r = Rect::new(10.0, 20.0, bw, bh);
+                let ink = ink_box(r, size);
+                assert!(
+                    ink.y >= r.y - 0.01 && ink.bottom() <= r.bottom() + 0.01,
+                    "a {size}-point run in a {bw}x{bh} box inks {}..{}, \
+                     outside the box's {}..{}",
+                    ink.y,
+                    ink.bottom(),
+                    r.y,
+                    r.bottom()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_detail_panel_is_never_narrower_than_the_sidebar_where_both_are_shown() {
+        // The panel holds a name, an address and a paragraph of notes; the
+        // list holds one line per contact. Wherever the window is wide enough
+        // to show both, the wider half is the one with more to say.
+        //
+        // Every width, not `GRID`'s twelve. The rule is a pure function of the
+        // width and the split it governs has two knees in it -- the 45% share
+        // meeting its 304-pixel cap, and the panel meeting its own minimum and
+        // being dropped -- so the widths where a fault can hide are a *band*,
+        // not a point. Raising the share to 95% leaves the panel narrower than
+        // the sidebar only between 564 and 608 pixels: below that the panel is
+        // dropped outright, which is a different rule and a legitimate one,
+        // and above it the cap binds and the split is unchanged. A twelve-size
+        // grid stepped straight over the band.
+        for step in 0..=500_u32 {
+            let w = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 4.0;
+            for h in [30.0_f32, 300.0, 768.0] {
+                let l = Layout::solve(w, h);
+                if l.panel.is_empty() || l.list.is_empty() {
+                    continue;
+                }
+                let sidebar = l.list.w + l.alphabet.w;
+                assert!(
+                    l.panel.w >= sidebar - 0.01,
+                    "{w}x{h}: the sidebar is {sidebar} wide and the panel it leaves is {}",
+                    l.panel.w
+                );
             }
         }
     }
@@ -6729,6 +6982,19 @@ mod tests {
     #[test]
     fn the_add_button_opens_a_blank_form_with_the_keyboard_in_the_first_field() {
         let mut app = wired();
+        // The form is dirtied first, on purpose. A fresh app has an empty
+        // form already, so "every field is empty after pressing +" is true
+        // of a program that never clears it -- the assertion would be
+        // reading the starting state rather than the effect of the press.
+        // Cancel is not used to get back out: it clears the form on the way,
+        // which would put the fixture right back where it started.
+        click_text(&mut app, SIZE, "Edit");
+        assert!(
+            FormField::ALL
+                .iter()
+                .any(|f| !app.field_value(*f).is_empty()),
+            "the fixture failed to leave anything in the form"
+        );
         // Not `== Empty`: the app opens showing the first sample contact.
         // What has to be true before the press is only that the form is not
         // already open, or "pressing + opened the form" proves nothing.
@@ -6839,6 +7105,26 @@ mod tests {
             .iter()
             .any(|(t, _)| *t == Target::Contact(first));
         assert!(before, "the first contact is not clickable to begin with");
+
+        // A small scroll first. At 4000 the row is off the window as well as
+        // off the list, and a scroll offset applied to the drawing but not to
+        // the hit boxes -- the fault this test was written for -- would leave
+        // a row answering in the middle of the list at either offset, so the
+        // small case is the one that reads like the bug. It does *not* test
+        // the list's clip: a row is only drawn at all when it is at least
+        // partly inside the list, so this row is not drawn under any clip.
+        app.scroll_offset = CONTACT_ROW_HEIGHT + LETTER_DIVIDER_HEIGHT + 4.0;
+        let nudged = app
+            .frame(SIZE.0, SIZE.1)
+            .hits()
+            .iter()
+            .any(|(t, _)| *t == Target::Contact(first));
+        assert!(
+            !nudged,
+            "the first contact still answers presses after the list scrolled it \
+             above the top of the list, where the header is"
+        );
+
         app.scroll_offset = 4000.0;
         let after = app
             .frame(SIZE.0, SIZE.1)
@@ -6849,6 +7135,40 @@ mod tests {
             !after,
             "the first contact still answers presses after the list scrolled past it"
         );
+    }
+
+    #[test]
+    fn every_row_answers_only_inside_the_list() {
+        // The rows are hit-boxed by the same pass that draws them, inside the
+        // list's clip, and `Frame::hit` trims a hit box to the clip in force.
+        // That trimming is the whole mechanism keeping a row from answering
+        // outside the column it is drawn in, and it cannot be seen from any
+        // test of the form "is this row clickable?": a row is only ever drawn
+        // when it is at least partly inside the list, so no row is ever
+        // entirely clipped away and every row stays clickable either way.
+        //
+        // What gives it away is *where* the box reaches. Clip the list to the
+        // window instead of to itself and the row straddling the top edge
+        // answers over the view cells above it -- press "Groups" and select a
+        // contact -- while the one straddling the bottom answers under the
+        // status line.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let l = Layout::solve(w, h);
+                let frame = app.frame(w, h);
+                for (target, rect) in frame.hits() {
+                    if !matches!(target, Target::Contact(_)) {
+                        continue;
+                    }
+                    assert!(
+                        l.list.intersect(*rect) == Some(*rect),
+                        "{name} at {w}x{h}: a row answers over {rect:?}, which is not \
+                         inside the list at {:?}",
+                        l.list
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -7328,6 +7648,134 @@ mod tests {
             count,
             "the list shows a different number of contacts than the group says it has"
         );
+    }
+
+    /// A second window size the layout genuinely solves differently.
+    ///
+    /// 600 is narrow enough that the sidebar is 45% of the window rather than
+    /// its preferred 304 pixels, so every control on the sidebar sits
+    /// somewhere else than it does at `SIZE`. A second size the layout
+    /// happened to solve identically would let a program that ignored the
+    /// size it was given pass every test below.
+    const OTHER: (f32, f32) = (600.0, 640.0);
+
+    #[test]
+    fn the_picture_is_drawn_at_the_size_render_is_given() {
+        // `render` is the only door the compositor draws through. Drawing a
+        // constant-sized picture there would leave the window a border of
+        // whatever was on the screen before it opened.
+        let mut app = wired();
+        let tree = App::render(&mut app, OTHER.0, OTHER.1);
+        let want = app.frame(OTHER.0, OTHER.1).into_tree();
+        assert_eq!(
+            format!("{:?}", tree.commands),
+            format!("{:?}", want.commands),
+            "render drew something other than the picture for {OTHER:?}"
+        );
+    }
+
+    #[test]
+    fn a_press_is_answered_against_the_size_the_last_frame_was_drawn_at() {
+        // The compositor calls `render(w, h)` and then hands over presses with
+        // no size attached. Answering them against a constant answers them
+        // against a window that is not on the screen.
+        let mut app = wired();
+        let _ = App::render(&mut app, OTHER.0, OTHER.1);
+        let other = Layout::solve(OTHER.0, OTHER.1);
+        // A letter on the A-Z rail, because the rail is pinned to the right
+        // edge of the sidebar and the sidebar is a *fraction* of the window
+        // at this width. A control on the left of the sidebar, such as a view
+        // cell, keeps roughly the same coordinates at both sizes and would
+        // let a program that ignored the size it was given pass anyway.
+        let at = point_in(&app, OTHER, other.alphabet, "A");
+
+        // The point has to be one the two sizes disagree about, or the test
+        // would pass against a program that ignored the size entirely.
+        let elsewhere = wired().frame(SIZE.0, SIZE.1).hit_test(at.0, at.1);
+        assert!(
+            !matches!(elsewhere, Some(Target::Letter('A'))),
+            "{at:?} names the A on the rail at both sizes -- pick another control"
+        );
+
+        let response = App::on_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: at.0,
+                y: at.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert!(matches!(response, Response::Redraw));
+        assert_eq!(
+            app.selected_letter,
+            Some('A'),
+            "the press was answered against some other window"
+        );
+    }
+
+    #[test]
+    fn a_resize_moves_where_the_controls_answer() {
+        let mut app = wired();
+        let _ = App::render(&mut app, SIZE.0, SIZE.1);
+        let here = Layout::solve(SIZE.0, SIZE.1);
+        // The A-Z rail again, and for the same reason as above: it is pinned
+        // to the right edge of a sidebar that is a fraction of the window, so
+        // it is somewhere genuinely different at the two sizes. A view cell
+        // barely moves, and a press aimed at where it *would* be lands on it
+        // either way -- which is how a program that ignored the resize
+        // entirely passed this test as first written.
+        let before = point_in(&app, SIZE, here.alphabet, "A");
+
+        let response = App::on_event(
+            &mut app,
+            &Event::Resize {
+                width: OTHER.0 as u32,
+                height: OTHER.1 as u32,
+            },
+        );
+        assert!(matches!(response, Response::Redraw));
+
+        let other = Layout::solve(OTHER.0, OTHER.1);
+        let after = point_in(&app, OTHER, other.alphabet, "A");
+        assert!(
+            (after.0 - before.0).abs() > 1.0 || (after.1 - before.1).abs() > 1.0,
+            "the rail did not move when the window did"
+        );
+
+        // No `render` in between: the resize alone has to be enough, because
+        // a press can arrive before the next frame is asked for.
+        App::on_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: after.0,
+                y: after.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert_eq!(
+            app.selected_letter,
+            Some('A'),
+            "the resize did not reach the hit boxes"
+        );
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window_and_nothing_else_does() {
+        let mut app = wired();
+        assert!(matches!(
+            App::on_event(&mut app, &Event::CloseRequested),
+            Response::Exit
+        ));
+        for event in [
+            Event::FocusIn,
+            Event::FocusOut,
+            Event::Tick { elapsed_ms: 16 },
+        ] {
+            assert!(
+                matches!(App::on_event(&mut app, &event), Response::Redraw),
+                "{event:?} was answered with something other than a redraw"
+            );
+        }
     }
 
     #[test]

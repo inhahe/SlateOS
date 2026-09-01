@@ -103562,17 +103562,173 @@ Two things this app added that klotski could not have shown.
     contract asserted as a biconditional with a coverage assertion per half —
     "drawn only if it fits" alone is satisfied by a program that draws nothing.
 
-And the counts to date, remeasured 2026-09-01 after this app: **45 apps and 126
-sites remain**, with automator, taskscheduler, hangman, sokoban, klotski and
-rush carrying `no_pass_paints_outside_the_region_it_owns`. The largest remaining
-is **magnifier at 7**, then spades and snippets at 6, then maze, hearts,
-emojipicker and asteroids at 5. magnifier is next. It is *not* another
-board-game clone — it has no solve to get wrong, so shapes 14/17/18 may not
-apply — but a first read shows ten centring sites of the familiar kind
-(`apps/magnifier/src/main.rs:862, 895, 1860, 1871, 1889, 1910, 1930, 1941, 1955,
-2179`), including a pair at 1860/1871 that offset *from* a centre by
-`± line_h` and `+ line_h * 0.4`, which is a centring with an unbounded second
-term and so is worse than a bare centring, not better.
+**magnifier** (2026-09-01) — done: 105 tests (from 92), 106/106 mutation rows
+caught. The first app in the campaign that is not a board game, and the first
+whose fixes were driven as much by the *mutation sweep* as by the containment
+test. Two faults fell out of the new suite on its first run, and both were
+hidden by a clip: `draw_pane`'s half-pixel seam filler spends its half pixel
+outside the pane on the last block of each row and column, and `draw_help` did
+not merely overflow, it **panicked** — `f32::clamp` requires `min <= max`, and a
+sheet narrower than its own two margins inverts them. Neither was visible to any
+of the 92 tests already there. `Frame::clip` pushes its command unconditionally,
+so a bound only the clip enforces is a bound no test reading the command stream
+can see; the campaign has now met that three times and it should be assumed
+present wherever a pass clips.
+
+Four things this app added.
+
+24. **A guard that no input satisfies is not a bound. It is a delete button on
+    the feature behind it, and it reads exactly like a bound.** `draw_info`
+    stacked the status line under the coordinate reading behind
+    `line_h + status_h <= info.h`. That condition is never true: two rows want
+    2.55× the font at this face, and `Layout` gives the info band at most 2.28×
+    at *every* window height from 40 to 2160, coming closest at h=309 where it
+    is still 1.41px short. So every "Picked #89B4FA", every "Zoom 4x", every
+    "Ruler cleared" had never been drawn, at any size, since the code was
+    written — a whole user-facing feature, dead, behind a line that looks like
+    careful defensive arithmetic. **No containment test can ever see this**, and
+    not by accident: a run that is never emitted is trivially inside every band
+    it might have left, so the campaign's central test is *structurally* blind
+    to it, exactly as it is blind to a modal's own panel (shape 22). What
+    pointed at it was a **mutation that survived**. The generalisation is the
+    valuable part: *a survivor does not always mean a missing test — sometimes
+    it means the code you broke is unreachable*, and the two are told apart by
+    probing the guard's reachability before writing a test for it. A second
+    tell was sitting in the file the whole time: `pick_colour_at`'s doc comment
+    says the unfiltered value is "in the status line **beside** it", and the
+    code stacked it *below*. **A doc comment that disagrees with the code it
+    sits on is evidence about which of the two is wrong**, and it is cheaper to
+    read than a sweep. The fix was not to widen the band but to move the
+    feature: the info band is a one-line strip by construction (16..=30px
+    against a single font), so the room it has is horizontal, and the status now
+    shares the reading's row. The mutation table carries a row that puts the
+    dead guard *back* — a bug found once should not be findable twice.
+25. **Two clamps that cancel mean the first one is in the wrong place.**
+    `status_size` was `(size * 0.92).max(7.0).min(size)`. The `.max(7.0)`
+    legibility floor cannot bite — it needs `size` under 7.6, and `shows`
+    refusing any band under 11 tall floors `size` at 7.7 — so it is inert, and
+    inert by a *tenth of a pixel*, which is a coincidence rather than a margin.
+    The `.min(size)` existed solely to undo the floor's one real effect: a floor
+    is the only shape that can make a status *taller* than the reading beside
+    it, and centring a taller run inside a shorter one's line box lifts it out
+    through the band's top — this campaign's own fault, arrived at from the
+    opposite direction. With both gone, `status_size <= size` is arithmetic,
+    `status_h <= line_h` follows by monotonicity, and the offset is non-negative
+    with nothing left to prove about reachability. **Look for the cancelling
+    pair whenever a clamp is followed by a second clamp on the same value.**
+26. **A no-overlap assertion is not a separation assertion.** Two runs that abut
+    exactly do not intersect, so `a.intersect(b).is_none()` passes on a layout
+    that a reader sees as one word. Any test asserting that two runs sharing a
+    row stay out of each other must assert the *gap* — otherwise the padding
+    between them is free to fall to zero and no test objects.
+27. **When a test sweeps only the sizes the layout hands out, it says nothing
+    about a bound only a squeezed band reaches — and the axis to squeeze is not
+    always the axis the campaign has been squeezing.** The header's
+    two-independent-guesses split (a flat `w * 0.5` for the title against a flat
+    `w * 0.45` for the reading) survived the sweep, and correctly: at every size
+    in `WINDOWS` the reading is far too short to reach a flat half of the band,
+    because "paused" is the longest thing the header ever says and the widest
+    band is 1920. The size that reaches it is narrow but **tall** — the
+    reading's font follows `header.h` and the window's `big`, and *neither
+    shrinks when the width does* — so a 120px-wide header on a 900px-tall window
+    sets a 19px reading against a 63px half and runs the two straight through
+    each other. The containment tests in this campaign squeeze both axes, but
+    the ordinary tests beside them mostly sweep `WINDOWS` alone; **wherever a
+    size is derived from one axis and spent on another, the fault lives at a
+    band squeezed on the axis it was not derived from.** As in shape 23, the
+    no-overlap claim now carries a coverage assertion — some band must actually
+    have been narrow enough to collide — so it cannot silently return to
+    asserting nothing.
+
+And the counts to date, measured 2026-09-01 with `scripts/count_centrings.py`:
+**49 apps and 113 sites remain**, with automator, taskscheduler, hangman,
+sokoban, klotski, rush and magnifier carrying
+`no_pass_paints_outside_the_region_it_owns`. The largest remaining is
+**crossword at 7**, then spades at 6, then emojipicker, hearts and snippets at
+5, then asteroids, camera, gomoku, maze and pomodoro at 4.
+
+**Every count above this line in this entry was quoted from an ad-hoc grep, and
+they are not comparable with the ones below it.** That is the point of the
+script and it is worth stating plainly. The greps did not agree with each other:
+a pattern loose enough to catch the forms rustfmt had wrapped also caught
+horizontal centrings and the already-fixed helper, and a pattern tight enough to
+exclude those missed every wrapped site. A raw grep gave 189 hits in 55 files
+against a recorded 126 in 45, with no way to reconcile them, because neither had
+written down what it counted. Nor is this hypothetical: the first draft of *this
+paragraph* said "44 apps and 122 sites" — a number carried forward by
+subtracting magnifier from the previous figure — and running the script gave 49
+and 113. Both digits were wrong, in opposite directions, and the apps count was
+wrong because the old tally had been undercounting all along. **A number in a
+tracking document that cannot be reproduced is worse than no number**, because
+it is quoted, subtracted from, and carried forward exactly as if it could be.
+
+So the script is now the one executable definition of a site: it matches across
+line breaks, outside `#[cfg(test)]` and comments, excludes the
+`centre_line`/`centred_in`/`label_centred` helper bodies, and detects finished
+apps by the presence of `fn centre_line(` rather than from a hand-kept list that
+can go stale. It also reports residual matches *inside* finished apps, which is
+the interesting case rather than the boring one: each is either a site bounded
+by construction — with the proof in a comment beside it, per shape 2 — or a site
+the campaign missed. The seven finished apps carry 21 such residuals between
+them (automator 6, sokoban 5, hangman 3, klotski 2, rush 2, taskscheduler 2,
+magnifier 1), and re-reading those 21 was a task in its own right: they are the
+campaign's own claim that a site is safe, and until now nothing had checked it.
+
+**That audit is done, and it found one.** Twenty of the twenty-one are bounded,
+and they come in three grades, which is worth naming because the grades are not
+equally trustworthy:
+
+| Grade | How the bound is enforced | Count |
+|---|---|---|
+| **A — bounded at the site, proof written** | `X.min(band.h)` / `(band.h - k).max(0.0)`, *and* a comment saying why | 13 |
+| **B — bounded at the site, proof unwritten** | same shapes, no comment; the reader re-derives it | 7 |
+| **C — bounded only by an argument about `Layout`** | the site itself constrains nothing | 1 |
+
+Grade A is the campaign's intended end state. Grade B is fine but costs the next
+reader the derivation each time. **Grade C is a bug waiting for a layout change**,
+and its one instance is `apps/automator/src/main.rs:2274` — the macro-list
+trigger dot, `let dot = l.small * 0.8;` centred in a row of height `l.row - 2.0`.
+Nothing at the site relates the two. It is safe *today* only because
+`Layout::solve` derives both from `font`: `dot = 0.8 * max(font - 2, 8)` against
+`max(2.2 * font, 14) - 2`, which over `font ∈ [9, 15]` is 6.4–10.4 against
+17.8–31, a margin of about 2.7×. Comfortable — but that margin is an accident of
+two unrelated formulas, and any edit to `Layout::row` or `Layout::small` can
+close it silently, with no test and no comment to object.
+
+The damning detail is that the dot is **inconsistent with its own neighbours two
+lines away**: the count and the name in the same loop body both go through
+`centre_line(rect, …)`, which refuses when the row is too short. The dot is the
+one thing in that row that cannot refuse. That is shape 28.
+
+> **Shape 28 — an unrelated-derivation bound is not a bound, it is a coincidence
+> with tenure.** A site whose safety rests on an arithmetic relationship between
+> two `Layout` fields that were never written to have one is not bounded; it is
+> unfalsified. Grade C differs from grade B in kind, not degree: grade B's proof
+> is a re-derivation of something the site enforces, grade C's is a re-derivation
+> of something nothing enforces. Prefer the fix that costs nothing — `.min(rect.h)`
+> on the fill, or `centre_line` when a refusal is the right answer — over the
+> comment that records the coincidence, and reach for the comment only when
+> shrinking would be wrong. The tell that found this one is **local
+> inconsistency**: when two sites in the same loop treat the same band
+> differently, the one that cannot refuse is the suspect.
+
+So the residual-match report is not noise to be tuned out of the script — it is
+the only thing that would have surfaced this, and it should be read on every
+run, not just when the number changes.
+
+**crossword is next**, at 7 sites (`apps/crossword/src/main.rs:1374, 1385, 1414,
+1444, 1474, 1625, 1662`). A read-ahead predicts two faults, one familiar and one
+new. The familiar one is sokoban's shape 9: `text_at` pushes `max_width: None`,
+so no run it draws is cut to anything. The new one is that **every centring in
+the file is computed against `font_size` rather than `line_height`** —
+`r.y + (row_h - l.font) / 2.0`, `cy - size / 2.0` — which none of the seven
+finished apps did. The renderer places a run by its top-left and the run then
+occupies a full line height, so a box centred on the font size is short by the
+face's leading (33% here) and every centred run in the app sits high by half of
+that. It is not a containment fault at ordinary sizes, which is presumably why
+it survived, but it is the same confusion between "how big the letters are" and
+"how much room the line takes" that shape 12 named, and it will *become* a
+containment fault in any band squeezed to near one line.
 
 ---
 

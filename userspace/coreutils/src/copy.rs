@@ -50,7 +50,7 @@ use crate::fsattr::{
     self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
     owner_of, permission_bits, times_of,
 };
-use crate::quote::{quoteaf_os, quotef_os};
+use crate::quote::{escape_os, quoteaf_os, quotef_os};
 use std::fs;
 use std::io;
 use std::io::Write;
@@ -663,10 +663,37 @@ pub fn chown_to_source<E: Write>(
         Ownership::Denied => Chowned::Disowned,
         Ownership::Failed(e) => {
             let why = strerror(&e);
+            // The *name* is quoted for two of the three kinds and bare for the
+            // third, and that is upstream's inconsistency rather than ours.
+            // `set_owner` writes `quoteaf (dst_name)` (`copy.c:960`); the
+            // symlink arm, which is a separate `lchownat` inline in
+            // `copy_internal`, writes `dst_name` with no quoting function at
+            // all (`copy.c:3186`). Reproduced rather than tidied, for the
+            // reason every other matched inconsistency in this crate is: a
+            // utility that differs from GNU only in the punctuation of a
+            // diagnostic is still one whose output a script cannot match on.
+            //
+            // Encoded on `made` because `made` is already the thing that tells
+            // the two apart — the same parameter that chose [`GroupRetry`]
+            // above, for the same underlying fact that a link's ownership is
+            // taken somewhere else in upstream's code.
+            //
+            // [`escape_os`] and not `Path::display`, which is the only rendering
+            // of a bare name this crate allows: `display` replaces every byte
+            // that is not valid UTF-8 with U+FFFD, so a link named in Latin-1
+            // would be *reported under a name that is not its own* — and the
+            // reader's obvious next move, pasting that name into a shell, would
+            // find nothing. `escape_os` is gnulib's `escape` style: identical to
+            // upstream's `%s` for every name that is text, and octal escapes
+            // rather than corruption for one that is not.
+            let name = if made == Made::Symlink {
+                escape_os(dst)
+            } else {
+                quoteaf_os(dst)
+            };
             let _ = writeln!(
                 run.err,
-                "{prog}: failed to preserve ownership for {}: {why}",
-                quoteaf_os(dst)
+                "{prog}: failed to preserve ownership for {name}: {why}"
             );
             fatal
         }

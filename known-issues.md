@@ -106373,6 +106373,46 @@ part that is easy to get wrong:
 > must be taught to skip whatever range the provenance record occupies —
 > otherwise the provenance itself reads as a use-after-free.
 
+### It stopped reproducing, which is not the same as being fixed (2026-09-01)
+
+The boot carrying both instruments (`3ac226bfa`) **did not reproduce it at
+all**. `syshealth` went to 24 passed / 0 failed, the `kshell` rung-21 panic
+disappeared, and the boot test passed. The `gen_loadavg` print shows the very
+slot that had been reported double-freed on the two preceding boots being used
+cleanly:
+
+```
+[fsconform] Running cross-backend FileMeta conformance...
+[loadavg-dbg] tasks ptr=0xffff80007e3a1900 len=1 cap=1 elem=176
+[loadavg-dbg] tasks ptr=0xffff80007e3a1800 len=1 cap=1 elem=176
+```
+
+Note `len=1 cap=1`: at that point in boot the scheduler holds one task, so
+`collect()` allocates once and never grows. **The "buffer freed by a growth
+`realloc`" explanation in the section above is therefore wrong** — there is no
+growth. The `Vec` is a single 176-byte element in a 256-byte class, allocated
+once and dropped once, and it still managed to be freed twice.
+
+That combination is what makes this serious rather than solved. A double-free
+of a `Vec` that is allocated exactly once, and that disappears when a serial
+write is inserted between the allocation and the drop, is not a defect in
+`gen_loadavg` — the function does not have enough moving parts to hold one. It
+points instead at the slot being handed to two owners in the first place, which
+the earlier "magic survives, so no allocation intervened" argument does **not**
+rule out: that argument constrains what happens *between* the two frees, and
+aliasing happens *before* both of them.
+
+Do not close this on the strength of a green boot. The next boot (`1d96d8b58`)
+removes the `gen_loadavg` print and keeps the heap-side trace, which splits the
+two variables:
+
+| Outcome | Reading |
+|---|---|
+| Double-free returns | The print was the perturbation; the trace now names the first freer, which is the open question. |
+| Stays away | The perturbation is on the allocator side — the per-free backtrace walk changes the timing of every free — and the bug is a race, not a `procfs` defect. |
+
 **Trigger for closing:** a boot whose `syshealth` "Heap safety" line reads
-`[PASS]` with `fs::conformance` running, and where `/proc/heapinfo` no longer
-disagrees with itself about its size.
+`[PASS]` with `fs::conformance` running **and with no diagnostic
+instrumentation compiled in**, and where `/proc/heapinfo` no longer disagrees
+with itself about its size. A green boot that still carries the free-trace does
+not count — the instrument is itself a suspect.

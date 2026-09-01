@@ -106241,3 +106241,86 @@ missing is a quiet boot, not an explanation.
 **Trigger for closing the number out:** the next `--bench` boot that is not
 contaminated. Nothing depends on it — the parent entry's conclusion never rested
 on the magnitude, only on the direction, and the direction is unchanged.
+
+## A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT
+
+**Found:** 2026-09-01, by `fs::conformance` on its first live boots.
+**Status:** OPEN. Currently the only thing keeping lane A's tree red.
+
+**In short:** reading two files under `/proc` — `version` and `loadavg` — each
+hands the same 256-byte block of memory back to the allocator twice. The
+allocator notices, refuses to reuse the block (so nothing is corrupted), and
+bumps a counter. That counter is global, so a *completely different* check
+three subsystems away — `syshealth`'s "Heap safety" line — then reports
+`2 violation(s)`, and `kshell::self_test` rung 21 panics the kernel on it. The
+panic names none of the above.
+
+### How it presents
+
+```
+[fsconform] Running cross-backend FileMeta conformance...
+[heap] DOUBLE-FREE detected! slot=0xffff80007e3a1900, class=256
+[fsconform] FAIL heap:/proc/version — the allocator's corruption counters moved …
+[heap] DOUBLE-FREE detected! slot=0xffff80007e3a1500, class=256
+[fsconform] FAIL heap:/proc/loadavg — …
+…
+       [FAIL] Heap safety: 2 violation(s)
+!!! KERNEL PANIC !!! kernel\src\kshell.rs:11139
+```
+
+Fully deterministic: **the same two slot addresses across separate boots**, and
+exactly two events over 496 inspected objects, so it is not allocation-volume
+dependent. The two slots are `0x400` apart — four class-256 slots — i.e. the
+same slab page.
+
+`/proc/heapinfo`'s "readdir and stat disagree about a regular file's size"
+failure is *collateral*, not a third bug: heapinfo's text reports these very
+counters, so the count going 0→2 between its `readdir` and its `stat` changes
+the text's length. It is expected to disappear with the fix, and if it does not
+it needs its own entry.
+
+### What has been ruled out (do not re-derive these)
+
+- **It is not a false positive from stale poison.** The theory was that a slot
+  recycled without re-poisoning keeps `POISON_MAGIC` at bytes 8..11, so a later
+  free misreads it. It cannot happen: every slab allocation goes through
+  `pcpu_slab_alloc` or `slab_alloc`, both of which call `poison_alloc`, which
+  fills the **whole** slot with `ALLOC_POISON` (`0xCD`) and destroys the magic.
+- **It is not the owner's own bytes colliding with the magic.** That needs bytes
+  8..11 to be `FE ED FA CE`; both payloads are ASCII text there.
+- **It is not `realloc`.** The allocator supplies no `realloc` override, so `Vec`
+  growth uses the default alloc/copy/dealloc, which frees the old block once.
+
+So it is a real double-free.
+
+### What makes it hard, and what was built for it
+
+Neither generator is at fault on inspection, and the two share no code:
+`gen_version` is a `format!` of three `const &str`s plus `into_bytes`;
+`gen_loadavg` calls `sched::task_list()` and formats. The 61-byte version string
+does not obviously want a 256-byte class either, which suggests the doubly-freed
+block may not be the text at all.
+
+Two pieces of permanent diagnostic machinery came out of this and should be kept
+regardless of the fix:
+
+- `fs::conformance`'s `HeapWatch` samples the corruption counters per inspected
+  path, which is what turned "somewhere in ~200 `/proc` generators" into two
+  named files.
+- `poison_free` now walks the frame chain on detection (`866ffbcb2`), so the
+  report names the freeing call site. Resolve the printed addresses with
+  `python scripts/symbolize.py --log build/serial-test.txt`.
+
+### If the frames are not enough
+
+Escalate to recording the **first** free's return addresses in the slot's own
+poison payload (bytes 12..44, which currently hold `FREE_POISON`), and print them
+on detection. "Who freed it the first time?" is the harder and more useful half,
+and the slot is already being written at exactly that moment. Note that
+`check_poison` verifies the `FREE_POISON` fill on allocation, so it must be
+taught to skip whatever range the provenance record occupies — otherwise the
+provenance itself reads as a use-after-free.
+
+**Trigger for closing:** a boot whose `syshealth` "Heap safety" line reads
+`[PASS]` with `fs::conformance` running, and where `/proc/heapinfo` no longer
+disagrees with itself about its size.

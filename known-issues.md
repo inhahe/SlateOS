@@ -103833,7 +103833,7 @@ our own code would have shown it; only running GNU did.
 
 - **`>2` operands with a non-directory last operand.** GNU calls
   `target_directory_operand`, and on failure with `2 < n_files` reports
-  `mv: target 'c': Not a directory` (`mv.c:490`). We reported a per-source
+  `mv: target 'c': Not a directory` (`mv.c:495`). We reported a per-source
   error. Note the synthesised error is built from an `ErrorKind`, **not** a
   hard-coded `20`: `errmsg::strerror` picks the POSIX text by kind precisely
   because a raw OS code is a Win32 code on the dev host and an errno on the
@@ -104801,10 +104801,10 @@ the directory arm (`:1594`) refuses outright and is its own entry.
 `set_authorized_context`, then `copy_acl`/`set_acl`, then `utimens` from the
 source's `st_atim`/`st_mtim` — in that order, and the order matters, since
 `chown` clears set-user-ID and so must precede the mode. For `mv` the flags that
-select all of this are on unconditionally: `cp_option_init` (`mv.c:100`) sets
-`preserve_timestamps`, `preserve_ownership`, `preserve_mode` and
-`preserve_links`, because a move is supposed to be indistinguishable from a
-rename.
+select all of this are on unconditionally: `cp_option_init` (`mv.c:119`) sets
+`preserve_timestamps` (137), `preserve_ownership` (134), `preserve_mode` (136)
+and `preserve_links` (135), because a move is supposed to be indistinguishable
+from a rename.
 
 **The proper fix.** Replace the two lines with an explicit sequence in the same
 order upstream uses: create the destination, copy the bytes, `fchown` (ignoring
@@ -104892,8 +104892,8 @@ case believe it was already dealt with.
 **In short:** `mv /other/fs/a /other/fs/b dir/` moves two names for one inode
 and produces two independent files. A rename would have kept them one file, and
 `mv` promises to be indistinguishable from a rename: `cp_option_init`
-(`mv.c:129`) sets `preserve_links` unconditionally, with no option to turn it
-off. The bytes are all correct and nothing is lost, so this is invisible until
+(`mv.c:119`) sets `preserve_links` (`mv.c:135`) unconditionally, with no option
+to turn it off. The bytes are all correct and nothing is lost, so this is invisible until
 someone writes to one of the names and the other does not change — or until a
 directory that fitted on the disk because of its links no longer does.
 

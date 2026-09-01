@@ -356,7 +356,7 @@ struct MvFlags {
     /// Whether descriptor 0 is a terminal, sampled once at startup rather than
     /// per operand.
     ///
-    /// GNU's `x.stdin_tty`, set from `isatty (STDIN_FILENO)` in `mv.c:436` and
+    /// GNU's `x.stdin_tty`, set from `isatty (STDIN_FILENO)` in `mv.c:152` and
     /// read only by [`abandon_move`]. Sampled once because upstream samples it
     /// once, and because a `mv` whose stdin is closed part-way through a long
     /// move should not start behaving differently half-way down its operand
@@ -365,7 +365,7 @@ struct MvFlags {
 }
 
 /// How the command line named its destination — GNU's `target_directory` and
-/// `no_target_directory` (`mv.c:325`).
+/// `no_target_directory` (`mv.c:320-321`).
 ///
 /// Two independent fields rather than one three-state enum, because **both can
 /// be given at once** and that combination is a diagnostic of its own rather
@@ -467,7 +467,7 @@ fn run_main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(Request::Run(mut flags, dest, paths)) => {
-            // GNU's `mv.c:436`. Sampled here rather than inside the check that
+            // GNU's `mv.c:152`. Sampled here rather than inside the check that
             // reads it, so that the answer is the one the process started with.
             flags.stdin_tty = stdfd::is_tty(0);
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
@@ -651,7 +651,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
                 make_backups = true;
                 backup_suffix = Some(given);
             }
-            // `mv.c:376`. One arm for both spellings because upstream has one:
+            // `mv.c:375`. One arm for both spellings because upstream has one:
             // `u` carries no colon in [`SHORT_OPTIONS`] and `--update` is
             // `Takes::Optional`, so a `None` here is either a bare `-u` or a
             // bare `--update`, and GNU treats those identically.
@@ -770,7 +770,7 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     }
 
     // The type is asked for only when an option asked for backups; the suffix
-    // is settled unconditionally, exactly as upstream does it (`mv.c:517`).
+    // is settled unconditionally, exactly as upstream does it (`mv.c:519-523`).
     // That asymmetry is load-bearing in one direction only: `$VERSION_CONTROL`
     // alone must never enable backups, while `$SIMPLE_BACKUP_SUFFIX` alone is
     // harmless because nothing reads the suffix unless backups are on.
@@ -1185,7 +1185,7 @@ fn move_into_directory<O: Write, E: Write>(
     dir: &Path,
     sources: &[OsString],
 ) -> bool {
-    // The set is built only when it can matter — GNU's comment at `mv.c:526`:
+    // The set is built only when it can matter — GNU's comment at `mv.c:529`:
     // "the problem it is used to detect can arise only if there are two or more
     // files to move."
     let mut seen: Option<DestInfo> = (sources.len() >= 2).then(DestInfo::default);
@@ -1335,8 +1335,9 @@ fn move_one<O: Write, E: Write>(
     // *this inode* somewhere? If it has, the second name for it becomes a hard
     // link to where the first one landed rather than a second file, because a
     // rename would have kept the two names together and `mv` promises to be
-    // indistinguishable from a rename — `cp_option_init` (`mv.c:129`) sets
-    // `preserve_links` unconditionally, with no option to turn it off.
+    // indistinguishable from a rename — `cp_option_init` (`mv.c:119`) sets
+    // `preserve_links` (`mv.c:135`) unconditionally, with no option to turn it
+    // off.
     //
     // # Why it is *here*, and not down in the cross-device fallback
     //
@@ -2079,7 +2080,7 @@ fn make_backup<O: Write, E: Write>(
 /// ```
 ///
 /// `mv` sets both `preserve_timestamps` (`mv.c:137`) and `move_mode`
-/// (`mv.c:119`) unconditionally, so for this program the whole expression
+/// (`mv.c:131`) unconditionally, so for this program the whole expression
 /// reduces to `dst_dev != src_dev` — the move is going to be a copy rather than
 /// a rename. That is the only case in which the destination's timestamp is a
 /// *rounded* version of the source's rather than the same bytes, and rounding is
@@ -2442,9 +2443,10 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 /// machinery below that point is a test of a constant for this caller.
 ///
 /// **A move is meant to be indistinguishable from a rename**, and that is not a
-/// figure of speech: `cp_option_init` (`mv.c:129`) turns on `preserve_mode`,
-/// `preserve_timestamps`, `preserve_ownership`, `preserve_links` and
-/// `preserve_xattr` unconditionally, with no option to turn any of them off.
+/// figure of speech: `cp_option_init` (`mv.c:119`) turns on `preserve_mode`
+/// (136), `preserve_timestamps` (137), `preserve_ownership` (134),
+/// `preserve_links` (135) and `preserve_xattr` (145) unconditionally, with no
+/// option to turn any of them off.
 /// Everything a rename would have kept for free this function has to carry by
 /// hand, in an order that is not free either:
 ///
@@ -2460,7 +2462,7 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 /// (`copy.c:3245`).
 ///
 /// None of steps 2–4 is fatal. `mv` leaves `require_preserve` false
-/// (`mv.c:142`), so a preservation that fails is *reported* on `err` and the
+/// (`mv.c:143`), so a preservation that fails is *reported* on `err` and the
 /// move still counts as done — which is the right answer for the overwhelmingly
 /// common one, an ordinary user who may not give the copy away.
 ///
@@ -2827,7 +2829,7 @@ const SET_ID_AND_STICKY: u32 = 0o7000;
 /// A separate function so that the "and does not fail" half is stated once: the
 /// three call sites in [`preserve_onto_file`] and the two in
 /// [`preserve_onto_link`] all return `()`, and `mv` leaves `require_preserve`
-/// false (`mv.c:142`), so there is no arm anywhere that turns one of these into
+/// false (`mv.c:143`), so there is no arm anywhere that turns one of these into
 /// a non-zero exit.
 fn preserve_failed<E: Write>(err: &mut E, what: &str, name: String, e: &io::Error) {
     let why = strerror(e);

@@ -686,6 +686,47 @@ pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 /// once per directory: restoring mtime is the last thing `cp -p` and every
 /// archive extractor do to each file.
 pub const SYS_FS_UTIMENSAT_PINNED: u64 = 669;
+/// `(src dirfd, src name ptr, dst dirfd, dst name ptr, packed lengths, flags)
+/// -> 0`, where `packed lengths` is `(src name len << 32) | dst name len`.
+///
+/// **The argument order is not 668's.** [`SYS_FS_LINKAT_PINNED`] interleaves
+/// `(handle, ptr, len, handle, ptr, len)`; this one puts both handles and both
+/// pointers first and packs the two lengths into the fifth register, because it
+/// needs the sixth for flags. Copying 668's call site and changing the number
+/// passes the destination handle where the source length belongs — which is why
+/// the packing has a named function rather than being written out at the call
+/// site.
+///
+/// `flags` is the same bit space [`SYS_FS_RENAME`] takes — `0` replaces, `1` is
+/// `RENAME_NOREPLACE`, `2` is `RENAME_EXCHANGE`, anything else is
+/// `InvalidArgument` — so one flags word means one thing on both routes and
+/// libc forwards it whole. 668 spent its sixth register on a name length and
+/// dropped its flag instead, which cost nothing there because 668's only flag
+/// was `AT_SYMLINK_FOLLOW`, a request to leave the pinned directory. Neither of
+/// these two could be synthesised by a caller: "stat, then rename" reopens
+/// exactly the race `RENAME_NOREPLACE` closes, and three renames through a
+/// temporary name are not an exchange.
+///
+/// Both names must be exactly one component, the source as much as the
+/// destination. The source side matters more here than in the rest of the
+/// family: an uncontained source name would be a way to *unlink* something
+/// outside the pinned directory, where an uncontained destination merely
+/// creates. The two handles may be the same, and `mv a b` within one directory
+/// does not deadlock.
+///
+/// There is no `follow` argument, and that is not a register shortage: rename
+/// operates on names, never on what a final component resolves to, so there is
+/// no variant to select.
+///
+/// A cross-mount rename is `CrossDevice`, where the path-based
+/// [`SYS_FS_RENAME`] copies and then deletes instead. A pin cannot span a copy —
+/// the copy is a *sequence* of independent operations, each taking and
+/// releasing its own lock, so no verification covers the whole of it, and
+/// refusing is visible where a lapsed guarantee is not. `crate::file::renameat`
+/// therefore declines the fast path on that answer rather than forwarding it,
+/// so that which route ran cannot change what a cross-mount rename does; see
+/// `design-decisions.md` §742, and §666 for the kernel's side of it.
+pub const SYS_FS_RENAMEAT_PINNED: u64 = 670;
 
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;

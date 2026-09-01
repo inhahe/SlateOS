@@ -104865,3 +104865,63 @@ including the batching boundary, the skip cases, and that `d_ino` is the
 filesystem's inode rather than the entry's index. The syscall itself still cannot
 be exercised on the host (it answers `ENOSYS`), which is exactly why the decoding
 was factored out of it.
+
+---
+
+## B-RENAME-CROSS-MOUNT-COPIES-INSTEAD-OF-ANSWERING-EXDEV — OPEN 2026-09-01
+
+**In short:** `rename(2)` on this system never returns `EXDEV`. Asked to rename
+across a mount boundary, the kernel's `SYS_FS_RENAME` copies the file and deletes
+the original, and reports success. Every other Unix refuses, and POSIX says it
+must; `mv`'s entire cross-device fallback — the one made attribute-preserving on
+2026-09-01 — is therefore unreachable on the target, and reachable only on the
+Linux and Windows hosts the unit tests run on.
+
+**Why it matters more than a spec deviation.** The kernel's copy is not `mv`'s
+copy, and the differences are user-visible:
+
+- **It is not `mv`'s.** `-v` prints `renamed 'a' -> 'b'` for something that was
+  copied; `--backup` has already been resolved on the assumption that a rename
+  either replaces or refuses; a partially-copied file left by a failure is not
+  cleaned up by the code that knows it should be.
+- **It moves directories silently.** `mv` refuses a cross-device directory move
+  (`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`) because it has no recursive
+  walk yet. If the kernel's rename copies a directory tree instead, the refusal
+  never fires and the tree is copied by machinery `mv` does not control.
+- **It cannot be pinned.** `SYS_FS_RENAMEAT_PINNED` (670) refuses a cross-mount
+  rename precisely because a pin cannot span a copy — a `stat`, a `copy`, a
+  `set_permissions`, a `set_owner` and a `remove`, each taking and releasing its
+  own lock (lane A's `design-decisions.md` §666). So the operation that most
+  wants the containment guarantee is the one shape that cannot have it, and the
+  reason is that the kernel is doing something other than a rename.
+
+**Where.** Kernel side: `sys_fs_rename`'s cross-mount arm — lane A's, not
+writable from here. libc side: `posix/src/file.rs`, `rename_ex` forwards to
+`SYS_FS_RENAME` and reports whatever it says, and `try_pinned_renameat` deletes
+670's `CrossDevice` answer so the two routes agree (`design-decisions.md` §742).
+
+**The proper fix.** A request to lane A to make `SYS_FS_RENAME` answer
+`CrossDevice` for a cross-mount rename, in one commit with 670 already doing so,
+after which:
+
+1. `try_pinned_renameat`'s three-line `CrossDevice` fallback is deleted and the
+   refusal is forwarded — both routes then agree on the POSIX answer.
+2. `mv`'s `copy_across_devices` becomes live on the target for the first time,
+   which is where the ordering matters: it must not be switched on before
+   `B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS` and
+   `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` are closed, or a
+   cross-mount `mv -r`-shaped move that silently worked would start failing.
+3. Anything else in the tree that renames across mounts and relied on the copy
+   has to grow its own fallback. Nothing does today.
+
+**Ordering, therefore.** This is not a change to make first. The two `mv` gaps
+above are the prerequisites, because closing this one converts a silent,
+kernel-performed copy into `mv`'s copy, and `mv`'s copy currently refuses two
+shapes the kernel's accepts. Doing them in the other order is a regression that
+looks like a fix.
+
+**How it would be caught.** `scripts/mv-diff.sh` runs against a real Linux and
+already has a second filesystem (`@FAR@`, `$XDG_RUNTIME_DIR`), so it measures
+GNU's behaviour correctly and cannot see this at all — the divergence is in the
+SlateOS kernel, which the harness does not run. It needs a `vfs_selftest` case,
+or a target-side test that renames between two mounts and asserts `EXDEV`.

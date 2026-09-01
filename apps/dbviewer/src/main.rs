@@ -23,24 +23,26 @@
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
 // list documented in the root Cargo.toml (keeps the discipline centralised).
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::return_self_not_must_use)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::unreadable_literal)]
-#![allow(clippy::wildcard_imports)]
+//
+// Twelve crate-level `#![allow]`s stood here and were removed: not one of them
+// silences anything the crate still trips. They were added when the drawing
+// pass was a wall of hand-computed offsets -- `too_many_lines`,
+// `similar_names`, `cast_precision_loss`, `wildcard_imports` -- and kept
+// afterwards out of habit, so the crate carried a blanket permission for faults
+// it had stopped committing, and would have carried it silently through the
+// next one.
 
 use guitk::Color;
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::frame::{Frame, Rect};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
+
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -67,8 +69,18 @@ const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 // Layout constants
 // ============================================================================
 
+/// The size the window opens at, and the size the probe draws at.
+const WINDOW_WIDTH: f32 = 1200.0;
+/// The height the window opens at.
+const WINDOW_HEIGHT: f32 = 800.0;
+
 const TOOLBAR_HEIGHT: f32 = 36.0;
 const STATUS_BAR_HEIGHT: f32 = 22.0;
+/// The widest the object-tree sidebar is ever drawn.
+///
+/// This used to be the *only* width the sidebar was drawn at, subtracted from
+/// the window whatever the window measured, so a 200-point window handed the
+/// data grid a width of -20.
 const SIDEBAR_WIDTH: f32 = 220.0;
 const TAB_HEIGHT: f32 = 30.0;
 const ROW_HEIGHT: f32 = 26.0;
@@ -78,6 +90,442 @@ const CORNER_RADIUS: f32 = 4.0;
 const CELL_PADDING: f32 = 8.0;
 const PAGE_SIZE: usize = 50;
 const DEFAULT_COL_WIDTH: f32 = 140.0;
+
+/// The narrowest a grid column is squeezed to before columns start being left
+/// out of the picture altogether.
+///
+/// A column narrower than this is an ellipsis with a header over it. The grid
+/// does not scroll sideways, so the choice is between columns nobody can read
+/// and columns nobody can see; the pagination bar says how many were left out,
+/// which is the one thing the old pass could not do -- it drew all of them at a
+/// width of its own choosing and let the clip swallow whatever ran off the end,
+/// leaving a table that looked complete and was not.
+const MIN_COL_WIDTH: f32 = 60.0;
+
+/// Height of the strip of tabs that names the four bottom panels.
+const PANEL_TAB_HEIGHT: f32 = 26.0;
+/// Height of the bar under the grid holding the page count and the arrows.
+const PAGE_BAR_HEIGHT: f32 = 22.0;
+/// Height of one row of the object tree, and of one filter chip under it.
+const TREE_ROW_HEIGHT: f32 = 22.0;
+/// Height of one line of the query history under the SQL editor.
+const HISTORY_ROW_HEIGHT: f32 = 18.0;
+
+/// The narrowest object-tree sidebar worth drawing.
+///
+/// Below this the tree is an ellipsis where a table name should be, and it has
+/// been paid for out of the grid's width.
+const MIN_SIDEBAR_WIDTH: f32 = 120.0;
+
+/// The narrowest data grid worth having a sidebar beside.
+///
+/// A window this narrow is showing a database and no data, which is not a
+/// database browser. The sidebar goes first.
+const MIN_GRID_WIDTH: f32 = 260.0;
+
+/// The shortest data grid worth taking a bottom panel out of: a header row, one
+/// row of data, and the pagination bar that says which page it is on.
+const MIN_GRID_HEIGHT: f32 = HEADER_HEIGHT + ROW_HEIGHT + PAGE_BAR_HEIGHT;
+
+// ============================================================================
+// Geometry
+// ============================================================================
+
+/// Every rectangle the picture is built from, solved from the live window size
+/// on every frame.
+///
+/// Nothing here is a constant offset into a window nobody measured. The old
+/// drawing pass wrote `SIDEBAR_WIDTH` and bare subtractions straight into the
+/// commands -- `width - SIDEBAR_WIDTH` for the grid, `height - content_y -
+/// STATUS_BAR_HEIGHT` for the content, `content_height - EDITOR_HEIGHT` for the
+/// grid's height -- none of which was ever compared against zero. At 200 points
+/// across the grid was 20 points *wide in the negative*, and at 150 points tall
+/// it was 128 points tall in the negative, so the whole picture was drawn
+/// upwards out of the window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// The whole window.
+    pub window: Rect,
+    /// The toolbar across the top: Execute, New Tab, the exports, Import.
+    pub toolbar: Rect,
+    /// The strip of database-connection tabs under the toolbar.
+    pub tabs: Rect,
+    /// The object-tree sidebar. Zero-width when the window is too narrow.
+    pub sidebar: Rect,
+    /// The data grid, including its header row and its pagination bar.
+    pub grid: Rect,
+    /// The bottom panel. Zero-height when the window is too short for it.
+    pub panel: Rect,
+    /// The strip along the bottom naming the database and the last action.
+    pub status: Rect,
+}
+
+impl Layout {
+    /// Solve the whole picture for a window of `w` by `h`.
+    #[must_use]
+    pub fn solve(w: f32, h: f32) -> Self {
+        // A size that is not a number is not a size. NaN survives every `max`,
+        // `min` and `clamp` below and comes out as a rectangle that contains no
+        // point and clips everything away -- a blank window that answers no
+        // press, with nothing in the picture to say why.
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        let h = if h.is_finite() { h.max(0.0) } else { 0.0 };
+        let window = Rect::new(0.0, 0.0, w, h);
+
+        // The status strip is given room first and everything above stops at
+        // its top edge, so nothing can be painted under it and then answer a
+        // press through it. Written the other way round -- the status pushed
+        // down to clear a full-height toolbar -- a window thirty points tall
+        // put the status bar at y=36 and drew it below the window's own bottom.
+        let status_h = STATUS_BAR_HEIGHT.min(h);
+        let status = Rect::new(0.0, (h - status_h).max(0.0), w, status_h);
+        let bottom = status.y;
+
+        let toolbar_h = TOOLBAR_HEIGHT.min(bottom);
+        let toolbar = Rect::new(0.0, 0.0, w, toolbar_h);
+
+        // The row of database tabs is given up before the grid is: a window
+        // showing which databases are open and none of their contents is not a
+        // database browser.
+        let tabs_h = if toolbar_h + TAB_HEIGHT + MIN_GRID_HEIGHT <= bottom {
+            TAB_HEIGHT
+        } else {
+            0.0
+        };
+        let tabs = Rect::new(0.0, toolbar_h, w, tabs_h);
+
+        let content_y = toolbar_h + tabs_h;
+        let content_h = (bottom - content_y).max(0.0);
+
+        // The sidebar takes at most two fifths of the window and never more
+        // than `SIDEBAR_WIDTH`, and goes altogether when what would be left is
+        // too narrow to read a table in. The grid is the program.
+        let wanted_side = (w * 0.4).min(SIDEBAR_WIDTH);
+        let side_w = if wanted_side >= MIN_SIDEBAR_WIDTH && w - wanted_side >= MIN_GRID_WIDTH {
+            wanted_side
+        } else {
+            0.0
+        };
+        let sidebar = Rect::new(0.0, content_y, side_w, content_h);
+
+        let main_x = side_w;
+        let main_w = (w - side_w).max(0.0);
+
+        // The bottom panel is taken only if the grid still keeps a header row,
+        // one row of data and its pagination bar afterwards.
+        let panel_h = if content_h - EDITOR_HEIGHT >= MIN_GRID_HEIGHT {
+            EDITOR_HEIGHT
+        } else {
+            0.0
+        };
+        let grid_h = (content_h - panel_h).max(0.0);
+        let grid = Rect::new(main_x, content_y, main_w, grid_h);
+        let panel = Rect::new(main_x, content_y + grid_h, main_w, panel_h);
+
+        Self {
+            window,
+            toolbar,
+            tabs,
+            sidebar,
+            grid,
+            panel,
+            status,
+        }
+    }
+
+    /// The grid's column-header row.
+    #[must_use]
+    fn grid_header(&self) -> Rect {
+        Rect::new(
+            self.grid.x,
+            self.grid.y,
+            self.grid.w,
+            HEADER_HEIGHT.min(self.grid.h),
+        )
+    }
+
+    /// The bar along the bottom of the grid: the page count and the arrows.
+    ///
+    /// It is measured from what is left under the header rather than taken off
+    /// the bottom unconditionally, so in a grid shorter than the two of them
+    /// together the bar cannot end up above its own header.
+    #[must_use]
+    fn page_bar(&self) -> Rect {
+        let h = PAGE_BAR_HEIGHT.min((self.grid.h - HEADER_HEIGHT).max(0.0));
+        Rect::new(self.grid.x, self.grid.bottom() - h, self.grid.w, h)
+    }
+
+    /// The rows of the grid, between the header row and the pagination bar.
+    #[must_use]
+    fn grid_rows(&self) -> Rect {
+        let top = self.grid_header().bottom();
+        let bottom = self.page_bar().y;
+        Rect::new(self.grid.x, top, self.grid.w, (bottom - top).max(0.0))
+    }
+
+    /// The strip of tabs naming the four bottom panels.
+    #[must_use]
+    fn panel_tabs(&self) -> Rect {
+        Rect::new(
+            self.panel.x,
+            self.panel.y,
+            self.panel.w,
+            PANEL_TAB_HEIGHT.min(self.panel.h),
+        )
+    }
+
+    /// What is left of the bottom panel under its tabs.
+    #[must_use]
+    fn panel_body(&self) -> Rect {
+        let top = self.panel_tabs().bottom();
+        Rect::new(
+            self.panel.x,
+            top,
+            self.panel.w,
+            (self.panel.bottom() - top).max(0.0),
+        )
+    }
+}
+
+// ============================================================================
+// What a press can land on
+// ============================================================================
+
+/// Everything in the window a press can mean.
+///
+/// Every one of these was a painted rectangle before the window existed. The
+/// list is the answer to "what can this program be asked to do?", and writing
+/// it down is what turned up the actions that had no control at all: nothing
+/// deleted a row, nothing removed a filter, nothing chose an export format,
+/// and nothing but `DbTab::new` ever selected a table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Target {
+    /// Run what the SQL editor holds.
+    Execute,
+    /// Open another database connection.
+    NewTab,
+    /// Write the selected table out in one of the three formats.
+    Export(ExportFormat),
+    /// Read the SQL editor's text as CSV into a new table.
+    Import,
+    /// Make the `i`th database tab the active one.
+    SelectTab(usize),
+    /// Close the `i`th database tab.
+    CloseTab(usize),
+    /// The `+` at the end of the tab strip.
+    AddTab,
+    /// The `i`th row of the object tree.
+    TreeNode(usize),
+    /// Show or hide the filter builder in the sidebar.
+    ToggleFilterBuilder,
+    /// Step the filter builder's column to the next one.
+    FilterColumn,
+    /// Step the filter builder's comparison to the next one.
+    FilterOp,
+    /// Give the keyboard to the filter builder's value box.
+    FilterValue,
+    /// Add the filter the builder is showing.
+    AddFilter,
+    /// Drop the `i`th filter in force.
+    RemoveFilter(usize),
+    /// Sort by the `i`th column, or reverse a sort already on it.
+    SortColumn(usize),
+    /// Delete the row at index `i` *of the table*, not of the page.
+    DeleteRow(usize),
+    /// The pagination bar's left arrow.
+    PrevPage,
+    /// The pagination bar's right arrow.
+    NextPage,
+    /// One of the four tabs naming the bottom panels.
+    ShowPanel(BottomPanel),
+    /// Give the keyboard to the SQL editor.
+    SqlEditor,
+    /// Put the `i`th query in the history back in the editor.
+    HistoryEntry(usize),
+    /// Star or unstar the `i`th query in the history. Its own box rather than a
+    /// second meaning for `HistoryEntry`: `toggle_favorite` existed, drew a
+    /// `[*]`, and had no caller outside the tests, and a row cannot mean two
+    /// things at once.
+    FavoriteEntry(usize),
+}
+
+/// The toolbar's buttons, in the order they are drawn.
+///
+/// A list rather than six inline pushes, because the toolbar used to start at a
+/// hard-coded `x = 130` and walk right without ever asking how wide the window
+/// was: at 400 points across, Import was drawn past the right-hand edge, and a
+/// button drawn off the edge that answers a press is worse than one that is not
+/// drawn at all.
+const TOOLBAR_BUTTONS: &[(&str, Target, Color)] = &[
+    ("Execute", Target::Execute, GREEN),
+    ("New Tab", Target::NewTab, BLUE),
+    ("Export CSV", Target::Export(ExportFormat::Csv), PEACH),
+    ("Export JSON", Target::Export(ExportFormat::Json), PEACH),
+    (
+        "Export SQL",
+        Target::Export(ExportFormat::SqlInserts),
+        PEACH,
+    ),
+    ("Import", Target::Import, TEAL),
+    // `show_filter_builder` was a field with no switch: it was set in `new` and
+    // read by the drawing pass, and nothing between the two could change it.
+    ("Filters", Target::ToggleFilterBuilder, YELLOW),
+];
+
+/// What the keyboard is reaching.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// Nothing; typing does nothing.
+    None,
+    /// The SQL editor.
+    Editor,
+    /// The filter builder's value box.
+    FilterValue,
+}
+
+// ============================================================================
+// Drawing helpers
+// ============================================================================
+
+/// A filled rectangle.
+fn fill(r: Rect, color: Color, radius: f32) -> RenderCommand {
+    RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    }
+}
+
+/// An outlined rectangle.
+fn stroke(r: Rect, color: Color, radius: f32) -> RenderCommand {
+    RenderCommand::StrokeRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        line_width: 1.0,
+        corner_radii: CornerRadii::all(radius),
+    }
+}
+
+/// A horizontal rule across `r` at `y`.
+fn hline(r: Rect, y: f32, color: Color) -> RenderCommand {
+    RenderCommand::Line {
+        x1: r.x,
+        y1: y,
+        x2: r.right(),
+        y2: y,
+        color,
+        width: 1.0,
+    }
+}
+
+/// `r` shrunk by `pad` on every side, never below nothing.
+fn inset(r: Rect, pad: f32) -> Rect {
+    Rect::new(
+        r.x + pad,
+        r.y + pad,
+        (r.w - pad * 2.0).max(0.0),
+        (r.h - pad * 2.0).max(0.0),
+    )
+}
+
+/// `r` shrunk by `pad` on the left and right only.
+fn inset_x(r: Rect, pad: f32) -> Rect {
+    Rect::new(r.x + pad, r.y, (r.w - pad * 2.0).max(0.0), r.h)
+}
+
+/// The box a run of text actually inks, given the box it was asked to sit in
+/// and the point size it was asked for.
+///
+/// A run taller than its box sticks out of *both* ends of it once it is
+/// centred, and no caller can prevent that from where it stands. The size is
+/// clamped rather than the box grown, because the box is the promise.
+fn ink_box(r: Rect, size: f32) -> Rect {
+    let size = size.min(r.h);
+    Rect::new(r.x, r.y + (r.h - size) / 2.0, r.w, size)
+}
+
+/// A run of text bounded by the box it is drawn in, on both axes.
+fn text_in(r: Rect, s: &str, size: f32, color: Color, weight: FontWeightHint) -> RenderCommand {
+    let ink = ink_box(r, size);
+    RenderCommand::Text {
+        x: ink.x,
+        y: ink.y,
+        text: s.to_owned(),
+        color,
+        font_size: ink.h,
+        font_weight: weight,
+        max_width: Some(ink.w),
+        overflow: TextOverflow::Ellipsis,
+    }
+}
+
+/// Draw a run of text in a box, unless the box has no room to read it in.
+///
+/// Every text run in this program goes through here. A box with no width bounds
+/// its run to nothing and a box with no height clamps its point size to
+/// nothing: either way the run is invisible, so emitting it puts a command in
+/// the frame that draws no pixel and reads, to anything inspecting the picture,
+/// as a label that is present.
+///
+/// The clip in force is asked for the same reason. A cursor that runs down a
+/// panel drawing row after row does not stop at the bottom of the panel by
+/// itself; the clip hides what it draws past that point, but hiding is not the
+/// same as not drawing, and a picture that claims to have drawn a column name
+/// three hundred points below the panel is a picture that cannot be asked what
+/// it is showing.
+fn put_text(
+    f: &mut Frame<Target>,
+    r: Rect,
+    s: &str,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+) {
+    let ink = ink_box(r, size);
+    if ink.is_empty() || s.is_empty() || !f.is_visible(ink) {
+        return;
+    }
+    f.push(text_in(r, s, size, color, weight));
+}
+
+/// The colour a cell of each type is drawn in.
+fn cell_color(cell: &CellValue) -> Color {
+    match cell {
+        CellValue::Null => OVERLAY0,
+        CellValue::Integer(_) => BLUE,
+        CellValue::Real(_) => PEACH,
+        CellValue::Text(_) => TEXT,
+        CellValue::Blob(_) => MAUVE,
+    }
+}
+
+/// The text a SQL token is drawn as, and the colour and weight it is drawn in.
+///
+/// The *text* is part of the answer, not just the colour: a string literal is
+/// tokenized without its quotes and drawn with them, so the caller cannot
+/// measure the token by looking at the token.
+fn token_ink(token: &SqlToken) -> (String, Color, FontWeightHint) {
+    match token {
+        SqlToken::Keyword(k) => (k.clone(), MAUVE, FontWeightHint::Bold),
+        SqlToken::Identifier(id) => (id.clone(), TEXT, FontWeightHint::Regular),
+        SqlToken::StringLiteral(s) => (format!("'{s}'"), GREEN, FontWeightHint::Regular),
+        SqlToken::NumberLiteral(n) => (n.clone(), PEACH, FontWeightHint::Regular),
+        SqlToken::Operator(op) => (op.clone(), RED, FontWeightHint::Regular),
+        SqlToken::Comma => (",".to_owned(), TEXT, FontWeightHint::Regular),
+        SqlToken::Semicolon => (";".to_owned(), TEXT, FontWeightHint::Regular),
+        SqlToken::LeftParen => ("(".to_owned(), YELLOW, FontWeightHint::Regular),
+        SqlToken::RightParen => (")".to_owned(), YELLOW, FontWeightHint::Regular),
+        SqlToken::Star => ("*".to_owned(), PEACH, FontWeightHint::Bold),
+        SqlToken::Dot => (".".to_owned(), TEXT, FontWeightHint::Regular),
+        SqlToken::Whitespace => (" ".to_owned(), TEXT, FontWeightHint::Regular),
+    }
+}
 
 /// Point size of the query-result message above the results table.
 const RESULT_MSG_FONT_SIZE: f32 = 11.0;
@@ -93,6 +541,30 @@ const RESULT_MSG_GAP: f32 = 4.0;
 /// describing. A message with no table under it — an error — is free to use
 /// the whole pane, because there is nothing else to show.
 const RESULT_MSG_MAX_LINES_WITH_TABLE: usize = 3;
+/// Rows of a query result the pane will draw. The pane does not scroll, so a
+/// result larger than this is reported by its message and read a page at a time
+/// from the data grid instead.
+const RESULT_ROWS_SHOWN: usize = 20;
+
+/// The widths the schema pane's three columns are drawn at when the pane is
+/// wide enough for all of them. Below that they are scaled down together, so
+/// the proportions hold and no column is pushed outside the pane.
+const SCHEMA_COL_WIDTHS: [f32; 3] = [180.0, 100.0, 200.0];
+/// Line-to-line spacing of a schema row.
+const SCHEMA_ROW_HEIGHT: f32 = 18.0;
+
+/// Width of a table box in the schema diagram, or the width of the diagram
+/// itself when that is narrower.
+const DIAGRAM_BOX_WIDTH: f32 = 160.0;
+/// Gap between two table boxes side by side.
+const DIAGRAM_BOX_SPACING: f32 = 40.0;
+/// Gap between two rows of table boxes.
+const DIAGRAM_ROW_GAP: f32 = 16.0;
+/// Height of the coloured band carrying a table box's name. A box shorter than
+/// this cannot say which table it is, so it is not drawn at all.
+const DIAGRAM_HEADER_HEIGHT: f32 = 20.0;
+/// Line-to-line spacing of the column list inside a table box.
+const DIAGRAM_COL_STEP: f32 = 14.0;
 
 // ============================================================================
 // SQL keywords for syntax highlighting
@@ -2761,7 +3233,7 @@ fn build_tree_nodes(db: &Database) -> Vec<TreeNode> {
 // ============================================================================
 
 /// Which bottom panel is active.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BottomPanel {
     SqlEditor,
     Results,
@@ -2787,6 +3259,14 @@ impl BottomPanel {
 // ============================================================================
 // Database tab (connection)
 // ============================================================================
+
+/// A row as the grid shows it: where it sits in the table it came from, and
+/// its cells. The index travels with the cells because filtering and sorting
+/// make the two orders differ.
+pub type SourceRow = (usize, Vec<CellValue>);
+
+/// What the grid draws: the column names, and the rows under them.
+pub type TableView = (Vec<String>, Vec<SourceRow>);
 
 /// A database connection tab.
 #[derive(Clone, Debug)]
@@ -2817,19 +3297,28 @@ impl DbTab {
         self.tree_nodes = build_tree_nodes(&self.db);
     }
 
-    /// Get the current table data with sorting and filtering applied.
-    fn current_table_data(&self) -> Option<(Vec<String>, Vec<Vec<CellValue>>)> {
+    /// The current table's columns, and its rows with sorting and filtering
+    /// applied, each paired with its index in the table it came from.
+    ///
+    /// The index is carried because a row on the screen is not the same row in
+    /// the table: filtering removes rows before it and sorting moves it. The
+    /// grid's delete button names a row by where it sits in the picture, and
+    /// `DbViewerApp::delete_row` removes one by where it sits in the table, so
+    /// without the index between them the third row on a sorted screen deletes
+    /// whatever happens to be third in insertion order -- silently, and with a
+    /// success message.
+    fn current_table_data(&self) -> Option<TableView> {
         let table_name = self.selected_table.as_ref()?;
         let table = self.db.find_table(table_name)?;
 
         let col_names: Vec<String> = table.columns.iter().map(|c| c.name.clone()).collect();
-        let mut rows: Vec<Vec<CellValue>> = table.rows.clone();
+        let mut rows: Vec<SourceRow> = table.rows.iter().cloned().enumerate().collect();
 
         // Apply filters
         for filter in &self.filters {
             if let Some(col) = table.columns.get(filter.column_idx) {
                 let filter_value = CellValue::parse_as(&filter.value_str, &col.data_type);
-                rows.retain(|row| {
+                rows.retain(|(_, row)| {
                     row.get(filter.column_idx)
                         .is_some_and(|cell| matches_filter(cell, &filter.op, &filter_value))
                 });
@@ -2840,7 +3329,7 @@ impl DbTab {
         if let Some(ref sort) = self.sort_state {
             let sort_idx = sort.column_idx;
             let dir = sort.direction;
-            rows.sort_by(|a, b| {
+            rows.sort_by(|(_, a), (_, b)| {
                 let va = a.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
                 let vb = b.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
                 match dir {
@@ -2871,6 +3360,24 @@ pub struct DbViewerApp {
     pub filter_column_idx: usize,
     pub filter_op_idx: usize,
     pub filter_value: String,
+    /// What the keyboard is reaching.
+    pub focus: Focus,
+    /// What the last press did, shown along the bottom.
+    ///
+    /// Several of this program's actions produce a string and nothing else --
+    /// an export, a failed import, a delete -- and with no window there was
+    /// nowhere for that string to go, so the functions that made it had no
+    /// caller. This is where it goes.
+    pub status: String,
+    /// The size the last frame was drawn at.
+    ///
+    /// A press is answered against the frame the user actually saw, so this is
+    /// remembered from `render` and from `Resize` both: a press can arrive
+    /// after a resize and before the next frame, and answering that one against
+    /// the old size hits whatever used to be under the pointer.
+    window_width: f32,
+    /// The height of the last frame drawn. See `window_width`.
+    window_height: f32,
 }
 
 impl Default for DbViewerApp {
@@ -2896,6 +3403,10 @@ impl DbViewerApp {
             filter_column_idx: 0,
             filter_op_idx: 0,
             filter_value: String::new(),
+            focus: Focus::Editor,
+            status: String::from("Ready"),
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
         }
     }
 
@@ -3085,248 +3596,237 @@ impl DbViewerApp {
     }
 
     // ========================================================================
-    // Rendering
+    // Drawing
     // ========================================================================
 
-    /// Render the entire application UI. Returns a flat list of render commands.
-    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
+    /// Build the whole picture for a window of `w` by `h`, and with it the hit
+    /// boxes that answer for what was drawn.
+    ///
+    /// One pass produces both, so a control cannot be drawn in one place and
+    /// answer in another, and a control the window was too small to draw is a
+    /// control that cannot be pressed.
+    #[must_use]
+    pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(l.window.w, l.window.h);
+        f.push(fill(l.window, BASE, 0.0));
 
-        // Background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Toolbar
-        self.render_toolbar(&mut cmds, width);
-
-        // Database tabs
-        let tabs_y = TOOLBAR_HEIGHT;
-        self.render_db_tabs(&mut cmds, 0.0, tabs_y, width);
-
-        let content_y = tabs_y + TAB_HEIGHT;
-        let content_height = height - content_y - STATUS_BAR_HEIGHT;
-
-        // Sidebar
-        self.render_sidebar(&mut cmds, 0.0, content_y, SIDEBAR_WIDTH, content_height);
-
-        // Main content area
-        let main_x = SIDEBAR_WIDTH;
-        let main_width = width - SIDEBAR_WIDTH;
-
-        // Data grid (top portion)
-        let grid_height = content_height - EDITOR_HEIGHT;
-        self.render_data_grid(&mut cmds, main_x, content_y, main_width, grid_height);
-
-        // Bottom panels
-        let bottom_y = content_y + grid_height;
-        self.render_bottom_panels(&mut cmds, main_x, bottom_y, main_width, EDITOR_HEIGHT);
-
-        // Status bar
-        self.render_status_bar(&mut cmds, 0.0, height - STATUS_BAR_HEIGHT, width);
-
-        cmds
+        self.draw_toolbar(&mut f, l.toolbar);
+        self.draw_db_tabs(&mut f, l.tabs);
+        self.draw_sidebar(&mut f, l.sidebar);
+        self.draw_data_grid(&mut f, &l);
+        self.draw_bottom_panels(&mut f, &l);
+        self.draw_status_bar(&mut f, l.status);
+        f
     }
 
-    fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>, width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width,
-            height: TOOLBAR_HEIGHT,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The picture as a flat command list, for a caller that wants the ink
+    /// without the hit boxes.
+    #[must_use]
+    pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+        self.frame(width, height).commands().to_vec()
+    }
 
-        // Title
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: 10.0,
-            text: "DB Viewer".to_owned(),
-            color: BLUE,
-            font_size: 14.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(100.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// The toolbar: the title, then the buttons, left to right.
+    fn draw_toolbar(&self, f: &mut Frame<Target>, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, MANTLE, 0.0));
 
-        // Toolbar buttons
-        let buttons = ["Execute", "New Tab", "Export", "Import"];
-        let colors = [GREEN, BLUE, PEACH, TEAL];
-        let mut bx = 130.0;
-        for (i, label) in buttons.iter().enumerate() {
-            let color = colors.get(i).copied().unwrap_or(SUBTEXT0);
-            let btn_w = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: 6.0,
-                width: btn_w,
-                height: 24.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 8.0,
-                y: 10.0,
-                text: (*label).to_owned(),
-                color,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(btn_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            bx += btn_w + 8.0;
+        // The cursor starts after the title and stops at the right-hand edge.
+        // The old pass started it at a hard-coded `x = 130` and never asked how
+        // wide the window was, so at 400 points across Import was painted past
+        // the edge -- and a button that is off the edge and still answers a
+        // press is worse than one that is not drawn at all.
+        let mut bx = area.x + 12.0;
+        let title_w = (area.right() - bx).clamp(0.0, 100.0);
+        put_text(
+            f,
+            Rect::new(bx, area.y, title_w, area.h),
+            "DB Viewer",
+            14.0,
+            BLUE,
+            FontWeightHint::Bold,
+        );
+        bx += title_w + 18.0;
+
+        let btn_h = (area.h - 12.0).max(0.0);
+        for (label, target, color) in TOOLBAR_BUTTONS {
+            let bw = text::padded_width(label, 8.0, 11.0, FontWeightHint::Regular);
+            let btn = Rect::new(bx, area.y + 6.0, bw, btn_h);
+            if btn.is_empty() || btn.right() > area.right() {
+                break;
+            }
+            f.push(fill(btn, SURFACE0, CORNER_RADIUS));
+            put_text(
+                f,
+                inset_x(btn, 8.0),
+                label,
+                11.0,
+                *color,
+                FontWeightHint::Regular,
+            );
+            f.hit(*target, btn);
+            bx = btn.right() + 8.0;
         }
     }
 
-    fn render_db_tabs(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: TAB_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The strip of database-connection tabs, each with its own close box.
+    fn draw_db_tabs(&self, f: &mut Frame<Target>, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, CRUST, 0.0));
 
-        let mut tx = x + 4.0;
+        let top_corners = CornerRadii {
+            top_left: CORNER_RADIUS,
+            top_right: CORNER_RADIUS,
+            bottom_left: 0.0,
+            bottom_right: 0.0,
+        };
+
+        let mut tx = area.x + 4.0;
         for (i, tab) in self.tabs.iter().enumerate() {
             let is_active = i == self.active_tab;
-            let tab_label = &tab.db.name;
-            let tw = text::padded_width_any_weight(tab_label, 16.0, 12.0);
+            let tw = text::padded_width_any_weight(&tab.db.name, 16.0, 12.0);
+            let cell = Rect::new(tx, area.y + 4.0, tw, (area.h - 4.0).max(0.0));
+            // A tab that does not fit is not drawn. The strip does not scroll,
+            // so the alternative is a row of tabs running out of the window,
+            // each of them clickable where nobody can see it.
+            if cell.is_empty() || cell.right() > area.right() {
+                break;
+            }
 
-            let bg = if is_active { BASE } else { CRUST };
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: y + 4.0,
-                width: tw,
-                height: TAB_HEIGHT - 4.0,
-                color: bg,
-                corner_radii: CornerRadii {
-                    top_left: CORNER_RADIUS,
-                    top_right: CORNER_RADIUS,
-                    bottom_left: 0.0,
-                    bottom_right: 0.0,
-                },
+            f.push(RenderCommand::FillRect {
+                x: cell.x,
+                y: cell.y,
+                width: cell.w,
+                height: cell.h,
+                color: if is_active { BASE } else { CRUST },
+                corner_radii: top_corners,
             });
 
-            cmds.push(RenderCommand::Text {
-                x: tx + 8.0,
-                y: y + 10.0,
-                text: tab_label.clone(),
-                color: if is_active { TEXT } else { SUBTEXT0 },
-                font_size: 11.0,
-                font_weight: if is_active {
+            let close = Rect::new((cell.right() - 16.0).max(cell.x), cell.y, 16.0, cell.h);
+            let label = Rect::new(
+                cell.x + 8.0,
+                cell.y,
+                (close.x - cell.x - 8.0).max(0.0),
+                cell.h,
+            );
+            put_text(
+                f,
+                label,
+                &tab.db.name,
+                11.0,
+                if is_active { TEXT } else { SUBTEXT0 },
+                if is_active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tw - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            );
+            put_text(f, close, "x", 10.0, OVERLAY0, FontWeightHint::Regular);
 
-            // Close button
-            cmds.push(RenderCommand::Text {
-                x: tx + tw - 16.0,
-                y: y + 10.0,
-                text: "x".to_owned(),
-                color: OVERLAY0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            // The tab first and its close box second: the topmost hit box wins,
+            // so recorded the other way round the tab would swallow the `x` and
+            // pressing it would merely select the tab it was trying to close.
+            f.hit(Target::SelectTab(i), cell);
+            f.hit(Target::CloseTab(i), close);
 
-            tx += tw + 2.0;
+            tx = cell.right() + 2.0;
         }
 
-        // New tab button
-        cmds.push(RenderCommand::FillRect {
-            x: tx,
-            y: y + 6.0,
-            width: 24.0,
-            height: 20.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::Text {
-            x: tx + 7.0,
-            y: y + 9.0,
-            text: "+".to_owned(),
-            color: SUBTEXT0,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(12.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        let plus = Rect::new(tx, area.y + 6.0, 24.0, (area.h - 12.0).max(0.0));
+        if !plus.is_empty() && plus.right() <= area.right() {
+            f.push(fill(plus, SURFACE0, CORNER_RADIUS));
+            put_text(f, plus, "+", 12.0, SUBTEXT0, FontWeightHint::Bold);
+            f.hit(Target::AddTab, plus);
+        }
     }
 
-    fn render_sidebar(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        // Sidebar border
-        cmds.push(RenderCommand::Line {
-            x1: x + width,
-            y1: y,
-            x2: x + width,
-            y2: y + height,
+    /// The object tree, with the filter builder reserved out of the bottom.
+    ///
+    /// Every row asks whether it is still inside the sidebar before it is
+    /// drawn. The old pass asked once, at the top of the tree loop
+    /// (`if ny > y + height { break; }`), which let a row straddling the bottom
+    /// edge be drawn whole, and asked not at all for the filter builder below
+    /// it -- so in a short window the filters in force were painted over the
+    /// bottom panel and the status bar.
+    ///
+    /// The builder is carved off the bottom *before* the tree is laid out
+    /// rather than drawn wherever the tree's cursor happened to stop. Written
+    /// the other way round, a database of a dozen tables pushed the whole
+    /// builder -- the only way to remove a filter -- off the end of the window,
+    /// and the filter it could not remove was still hiding rows.
+    fn draw_sidebar(&self, f: &mut Frame<Target>, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, MANTLE, 0.0));
+        f.push(RenderCommand::Line {
+            x1: area.right(),
+            y1: area.y,
+            x2: area.right(),
+            y2: area.bottom(),
             color: SURFACE0,
             width: 1.0,
         });
 
-        let tab = match self.active_db_tab() {
-            Some(t) => t,
-            None => return,
+        let Some(tab) = self.active_db_tab() else {
+            return;
         };
 
-        let mut ny = y + 8.0;
+        // What the builder would like, and what it is allowed: never more than
+        // three fifths of the sidebar, so the tree is never squeezed to nothing.
+        let builder_h = if self.show_filter_builder {
+            let wanted = 20.0 + 4.0 * TREE_ROW_HEIGHT + tab.filters.len() as f32 * 20.0;
+            wanted.min(area.h * 0.6)
+        } else {
+            0.0
+        };
+        let builder = Rect::new(
+            area.x,
+            (area.bottom() - builder_h).max(area.y),
+            area.w,
+            builder_h,
+        );
+        let tree_area = Rect::new(area.x, area.y, area.w, (builder.y - area.y).max(0.0));
 
-        // Database name
-        cmds.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: ny,
-            text: tab.db.name.clone(),
-            color: BLUE,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        ny += 22.0;
+        self.draw_object_tree(f, tree_area, tab);
+        if builder_h > 0.0 {
+            self.draw_filter_builder(f, builder, tab);
+        }
+    }
 
-        // Separator
-        cmds.push(RenderCommand::Line {
-            x1: x + 8.0,
-            y1: ny,
-            x2: x + width - 8.0,
-            y2: ny,
-            color: SURFACE0,
-            width: 1.0,
-        });
-        ny += 8.0;
+    /// The database's name and its tables, indexes, views and triggers.
+    fn draw_object_tree(&self, f: &mut Frame<Target>, area: Rect, tab: &DbTab) {
+        if area.is_empty() {
+            return;
+        }
+        let mut y = area.y + 8.0;
 
-        // Tree nodes
-        for node in &tab.tree_nodes {
-            if ny > y + height {
+        let name_row = Rect::new(area.x + 10.0, y, (area.w - 20.0).max(0.0), 18.0);
+        if name_row.bottom() > area.bottom() {
+            return;
+        }
+        put_text(f, name_row, &tab.db.name, 12.0, BLUE, FontWeightHint::Bold);
+        y += 22.0;
+
+        if y >= area.bottom() {
+            return;
+        }
+        f.push(hline(inset_x(area, 8.0), y, SURFACE0));
+        y += 8.0;
+
+        for (i, node) in tab.tree_nodes.iter().enumerate() {
+            let row = Rect::new(
+                area.x + 4.0,
+                y,
+                (area.w - 8.0).max(0.0),
+                TREE_ROW_HEIGHT - 2.0,
+            );
+            if row.is_empty() || row.bottom() > area.bottom() {
                 break;
             }
 
@@ -3335,7 +3835,6 @@ impl DbViewerApp {
                 TreeNodeKind::Table(name) => tab.selected_table.as_deref() == Some(name.as_str()),
                 _ => false,
             };
-
             let (icon, label, color) = match &node.kind {
                 TreeNodeKind::TablesHeader => ("T", "Tables".to_owned(), BLUE),
                 TreeNodeKind::Table(name) => (
@@ -3350,317 +3849,306 @@ impl DbViewerApp {
                 TreeNodeKind::TriggersHeader => ("!", "Triggers".to_owned(), RED),
                 TreeNodeKind::Trigger(name) => ("  ", name.clone(), SUBTEXT0),
             };
+            let is_header = node.depth == 0;
 
-            // Highlight selected
             if is_selected {
-                cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0,
-                    y: ny - 2.0,
-                    width: width - 8.0,
-                    height: 20.0,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(3.0),
-                });
+                f.push(fill(row, SURFACE0, 3.0));
             }
 
-            // Header styling
-            let is_header = matches!(
-                node.kind,
-                TreeNodeKind::TablesHeader
-                    | TreeNodeKind::IndexesHeader
-                    | TreeNodeKind::ViewsHeader
-                    | TreeNodeKind::TriggersHeader
-            );
-
-            let font_weight = if is_header {
+            let weight = if is_header {
                 FontWeightHint::Bold
             } else {
                 FontWeightHint::Regular
             };
-            let font_size = if is_header { 10.0 } else { 11.0 };
+            let size = if is_header { 10.0 } else { 11.0 };
+            let icon_box = Rect::new(row.x + 6.0 + indent, row.y, 16.0, row.h);
+            put_text(f, icon_box, icon, size, color, weight);
+            let label_box = Rect::new(
+                icon_box.right() + 6.0,
+                row.y,
+                (row.right() - icon_box.right() - 12.0).max(0.0),
+                row.h,
+            );
+            put_text(f, label_box, &label, size, color, weight);
 
-            // Icon
-            cmds.push(RenderCommand::Text {
-                x: x + 10.0 + indent,
-                y: ny,
-                text: icon.to_owned(),
-                color,
-                font_size,
-                font_weight,
-                max_width: Some(16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Label
-            cmds.push(RenderCommand::Text {
-                x: x + 26.0 + indent,
-                y: ny,
-                text: label,
-                color,
-                font_size,
-                font_weight,
-                max_width: Some(width - 36.0 - indent),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            ny += 22.0;
-        }
-
-        // Filter builder section
-        if self.show_filter_builder {
-            ny += 8.0;
-            cmds.push(RenderCommand::Line {
-                x1: x + 8.0,
-                y1: ny,
-                x2: x + width - 8.0,
-                y2: ny,
-                color: SURFACE0,
-                width: 1.0,
-            });
-            ny += 8.0;
-
-            cmds.push(RenderCommand::Text {
-                x: x + 10.0,
-                y: ny,
-                text: "FILTER BUILDER".to_owned(),
-                color: YELLOW,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(width - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            ny += 18.0;
-
-            // Show active filters
-            if let Some(t) = self.active_db_tab() {
-                for (fi, filter) in t.filters.iter().enumerate() {
-                    let col_name =
-                        t.db.find_table(t.selected_table.as_deref().unwrap_or(""))
-                            .and_then(|tbl| tbl.columns.get(filter.column_idx))
-                            .map_or("?", |c| c.name.as_str());
-
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 8.0,
-                        y: ny - 2.0,
-                        width: width - 16.0,
-                        height: 18.0,
-                        color: SURFACE0,
-                        corner_radii: CornerRadii::all(3.0),
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: x + 12.0,
-                        y: ny,
-                        text: format!("{col_name} {} {}", filter.op.label(), filter.value_str),
-                        color: TEAL,
-                        font_size: 10.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(width - 40.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    // Remove button
-                    cmds.push(RenderCommand::Text {
-                        x: x + width - 20.0,
-                        y: ny,
-                        text: "x".to_owned(),
-                        color: RED,
-                        font_size: 10.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(10.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    let _ = fi; // suppress unused
-                    ny += 20.0;
-                }
+            // A heading names a category, not an object; there is nothing for
+            // pressing one to mean, so it is not a control. The three kinds
+            // that are not tables answer by saying what they are -- before this
+            // the sidebar was the only place an index, view or trigger was
+            // mentioned at all, and it could not be asked about one.
+            if !is_header {
+                f.hit(Target::TreeNode(i), row);
             }
+
+            y += TREE_ROW_HEIGHT;
         }
     }
 
-    fn render_data_grid(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        // Grid background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The filter builder: a column, a comparison, a value, and the filters in
+    /// force with a way to remove each of them.
+    fn draw_filter_builder(&self, f: &mut Frame<Target>, area: Rect, tab: &DbTab) {
+        if area.is_empty() {
+            return;
+        }
+        f.push(hline(inset_x(area, 8.0), area.y, SURFACE0));
 
-        let tab = match self.active_db_tab() {
-            Some(t) => t,
-            None => return,
+        let cols: Vec<String> = tab
+            .selected_table
+            .as_deref()
+            .and_then(|n| tab.db.find_table(n))
+            .map(|t| t.columns.iter().map(|c| c.name.clone()).collect())
+            .unwrap_or_default();
+        let col_name = cols
+            .get(self.filter_column_idx)
+            .map_or("(no column)", String::as_str);
+        let op = FilterOp::all()
+            .get(self.filter_op_idx)
+            .map_or("=", FilterOp::label);
+
+        let mut y = area.y + 4.0;
+        let heading = Rect::new(area.x + 10.0, y, (area.w - 20.0).max(0.0), 14.0);
+        if heading.bottom() > area.bottom() {
+            return;
+        }
+        put_text(
+            f,
+            heading,
+            "FILTER BUILDER",
+            10.0,
+            YELLOW,
+            FontWeightHint::Bold,
+        );
+        y += 18.0;
+
+        // Column, comparison, value and Add, each a row of its own. Three of
+        // the four step a field that the program already had and that nothing
+        // could reach: `filter_column_idx`, `filter_op_idx` and `filter_value`
+        // were set by tests and by nothing else.
+        let rows: [(String, Target, Color); 4] = [
+            (
+                format!("Column: {col_name}"),
+                Target::FilterColumn,
+                LAVENDER,
+            ),
+            (format!("Where: {op}"), Target::FilterOp, MAUVE),
+            (
+                if self.filter_value.is_empty() {
+                    "Value: (type here)".to_owned()
+                } else {
+                    format!("Value: {}", self.filter_value)
+                },
+                Target::FilterValue,
+                if self.focus == Focus::FilterValue {
+                    TEXT
+                } else {
+                    SUBTEXT0
+                },
+            ),
+            ("+ Add filter".to_owned(), Target::AddFilter, GREEN),
+        ];
+        for (label, target, color) in rows {
+            let row = Rect::new(
+                area.x + 8.0,
+                y,
+                (area.w - 16.0).max(0.0),
+                TREE_ROW_HEIGHT - 4.0,
+            );
+            if row.is_empty() || row.bottom() > area.bottom() {
+                return;
+            }
+            f.push(fill(row, SURFACE0, 3.0));
+            if target == Target::FilterValue && self.focus == Focus::FilterValue {
+                f.push(stroke(row, BLUE, 3.0));
+            }
+            put_text(
+                f,
+                inset_x(row, 6.0),
+                &label,
+                10.0,
+                color,
+                FontWeightHint::Regular,
+            );
+            f.hit(target, row);
+            y += TREE_ROW_HEIGHT;
+        }
+
+        for (fi, filter) in tab.filters.iter().enumerate() {
+            let row = Rect::new(area.x + 8.0, y, (area.w - 16.0).max(0.0), 18.0);
+            if row.is_empty() || row.bottom() > area.bottom() {
+                return;
+            }
+            let name = cols.get(filter.column_idx).map_or("?", String::as_str);
+            f.push(fill(row, SURFACE0, 3.0));
+            let remove = Rect::new((row.right() - 16.0).max(row.x), row.y, 16.0, row.h);
+            let text_box = Rect::new(row.x + 4.0, row.y, (remove.x - row.x - 4.0).max(0.0), row.h);
+            put_text(
+                f,
+                text_box,
+                &format!("{name} {} {}", filter.op.label(), filter.value_str),
+                10.0,
+                TEAL,
+                FontWeightHint::Regular,
+            );
+            put_text(f, remove, "x", 10.0, RED, FontWeightHint::Regular);
+            f.hit(Target::RemoveFilter(fi), remove);
+            y += 20.0;
+        }
+    }
+
+    /// The data grid: headers that sort, the rows of the current page each
+    /// with a delete box, and the pagination bar under them.
+    fn draw_data_grid(&self, f: &mut Frame<Target>, l: &Layout) {
+        let area = l.grid;
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, BASE, 0.0));
+
+        let Some(tab) = self.active_db_tab() else {
+            return;
         };
-
-        let (col_names, all_rows) = if let Some(data) = tab.current_table_data() {
-            data
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 20.0,
-                y: y + 30.0,
-                text: "No table selected".to_owned(),
-                color: OVERLAY0,
-                font_size: 13.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let Some((col_names, all_rows)) = tab.current_table_data() else {
+            put_text(
+                f,
+                inset(area, 20.0),
+                "No table selected",
+                13.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            );
             return;
         };
 
         let total_rows = all_rows.len();
         let start = tab.page.saturating_mul(PAGE_SIZE);
-        let end = (start.saturating_add(PAGE_SIZE)).min(total_rows);
+        let end = start.saturating_add(PAGE_SIZE).min(total_rows);
         let page_rows = all_rows.get(start..end).unwrap_or(&[]);
 
+        // The delete box is taken out of the right-hand end before the columns
+        // are measured, so a cell is never drawn underneath it and the box is
+        // never drawn over a cell's last few characters.
+        let delete_w = 20.0_f32.min(area.w);
+        let body = Rect::new(area.x, area.y, (area.w - delete_w).max(0.0), area.h);
         let col_count = col_names.len();
         let col_width = if col_count > 0 {
-            (width / col_count as f32).max(DEFAULT_COL_WIDTH).min(width)
+            (body.w / col_count as f32).max(MIN_COL_WIDTH)
         } else {
             DEFAULT_COL_WIDTH
         };
+        // How many columns fit whole. The rest are not drawn: the grid does not
+        // scroll sideways, so a column past the right-hand edge is one nobody
+        // can read and nobody can sort by, and the count below says so rather
+        // than letting the table look complete.
+        let shown = col_names
+            .iter()
+            .enumerate()
+            .take_while(|(ci, _)| body.x + (*ci as f32 + 1.0) * col_width <= body.right() + 0.01)
+            .count();
 
-        // Clip to grid area
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y,
-            width,
-            height,
-        });
+        let header = l.grid_header();
+        let rows_area = l.grid_rows();
 
-        // Header row
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width: col_width * col_count as f32,
-            height: HEADER_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        for (ci, col_name) in col_names.iter().enumerate() {
-            let cx = x + ci as f32 * col_width;
-
-            // Sort indicator
-            let sort_indicator = tab.sort_state.as_ref().and_then(|s| {
-                if s.column_idx == ci {
-                    Some(match s.direction {
+        // --- header row ---
+        if !header.is_empty() {
+            f.push(fill(
+                Rect::new(header.x, header.y, body.w, header.h),
+                SURFACE0,
+                0.0,
+            ));
+            for (ci, col_name) in col_names.iter().enumerate().take(shown) {
+                let cell = Rect::new(
+                    body.x + ci as f32 * col_width,
+                    header.y,
+                    col_width,
+                    header.h,
+                );
+                let arrow = tab.sort_state.as_ref().and_then(|s| {
+                    (s.column_idx == ci).then_some(match s.direction {
                         SortDir::Ascending => " ^",
                         SortDir::Descending => " v",
                     })
-                } else {
-                    None
-                }
-            });
-
-            let header_text = format!("{col_name}{}", sort_indicator.unwrap_or(""));
-
-            cmds.push(RenderCommand::Text {
-                x: cx + CELL_PADDING,
-                y: y + 7.0,
-                text: header_text,
-                color: LAVENDER,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(col_width - CELL_PADDING * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Column separator
-            if ci > 0 {
-                cmds.push(RenderCommand::Line {
-                    x1: cx,
-                    y1: y,
-                    x2: cx,
-                    y2: y + height,
-                    color: SURFACE1,
-                    width: 1.0,
                 });
+                put_text(
+                    f,
+                    inset_x(cell, CELL_PADDING),
+                    &format!("{col_name}{}", arrow.unwrap_or("")),
+                    11.0,
+                    LAVENDER,
+                    FontWeightHint::Bold,
+                );
+                // The header is the sort control. Before this, `toggle_sort`
+                // had no caller outside the tests: the arrow was drawn, and
+                // there was no way to put it there.
+                f.hit(Target::SortColumn(ci), cell);
+                if ci > 0 {
+                    f.push(RenderCommand::Line {
+                        x1: cell.x,
+                        y1: header.y,
+                        x2: cell.x,
+                        y2: rows_area.bottom(),
+                        color: SURFACE1,
+                        width: 1.0,
+                    });
+                }
             }
+            f.push(hline(
+                Rect::new(header.x, header.y, body.w, header.h),
+                header.bottom(),
+                SURFACE1,
+            ));
         }
 
-        // Header bottom border
-        cmds.push(RenderCommand::Line {
-            x1: x,
-            y1: y + HEADER_HEIGHT,
-            x2: x + col_width * col_count as f32,
-            y2: y + HEADER_HEIGHT,
-            color: SURFACE1,
-            width: 1.0,
-        });
-
-        // Data rows
-        let mut ry = y + HEADER_HEIGHT;
-        for (ri, row) in page_rows.iter().enumerate() {
-            if ry > y + height {
+        // --- data rows ---
+        //
+        // Clipped *and* bounded. The clip alone is not enough: it stops the
+        // renderer showing a row past the bottom edge and it makes `Frame::hit`
+        // drop that row's boxes, but a fill is pushed exactly as asked, so the
+        // old pass -- which tested `ry > y + height` at the *top* of a row, and
+        // so drew whole any row that merely started inside -- painted a 26-point
+        // band of row colour over the pagination bar below it.
+        f.clip(rows_area);
+        let mut ry = rows_area.y;
+        for (ri, (source_idx, row)) in page_rows.iter().enumerate() {
+            let line = Rect::new(rows_area.x, ry, area.w, ROW_HEIGHT);
+            if line.bottom() > rows_area.bottom() {
                 break;
             }
+            f.push(fill(
+                Rect::new(line.x, line.y, body.w, line.h),
+                if ri % 2 == 0 { BASE } else { SURFACE0 },
+                0.0,
+            ));
 
-            // Alternating row colors
-            let row_bg = if ri % 2 == 0 { BASE } else { SURFACE0 };
-            cmds.push(RenderCommand::FillRect {
-                x,
-                y: ry,
-                width: col_width * col_count as f32,
-                height: ROW_HEIGHT,
-                color: row_bg,
-                corner_radii: CornerRadii::ZERO,
-            });
-
-            for (ci, cell) in row.iter().enumerate() {
-                let cx = x + ci as f32 * col_width;
-                let display = cell.display();
-                let color = match cell {
-                    CellValue::Null => OVERLAY0,
-                    CellValue::Integer(_) => BLUE,
-                    CellValue::Real(_) => PEACH,
-                    CellValue::Text(_) => TEXT,
-                    CellValue::Blob(_) => MAUVE,
-                };
-
-                cmds.push(RenderCommand::Text {
-                    x: cx + CELL_PADDING,
-                    y: ry + 6.0,
-                    text: display,
-                    color,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(col_width - CELL_PADDING * 2.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+            for (ci, cell) in row.iter().enumerate().take(shown) {
+                let cell_box = Rect::new(body.x + ci as f32 * col_width, ry, col_width, ROW_HEIGHT);
+                put_text(
+                    f,
+                    inset_x(cell_box, CELL_PADDING),
+                    &cell.display(),
+                    11.0,
+                    cell_color(cell),
+                    FontWeightHint::Regular,
+                );
             }
 
-            // Row separator
-            cmds.push(RenderCommand::Line {
-                x1: x,
-                y1: ry + ROW_HEIGHT,
-                x2: x + col_width * col_count as f32,
-                y2: ry + ROW_HEIGHT,
-                color: SURFACE0,
-                width: 1.0,
-            });
+            let del = Rect::new(body.right(), ry, delete_w, ROW_HEIGHT);
+            put_text(f, del, "x", 10.0, RED, FontWeightHint::Regular);
+            // Named by where the row sits in the *table*, not by where it sits
+            // on the screen. With a sort in force the two differ, and deleting
+            // by screen position removes a row the user was not pointing at.
+            f.hit(Target::DeleteRow(*source_idx), del);
 
+            f.push(hline(line, line.bottom(), SURFACE0));
             ry += ROW_HEIGHT;
         }
+        f.unclip();
 
-        cmds.push(RenderCommand::PopClip);
-
-        // Pagination bar
-        let page_bar_y = y + height - 22.0;
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y: page_bar_y,
-            width,
-            height: 22.0,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        // --- pagination bar ---
+        let bar = l.page_bar();
+        if bar.is_empty() {
+            return;
+        }
+        f.push(fill(bar, MANTLE, 0.0));
 
         let total_pages = if total_rows == 0 {
             1
@@ -3669,654 +4157,606 @@ impl DbViewerApp {
             // Use div_ceil to avoid the `(x-1)/n + 1` underflow/overflow trap.
             total_rows.div_ceil(PAGE_SIZE)
         };
-        let page_text = format!(
-            "Page {} of {} ({} rows)",
+        let hidden = col_count.saturating_sub(shown);
+        let mut caption = format!(
+            "Page {} of {total_pages} ({total_rows} rows)",
             tab.page.saturating_add(1),
-            total_pages,
-            total_rows
         );
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: page_bar_y + 5.0,
-            text: page_text,
-            color: SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width - 200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Prev / Next buttons
-        let nav_x = x + width - 120.0;
-        for (bi, label) in ["< Prev", "Next >"].iter().enumerate() {
-            let bx = nav_x + bi as f32 * 60.0;
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: page_bar_y + 2.0,
-                width: 54.0,
-                height: 18.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(3.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 6.0,
-                y: page_bar_y + 5.0,
-                text: (*label).to_owned(),
-                color: SUBTEXT1,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(48.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if hidden > 0 {
+            caption.push_str(&format!(" — {shown} of {col_count} columns shown"));
         }
+
+        // The buttons are placed first and the caption is given what is left of
+        // the bar, so the two cannot be drawn on top of each other in a narrow
+        // window. The old pass gave the caption `width - 200` whatever the bar
+        // measured, which in a 180-point grid is a negative width.
+        let mut bx = bar.right();
+        for (label, target) in [("Next >", Target::NextPage), ("< Prev", Target::PrevPage)] {
+            let btn = Rect::new(bx - 60.0, bar.y + 2.0, 54.0, (bar.h - 4.0).max(0.0));
+            if btn.is_empty() || btn.x < bar.x {
+                break;
+            }
+            f.push(fill(btn, SURFACE0, 3.0));
+            put_text(
+                f,
+                inset_x(btn, 6.0),
+                label,
+                10.0,
+                SUBTEXT1,
+                FontWeightHint::Regular,
+            );
+            f.hit(target, btn);
+            bx = btn.x;
+        }
+        let caption_box = Rect::new(bar.x + 12.0, bar.y, (bx - bar.x - 18.0).max(0.0), bar.h);
+        put_text(
+            f,
+            caption_box,
+            &caption,
+            10.0,
+            SUBTEXT0,
+            FontWeightHint::Regular,
+        );
     }
 
-    fn render_bottom_panels(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The four bottom-panel tabs, and whichever panel they name.
+    fn draw_bottom_panels(&self, f: &mut Frame<Target>, l: &Layout) {
+        let area = l.panel;
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, MANTLE, 0.0));
+        f.push(hline(area, area.y, SURFACE1));
 
-        // Top border
-        cmds.push(RenderCommand::Line {
-            x1: x,
-            y1: y,
-            x2: x + width,
-            y2: y,
-            color: SURFACE1,
-            width: 1.0,
-        });
-
-        // Panel tabs
-        let mut tx = x + 4.0;
+        let tabs = l.panel_tabs();
+        let top_corners = CornerRadii {
+            top_left: 3.0,
+            top_right: 3.0,
+            bottom_left: 0.0,
+            bottom_right: 0.0,
+        };
+        let mut tx = tabs.x + 4.0;
         for panel in BottomPanel::all() {
-            let is_active = *panel == self.bottom_panel;
             let label = panel.label();
             let tw = text::padded_width_any_weight(label, 8.0, 11.0);
-
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: y + 2.0,
-                width: tw,
-                height: 22.0,
+            let cell = Rect::new(tx, tabs.y + 2.0, tw, (tabs.h - 4.0).max(0.0));
+            if cell.is_empty() || cell.right() > tabs.right() {
+                break;
+            }
+            let is_active = *panel == self.bottom_panel;
+            f.push(RenderCommand::FillRect {
+                x: cell.x,
+                y: cell.y,
+                width: cell.w,
+                height: cell.h,
                 color: if is_active { SURFACE0 } else { MANTLE },
-                corner_radii: CornerRadii {
-                    top_left: 3.0,
-                    top_right: 3.0,
-                    bottom_left: 0.0,
-                    bottom_right: 0.0,
-                },
+                corner_radii: top_corners,
             });
-            cmds.push(RenderCommand::Text {
-                x: tx + 8.0,
-                y: y + 6.0,
-                text: label.to_owned(),
-                color: if is_active { TEXT } else { SUBTEXT0 },
-                font_size: 10.0,
-                font_weight: if is_active {
+            put_text(
+                f,
+                inset_x(cell, 8.0),
+                label,
+                10.0,
+                if is_active { TEXT } else { SUBTEXT0 },
+                if is_active {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: Some(tw - 16.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            tx += tw + 2.0;
+            );
+            // Four tabs that named four panels and could not switch between
+            // them: `bottom_panel` was set once in `new`, and again by
+            // `execute_query`, and by nothing a user could press.
+            f.hit(Target::ShowPanel(*panel), cell);
+            tx = cell.right() + 2.0;
         }
 
-        let content_y = y + 26.0;
-        let content_height = height - 26.0;
-
-        // Clip panel content
-        cmds.push(RenderCommand::PushClip {
-            x,
-            y: content_y,
-            width,
-            height: content_height,
-        });
-
+        let body = l.panel_body();
+        if body.is_empty() {
+            return;
+        }
+        f.clip(body);
         match self.bottom_panel {
-            BottomPanel::SqlEditor => {
-                self.render_sql_editor(cmds, x, content_y, width, content_height);
-            }
-            BottomPanel::Results => self.render_results(cmds, x, content_y, width, content_height),
-            BottomPanel::Schema => self.render_schema(cmds, x, content_y, width, content_height),
-            BottomPanel::Diagram => self.render_diagram(cmds, x, content_y, width, content_height),
+            BottomPanel::SqlEditor => self.draw_sql_editor(f, body),
+            BottomPanel::Results => self.draw_results(f, body),
+            BottomPanel::Schema => self.draw_schema(f, body),
+            BottomPanel::Diagram => self.draw_diagram(f, body),
         }
-
-        cmds.push(RenderCommand::PopClip);
+        f.unclip();
     }
 
-    fn render_sql_editor(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        _height: f32,
-    ) {
-        // Editor background
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: y + 4.0,
-            width: width - 16.0,
-            height: 80.0,
-            color: CRUST,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
-        cmds.push(RenderCommand::StrokeRect {
-            x: x + 8.0,
-            y: y + 4.0,
-            width: width - 16.0,
-            height: 80.0,
-            color: SURFACE1,
-            line_width: 1.0,
-            corner_radii: CornerRadii::all(CORNER_RADIUS),
-        });
+    /// The SQL editor and the query history under it.
+    fn draw_sql_editor(&self, f: &mut Frame<Target>, area: Rect) {
+        // The box takes what it needs off the top of the pane and no more, and
+        // the history starts where the box ends. Both used to be placed at
+        // fixed offsets from the top of a pane whose height nobody asked for.
+        let box_h = 80.0_f32.min((area.h - 24.0).max(0.0));
+        let editor = Rect::new(area.x + 8.0, area.y + 4.0, (area.w - 16.0).max(0.0), box_h);
+        if editor.is_empty() {
+            return;
+        }
+        f.push(fill(editor, CRUST, CORNER_RADIUS));
+        f.push(stroke(
+            editor,
+            if self.focus == Focus::Editor {
+                BLUE
+            } else {
+                SURFACE1
+            },
+            CORNER_RADIUS,
+        ));
+        f.hit(Target::SqlEditor, editor);
 
-        // SQL text with keyword highlighting (simplified: render full text, then overlay)
-        let sql = &self.sql_input;
-        if sql.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 12.0,
-                text: "Enter SQL query...".to_owned(),
-                color: OVERLAY0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        let line = Rect::new(
+            editor.x + 8.0,
+            editor.y + 4.0,
+            (editor.w - 16.0).max(0.0),
+            16.0,
+        );
+        if self.sql_input.is_empty() {
+            put_text(
+                f,
+                line,
+                "Enter SQL query...",
+                12.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            );
         } else {
-            // Render tokens with syntax coloring
-            let tokens = tokenize_sql(sql);
-            let mut tx_pos = x + 16.0;
-            let ty = y + 12.0;
-            let max_w = width - 40.0;
-
-            for token in &tokens {
-                let (text, color, weight) = match token {
-                    SqlToken::Keyword(k) => (k.clone(), MAUVE, FontWeightHint::Bold),
-                    SqlToken::Identifier(id) => (id.clone(), TEXT, FontWeightHint::Regular),
-                    SqlToken::StringLiteral(s) => {
-                        (format!("'{s}'"), GREEN, FontWeightHint::Regular)
-                    }
-                    SqlToken::NumberLiteral(n) => (n.clone(), PEACH, FontWeightHint::Regular),
-                    SqlToken::Operator(op) => (op.clone(), RED, FontWeightHint::Regular),
-                    SqlToken::Comma => (",".to_owned(), TEXT, FontWeightHint::Regular),
-                    SqlToken::Semicolon => (";".to_owned(), TEXT, FontWeightHint::Regular),
-                    SqlToken::LeftParen => ("(".to_owned(), YELLOW, FontWeightHint::Regular),
-                    SqlToken::RightParen => (")".to_owned(), YELLOW, FontWeightHint::Regular),
-                    SqlToken::Star => ("*".to_owned(), PEACH, FontWeightHint::Bold),
-                    SqlToken::Dot => (".".to_owned(), TEXT, FontWeightHint::Regular),
-                    SqlToken::Whitespace => (" ".to_owned(), TEXT, FontWeightHint::Regular),
-                };
-
+            let mut tx = line.x;
+            for token in tokenize_sql(&self.sql_input) {
+                let (s, color, weight) = token_ink(&token);
                 // Measured in the token's *own* weight: keywords are drawn
                 // bold, so a fixed cell laid the next token on top of the tail
                 // of every SELECT and WHERE. And a quoted string literal is
                 // drawn with its quotes, which the byte count did include but
                 // only by accident of them being one byte each.
-                let text_w = text::measure(&text, 12.0, weight);
-
-                if tx_pos + text_w < x + max_w {
-                    cmds.push(RenderCommand::Text {
-                        x: tx_pos,
-                        y: ty,
-                        text,
-                        color,
-                        font_size: 12.0,
-                        font_weight: weight,
-                        max_width: Some(text_w + 4.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
+                let w = text::measure(&s, 12.0, weight);
+                if tx + w > line.right() {
+                    break;
                 }
-                tx_pos += text_w;
-            }
-        }
-
-        // History section
-        let history_y = y + 92.0;
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: history_y,
-            text: format!("HISTORY ({} queries)", self.history.len()),
-            color: OVERLAY0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let mut hy = history_y + 16.0;
-        for entry in self.history.iter().rev().take(5) {
-            let star = if entry.favorite { "[*] " } else { "" };
-            let status_color = if entry.success { GREEN } else { RED };
-
-            cmds.push(RenderCommand::FillRect {
-                x: x + 8.0,
-                y: hy - 1.0,
-                width: width - 16.0,
-                height: 16.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(2.0),
-            });
-
-            // Status dot
-            cmds.push(RenderCommand::FillRect {
-                x: x + 12.0,
-                y: hy + 4.0,
-                width: 6.0,
-                height: 6.0,
-                color: status_color,
-                corner_radii: CornerRadii::all(3.0),
-            });
-
-            cmds.push(RenderCommand::Text {
-                x: x + 22.0,
-                y: hy + 1.0,
-                text: format!("{star}{}", entry.sql),
-                color: SUBTEXT0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 40.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            hy += 18.0;
-        }
-    }
-
-    fn render_results(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        match &self.query_result {
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0,
-                    y: y + 8.0,
-                    text: "No query results. Execute a query first.".to_owned(),
-                    color: OVERLAY0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 32.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-            }
-            Some(result) => {
-                // Message. `RenderCommand::Text` clips at `max_width` rather
-                // than wrapping, so a message wider than the pane used to be
-                // cut mid-word with nothing to mark the cut — and the messages
-                // that run long are exactly the ones worth reading, the SQL
-                // errors saying what the engine rejected and where.
-                let msg_color = if result.is_error { RED } else { GREEN };
-                let msg_width = width - 24.0;
-                let mut message = text::wrap(
-                    &result.message,
-                    msg_width,
-                    RESULT_MSG_FONT_SIZE,
-                    FontWeightHint::Bold,
+                put_text(
+                    f,
+                    Rect::new(tx, line.y, w + 4.0, line.h),
+                    &s,
+                    12.0,
+                    color,
+                    weight,
                 );
-                // The message is bounded, and the overflow is marked rather
-                // than dropped in silence.
-                let fits_in_pane =
-                    (((height - 4.0 - RESULT_MSG_GAP) / RESULT_MSG_LINE_HEIGHT) as usize).max(1);
-                let max_lines = if result.columns.is_empty() {
-                    fits_in_pane
-                } else {
-                    fits_in_pane.min(RESULT_MSG_MAX_LINES_WITH_TABLE)
-                };
-                if message.len() > max_lines {
-                    message.truncate(max_lines);
-                    if let Some(last) = message.last_mut() {
-                        *last = text::elide(
-                            &format!("{last}…"),
-                            msg_width,
-                            "…",
-                            RESULT_MSG_FONT_SIZE,
-                            FontWeightHint::Bold,
-                        );
-                    }
-                }
-                for (n, line) in message.iter().enumerate() {
-                    cmds.push(RenderCommand::Text {
-                        x: x + 12.0,
-                        y: y + 4.0 + n as f32 * RESULT_MSG_LINE_HEIGHT,
-                        text: line.clone(),
-                        color: msg_color,
-                        font_size: RESULT_MSG_FONT_SIZE,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(msg_width),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                }
-
-                // Result table
-                if !result.columns.is_empty() {
-                    let col_count = result.columns.len();
-                    let col_w = (width / col_count as f32).max(100.0).min(width);
-
-                    // Column headers. The table follows the message rather than
-                    // sitting at a fixed offset from the top of the pane, so a
-                    // message that grew cannot be drawn over its own headers.
-                    let header_y =
-                        y + 4.0 + message.len() as f32 * RESULT_MSG_LINE_HEIGHT + RESULT_MSG_GAP;
-                    cmds.push(RenderCommand::FillRect {
-                        x,
-                        y: header_y,
-                        width,
-                        height: 20.0,
-                        color: SURFACE0,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-
-                    for (ci, col_name) in result.columns.iter().enumerate() {
-                        cmds.push(RenderCommand::Text {
-                            x: x + ci as f32 * col_w + 6.0,
-                            y: header_y + 4.0,
-                            text: col_name.clone(),
-                            color: LAVENDER,
-                            font_size: 10.0,
-                            font_weight: FontWeightHint::Bold,
-                            max_width: Some(col_w - 12.0),
-                            overflow: TextOverflow::Ellipsis,
-                        });
-                    }
-
-                    // Data rows
-                    let mut ry = header_y + 22.0;
-                    for row in result.rows.iter().take(20) {
-                        if ry > y + height {
-                            break;
-                        }
-                        for (ci, cell) in row.iter().enumerate() {
-                            let color = match cell {
-                                CellValue::Null => OVERLAY0,
-                                CellValue::Integer(_) => BLUE,
-                                CellValue::Real(_) => PEACH,
-                                CellValue::Text(_) => TEXT,
-                                CellValue::Blob(_) => MAUVE,
-                            };
-                            cmds.push(RenderCommand::Text {
-                                x: x + ci as f32 * col_w + 6.0,
-                                y: ry,
-                                text: cell.display(),
-                                color,
-                                font_size: 10.0,
-                                font_weight: FontWeightHint::Regular,
-                                max_width: Some(col_w - 12.0),
-                                overflow: TextOverflow::Ellipsis,
-                            });
-                        }
-                        ry += 16.0;
-                    }
-                }
+                tx += w;
             }
+        }
+
+        let mut hy = editor.bottom() + 8.0;
+        let head = Rect::new(area.x + 12.0, hy, (area.w - 24.0).max(0.0), 12.0);
+        if head.bottom() > area.bottom() {
+            return;
+        }
+        put_text(
+            f,
+            head,
+            &format!("HISTORY ({} queries)", self.history.len()),
+            10.0,
+            OVERLAY0,
+            FontWeightHint::Bold,
+        );
+        hy += 16.0;
+
+        // Newest first, and each row carries its index in the history rather
+        // than its position on the screen -- the list is reversed and cut to
+        // five, so the two are different numbers and starring by the second
+        // would star the wrong query.
+        for (i, entry) in self.history.iter().enumerate().rev().take(5) {
+            let row = Rect::new(
+                area.x + 8.0,
+                hy,
+                (area.w - 16.0).max(0.0),
+                HISTORY_ROW_HEIGHT - 2.0,
+            );
+            if row.is_empty() || row.bottom() > area.bottom() {
+                break;
+            }
+            f.push(fill(row, SURFACE0, 2.0));
+            let dot = Rect::new(row.x + 4.0, row.y + (row.h - 6.0) / 2.0, 6.0, 6.0);
+            f.push(fill(dot, if entry.success { GREEN } else { RED }, 3.0));
+            let star = Rect::new((row.right() - 16.0).max(row.x), row.y, 16.0, row.h);
+            put_text(
+                f,
+                Rect::new(
+                    dot.right() + 6.0,
+                    row.y,
+                    (star.x - dot.right() - 8.0).max(0.0),
+                    row.h,
+                ),
+                &entry.sql,
+                10.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            );
+            put_text(
+                f,
+                star,
+                if entry.favorite { "*" } else { "-" },
+                10.0,
+                if entry.favorite { YELLOW } else { OVERLAY0 },
+                FontWeightHint::Bold,
+            );
+            // The row first, the star second: the last box recorded is the one
+            // `hit_test` answers with, so recorded the other way round the row
+            // would swallow its own star.
+            f.hit(Target::HistoryEntry(i), row);
+            f.hit(Target::FavoriteEntry(i), star);
+            hy += HISTORY_ROW_HEIGHT;
         }
     }
 
-    fn render_schema(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        height: f32,
-    ) {
-        let tab = match self.active_db_tab() {
-            Some(t) => t,
-            None => return,
-        };
-
-        let table_name = if let Some(n) = &tab.selected_table {
-            n
-        } else {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 8.0,
-                text: "Select a table to view its schema.".to_owned(),
-                color: OVERLAY0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 32.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+    /// The last query's message, and the rows it returned under it.
+    fn draw_results(&self, f: &mut Frame<Target>, area: Rect) {
+        let Some(result) = self.query_result.as_ref() else {
+            put_text(
+                f,
+                Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
+                "No query results. Execute a query first.",
+                12.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            );
             return;
         };
 
-        let table = match tab.db.find_table(table_name) {
-            Some(t) => t,
-            None => return,
+        // Message. `RenderCommand::Text` clips at `max_width` rather than
+        // wrapping, so a message wider than the pane used to be cut mid-word
+        // with nothing to mark the cut -- and the messages that run long are
+        // exactly the ones worth reading, the SQL errors saying what the engine
+        // rejected and where.
+        let msg_color = if result.is_error { RED } else { GREEN };
+        let msg_width = (area.w - 24.0).max(0.0);
+        let mut message = text::wrap(
+            &result.message,
+            msg_width,
+            RESULT_MSG_FONT_SIZE,
+            FontWeightHint::Bold,
+        );
+        // The message is bounded, and the overflow is marked rather than
+        // dropped in silence.
+        let fits_in_pane =
+            (((area.h - 4.0 - RESULT_MSG_GAP) / RESULT_MSG_LINE_HEIGHT) as usize).max(1);
+        let max_lines = if result.columns.is_empty() {
+            fits_in_pane
+        } else {
+            fits_in_pane.min(RESULT_MSG_MAX_LINES_WITH_TABLE)
         };
-
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 4.0,
-            text: format!("SCHEMA: {table_name}"),
-            color: BLUE,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Column headers
-        let headers = ["Column", "Type", "Constraints"];
-        let col_widths = [180.0, 100.0, 200.0];
-        let mut cy = y + 24.0;
-
-        cmds.push(RenderCommand::FillRect {
-            x: x + 8.0,
-            y: cy,
-            width: width - 16.0,
-            height: 18.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(2.0),
-        });
-
-        let mut hx = x + 12.0;
-        for (hi, header) in headers.iter().enumerate() {
-            cmds.push(RenderCommand::Text {
-                x: hx,
-                y: cy + 3.0,
-                text: (*header).to_owned(),
-                color: LAVENDER,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(col_widths.get(hi).copied().unwrap_or(100.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
-            hx += col_widths.get(hi).copied().unwrap_or(100.0);
+        if message.len() > max_lines {
+            message.truncate(max_lines);
+            if let Some(last) = message.last_mut() {
+                *last = text::elide(
+                    &format!("{last}…"),
+                    msg_width,
+                    "…",
+                    RESULT_MSG_FONT_SIZE,
+                    FontWeightHint::Bold,
+                );
+            }
+        }
+        let mut my = area.y + 4.0;
+        for line in &message {
+            let row = Rect::new(area.x + 12.0, my, msg_width, RESULT_MSG_LINE_HEIGHT);
+            if row.bottom() > area.bottom() {
+                break;
+            }
+            put_text(
+                f,
+                row,
+                line,
+                RESULT_MSG_FONT_SIZE,
+                msg_color,
+                FontWeightHint::Bold,
+            );
+            my += RESULT_MSG_LINE_HEIGHT;
         }
 
+        if result.columns.is_empty() {
+            return;
+        }
+
+        // The table follows the message rather than sitting at a fixed offset
+        // from the top of the pane, so a message that grew cannot be drawn over
+        // its own headers.
+        let table_top =
+            area.y + 4.0 + message.len() as f32 * RESULT_MSG_LINE_HEIGHT + RESULT_MSG_GAP;
+        let table = Rect::new(
+            area.x,
+            table_top,
+            area.w,
+            (area.bottom() - table_top).max(0.0),
+        );
+        if table.is_empty() {
+            return;
+        }
+
+        let col_count = result.columns.len();
+        let col_w = (table.w / col_count as f32).max(MIN_COL_WIDTH);
+        // As in the data grid: a column past the right-hand edge is one nobody
+        // can read, and the clip would hide the fact that it was ever asked for.
+        let shown = (0..col_count)
+            .take_while(|ci| table.x + (*ci as f32 + 1.0) * col_w <= table.right() + 0.01)
+            .count();
+
+        let header = Rect::new(table.x, table.y, table.w, 20.0_f32.min(table.h));
+        if !header.is_empty() {
+            f.push(fill(header, SURFACE0, 0.0));
+            for (ci, col_name) in result.columns.iter().enumerate().take(shown) {
+                let cell = Rect::new(table.x + ci as f32 * col_w, header.y, col_w, header.h);
+                put_text(
+                    f,
+                    inset_x(cell, 6.0),
+                    col_name,
+                    10.0,
+                    LAVENDER,
+                    FontWeightHint::Bold,
+                );
+            }
+        }
+
+        let mut ry = header.bottom() + 2.0;
+        for row in result.rows.iter().take(RESULT_ROWS_SHOWN) {
+            let line = Rect::new(table.x, ry, table.w, 16.0);
+            // Bottom edge, not top: a row that merely *starts* inside the pane
+            // is a row whose second half is drawn over whatever is below it.
+            if line.bottom() > table.bottom() {
+                break;
+            }
+            for (ci, cell) in row.iter().enumerate().take(shown) {
+                let cell_box = Rect::new(table.x + ci as f32 * col_w, ry, col_w, line.h);
+                put_text(
+                    f,
+                    inset_x(cell_box, 6.0),
+                    &cell.display(),
+                    10.0,
+                    cell_color(cell),
+                    FontWeightHint::Regular,
+                );
+            }
+            ry += 16.0;
+        }
+    }
+
+    /// The selected table's columns, their types and constraints, and the
+    /// foreign keys that leave it.
+    fn draw_schema(&self, f: &mut Frame<Target>, area: Rect) {
+        let Some(tab) = self.active_db_tab() else {
+            return;
+        };
+        let Some(table_name) = tab.selected_table.as_ref() else {
+            put_text(
+                f,
+                Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
+                "Select a table to view its schema.",
+                12.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            );
+            return;
+        };
+        let Some(table) = tab.db.find_table(table_name) else {
+            return;
+        };
+
+        let inner = (area.w - 24.0).max(0.0);
+        let title = Rect::new(area.x + 12.0, area.y + 4.0, inner, 16.0);
+        if title.bottom() > area.bottom() {
+            return;
+        }
+        put_text(
+            f,
+            title,
+            &format!("SCHEMA: {table_name}"),
+            12.0,
+            BLUE,
+            FontWeightHint::Bold,
+        );
+
+        // Three columns that used to be 180, 100 and 200 points wide whatever
+        // the pane measured -- 480 points of table drawn into a pane that, with
+        // the sidebar taking its share of a small window, is routinely narrower
+        // than that. The constraints column was then drawn entirely outside the
+        // pane, and the clip swallowed it: the schema looked as though the table
+        // had no constraints at all. Scaled together, the three keep their
+        // familiar proportions and all three stay inside.
+        let scale = (inner / SCHEMA_COL_WIDTHS.iter().sum::<f32>()).min(1.0);
+        let col_w = SCHEMA_COL_WIDTHS.map(|w| w * scale);
+
+        let mut cy = area.y + 24.0;
+        let head = Rect::new(area.x + 8.0, cy, (area.w - 16.0).max(0.0), 18.0);
+        if head.bottom() > area.bottom() {
+            return;
+        }
+        f.push(fill(head, SURFACE0, 2.0));
+        let mut hx = area.x + 12.0;
+        for (hi, header) in ["Column", "Type", "Constraints"].iter().enumerate() {
+            let w = col_w.get(hi).copied().unwrap_or(0.0);
+            put_text(
+                f,
+                Rect::new(hx, cy + 1.0, w, 16.0),
+                header,
+                10.0,
+                LAVENDER,
+                FontWeightHint::Bold,
+            );
+            hx += w;
+        }
         cy += 22.0;
 
         for col in &table.columns {
-            if cy > y + height {
-                break;
+            let row = Rect::new(area.x + 12.0, cy, inner, SCHEMA_ROW_HEIGHT);
+            if row.bottom() > area.bottom() {
+                return;
             }
-
-            let type_color = col.data_type.color();
-            let constraints = col.constraints.describe();
-
-            let mut rx = x + 12.0;
-
-            cmds.push(RenderCommand::Text {
-                x: rx,
-                y: cy,
-                text: col.name.clone(),
-                color: TEXT,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(180.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            rx += 180.0;
-
-            cmds.push(RenderCommand::Text {
-                x: rx,
-                y: cy,
-                text: col.data_type.label().to_owned(),
-                color: type_color,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            rx += 100.0;
-
-            if !constraints.is_empty() {
-                cmds.push(RenderCommand::Text {
-                    x: rx,
-                    y: cy,
-                    text: constraints,
-                    color: YELLOW,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(200.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
+            let cells: [(String, Color); 3] = [
+                (col.name.clone(), TEXT),
+                (col.data_type.label().to_owned(), col.data_type.color()),
+                (col.constraints.describe(), YELLOW),
+            ];
+            let mut rx = row.x;
+            for (ci, (label, color)) in cells.into_iter().enumerate() {
+                let w = col_w.get(ci).copied().unwrap_or(0.0);
+                put_text(
+                    f,
+                    Rect::new(rx, row.y, w, row.h),
+                    &label,
+                    10.0,
+                    color,
+                    FontWeightHint::Regular,
+                );
+                rx += w;
             }
-
-            cy += 18.0;
+            cy += SCHEMA_ROW_HEIGHT;
         }
 
-        // Foreign keys
         let fks: Vec<&ForeignKey> = tab
             .db
             .foreign_keys
             .iter()
             .filter(|fk| fk.from_table.to_uppercase() == table_name.to_uppercase())
             .collect();
-
-        if !fks.is_empty() {
-            cy += 8.0;
-            cmds.push(RenderCommand::Text {
-                x: x + 12.0,
-                y: cy,
-                text: "FOREIGN KEYS".to_owned(),
-                color: PEACH,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(width - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 16.0;
-
-            for fk in fks {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0,
-                    y: cy,
-                    text: format!(
-                        "{}.{} -> {}.{}",
-                        fk.from_table, fk.from_column, fk.to_table, fk.to_column
-                    ),
-                    color: TEAL,
-                    font_size: 10.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 32.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 16.0;
-            }
-        }
-    }
-
-    fn render_diagram(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        width: f32,
-        _height: f32,
-    ) {
-        let tab = match self.active_db_tab() {
-            Some(t) => t,
-            None => return,
-        };
-
-        cmds.push(RenderCommand::Text {
-            x: x + 12.0,
-            y: y + 4.0,
-            text: "SCHEMA DIAGRAM".to_owned(),
-            color: BLUE,
-            font_size: 12.0,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(width - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        let table_count = tab.db.tables.len();
-        if table_count == 0 {
-            cmds.push(RenderCommand::Text {
-                x: x + 16.0,
-                y: y + 28.0,
-                text: "No tables in database.".to_owned(),
-                color: OVERLAY0,
-                font_size: 11.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width - 32.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+        if fks.is_empty() {
             return;
         }
 
-        // Simple layout: tables as boxes in a row
-        let box_width: f32 = 160.0;
-        let box_spacing: f32 = 40.0;
-        let start_x = x + 20.0;
-        let start_y = y + 28.0;
+        cy += 8.0;
+        let heading = Rect::new(area.x + 12.0, cy, inner, 14.0);
+        // The foreign-key list used to ask nothing at all about where it was
+        // being drawn: a table with a dozen columns put the whole of it below
+        // the pane, and the clip made that look like a table with no foreign
+        // keys rather than a pane too short to show them.
+        if heading.bottom() > area.bottom() {
+            return;
+        }
+        put_text(
+            f,
+            heading,
+            "FOREIGN KEYS",
+            10.0,
+            PEACH,
+            FontWeightHint::Bold,
+        );
+        cy += 16.0;
 
-        let mut table_positions: Vec<(f32, f32, String)> = Vec::new();
+        for fk in fks {
+            let row = Rect::new(area.x + 16.0, cy, (area.w - 32.0).max(0.0), 14.0);
+            if row.bottom() > area.bottom() {
+                return;
+            }
+            put_text(
+                f,
+                row,
+                &format!(
+                    "{}.{} -> {}.{}",
+                    fk.from_table, fk.from_column, fk.to_table, fk.to_column
+                ),
+                10.0,
+                TEAL,
+                FontWeightHint::Regular,
+            );
+            cy += 16.0;
+        }
+    }
 
-        for (ti, table) in tab.db.tables.iter().enumerate() {
-            let tx = start_x + ti as f32 * (box_width + box_spacing);
-            let ty = start_y;
-            let box_height = 22.0 + table.columns.len() as f32 * 14.0;
+    /// The tables as boxes, wrapped to the width of the pane, with the foreign
+    /// keys drawn between the boxes that were placed.
+    ///
+    /// The boxes used to be laid in one unbounded row at `start_x + ti * 200`,
+    /// so the third table in a 400-point pane was drawn entirely outside it and
+    /// the clip made the database look as though it had two tables. They wrap
+    /// now, and when the pane runs out of height the heading says how many of
+    /// the tables are being shown rather than letting the diagram look complete.
+    fn draw_diagram(&self, f: &mut Frame<Target>, area: Rect) {
+        let Some(tab) = self.active_db_tab() else {
+            return;
+        };
 
-            table_positions.push((tx, ty, table.name.clone()));
+        let total = tab.db.tables.len();
+        if total == 0 {
+            put_text(
+                f,
+                Rect::new(area.x + 12.0, area.y + 4.0, (area.w - 24.0).max(0.0), 16.0),
+                "SCHEMA DIAGRAM",
+                12.0,
+                BLUE,
+                FontWeightHint::Bold,
+            );
+            put_text(
+                f,
+                Rect::new(area.x + 16.0, area.y + 28.0, (area.w - 32.0).max(0.0), 14.0),
+                "No tables in database.",
+                11.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            );
+            return;
+        }
 
-            // Table box
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: ty,
-                width: box_width,
-                height: box_height,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
-            cmds.push(RenderCommand::StrokeRect {
-                x: tx,
-                y: ty,
-                width: box_width,
-                height: box_height,
-                color: BLUE,
-                line_width: 1.0,
-                corner_radii: CornerRadii::all(CORNER_RADIUS),
-            });
+        let top = area.y + 28.0;
+        let content = Rect::new(
+            area.x + 20.0,
+            top,
+            (area.w - 40.0).max(0.0),
+            (area.bottom() - top).max(0.0),
+        );
 
-            // Table name header
-            cmds.push(RenderCommand::FillRect {
-                x: tx,
-                y: ty,
-                width: box_width,
-                height: 20.0,
+        // --- placement, before anything is painted ---
+        let mut placed: Vec<(Rect, &Table)> = Vec::new();
+        if !content.is_empty() {
+            let box_w = DIAGRAM_BOX_WIDTH.min(content.w);
+            let per_row = (((content.w + DIAGRAM_BOX_SPACING) / (box_w + DIAGRAM_BOX_SPACING))
+                as usize)
+                .max(1);
+            let mut row_y = content.y;
+            for chunk in tab.db.tables.chunks(per_row) {
+                let room = (content.bottom() - row_y).max(0.0);
+                if room < DIAGRAM_HEADER_HEIGHT {
+                    break;
+                }
+                let mut row_h: f32 = 0.0;
+                for (i, table) in chunk.iter().enumerate() {
+                    let natural =
+                        DIAGRAM_HEADER_HEIGHT + 2.0 + table.columns.len() as f32 * DIAGRAM_COL_STEP;
+                    let h = natural.min(room);
+                    let bx = content.x + i as f32 * (box_w + DIAGRAM_BOX_SPACING);
+                    let r = Rect::new(bx, row_y, box_w, h);
+                    if r.right() > content.right() + 0.01 {
+                        break;
+                    }
+                    placed.push((r, table));
+                    row_h = row_h.max(h);
+                }
+                row_y += row_h + DIAGRAM_ROW_GAP;
+            }
+        }
+
+        let mut heading = "SCHEMA DIAGRAM".to_owned();
+        if placed.len() < total {
+            heading.push_str(&format!(" — {} of {total} tables shown", placed.len()));
+        }
+        put_text(
+            f,
+            Rect::new(area.x + 12.0, area.y + 4.0, (area.w - 24.0).max(0.0), 16.0),
+            &heading,
+            12.0,
+            BLUE,
+            FontWeightHint::Bold,
+        );
+
+        // --- the boxes ---
+        for (r, table) in &placed {
+            f.push(fill(*r, SURFACE0, CORNER_RADIUS));
+            f.push(stroke(*r, BLUE, CORNER_RADIUS));
+            let head = Rect::new(r.x, r.y, r.w, DIAGRAM_HEADER_HEIGHT.min(r.h));
+            f.push(RenderCommand::FillRect {
+                x: head.x,
+                y: head.y,
+                width: head.w,
+                height: head.h,
                 color: BLUE,
                 corner_radii: CornerRadii {
                     top_left: CORNER_RADIUS,
@@ -4325,139 +4765,541 @@ impl DbViewerApp {
                     bottom_right: 0.0,
                 },
             });
-            cmds.push(RenderCommand::Text {
-                x: tx + 6.0,
-                y: ty + 4.0,
-                text: table.name.clone(),
-                color: CRUST,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(box_width - 12.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            put_text(
+                f,
+                inset_x(head, 6.0),
+                &table.name,
+                10.0,
+                CRUST,
+                FontWeightHint::Bold,
+            );
 
-            // Columns
-            let mut cy = ty + 24.0;
+            let mut cy = head.bottom() + 4.0;
             for col in &table.columns {
-                let pk_marker = if col.constraints.primary_key {
+                let line = Rect::new(r.x + 6.0, cy, (r.w - 12.0).max(0.0), DIAGRAM_COL_STEP);
+                if line.bottom() > r.bottom() {
+                    break;
+                }
+                let pk = if col.constraints.primary_key {
                     "PK "
                 } else {
                     ""
                 };
-                cmds.push(RenderCommand::Text {
-                    x: tx + 6.0,
-                    y: cy,
-                    text: format!("{pk_marker}{}: {}", col.name, col.data_type.label()),
-                    color: SUBTEXT1,
-                    font_size: 9.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(box_width - 12.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 14.0;
+                put_text(
+                    f,
+                    line,
+                    &format!("{pk}{}: {}", col.name, col.data_type.label()),
+                    9.0,
+                    SUBTEXT1,
+                    FontWeightHint::Regular,
+                );
+                cy += DIAGRAM_COL_STEP;
             }
         }
 
-        // Draw FK relationship lines
+        // --- the foreign keys between them ---
         for fk in &tab.db.foreign_keys {
-            let from_pos = table_positions
-                .iter()
-                .find(|(_, _, n)| n.to_uppercase() == fk.from_table.to_uppercase());
-            let to_pos = table_positions
-                .iter()
-                .find(|(_, _, n)| n.to_uppercase() == fk.to_table.to_uppercase());
+            let find = |name: &str| {
+                placed
+                    .iter()
+                    .find(|(_, t)| t.name.to_uppercase() == name.to_uppercase())
+                    .map(|(r, _)| *r)
+            };
+            let (Some(from), Some(to)) = (find(&fk.from_table), find(&fk.to_table)) else {
+                continue;
+            };
+            let from_y = from.y + 10.0;
+            let to_y = to.y + 10.0;
+            f.push(RenderCommand::Line {
+                x1: from.right(),
+                y1: from_y,
+                x2: to.x,
+                y2: to_y,
+                color: PEACH,
+                width: 1.5,
+            });
+            let mid_x = f32::midpoint(from.right(), to.x);
+            let mid_y = f32::midpoint(from_y, to_y) - 8.0;
+            let label = Rect::new(
+                mid_x,
+                mid_y,
+                (content.right() - mid_x).clamp(0.0, 120.0),
+                10.0,
+            );
+            put_text(
+                f,
+                label,
+                &format!("{} -> {}", fk.from_column, fk.to_column),
+                8.0,
+                PEACH,
+                FontWeightHint::Regular,
+            );
+        }
+    }
 
-            if let (Some((fx, fy, _)), Some((tox, toy, _))) = (from_pos, to_pos) {
-                // Draw a line from the right side of from_table to the left side of to_table
-                let from_x = fx + box_width;
-                let from_y = fy + 10.0;
-                let to_x = *tox;
-                let to_y = toy + 10.0;
+    /// The status line: which database, which table, what just happened, and
+    /// how many queries have been run.
+    ///
+    /// The four readings used to be placed at `x + 10`, `x + 200` and
+    /// `x + width - 150` whatever the window measured, so in a narrow window the
+    /// table reading was drawn over the database name and the query count was
+    /// drawn over both. They are laid left to right from measured widths now,
+    /// with the count reserved out of the right-hand end first, and each one
+    /// stops as soon as the next would not fit.
+    fn draw_status_bar(&self, f: &mut Frame<Target>, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        f.push(fill(area, CRUST, 0.0));
 
-                cmds.push(RenderCommand::Line {
-                    x1: from_x,
-                    y1: from_y,
-                    x2: to_x,
-                    y2: to_y,
-                    color: PEACH,
-                    width: 1.5,
+        let tab = self.active_db_tab();
+
+        let count = format!("Queries: {}", self.history.len());
+        let count_w = text::measure(&count, 10.0, FontWeightHint::Regular);
+        let mut right = area.right() - 10.0;
+        if right - count_w >= area.x + 10.0 {
+            put_text(
+                f,
+                Rect::new(right - count_w, area.y, count_w, area.h),
+                &count,
+                10.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            );
+            right -= count_w + 12.0;
+        }
+
+        let mut readings: Vec<(String, Color)> = Vec::new();
+        readings.push((
+            format!("DB: {}", tab.map_or("No database", |t| t.db.name.as_str())),
+            BLUE,
+        ));
+        if let Some(t) = tab
+            && let Some(table_name) = t.selected_table.as_ref()
+            && let Some(table) = t.db.find_table(table_name)
+        {
+            readings.push((
+                format!(
+                    "Table: {table_name} ({} cols, {} rows)",
+                    table.col_count(),
+                    table.row_count()
+                ),
+                SUBTEXT0,
+            ));
+        }
+        // What the last thing the user pressed did. Before this the program had
+        // no way to say so: every control was a painted rectangle, and the
+        // status line reported only what was already visible elsewhere.
+        readings.push((self.status.clone(), SUBTEXT1));
+
+        let mut sx = area.x + 10.0;
+        for (label, color) in readings {
+            let w = text::measure(&label, 10.0, FontWeightHint::Regular);
+            if sx + w > right {
+                break;
+            }
+            put_text(
+                f,
+                Rect::new(sx, area.y, w, area.h),
+                &label,
+                10.0,
+                color,
+                FontWeightHint::Regular,
+            );
+            sx += w + 14.0;
+        }
+    }
+}
+
+// ============================================================================
+// What a press and a keystroke do
+// ============================================================================
+
+impl DbViewerApp {
+    /// Route an event to whatever the drawing pass put under it.
+    fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        match event {
+            Event::Key(ke) => self.handle_key(ke),
+            Event::Mouse(me) => self.handle_mouse(me, size),
+            _ => {}
+        }
+    }
+
+    /// Route a press to the control the last frame drew at that point.
+    ///
+    /// The hit boxes come from a frame drawn at the same size, so a control the
+    /// window was too small to draw is a control that cannot be pressed -- and
+    /// the toolbar button that ran off the right-hand edge of a narrow window
+    /// cannot be pressed from off the edge.
+    fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        let MouseEventKind::Press(MouseButton::Left) = event.kind else {
+            return;
+        };
+        let frame = self.frame(size.0, size.1);
+        let Some(target) = frame.hit_test(event.x, event.y) else {
+            return;
+        };
+        self.activate(target);
+    }
+
+    /// The columns of the table the sidebar has selected, if it has one.
+    fn selected_columns(&self) -> Vec<String> {
+        self.active_db_tab()
+            .and_then(|tab| {
+                let name = tab.selected_table.as_deref()?;
+                let table = tab.db.find_table(name)?;
+                Some(table.columns.iter().map(|c| c.name.clone()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Do what pressing `target` means, and say on the status line what it did.
+    fn activate(&mut self, target: Target) {
+        match target {
+            Target::Execute => {
+                self.execute_query();
+                self.status = self
+                    .query_result
+                    .as_ref()
+                    .map_or_else(|| String::from("Ready"), |r| r.message.clone());
+            }
+            Target::NewTab | Target::AddTab => {
+                let name = format!("database{}", self.tabs.len().saturating_add(1));
+                self.add_tab(&name);
+                self.status = format!("Opened {name}");
+            }
+            Target::Export(format) => match self.export_current_table(format) {
+                Some(text) => {
+                    // The export is put in the editor rather than thrown away.
+                    // `export_current_table` returned a `String` that no caller
+                    // outside the tests ever received: the three formats were
+                    // written, and the program had nowhere to put the result.
+                    // The editor is the one text surface the window has, and it
+                    // makes export-then-import a round trip a user can perform.
+                    self.status = format!(
+                        "Exported {} as {} into the editor ({} bytes)",
+                        self.active_db_tab()
+                            .and_then(|t| t.selected_table.clone())
+                            .unwrap_or_default(),
+                        format.label(),
+                        text.len()
+                    );
+                    self.sql_input = text;
+                    self.bottom_panel = BottomPanel::SqlEditor;
+                    self.focus = Focus::Editor;
+                }
+                None => self.status = String::from("Nothing to export: no table selected"),
+            },
+            Target::Import => {
+                let name = format!("imported{}", self.tabs.len().saturating_add(1));
+                let csv = self.sql_input.clone();
+                self.status = match self.import_csv_data(&name, &csv) {
+                    Ok(()) => {
+                        self.select_table(&name);
+                        format!("Imported {name}")
+                    }
+                    Err(e) => format!("Import failed: {e}"),
+                };
+            }
+            Target::SelectTab(i) => {
+                if i < self.tabs.len() {
+                    self.active_tab = i;
+                    self.status = self
+                        .active_db_tab()
+                        .map_or_else(String::new, |t| format!("Switched to {}", t.db.name));
+                }
+            }
+            Target::CloseTab(i) => {
+                if self.tabs.len() <= 1 {
+                    self.status = String::from("The last database tab stays open");
+                } else {
+                    let name = self
+                        .tabs
+                        .get(i)
+                        .map(|t| t.db.name.clone())
+                        .unwrap_or_default();
+                    self.close_tab(i);
+                    self.status = format!("Closed {name}");
+                }
+            }
+            Target::TreeNode(i) => {
+                let node = self
+                    .active_db_tab()
+                    .and_then(|t| t.tree_nodes.get(i))
+                    .map(|n| n.kind.clone());
+                match node {
+                    Some(TreeNodeKind::Table(name)) => {
+                        self.select_table(&name);
+                        self.status = format!("Table {name}");
+                    }
+                    Some(TreeNodeKind::Index(name)) => self.status = format!("Index {name}"),
+                    Some(TreeNodeKind::View(name)) => self.status = format!("View {name}"),
+                    Some(TreeNodeKind::Trigger(name)) => self.status = format!("Trigger {name}"),
+                    _ => {}
+                }
+            }
+            Target::ToggleFilterBuilder => {
+                self.show_filter_builder = !self.show_filter_builder;
+                self.status = if self.show_filter_builder {
+                    String::from("Filter builder shown")
+                } else {
+                    self.focus = Focus::None;
+                    String::from("Filter builder hidden")
+                };
+            }
+            Target::FilterColumn => {
+                let cols = self.selected_columns();
+                if cols.is_empty() {
+                    self.status = String::from("No table selected");
+                } else {
+                    self.filter_column_idx = self
+                        .filter_column_idx
+                        .saturating_add(1)
+                        .checked_rem(cols.len())
+                        .unwrap_or(0);
+                    self.status = cols
+                        .get(self.filter_column_idx)
+                        .map_or_else(String::new, |c| format!("Filter column: {c}"));
+                }
+            }
+            Target::FilterOp => {
+                let ops = FilterOp::all();
+                self.filter_op_idx = self
+                    .filter_op_idx
+                    .saturating_add(1)
+                    .checked_rem(ops.len())
+                    .unwrap_or(0);
+                self.status = ops
+                    .get(self.filter_op_idx)
+                    .map_or_else(String::new, |o| format!("Filter test: {}", o.label()));
+            }
+            Target::FilterValue => {
+                self.focus = Focus::FilterValue;
+                self.status = String::from("Type the value to filter by");
+            }
+            Target::AddFilter => {
+                let cols = self.selected_columns();
+                let name = cols
+                    .get(self.filter_column_idx)
+                    .cloned()
+                    .unwrap_or_else(|| String::from("(no column)"));
+                self.add_filter();
+                self.status = format!("Filtering on {name}");
+            }
+            Target::RemoveFilter(i) => {
+                self.remove_filter(i);
+                self.status = String::from("Filter removed");
+            }
+            Target::SortColumn(i) => {
+                self.toggle_sort(i);
+                let dir = self
+                    .active_db_tab()
+                    .and_then(|t| t.sort_state.as_ref())
+                    .map_or("", |s| match s.direction {
+                        SortDir::Ascending => "ascending",
+                        SortDir::Descending => "descending",
+                    });
+                let name = self.selected_columns().get(i).cloned().unwrap_or_default();
+                self.status = format!("Sorted by {name}, {dir}");
+            }
+            Target::DeleteRow(i) => {
+                self.delete_row(i);
+                self.status = format!("Deleted row {}", i.saturating_add(1));
+            }
+            Target::PrevPage => {
+                self.prev_page();
+                self.status = self.active_db_tab().map_or_else(String::new, |t| {
+                    format!("Page {}", t.page.saturating_add(1))
                 });
-
-                // FK label
-                let mid_x = f32::midpoint(from_x, to_x);
-                let mid_y = f32::midpoint(from_y, to_y) - 8.0;
-                cmds.push(RenderCommand::Text {
-                    x: mid_x,
-                    y: mid_y,
-                    text: format!("{} -> {}", fk.from_column, fk.to_column),
-                    color: PEACH,
-                    font_size: 8.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(120.0),
-                    overflow: TextOverflow::Ellipsis,
+            }
+            Target::NextPage => {
+                self.next_page();
+                self.status = self.active_db_tab().map_or_else(String::new, |t| {
+                    format!("Page {}", t.page.saturating_add(1))
                 });
+            }
+            Target::ShowPanel(panel) => {
+                self.bottom_panel = panel;
+                self.focus = if panel == BottomPanel::SqlEditor {
+                    Focus::Editor
+                } else {
+                    Focus::None
+                };
+                self.status = panel.label().to_owned();
+            }
+            Target::SqlEditor => {
+                self.focus = Focus::Editor;
+                self.status = String::from("Type a query, Enter to run it");
+            }
+            Target::HistoryEntry(i) => {
+                if let Some(entry) = self.history.get(i) {
+                    self.sql_input = entry.sql.clone();
+                    self.focus = Focus::Editor;
+                    self.bottom_panel = BottomPanel::SqlEditor;
+                    self.status = String::from("Query recalled");
+                }
+            }
+            Target::FavoriteEntry(i) => {
+                self.toggle_favorite(i);
+                self.status = if self.history.get(i).is_some_and(|e| e.favorite) {
+                    String::from("Starred")
+                } else {
+                    String::from("Unstarred")
+                };
             }
         }
     }
 
-    fn render_status_bar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32) {
-        cmds.push(RenderCommand::FillRect {
-            x,
-            y,
-            width,
-            height: STATUS_BAR_HEIGHT,
-            color: CRUST,
-            corner_radii: CornerRadii::ZERO,
-        });
+    /// The text box that has the keyboard, if any.
+    fn focused_text(&mut self) -> Option<&mut String> {
+        match self.focus {
+            Focus::Editor => Some(&mut self.sql_input),
+            Focus::FilterValue => Some(&mut self.filter_value),
+            Focus::None => None,
+        }
+    }
 
-        let tab = self.active_db_tab();
-
-        // Database name
-        let db_name = tab.map_or("No database", |t| t.db.name.as_str());
-        cmds.push(RenderCommand::Text {
-            x: x + 10.0,
-            y: y + 5.0,
-            text: format!("DB: {db_name}"),
-            color: BLUE,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(200.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Table info
-        if let Some(t) = tab
-            && let Some(ref table_name) = t.selected_table
-            && let Some(table) = t.db.find_table(table_name)
-        {
-            cmds.push(RenderCommand::Text {
-                x: x + 200.0,
-                y: y + 5.0,
-                text: format!(
-                    "Table: {} ({} cols, {} rows)",
-                    table_name,
-                    table.col_count(),
-                    table.row_count()
-                ),
-                color: SUBTEXT0,
-                font_size: 10.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(300.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+    /// Route a keystroke to whatever has the keyboard.
+    fn handle_key(&mut self, event: &KeyEvent) {
+        if !event.pressed {
+            return;
+        }
+        match event.key {
+            Key::Escape => {
+                self.focus = Focus::None;
+                self.status = String::from("Keyboard released");
+                return;
+            }
+            Key::Tab => {
+                self.focus = match self.focus {
+                    Focus::Editor if self.show_filter_builder => Focus::FilterValue,
+                    _ => Focus::Editor,
+                };
+                return;
+            }
+            Key::Backspace => {
+                if let Some(text) = self.focused_text() {
+                    text.pop();
+                    return;
+                }
+            }
+            Key::Enter => match self.focus {
+                Focus::Editor => {
+                    self.activate(Target::Execute);
+                    return;
+                }
+                Focus::FilterValue => {
+                    self.activate(Target::AddFilter);
+                    return;
+                }
+                Focus::None => {}
+            },
+            _ => {}
         }
 
-        // History count
-        cmds.push(RenderCommand::Text {
-            x: x + width - 150.0,
-            y: y + 5.0,
-            text: format!("Queries: {}", self.history.len()),
-            color: SUBTEXT0,
-            font_size: 10.0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(140.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // Printable text. `KeyEvent::text` is what the platform's keyboard
+        // layout produced, shift and dead keys included; deriving a character
+        // from the key code instead is what makes a `*` impossible to type on
+        // any layout but the one the table was written for -- and `SELECT *` is
+        // the first query anybody types.
+        let typed = event.text.clone();
+        if !typed.is_empty()
+            && !typed.chars().any(char::is_control)
+            && let Some(text) = self.focused_text()
+        {
+            text.push_str(&typed);
+            return;
+        }
+
+        // Nothing has the keyboard, so letters are shortcuts.
+        match event.key {
+            Key::N => self.activate(Target::NewTab),
+            Key::F => self.activate(Target::ToggleFilterBuilder),
+            Key::E => self.activate(Target::SqlEditor),
+            Key::R => self.activate(Target::ShowPanel(BottomPanel::Results)),
+            Key::S => self.activate(Target::ShowPanel(BottomPanel::Schema)),
+            Key::D => self.activate(Target::ShowPanel(BottomPanel::Diagram)),
+            Key::PageDown => self.activate(Target::NextPage),
+            Key::PageUp => self.activate(Target::PrevPage),
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
+// The window
+// ============================================================================
+
+impl App for DbViewerApp {
+    fn title(&self) -> String {
+        String::from("DB Viewer")
+    }
+
+    fn app_id(&self) -> String {
+        String::from("dbviewer")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        // A database browser changes when someone asks it something, and at no
+        // other time. There is no clock on the screen to keep.
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                // Remembered here as well as in `render`, because a press can
+                // arrive after a resize and before the next frame, and it has to
+                // be answered against the window's real size.
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                Response::Redraw
+            }
+            _ => {
+                self.handle_event(event, (self.window_width, self.window_height));
+                Response::Redraw
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.window_width = width;
+        self.window_height = height;
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for DbViewerApp {
+    type Target = Target;
+    type Outcome = ();
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        );
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.handle_event(&Event::Key(key.clone()), size);
     }
 }
 
@@ -4466,11 +5308,23 @@ impl DbViewerApp {
 // ============================================================================
 
 /// Supported export formats.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ExportFormat {
     Csv,
     Json,
     SqlInserts,
+}
+
+impl ExportFormat {
+    /// What the status line calls this format.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Csv => "CSV",
+            Self::Json => "JSON",
+            Self::SqlInserts => "SQL",
+        }
+    }
 }
 
 // ============================================================================
@@ -4492,12 +5346,13 @@ pub enum ExportFormat {
 // Main
 // ============================================================================
 
-fn main() {
-    let app = DbViewerApp::new();
-    let cmds = app.render(1200.0, 800.0);
-    // In the real OS, these commands would be submitted to the compositor.
-    // For now, just verify it produces output.
-    assert!(!cmds.is_empty(), "Render should produce commands");
+fn main() -> ExitCode {
+    // The previous `main` built a sample database, drew one frame into a `Vec`,
+    // asserted the `Vec` was not empty and dropped it. It exercised the drawing
+    // code and showed nobody the result -- and every control the drawing code
+    // painted answered nothing, because nothing was reading presses.
+    let mut app = DbViewerApp::new();
+    app::launch("dbviewer", &mut app)
 }
 
 // ============================================================================
@@ -5742,8 +6597,9 @@ mod tests {
     /// test about wrapping has to pick its width from that rather than from a
     /// constant — see `a_long_query_error_is_wrapped_not_cut_mid_word`.
     fn results_pane_layout_at(app: &DbViewerApp, width: f32) -> (Vec<(f32, String)>, Option<f32>) {
-        let mut cmds = Vec::new();
-        app.render_results(&mut cmds, 0.0, 0.0, width, TEST_PANE_HEIGHT);
+        let mut f = Frame::new(width, TEST_PANE_HEIGHT);
+        app.draw_results(&mut f, Rect::new(0.0, 0.0, width, TEST_PANE_HEIGHT));
+        let cmds = f.commands();
         let lines = cmds
             .iter()
             .filter_map(|c| match c {
@@ -6051,7 +6907,7 @@ mod tests {
         app.filter_value = "35".to_owned();
         app.add_filter();
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();
-        for row in &rows {
+        for (_, row) in &rows {
             if let Some(CellValue::Integer(age)) = row.get(3) {
                 assert!(*age >= 35);
             }
@@ -6065,7 +6921,7 @@ mod tests {
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();
         let ages: Vec<i64> = rows
             .iter()
-            .filter_map(|r| {
+            .filter_map(|(_, r)| {
                 if let Some(CellValue::Integer(v)) = r.get(3) {
                     Some(*v)
                 } else {
@@ -6109,9 +6965,10 @@ mod tests {
             affected_rows: 0,
             is_error: false,
         });
-        let mut cmds = Vec::new();
-        app.render_results(&mut cmds, 0.0, 0.0, 600.0, 400.0);
-        let cell = cmds
+        let mut f = Frame::new(600.0, 400.0);
+        app.draw_results(&mut f, Rect::new(0.0, 0.0, 600.0, 400.0));
+        let cell = f
+            .commands()
             .iter()
             .find_map(|cmd| match cmd {
                 RenderCommand::Text {

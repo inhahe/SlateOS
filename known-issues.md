@@ -104331,3 +104331,85 @@ test needs two filesystems. The unit tests in `mv.rs` drive `copy_across_devices
 directly, so a test that stamps a source, calls the function, and asserts the
 destination's mtime is the source's would catch the timestamp half today without
 any mount at all — and that test does not exist. Write it with the fix.
+
+
+---
+
+## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
+
+**Status:** open, measured but only a third attributed. Not a regression — it
+has presumably always been true — and not a gate: the series that exposes it
+(`vfs_readdir_root`) is tracked, not scored.
+
+**In short:** listing the root directory is about four times more expensive per
+entry than listing an ordinary directory, even though on the boot-test both are
+the *same* in-memory filesystem running the *same* code. Something about being
+the root, rather than about the entries in it, is costing roughly 29
+microseconds a call. About 10 of those 29 are accounted for; the rest is not.
+
+**Where it came from.** While refuting the two proposed causes of the
+`vfs_readdir` movement (see
+A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER above),
+`bench_vfs_readdir_breakdown` produced a cost model for a memfs listing, and the
+scored root listing does not fit it. From the same boot:
+
+| measurement | value |
+|---|---|
+| `vfs_readdir_n0` (empty memfs dir) | 9302 ns |
+| `vfs_readdir_n8` (8 entries) | 13944 ns |
+| `vfs_readdir_n64` (64 entries) | 37521 ns |
+| implied slope | ~441 ns/entry |
+| `vfs_readdir` — `/`, 21 entries | 47998 ns |
+| implied slope for `/`, against the same fixed cost | **~1843 ns/entry** |
+
+The model predicts `9302 + 21x441 = 18563 ns`. The measurement is 47998 ns, so
+**29435 ns is unexplained by entry count**.
+
+**This is not a filesystem-type difference.** The obvious explanation would be
+that `/` is FAT and `/tmp` is memfs, and it is wrong: `main.rs:1418` mounts FAT
+from `vda` and *falls back to memfs* when there is no FAT volume, and the
+boot-test's `vda` is a raw swap disk with no filesystem on it. So on the machine
+these numbers come from, `/` and `/tmp` are both `fs/memfs.rs`. The comparison
+is like-for-like, which is what makes the gap interesting.
+
+**What is attributed (about a third).** `Vfs::finish_listing`
+(`kernel/src/fs/vfs.rs:2333`) injects mount points that the backing filesystem
+does not know about, and for each one it calls `submount_root_ino`
+(`vfs.rs:3454`), which is:
+
+```rust
+Self::metadata_resolved(dir_path.join(name)).map_or(0, |m| m.ino)
+```
+
+That is a **full stat per mount point** — a `PathBuf` allocation for the join,
+then `resolve_mount` (VFS lock, longest-prefix scan) and a filesystem
+`metadata()` call. `/` has five submounts (`tmp`, `proc`, `dev`, `sys`, `mnt`),
+and the suite already prices exactly this operation: `vfs_stat_breakdown_resolved`
+= 1928 ns. Five of those is **9640 ns**, or 33% of the gap. It also explains the
+shape — the cost attaches to the *directory* (how many things are mounted under
+it), not to how many entries it holds, which is precisely the anomaly.
+
+The `!entries.iter().any(...)` de-duplication in the same loop is **not** a
+suspect: 5 mounts x 21 entries is ~105 `PathBuf` comparisons, nowhere near
+microseconds.
+
+**What is not attributed.** ~20 us. Candidates, in the order worth testing:
+`resolve_follow` + `check_path_access` on the root path itself; `submount_children`
+taking the `VFS` lock a second time (`finish_listing` takes it, then each
+`submount_root_ino` takes it again through `resolve_mount`); and memfs's own
+root-directory lookup, which may not be structured like a child directory's.
+
+**The proper fix (once it is measured, not before).** `finish_listing` already
+holds the mount table when it computes `submount_children`; the mounted
+filesystem's root inode is available from that same table without re-resolving a
+path that was just constructed from data the table already had. Reading it there
+would remove five stats, five joins and five lock acquisitions per root listing.
+But that is the fix for the attributed third — the remaining two thirds must be
+measured first, because this whole entry exists downstream of an investigation
+that lost two days to acting on an unmeasured hypothesis.
+
+**How to measure it.** The same way the last one was settled: a 2x2 in
+`bench_vfs_readdir_breakdown` — the same directory listed as a mount parent and
+as a plain child — rather than reasoning about the code. `bench_vfs_readdir`
+now logs the entry count of `/` and names every boot, so the workload side of the
+comparison is finally pinned.

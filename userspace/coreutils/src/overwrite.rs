@@ -18,9 +18,10 @@
 //!
 //! # The four things
 //!
-//! * [`Interactive`] — `copy.h:75`'s enum. The reason `-i`/`-n`/`-f` are one
-//!   field rather than three booleans, and therefore the reason `mv -in` is
-//!   `-n` while `mv -ni` is `-i`.
+//! * [`Interactive`] — `copy.h:73`'s enum. The reason `-i`/`-n`/`-f` (and
+//!   `--update=none`, which is a fourth spelling of the same field) are one
+//!   field rather than four booleans, and therefore the reason `mv -in` is `-n`
+//!   while `mv -ni` is `-i`.
 //! * [`can_write_any_file`] and [`writable_destination`] — whether the
 //!   permission bits are worth mentioning. These decide only the *wording* of
 //!   the question, but they are also what `mv` consults to decide whether to
@@ -45,11 +46,7 @@ use crate::yesno::{Answers, yesno};
 
 /// What to do about a destination that is already there.
 ///
-/// GNU's `enum Interactive` (`copy.h:75`). Four of its five members are here;
-/// the fifth is `I_ALWAYS_SKIP`, reached only through `--update=none`, which
-/// neither utility has yet and which differs from [`Interactive::AlwaysNo`] in
-/// exactly the two ways `copy.h`'s own comments give: "Skip and fail" against
-/// "Skip and ignore".
+/// GNU's `enum Interactive` (`copy.h:73`), all five members.
 ///
 /// An enum and not three booleans because these are alternatives rather than
 /// independent switches: GNU stores one value and lets the last option given
@@ -77,6 +74,25 @@ pub enum Interactive {
     /// `-n` / `--no-clobber`: leave an existing destination alone, and *fail*.
     /// GNU's `I_ALWAYS_NO`, whose comment is "Skip and fail".
     AlwaysNo,
+    /// `--update=none`: leave an existing destination alone, and *succeed*.
+    /// GNU's `I_ALWAYS_SKIP`, whose comment is "Skip and ignore".
+    ///
+    /// Every test upstream makes on `I_ALWAYS_NO` before the skip it also makes
+    /// on this — `abandon_move` (`copy.c:2062`), the same-file guard (2344), the
+    /// `record_file` guard (2244) and the `lstat` guard (2300) all name the two
+    /// together — so the two values choose the same *action* everywhere and
+    /// differ only in what is made of it afterwards, at `copy.c:2409-2431`:
+    ///
+    /// | | exit status | says |
+    /// |---|---|---|
+    /// | [`Interactive::AlwaysNo`] | 1 | `mv: not replacing 'b'` |
+    /// | `AlwaysSkip` | 0 | nothing (`skipped 'b'` under `--debug`) |
+    ///
+    /// So `mv --update=none a b` over an existing `b` is a *successful* command
+    /// that moved nothing, which is the point of it: it is for the loop that
+    /// wants whatever is already there kept, and would rather not have to tell
+    /// the difference between "kept it" and "the disk is full".
+    AlwaysSkip,
     /// `mv -f`: never ask, whatever the mode says. GNU's `I_ALWAYS_YES`.
     ///
     /// `cp` never sets this — its `-f` means something else — so a `cp` reading

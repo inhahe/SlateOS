@@ -348,18 +348,46 @@ impl<T> Frame<T> {
     /// if nothing of it is visible: a control that was clipped away is not
     /// there to be clicked.
     pub fn hit(&mut self, target: T, rect: Rect) {
+        let Some(visible) = self.visible_part(rect) else {
+            return;
+        };
+        self.hits.push((target, visible));
+    }
+
+    /// How much of `rect` a viewer could actually see, or `None` for none of
+    /// it.
+    ///
+    /// `rect` is in the coordinate space currently being drawn in, exactly as
+    /// [`hit`](Self::hit) takes it, and the answer is in window coordinates.
+    ///
+    /// This is the rule [`hit`](Self::hit) applies to decide whether a control
+    /// is there to be clicked, made available to the drawing pass so that ink
+    /// and hit boxes can be governed by *one* rule rather than two that drift
+    /// apart. A clip makes what is outside it invisible; it does not make it
+    /// free. A list of six hundred rows scrolled to its end still builds six
+    /// hundred rectangles, measures six hundred strings and hands the renderer
+    /// six hundred commands to walk past — every frame — unless the pass that
+    /// draws it asks first.
+    #[must_use]
+    pub fn visible_part(&self, rect: Rect) -> Option<Rect> {
         let moved = rect.translated(self.offset.0, self.offset.1);
         let visible = match self.clips.last() {
-            Some(clip) => match clip.intersect(moved) {
-                Some(visible) => visible,
-                None => return,
-            },
+            Some(clip) => clip.intersect(moved)?,
             None => moved,
         };
         if visible.is_empty() {
-            return;
+            return None;
         }
-        self.hits.push((target, visible));
+        Some(visible)
+    }
+
+    /// Whether any part of `rect` would be visible if drawn now.
+    ///
+    /// See [`visible_part`](Self::visible_part), which this is the yes-or-no
+    /// form of.
+    #[must_use]
+    pub fn is_visible(&self, rect: Rect) -> bool {
+        self.visible_part(rect).is_some()
     }
 
     /// Forget every target recorded so far, keeping the drawing.
@@ -875,5 +903,42 @@ mod tests {
             frame.hit_test_ref(5.0, 5.0).map(String::as_str),
             Some("row-7")
         );
+    }
+
+    #[test]
+    fn what_is_visible_is_what_a_hit_box_would_be_trimmed_to() {
+        // The two must not drift: `visible_part` exists so a drawing pass can
+        // skip ink for the same reason `hit` drops a control, and a rule kept
+        // in two places is a rule that will one day disagree with itself.
+        let mut frame: Frame<&str> = Frame::new(100.0, 100.0);
+        frame.clip(Rect::new(0.0, 20.0, 100.0, 40.0));
+        for row in [
+            Rect::new(0.0, -30.0, 100.0, 20.0),
+            Rect::new(0.0, 10.0, 100.0, 20.0),
+            Rect::new(0.0, 30.0, 100.0, 20.0),
+            Rect::new(0.0, 55.0, 100.0, 20.0),
+            Rect::new(0.0, 80.0, 100.0, 20.0),
+        ] {
+            let expected = frame.visible_part(row);
+            frame.hit("row", row);
+            let recorded = frame.hits().last().filter(|_| expected.is_some());
+            assert_eq!(
+                expected,
+                recorded.map(|(_, r)| *r),
+                "{row:?} was called {expected:?} visible but recorded as {recorded:?}"
+            );
+            frame.discard_hits();
+        }
+        frame.unclip();
+    }
+
+    #[test]
+    fn nothing_is_hidden_when_nothing_is_clipped() {
+        // A rectangle outside the window is still "visible" to a frame with
+        // no clip: the frame's own size is not a clip, and pretending it were
+        // would make this disagree with `hit`, which records such a box.
+        let frame: Frame<&str> = Frame::new(100.0, 100.0);
+        assert!(frame.is_visible(Rect::new(500.0, 500.0, 10.0, 10.0)));
+        assert!(!frame.is_visible(Rect::new(0.0, 0.0, 0.0, 10.0)));
     }
 }

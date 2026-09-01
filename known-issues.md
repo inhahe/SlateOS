@@ -102924,6 +102924,64 @@ the shared expression underneath them.
 
 ---
 
+### Lesson 107: a clip hides a drawing pass's overrun from every test but one (lane C, 2026-09-01)
+
+**In short:** the contacts detail panel drew a contact's fields down a column
+and never checked that it still had column left. A contact with six phone
+numbers and a paragraph of notes pushed the group chips **below the box they
+were being drawn in**, where they landed on top of the Edit / Star / Delete
+buttons. The edit form did the same to Save and Cancel. Both faults were
+present from the first commit, under a suite of 230 tests, and not one of them
+could see either.
+
+They could not see it because the clip that was in force hides the overrun from
+**two of the three kinds of thing a frame contains, but not the third**:
+
+| what is emitted | what the clip does to it | can a test see the overrun? |
+|---|---|---|
+| a run of text | `put_text` asks `Frame::is_visible` first and emits nothing | **no** — the run is simply absent |
+| a hit box | `Frame::hit` trims to the clip and drops an empty result | **no** — the control is simply absent |
+| a filled box | pushed to the display list exactly as asked | **yes** — the rect is in the frame |
+
+So every test phrased over text ("is the label inside the window?", "is the
+column bounded?") and every test phrased over controls ("does every hit box lie
+inside the window?", "is the panel clear of the status line?") passes over a
+pass that has run hundreds of pixels past its box. The picture on screen is
+even *correct* — the compositor throws the overrun away. The fault is real all
+the same: the moment anything is drawn **after** the offending pass under a
+different clip, as the buttons are, the overrun lands on top of it.
+
+**The rule.** *A clip makes a fault invisible, not absent — and it hides it
+unevenly, so the test that owns "a pass stops at its box" must be phrased over
+fills, never over text or hit boxes.* The general form: when a mechanism
+suppresses output, enumerate which of your assertion surfaces it suppresses.
+Whichever surface it leaves alone is the only one that can carry the assertion.
+
+**The exemption is the rule, not a hole in it.** "No fill is painted entirely
+outside the clip" is too strong as written: a two-pixel sliver of a contact row
+at the bottom edge draws its 40-pixel avatar circle in full, forty pixels below
+the cut, and that is correct — *the unit of "do not draw this" is the item, and
+an item is drawn whole or not at all.* The honest assertion is therefore: a
+fill wholly outside the clip is allowed exactly when some other fill **drawn
+under the same clip** encloses it and is itself partly visible. That excuses
+the avatar (its row's own background carries it) and excuses nothing else — a
+row three hundred pixels below the list has no such parent, because the only
+fill enclosing it is its own background, which is just as invisible as it is.
+Note the "same clip" qualifier: without it, the window background excuses
+everything.
+
+**Where else to look.** Every app in the wiring campaign whose panels are
+`f.clip(...)`-ed and whose contents are laid out with a running `y` cursor:
+the list bodies, the form bodies, and any column of sections. Grep for a `for`
+loop that increments a `y` inside a `clip`/`unclip` pair and does not test the
+cursor against the bottom of the box. In this crate the list already had the
+guard (`if cy >= l.list.bottom() { break; }`) and the two panels did not, which
+is the usual shape: the scrolling thing is guarded because someone thought
+about scrolling, and the "it always fits" thing is not, because at the default
+window size it always does.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31
@@ -104210,3 +104268,66 @@ untracked. They are another lane's, they are harmless (the only symptom is
 deleting another lane's files is the class of action that caused this. Whoever
 recognises them should remove them — from a shell whose working directory is
 not a repository.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — OPEN 2026-09-01
+
+**In short:** when `mv` moves a file between two filesystems it cannot rename it,
+so it copies the bytes and deletes the original. Ours copies the bytes and the
+permission bits and *nothing else*: the file arrives with today's date instead of
+the date it was written, and (if run as root) owned by root rather than by
+whoever owned it. GNU's `mv` carries both over, and a user who moves a photo
+directory off one disk onto another does not expect every photo to be re-dated to
+the moment of the move. Nothing user-visible is broken on a single-filesystem
+machine, which is why this has gone unnoticed: no case in `scripts/mv-diff.sh`
+crosses a filesystem boundary, because mounting a second one needs a password the
+harness must not ask for.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs:1601`, in `copy_across_devices`:
+
+```rust
+    fs::copy(src, target)?;
+    fs::remove_file(src)
+```
+
+`std::fs::copy` is documented to copy the permission bits and is documented not
+to copy anything else. It is the whole of the plain-file arm; the symlink arm
+above it (`:1584`) recreates the link's text correctly and is not affected, and
+the directory arm (`:1594`) refuses outright and is its own entry.
+
+**What GNU does.** `copy.c`'s `copy_reg` finishes with `set_owner`, then
+`set_authorized_context`, then `copy_acl`/`set_acl`, then `utimens` from the
+source's `st_atim`/`st_mtim` — in that order, and the order matters, since
+`chown` clears set-user-ID and so must precede the mode. For `mv` the flags that
+select all of this are on unconditionally: `cp_option_init` (`mv.c:100`) sets
+`preserve_timestamps`, `preserve_ownership`, `preserve_mode` and
+`preserve_links`, because a move is supposed to be indistinguishable from a
+rename.
+
+**The proper fix.** Replace the two lines with an explicit sequence in the same
+order upstream uses: create the destination, copy the bytes, `fchown` (ignoring
+`EPERM`, as upstream does when not preserving is merely unprivileged rather than
+an error), `fchmod` from the source's mode including the set-ID bits, then
+`futimens` with the source's `st_atim`/`st_mtim` at full nanosecond resolution —
+and only unlink the source once all of that has succeeded. Nanoseconds rather
+than seconds because the next entry depends on them.
+
+**Two things that fall out of it.** First, `mv -u`'s comparison is currently a
+plain `(mtime)` comparison; upstream passes `UTIMECMP_TRUNCATE_SOURCE` exactly
+and only when the move is cross-device (`copy.c:2379`), which rounds the source's
+stamp down to the destination filesystem's resolution before comparing. That flag
+is unimplemented here — see `destination_is_older`'s doc at `mv.rs:1300` — and it
+is *doubly* unreachable, because a fallback that does not preserve the timestamp
+at all has no preserved timestamp for the truncation to be about. Whoever does
+the fix above should do the truncation in the same change, since that is the
+moment it stops being unreachable. Second, hard links across the fallback: `mv`
+sets `preserve_links`, so a group moved together should arrive as a group, and
+`fs::copy` gives one independent file per name. That is the same shape as the
+directory refusal and belongs with a recursive fallback rather than with this.
+
+**How it would be caught.** It would not be, by anything we have. A regression
+test needs two filesystems. The unit tests in `mv.rs` drive `copy_across_devices`
+directly, so a test that stamps a source, calls the function, and asserts the
+destination's mtime is the source's would catch the timestamp half today without
+any mount at all — and that test does not exist. Write it with the fix.

@@ -2609,7 +2609,14 @@ fn place_entity<O: Write, E: Write>(
                 // `forget_created` half — `earlier_file` is non-null on this
                 // path, which is exactly the `recorded == None` this branch
                 // leaves behind. See the tail below.
-                un_backup(moved_aside.as_deref(), target, job);
+                backup::un_backup(
+                    "cp",
+                    moved_aside.as_deref(),
+                    target,
+                    job.flags.verbose,
+                    &mut *job.out,
+                    &mut *job.err,
+                );
                 Placed::Failed
             };
         }
@@ -2630,51 +2637,17 @@ fn place_entity<O: Write, E: Write>(
         }
         // And the half the label is named for. In upstream's order: forget
         // first, then put the backup back.
-        un_backup(moved_aside.as_deref(), target, job);
+        backup::un_backup(
+            "cp",
+            moved_aside.as_deref(),
+            target,
+            job.flags.verbose,
+            &mut *job.out,
+            &mut *job.err,
+        );
     }
 
     if ok { Placed::Copied } else { Placed::Failed }
-}
-
-/// GNU's `un_backup` label (`copy.c:3364`): a copy that failed after its
-/// destination had been renamed away must put the destination back.
-///
-/// Without it a failed `cp -b a b` would leave no `b` at all — the copy did not
-/// happen, and the file that *was* `b` is now sitting under a name the user did
-/// not ask for and may not think to look under. That is `-b` losing a file,
-/// which is the one thing `-b` exists to prevent.
-///
-/// A failure to restore is reported and nothing more: the return value is
-/// already "this operand failed", and there is no second thing to try. GNU says
-/// the same and also carries on.
-fn un_backup<O: Write, E: Write>(
-    moved_aside: Option<&Path>,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) {
-    let Some(backup) = moved_aside else {
-        return;
-    };
-    match fs::rename(backup, target) {
-        Ok(()) => {
-            if job.flags.verbose {
-                let _ = writeln!(
-                    job.out,
-                    "{} -> {} (unbackup)",
-                    quoteaf_os(backup),
-                    quoteaf_os(target)
-                );
-            }
-        }
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot un-backup {}: {why}",
-                quoteaf_os(target)
-            );
-        }
-    }
 }
 
 /// Whether [`place_entity`]'s backup block will move this destination aside —

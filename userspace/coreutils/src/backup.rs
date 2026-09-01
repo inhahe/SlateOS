@@ -67,10 +67,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::errmsg::strerror;
 use crate::fileid::file_id;
 use crate::getopt::{Error, Program};
 use crate::pathname::{base_len, last_component, last_component_offset};
-use crate::quote::{os_bytes, os_from_bytes};
+use crate::quote::{os_bytes, os_from_bytes, quoteaf_os};
 
 /// When to make a backup, and of what shape.
 ///
@@ -422,6 +423,65 @@ pub fn source_is_dst_backup(
     match fs::metadata(&would_be) {
         Ok(m) => file_id(&would_be, &m) == file_id(src, src_meta),
         Err(_) => false,
+    }
+}
+
+/// GNU's `un_backup` label (`copy.c:3364`): an operation that failed *after* its
+/// destination had been renamed away must put the destination back.
+///
+/// Without it a failed `cp -b a b` leaves no `b` at all — the copy did not
+/// happen, and the file that *was* `b` now sits under a name the user did not
+/// ask for and may not think to look under. That is the option losing a file,
+/// which is the one thing the option exists to prevent. `mv -b` has the identical
+/// exposure and a larger one, since more of its failure paths come after the
+/// backup, which is why this is shared rather than written twice.
+///
+/// A failure to restore is reported and nothing more: the caller's answer is
+/// already "this operand failed", and there is no second thing to try. GNU says
+/// the same and also carries on.
+///
+/// The verbose line has **no verb** in front of it, unlike the `renamed`/`copied`
+/// ones — upstream prints it from its own `printf` rather than through
+/// `emit_verbose`, so `'b~' -> 'b' (unbackup)` starts at the quote.
+///
+/// `backup` is an `Option` because upstream's null check is inside the label
+/// (`if (dst_backup)`) rather than at each of the eleven `goto`s that reach it:
+/// a caller that failed before making a backup jumps there just the same. Asking
+/// the question once here rather than at every call site is both upstream's
+/// shape and one fewer thing for a new failure path to forget.
+///
+/// `out` and `err` are `dyn` rather than generic because the two callers have
+/// different writer types and this needs to be one function to be worth having.
+pub fn un_backup(
+    program: &str,
+    backup: Option<&Path>,
+    target: &Path,
+    verbose: bool,
+    out: &mut dyn io::Write,
+    err: &mut dyn io::Write,
+) {
+    let Some(backup) = backup else {
+        return;
+    };
+    match fs::rename(backup, target) {
+        Ok(()) => {
+            if verbose {
+                let _ = writeln!(
+                    out,
+                    "{} -> {} (unbackup)",
+                    quoteaf_os(backup),
+                    quoteaf_os(target)
+                );
+            }
+        }
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                err,
+                "{program}: cannot un-backup {}: {why}",
+                quoteaf_os(target)
+            );
+        }
     }
 }
 

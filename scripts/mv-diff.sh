@@ -717,7 +717,39 @@ run_case -ff file.txt dst
 run_case -f -f file.txt dst
 
 # =============================================================================
-# 14. --help and --version
+# 14. -v, --verbose
+# =============================================================================
+# The line goes to *stdout*, not stderr, so these cases are the only ones in the
+# file where the two streams could be swapped without any of the others
+# noticing. `renamed 'src' -> 'dst'`, both names quoted in one style, one line
+# per source, and nothing at all when the move fails.
+#
+# The `copied` / `removed` pair that a cross-device move prints is not here, for
+# the reason given at the head of this file: no case moves across a filesystem
+# boundary. Those two sentences are pinned by unit test in `mv.rs` instead.
+
+run_case -v file.txt dst
+run_case -v file.txt dir
+run_case --verbose tree moved
+# Two sources: two lines, in operand order, each naming where it landed rather
+# than the directory that was asked for.
+run_case -v file.txt tree/a.txt dir
+# A failure prints its diagnostic and no verbose line — `emit_verbose` sits
+# inside the `rename_errno == 0` arm (`copy.c:2761`).
+run_case -v nosuchfile dst
+# An overwrite goes through the second rename, which has its own emission site.
+TREE='mktree; printf old > dst'
+run_case -v file.txt dst
+# Clustered, and after the operands, since options permute.
+run_case -fv file.txt dst
+run_case file.txt dst -v
+# A name that needs quoting, which is what the one-style rule is for: the reader
+# has to be able to tell the space *in* the name from the space between names.
+TREE='mktree; printf x > "a b.txt"'
+run_case -v "a b.txt" dst
+
+# =============================================================================
+# 15. --help and --version
 # =============================================================================
 # The family's two deliberate differences: `--help` omits the GNU project's
 # `Report bugs to:` block, and `--version` names SlateOS.
@@ -729,7 +761,7 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help file.txt dst
 xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 
 # =============================================================================
-# 15. Options GNU has and this mv has not
+# 16. Options GNU has and this mv has not
 # =============================================================================
 # An inventory, not a permission. Each entry names its option and turns into an
 # XPASS the moment the option lands, which is what forces it to be promoted to a
@@ -765,13 +797,6 @@ TREE='mktree; printf old > dst'
 missing -n -f file.txt dst
 TREE='mktree; printf old > dst'
 missing -f -n file.txt dst
-
-# -v, --verbose: name each move on stdout, with `renamed` and the `->` arrow.
-missing -v file.txt dst
-missing -v file.txt dir
-missing --verbose tree moved
-missing -v file.txt tree/a.txt dir
-missing -v nosuchfile dst
 
 # -t, --target-directory: the destination given first, so every operand is a
 # source. It is also the only shape in which one source and a directory is

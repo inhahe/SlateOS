@@ -1273,15 +1273,23 @@ impl HangmanApp {
     /// given the terms of: with no height the chips were as tall as the type
     /// asked for, and only the caller's own `chip_y + btn_h` check kept them
     /// off the line below. Naming the band makes the bound the pass's own.
+    ///
+    /// There is deliberately no `if band.is_empty() { return; }` here, and
+    /// there was. `Rect::intersect` answers `None` for an empty box, so the
+    /// guard could not change a single command: a strip with no area yields no
+    /// chip, no run and no hit box without being told. A clamp no test can
+    /// reach is a claim, not a bound (lesson 92, and lesson 109's second half).
     fn draw_difficulty_chips(&self, f: &mut Frame<Target>, l: &Layout, band: Rect) {
-        if band.is_empty() {
-            return;
-        }
         #[expect(clippy::cast_precision_loss, reason = "three chips; exact in f32")]
         let n = Difficulty::ALL.len().max(1) as f32;
         let gap = l.pad * 0.4;
         let chip_w = ((band.w - gap * (n - 1.0)) / n).max(0.0);
-        let chip_h = (l.font * 2.0).min(band.h);
+        // The nominal height, unclamped, because `intersect` below is what cuts
+        // the chip to the strip -- on all four sides, not just the bottom. This
+        // read `(l.font * 2.0).min(band.h)`, and a `.min` a stronger guard two
+        // lines later already subsumes is not a guard: no test could reach it,
+        // and a clamp no test can reach is a claim, not a bound.
+        let chip_h = l.font * 2.0;
         for (i, diff) in Difficulty::ALL.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "three chips; exact in f32")]
             let cx = (i as f32).mul_add(chip_w + gap, band.x);
@@ -1311,6 +1319,14 @@ impl HangmanApp {
     /// The header: who we are, what category and difficulty are in play, how
     /// many guesses are left, and the hint button.
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
+        // A band of no area gets no commands at all, not one degenerate fill.
+        // Every other pass in this file already refuses -- `draw_stats` and
+        // `draw_result` on `is_empty`, `draw_gallows` on a side of zero -- and
+        // the header was the one that went straight into an unconditional fill
+        // of a rectangle it had not looked at.
+        if l.header.is_empty() {
+            return;
+        }
         fill(f, l.header, MANTLE, CornerRadii::all(4.0));
         let mut x = l.header.x + l.pad;
 
@@ -1439,7 +1455,17 @@ impl HangmanApp {
         // common case, the band being what is left beside the statistics
         // column -- the figure was exactly one padding wider than the room it
         // had, and its right-hand upright was drawn over the column.
-        let side = (l.gallows.w - l.pad * 2.0).min(l.gallows.h).max(0.0);
+        //
+        // The square is then shrunk by one stroke width before anything is
+        // drawn in it, because a stroke straddles the line it is drawn on:
+        // half of a `width`-thick base line is below `y = 210`, and the picture
+        // reaches `y = 210` of 220. The thickness has a floor of one point that
+        // does not scale, so in a band a few points tall the half-stroke is a
+        // larger share of the square than the picture's own top margin -- a
+        // 6 px band drew the beam a fifth of a point above the band's top edge.
+        let outer = (l.gallows.w - l.pad * 2.0).min(l.gallows.h).max(0.0);
+        let stroke = (outer * 3.0 / GALLOWS_UNITS).max(1.0);
+        let side = (outer - stroke).max(0.0);
         if side <= 0.0 {
             return;
         }
@@ -1532,6 +1558,14 @@ impl HangmanApp {
         // One `centre_line` for the row rather than one per letter: every
         // letter is the same size, so either the row can hold a line of text
         // or none of it can, and asking once says that plainly.
+        //
+        // "Asking once" has to be true of the code and not only of the comment.
+        // This said the same thing while the loop below called `run_in`, which
+        // asks `centre_line` again for every cell -- so the row's answer placed
+        // nothing but the rule, the cells' answers placed the glyphs, and
+        // replacing the row's guard with the bare centring it is there to
+        // prevent changed no test's answer. A guard a second copy dominates is
+        // not a guard (lesson 92); the letters are placed on this baseline now.
         let Some(baseline) = centre_line(l.word, l.word_font) else {
             return;
         };
@@ -1563,15 +1597,19 @@ impl HangmanApp {
             // cell and given the cell's width as a `max_width` measured from
             // an x it no longer started at.
             let cell = Rect::new(x, l.word.y, step, l.word.h);
-            run_in(
-                f,
-                cell,
-                &ch.to_string(),
-                l.word_font,
-                FontWeightHint::Bold,
-                color,
-                None,
-            );
+            let glyph = ch.to_string();
+            if let Some((tx, tw)) = span(cell, &glyph, l.word_font, FontWeightHint::Bold, None) {
+                text_at(
+                    f,
+                    &glyph,
+                    tx,
+                    baseline,
+                    l.word_font,
+                    FontWeightHint::Bold,
+                    color,
+                    Some(tw),
+                );
+            }
             if rule {
                 f.push(RenderCommand::Line {
                     x1: step.mul_add(0.1, x),
@@ -1682,14 +1720,21 @@ impl HangmanApp {
         if y + l.small * 2.0 > l.stats.bottom() {
             return;
         }
-        f.push(RenderCommand::Line {
-            x1: x,
-            y1: y,
-            x2: x + w,
-            y2: y,
-            color: SURFACE0,
-            width: 1.0,
-        });
+        // Only when it has a length. A stroke of no length is still a mark one
+        // line width across, so a column narrower than two paddings -- which is
+        // every column the sliver grid squeezes -- put a 1 px square a padding
+        // past its own right edge. `w` is `(stats.w - pad * 2).max(0.0)`, and a
+        // `max(0.0)` makes a width legal, not present.
+        if w > 0.0 {
+            f.push(RenderCommand::Line {
+                x1: x,
+                y1: y,
+                x2: x + w,
+                y2: y,
+                color: SURFACE0,
+                width: 1.0,
+            });
+        }
         y += l.pad;
 
         if !column_line(
@@ -4168,6 +4213,15 @@ mod tests {
     /// A line is a rectangle of no thickness for this purpose: `draw_word`'s
     /// rules and `draw_stats`' divider are strokes and nothing else, so a pass
     /// that drew only lines would otherwise be measured as drawing nothing.
+    ///
+    /// The thickness is added across the line, and on *both* axes when the
+    /// line does not run along one. A vertical stroke has zero extent in x, and
+    /// [`inside`] answers "yes" for anything empty -- so the gallows, which is
+    /// nothing but strokes and whose two uprights are vertical, was measured as
+    /// painting nothing at all and could be drawn anywhere at all. A purely
+    /// horizontal line is *not* widened in x, because a butt cap does not
+    /// extend past the endpoint and pretending it does would make the word
+    /// row's rules escape a row they sit exactly inside.
     fn painted(f: &Frame<Target>) -> Vec<Rect> {
         f.commands()
             .iter()
@@ -4193,12 +4247,17 @@ mod tests {
                     y2,
                     width,
                     ..
-                } => Some(Rect::new(
-                    x1.min(*x2),
-                    y1.min(*y2) - width / 2.0,
-                    (x2 - x1).abs(),
-                    (y2 - y1).abs() + width,
-                )),
+                } => {
+                    let (dx, dy) = ((x2 - x1).abs(), (y2 - y1).abs());
+                    let gx = if dx > 0.0 && dy == 0.0 { 0.0 } else { *width };
+                    let gy = if dy > 0.0 && dx == 0.0 { 0.0 } else { *width };
+                    Some(Rect::new(
+                        x1.min(*x2) - gx / 2.0,
+                        y1.min(*y2) - gy / 2.0,
+                        dx + gx,
+                        dy + gy,
+                    ))
+                }
                 _ => None,
             })
             .collect()
@@ -4347,9 +4406,50 @@ mod tests {
                     draw(&app, &mut f, &l);
                     check_containment(&state, pass, region, &f);
                 }
+
+                // The same seven passes, against bands `Layout::solve` does not
+                // currently hand out. A bound that nothing can squeeze is not
+                // verified: `draw_word`'s rule-fit check and `draw_result`'s
+                // card-height clamp were both dominated by a guard further in,
+                // so deleting either changed no test's answer -- not because
+                // they are redundant, but because the band they bound was never
+                // narrow enough to reach them.
+                //
+                // Five of the seven, not all: `menu` owns the whole window, and
+                // the `keyboard` band is *derived* from `key` and `key_gap` in
+                // `solve` rather than being an input to the pass, so a keyboard
+                // band shrunk on its own is a band the keys were never sized
+                // for and the resulting overrun would be the test's fault.
+                for (pass, band, draw) in SQUEEZABLE {
+                    let mut base = l;
+                    let full = *band(&mut base);
+                    for region in squeezes(full) {
+                        let mut sq = l;
+                        *band(&mut sq) = region;
+                        let mut f = Frame::new(w, h);
+                        draw(&app, &mut f, &sq);
+                        check_containment(&format!("{state}, squeezed"), pass, region, &f);
+                    }
+                }
             }
         }
     }
+
+    /// The bands a pass takes as an *input*, paired with the pass that owns
+    /// them, so a test can hand one of them a box the layout would not.
+    ///
+    /// A `fn(&mut Layout) -> &mut Rect` rather than a field name because Rust
+    /// has no field pointers; the same accessor reads the band and replaces it.
+    type Band = fn(&mut Layout) -> &mut Rect;
+
+    /// The five bands [`no_pass_paints_outside_the_region_it_owns`] squeezes.
+    const SQUEEZABLE: [(&str, Band, Pass); 5] = [
+        ("header", |l| &mut l.header, HangmanApp::draw_header),
+        ("gallows", |l| &mut l.gallows, HangmanApp::draw_gallows),
+        ("word", |l| &mut l.word, HangmanApp::draw_word),
+        ("stats", |l| &mut l.stats, HangmanApp::draw_stats),
+        ("result", |l| &mut l.overlay, HangmanApp::draw_result),
+    ];
 
     /// `r`, and `r` squeezed to boxes the layout does not currently hand out.
     ///
@@ -4361,17 +4461,37 @@ mod tests {
     ///
     /// The heights go down to zero because zero is where centring inverts, and
     /// the widths because a box can run out sideways as easily as downwards.
+    ///
+    /// Absolute slivers *and* sixteenths of the band, because the two catch
+    /// different faults. A fixed 12 px band is below any font size and so only
+    /// ever reaches the outermost refusal; the interesting failures live in the
+    /// narrow window between "the type fits" and "the type and everything under
+    /// it fits", which is a fraction of the band and not a constant. Leaving
+    /// `RULE_WIDTH / 2.0` out of `draw_word`'s rule check is wrong for a band
+    /// of exactly one particular height and right either side of it.
     fn squeezes(r: Rect) -> Vec<Rect> {
         let mut out = vec![r];
-        for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+        let mut push_h = |h: f32| {
             if h < r.h {
                 out.push(Rect::new(r.x, r.y, r.w, h));
             }
+        };
+        for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+            push_h(h);
         }
-        for w in [0.0, 1.0, 5.0, 30.0] {
+        for k in 1..16_u8 {
+            push_h(r.h * f32::from(k) / 16.0);
+        }
+        let mut push_w = |w: f32| {
             if w < r.w {
                 out.push(Rect::new(r.x, r.y, w, r.h));
             }
+        };
+        for w in [0.0, 1.0, 5.0, 30.0] {
+            push_w(w);
+        }
+        for k in 1..16_u8 {
+            push_w(r.w * f32::from(k) / 16.0);
         }
         out
     }
@@ -4393,6 +4513,43 @@ mod tests {
                     app.draw_difficulty_chips(&mut f, &l, band);
                     check_containment(&format!("{name} at {w}x{h}"), "difficulty chips", band, &f);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn every_letter_of_the_word_gets_its_own_column() {
+        // Containment cannot see this. Each letter is centred in a cell, and a
+        // cell that is wrongly the *whole row* is still inside the row -- so
+        // bounding every glyph by `l.word` rather than by its own step passes
+        // every assertion in the containment sweep while stacking the entire
+        // word in one place. The row is a row because the cells advance, and
+        // only a test that reads the positions can say so.
+        for (w, h) in SIZES {
+            let l = Layout::solve(w, h);
+            if l.word.is_empty() {
+                continue;
+            }
+            let app = playing_app("technology");
+            let mut f = Frame::new(w, h);
+            app.draw_word(&mut f, &l);
+            let xs: Vec<f32> = inked(&f).into_iter().map(|(_, r)| r.x).collect();
+            if xs.len() < 2 {
+                continue;
+            }
+            assert_eq!(
+                xs.len(),
+                app.word.len(),
+                "a {w}x{h} window drew {} runs for a ten-letter word",
+                xs.len()
+            );
+            for pair in xs.windows(2) {
+                let [a, b] = pair else { continue };
+                assert!(
+                    b > a,
+                    "a {w}x{h} window drew the word's letters at {xs:?} -- \
+                     a later letter is not to the right of an earlier one"
+                );
             }
         }
     }
@@ -4519,16 +4676,36 @@ mod tests {
                 let state = format!("{name} at {w}x{h}");
                 let menu = app.phase == GamePhase::CategorySelect;
                 let over = app.phase == GamePhase::Won || app.phase == GamePhase::Lost;
-                let passes: [(&str, bool, Pass); 7] = [
-                    ("menu", menu, HangmanApp::draw_menu),
-                    ("header", !menu, HangmanApp::draw_header),
-                    ("gallows", !menu, HangmanApp::draw_gallows),
-                    ("word", !menu, HangmanApp::draw_word),
-                    ("keyboard", !menu, HangmanApp::draw_keyboard),
-                    ("stats", !menu, HangmanApp::draw_stats),
-                    ("result", over, HangmanApp::draw_result),
+                // "Drew something" is too weak a converse on its own: a column
+                // that stops after its heading has drawn something. So each
+                // pass also names a run from its *far end*, the last thing it
+                // reaches if it ran the whole way -- the alphabet's last key,
+                // the column's list of wrong letters, the card's second button.
+                let passes: [(&str, bool, &[&str], Pass); 7] = [
+                    ("menu", menu, &["HANGMAN", "Hard"], HangmanApp::draw_menu),
+                    (
+                        "header",
+                        !menu,
+                        &["Hangman", "% win"],
+                        HangmanApp::draw_header,
+                    ),
+                    ("gallows", !menu, &[], HangmanApp::draw_gallows),
+                    ("word", !menu, &[], HangmanApp::draw_word),
+                    ("keyboard", !menu, &["Q", "M"], HangmanApp::draw_keyboard),
+                    (
+                        "stats",
+                        !menu,
+                        &["Wins:", "Games:", "Wrong:"],
+                        HangmanApp::draw_stats,
+                    ),
+                    (
+                        "result",
+                        over,
+                        &["Word: ", MENU_LABEL],
+                        HangmanApp::draw_result,
+                    ),
                 ];
-                for (pass, expected, draw) in passes {
+                for (pass, expected, wanted, draw) in passes {
                     if !expected {
                         continue;
                     }
@@ -4538,12 +4715,23 @@ mod tests {
                         !f.commands().is_empty(),
                         "{state}: the {pass} pass drew nothing in a window with room for it"
                     );
+                    let ink: Vec<String> = inked(&f).into_iter().map(|(s, _)| s).collect();
+                    for want in wanted {
+                        assert!(
+                            ink.iter().any(|s| s.contains(want)),
+                            "{state}: the {pass} pass never reached {want:?}; it inked {ink:?}"
+                        );
+                    }
                 }
 
                 // And every pass handed a band of no height draws nothing at
-                // all -- no ink, and, just as importantly, no hit box. A button
-                // that is not painted but is still clickable is worse than
-                // either half on its own.
+                // all -- no ink, no hit box, and no command of any kind. The
+                // hit box matters as much as the ink: a button that is not
+                // painted but is still clickable is worse than either half on
+                // its own. The command count matters because a degenerate fill
+                // is how a pass says "I did not look at the band I was given",
+                // and it is invisible to a containment check -- an empty
+                // rectangle is inside everything.
                 let mut squeezed = l;
                 squeezed.header = Rect::new(l.header.x, l.header.y, l.header.w, 0.0);
                 squeezed.gallows = Rect::new(l.gallows.x, l.gallows.y, l.gallows.w, 0.0);
@@ -4570,6 +4758,11 @@ mod tests {
                         f.hits().is_empty(),
                         "{state}: the {pass} pass hit-boxed {:?} in a band of no height",
                         f.hits().iter().map(|(t, _)| t).collect::<Vec<_>>()
+                    );
+                    assert!(
+                        f.commands().is_empty(),
+                        "{state}: the {pass} pass pushed {} command(s) into a band of no height",
+                        f.commands().len()
                     );
                 }
             }

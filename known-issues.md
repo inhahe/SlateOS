@@ -102941,6 +102941,69 @@ window size it always does.
 
 ---
 
+### Lesson 108: a pass held to its caller's box is not held to its own (lane C, 2026-09-01)
+
+**In short:** dbviewer has a test that hands each drawing pass a box and checks
+the pass paints nothing outside it. It listed eight passes, one of them
+`draw_sidebar`. But `draw_sidebar` cuts its box in two — an object tree on top,
+a filter builder underneath — and hands each half to a sub-pass. So a tree row
+that overran the *tree's* box landed on the *builder*, which is still inside the
+sidebar, and the test that exists precisely to catch overruns reported nothing
+wrong. A mutation that deleted the tree's bottom-edge guard was caught only by
+an unrelated test, incidentally, and only in the states where the builder
+happened to be hidden.
+
+**The rule.** *List every pass that is handed a box, not every pass that is
+handed a **window** region.* A containment test's resolution is the size of the
+smallest box it knows about; overruns finer than that are invisible to it by
+construction, and the guard being tested almost always lives in the sub-pass,
+because that is where the cursor walks.
+
+The practical obstacle is worth naming, because it is what caused the omission:
+the two sub-passes each take the `DbTab` they draw, so they do not fit the
+`fn(&App, &mut Frame, Rect)` alias the pass list used, and were quietly left out
+rather than the alias being widened. Making `Pass` a `Box<dyn Fn(..)>` costs one
+allocation per pass per test and admits them. **A type alias that silently
+excludes members of the set it is enumerating is a coverage hole with a
+compile-time excuse.**
+
+**Fills are a complete witness; runs and hit boxes are one-way ones — and the
+distinction is not the same as Lesson 107's.** Widening the pass list *still*
+did not catch the mutation, because a tree row pushes a fill only when it is the
+selected table; every other row is two runs of text and a hit box. Lesson 107
+concluded that the assertion must be phrased over fills, and that is right for a
+test that draws a **window**, where a clip is in force. This test hands each pass
+an **unclipped** frame — so nothing is suppressing the runs and hit boxes, and
+they say what the fills cannot. The correct formulation is therefore:
+
+| surface | witnesses an overrun? |
+|---|---|
+| a fill | always — pushed exactly as asked, clip or no clip |
+| a run of text | only if no clip suppressed it: finding one proves an overrun, finding none proves nothing |
+| a hit box | same |
+
+So a one-way witness may always be *added*: it can only ever add catches, never
+cause a false failure. What it must never do is *replace* the fill, because its
+silence means nothing. Lesson 107 said "phrase it over fills"; the sharper
+statement is **"you may only conclude *absence* of an overrun from fills"**.
+
+Doing that here found a fourteenth production fault the moment it was added:
+three one-line placeholders (`No query results`, `Select a table to view its
+schema`, `No tables in database`) placed their line at a fixed inset from the
+top of their pane and inked it whatever the pane measured, so a pane shorter
+than the inset got a line below its own bottom edge.
+
+**Where else to look.** Any per-pass containment sweep: check that its pass list
+is closed under "is handed a sub-box". `alarmclock` was checked and is clean —
+its three passes are whole tabs, and the one sub-pass with a smaller box, the
+alarm editor, has its own containment test. The placeholder shape is worth its
+own grep across the campaign: a `put_text` at a *constant* offset from a pane's
+top edge, in an early-return arm for the empty case. Those arms are written
+first, before anyone has thought about small windows, and they are the only
+paint in the pass, so no sibling ever collides with them and reveals the fault.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31

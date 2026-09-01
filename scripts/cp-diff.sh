@@ -74,12 +74,16 @@
 # lands. `cp.rs`'s module docs explain why those options are *refused* rather
 # than ignored.
 #
-# The third group is at present only `--preserve=xattr`, whose reason is in
-# section 17: the reference is built from source on a host with no libattr, so
-# its `cp` is compiled without extended-attribute support and refuses the word
-# outright. That one will not turn green by anything done here — it would take
-# a libattr on the build host — which is why it names the reference in its
-# reason rather than pretending to be an inventory entry.
+# The third group is the one where the *reference* is what cannot do the thing.
+# It held `--preserve=xattr` until 2026-09-01: the reference is built from
+# source, this host had no libattr, so its `cp` was compiled without
+# extended-attribute support and refused the word outright. This comment used to
+# say that would "not turn green by anything done here — it would take a libattr
+# on the build host". It took a libattr on the build host: `diff-wsl.sh` now
+# builds one from source into the same cache and configures coreutils against
+# it, and those three are real cases whenever it succeeds. They fall back to
+# `xfail_case` when it does not, which is what `xattr_case` in section 17 is.
+# The group is currently empty on this host.
 #
 # ## The reference is built, not found
 #
@@ -240,6 +244,17 @@ hardlinks() {
       | LC_ALL=C sort )
 }
 
+# And the extended attributes, which `snapshot` cannot see: they are not in the
+# mode, the size or the name, so a `cp -a` that carried every byte and dropped
+# every attribute looked perfect here until this was added. `diff_xattrs_in` and
+# its reasoning live in `diff-wsl.sh` section 8.
+#
+# Empty output on a tree that has none, which is almost every case in this file —
+# so the cost of comparing it everywhere is one line of "" against "".
+xattrs() {
+  diff_xattrs_in '' "$1"
+}
+
 # And the bytes, so that a file which arrived with the right size and the wrong
 # contents is still caught. `-type f` does not follow, so a symlink is not read
 # here — its target is already in the snapshot above.
@@ -330,9 +345,10 @@ run_one() {
 
 judge() {
   local o_dir=$1 g_dir=$2 o_out=$3 g_out=$4 o_extra=$5 g_extra=$6 label=$7
-  local o_snap g_snap o_body g_body o_show g_show o_link g_link
+  local o_snap g_snap o_body g_body o_show g_show o_link g_link o_xat g_xat
   o_snap=$(snapshot "$o_dir"); g_snap=$(snapshot "$g_dir")
   o_link=$(hardlinks "$o_dir"); g_link=$(hardlinks "$g_dir")
+  o_xat=$(xattrs "$o_dir"); g_xat=$(xattrs "$g_dir")
   o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | scrub "$g_dir")
   o_show=$(scrub "$o_dir" <"$o_out"); g_show=$(scrub "$g_dir" <"$g_out")
   o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir")
@@ -340,18 +356,18 @@ judge() {
 
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
      && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
-     && [ "$o_link" = "$g_link" ]; then
+     && [ "$o_link" = "$g_link" ] && [ "$o_xat" = "$g_xat" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s}' \
+  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}' \
     "$(printf '%s' "$o_extra" | tr '\n' '|')" "$(printf '%s' "$o_show" | tr '\n' '|')" \
     "$(printf '%s' "$o_snap" | tr '\n' '|')" "$(printf '%s' "$o_body" | tr '\n' '|')" \
-    "$(printf '%s' "$o_link" | tr '\n' '|')" \
+    "$(printf '%s' "$o_link" | tr '\n' '|')" "$(printf '%s' "$o_xat" | tr '\n' '|')" \
     "$(printf '%s' "$g_extra" | tr '\n' '|')" "$(printf '%s' "$g_show" | tr '\n' '|')" \
     "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')" \
-    "$(printf '%s' "$g_link" | tr '\n' '|')")
+    "$(printf '%s' "$g_link" | tr '\n' '|')" "$(printf '%s' "$g_xat" | tr '\n' '|')")
   LABEL=$label
 }
 
@@ -417,6 +433,25 @@ SELF_RESIDUE='GNU leaves a partial copy, we leave the tree untouched'
 echo "cp-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
+# Said out loud, because a harness that has quietly stopped checking something
+# is worse than one that never checked it: the run would otherwise report the
+# same counts while comparing one fewer thing.
+#
+# Two independent facts, and both are needed. The harness must be able to *set*
+# an attribute (Python, and a filesystem that accepts one), and the reference
+# must have been built with `USE_XATTR` — a coreutils compiled without libattr
+# has a `copy_attr` whose whole body is `return true`, so it drops every
+# attribute silently and a case comparing against it would report the loss as
+# *ours*. Section 17's `--preserve=xattr` cases are the ones that need the
+# second fact; the comparison itself runs on every case either way, since a
+# tree with no attributes costs an empty string against an empty string.
+if [ -z "$DIFF_XATTR" ]; then
+  echo "  xattr: NOT COMPARED -- no working setxattr found"
+elif [ "$DIFF_XATTR_REF" != yes ]; then
+  echo "  xattr: compared with $DIFF_XATTR, but the reference lacks USE_XATTR"
+else
+  echo "  xattr: $DIFF_XATTR, reference has USE_XATTR"
+fi
 
 # =============================================================================
 # 1. Too few operands
@@ -1666,18 +1701,15 @@ run_case --no-preserve=links,xattr,context file.txt new.txt
 
 # `--preserve=xattr`, `--preserve=all` and `-a`.
 #
-# What these cases can pin is the *option surface* — that the spellings are
+# These pin two different things, and until 2026-09-01 only the first was
+# available. The first is the *option surface* — that the spellings are
 # accepted, that each asks for the attributes GNU says it asks for, and that a
-# copy under them lands identically. What they cannot pin is an extended
-# attribute actually crossing, and the reason is the reference: `diff-wsl.sh`
-# builds coreutils with a plain `./configure`, this host has no libattr headers,
-# and so the built `cp` has `USE_XATTR` undefined and a `copy_attr` whose whole
-# body is `return true`. The host has no `setfattr` to seed an attribute with
-# either. That half is covered where it can be: `cp.rs`'s tests write and read
-# real attributes through the syscalls on a real filesystem.
+# copy under them lands identically. The second is an extended attribute
+# actually crossing, which needs a reference that can carry one.
 #
-# `--preserve=xattr` therefore differs on purpose, and *loudly*: a `cp` built
-# without xattr support does not ignore the word, it refuses the run —
+# It could not, and the reason is worth keeping: a `cp` built without libattr has
+# `USE_XATTR` undefined, `copy_attr`'s whole body becomes `return true`, and
+# `--preserve=xattr` does not ignore the word but refuses the run outright —
 #
 #   #if !USE_XATTR
 #     if (x.require_preserve_xattr)
@@ -1685,22 +1717,69 @@ run_case --no-preserve=links,xattr,context file.txt new.txt
 #                                 "built without xattr support"));
 #   #endif                                                      (cp.c:1276)
 #
-# — which is a shortfall in the reference and not in us, and is why these three
-# are `xfail_case` rather than `missing`: the option is implemented, and it is
-# the comparison that cannot be made.
+# — so the three cases below were `xfail_case`s reading "the built reference has
+# USE_XATTR undefined and refuses the word". `diff-wsl.sh` now builds libattr
+# from source into the same cache coreutils is built in and configures against
+# it, so on this host they are real cases. They stay conditional rather than
+# becoming unconditional `run_case`s because that build can still fail — no
+# network, no compiler — and a case that goes red for the reference's sake
+# teaches the reader the wrong thing.
 #
 # That same `#if` is also the sharpest available confirmation of what
 # `require_preserve_xattr` means, because `--preserve=all` and `-a` walk
 # straight past it in the very same binary. GNU's `PRESERVE_ALL` sets
 # `preserve_xattr` and deliberately not `require_preserve_xattr`, so only the
-# word typed by hand insists. Those cases below are real, and they agree.
+# word typed by hand insists. Those cases below have always been real.
 NO_XATTR_REF='the built reference has USE_XATTR undefined and refuses the word'
+xattr_case() {
+  if [ "$DIFF_XATTR_REF" = yes ]; then run_case "$@"
+  else xfail_case "$NO_XATTR_REF" "$@"; fi
+}
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
-xfail_case "$NO_XATTR_REF" --preserve=xattr file.txt new.txt
+xattr_case --preserve=xattr file.txt new.txt
 STAMPS=1 TREE='mkstamped; chmod 700 file.txt'
-xfail_case "$NO_XATTR_REF" --preserve=mode,xattr file.txt new.txt
+xattr_case --preserve=mode,xattr file.txt new.txt
 STAMPS=1 TREE='mkstamped'
-xfail_case "$NO_XATTR_REF" --preserve=xattr -r tree dst
+xattr_case --preserve=xattr -r tree dst
+
+# And the half that was missing entirely: an attribute that has to *arrive*.
+# Every case above copies a tree with no attributes on it, so all of them would
+# pass against a `cp` that dropped every one — which is precisely what the
+# reference was doing, and precisely the shape of blind spot
+# `B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` was filed about.
+#
+# Measured rather than assumed: with `copy_xattrs` in `cp.rs` short-circuited to
+# `return true` and nothing else changed, this run goes from 565/0 to 562/3 —
+# the three cases that seed an attribute and expect it to arrive, and correctly
+# not the two below them that expect one *not* to.
+#
+# `-a` and not `--preserve=xattr` for the tree case: `-a` is what a user reaches
+# for, and it exercises the same `copy_attr` through the other spelling.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+xattr_case --preserve=xattr file.txt new.txt
+# Several at once, one with a value that is not printable ASCII — a copy that
+# carried the names and re-read the values as text mangles the last one, and a
+# copy that carried only the first passes the case above.
+STAMPS=1 TREE='mkstamped
+              diff_setxattr file.txt user.a one
+              diff_setxattr file.txt user.b two
+              diff_setxattr file.txt user.c "héllo"'
+xattr_case --preserve=xattr file.txt new.txt
+# Down a tree, so that a directory's own attributes are carried too and not just
+# its files'. `mkstamped` builds `tree/`; both levels get one.
+STAMPS=1 TREE='mkstamped
+              diff_setxattr tree user.ondir d
+              diff_setxattr tree/a.txt user.onfile f'
+xattr_case -a tree dst
+# Asked for and *not* wanted: plain `cp` preserves nothing, so the attribute
+# must be absent from the copy on both sides. A subject that always carried
+# attributes would pass every case above and fail only this one.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+run_case file.txt new.txt
+# `--no-preserve=xattr` after `-a`, which is the documented way to turn the one
+# word off. The source keeps its attribute; the copy must not get it.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
+xattr_case -a --no-preserve=xattr file.txt new.txt
 # `--preserve=all` is every word GNU has, `context` included; on a host without
 # SELinux the security-context line is guarded by `if (selinux_enabled)` and so
 # asks for nothing. That is why `all` works here and `context` alone does not.

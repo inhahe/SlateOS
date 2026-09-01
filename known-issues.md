@@ -105222,7 +105222,7 @@ its own change; tracked as
 
 ---
 
-## B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+## B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES — FIXED 2026-09-01
 
 **In short:** the two differential harnesses that compare our `cp` and `mv`
 against the real GNU ones cannot see extended attributes — small named blobs a
@@ -105256,6 +105256,46 @@ only shape where the fallback runs at all.
 it is needed is that
 `B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES` above was fixed with the
 harness reporting an identical 341/0/11 before and after.
+
+**Fixed 2026-09-01, in two halves, and the second half was the one that was not
+foreseen above.**
+
+The first half is the comparison: `diff-wsl.sh` section 8 adds `diff_xattrs_in`,
+which both harnesses fold into `judge` beside the tree, the bytes and the
+hard-link groups, and which reports as `xattr{…}`. It is **not** `getfattr`, as
+this entry proposed. `getfattr` is part of `attr`, which is not installed on
+this host and cannot be installed without a password the scripts do not have —
+but the substitution is an improvement rather than a concession, for three
+reasons set out at length in section 8: `os.listxattr(..., follow_symlinks=
+False)` reads a symlink's own attributes without a flag that is easy to leave
+off, the value stays bytes under one stated encoding rule instead of `-d`'s
+per-value guess between text and base64, and no subprocess is needed per file.
+`security.selinux` is elided, as suggested; the rest of `security.*` is not,
+since `security.capability` is a real thing for these two programs to lose.
+
+The second half is that **the reference could not carry an attribute either**,
+which this entry did not anticipate and which would have made the first half
+worse than useless: `m4/xattr.m4` had found no libattr on the build host, so the
+reference `cp` and `mv` had `USE_XATTR` undefined and a `copy_attr` whose entire
+body is `return true`. The first five cases written against it came back red
+with *ours* carrying the attributes and GNU carrying none — a harness reporting
+a difference in the subject that is entirely in the reference is worse than one
+that reports nothing. `diff-wsl.sh` therefore builds libattr 2.5.2 from source
+into the same cache coreutils is built in, and configures coreutils against it;
+what was actually achieved is read back from the built tree's `config.h` rather
+than assumed from the flags, because `gl_FUNC_XATTR` can decline and only warn.
+
+Cases: mv-diff section 23, five of them, and cp-diff section 17, five more plus
+the three `--preserve=xattr` cases that were `xfail_case`s naming this exact
+shortfall and are now real. Measured rather than assumed, which is the test this
+entry itself demands: with `preserve_xattrs` in `mv.rs` short-circuited to
+`return`, mv-diff goes from 351/0 to 348/3 — before this work the same break
+changed nothing at all.
+
+Still not covered, for a reason outside the harness: an attribute on a directory
+crossing a filesystem boundary, because a directory cannot cross one yet
+(`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`). mv-diff section 23 names the
+case to add when it can.
 
 ---
 

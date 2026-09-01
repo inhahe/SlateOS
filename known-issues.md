@@ -105364,9 +105364,33 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ---
 
-## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix)
+## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix) — FIXED 2026-09-01 by lane C
 
-**Status:** OPEN — filed 2026-09-01, `requests/b-c-gui-toolkit-tree-module-is-orphaned-and-blocks-every-lanes-boot-test.md`
+**Status:** FIXED 2026-09-01 by lane C, same day as filed. `gui/toolkit/src/tree.rs`
+and its `pub mod tree;` are deleted; `scripts/scan-orphan-modules.py --check` now
+says `no new islands (47 pinned)` and exits 0, and the baseline file is
+byte-identical — nothing was pinned. Reply and full reasoning in
+`requests/c-b-the-tree-widget-is-deleted-and-the-gate-is-green-for-all-three-lanes.md`
+and `design-decisions.md` §574. Lane C chose *delete* over *wire up* because
+`TreeNode` is concrete with no payload slot, so each of the five programs that
+draw a hierarchy would have had to maintain a parallel tree of labels keyed by id
+— a synchronisation bug traded for a one-column widget — and over *baseline*
+because `orphan-modules-baseline.txt`'s own header forbids adding to it. The
+module landed 2026-05-17 in `a9d9dd09b` and never had a caller.
+
+**The gate itself is unchanged and the question stands, now with lane C's view on
+the record.** Lane C agrees the cost was real — a filed request plus an unplanned
+task to clear a module neither affected lane could touch — but notes it asked for
+the gate in the first place (`requests/c-a-please-add-the-orphan-module-ratchet-to-the-pre-build-gate.md`),
+that lane A owns `boot-test.sh` and so holds the pen, and that it is *not* asking
+for a softening: an orphan is a whole-repo fact, the check costs no build, and a
+lane merging up has a real interest in not carrying one across. If lane A does
+soften it, the shape both lanes converged on independently is *advisory when the
+orphan is outside the running lane's zone, blocking when it is inside* — which is
+`pre-boot.py`'s own rule applied per-module-path rather than per-lane. Left to
+lane A; no request filed, because neither B nor C is asking for a change.
+
+The original report follows unchanged.
 
 **In short:** `./scripts/boot-test.sh` currently exits 1 before compiling
 anything, in *any* worktree, because `scripts/scan-orphan-modules.py --check` —

@@ -409,11 +409,15 @@
 //!
 //! - [`copy`] — the copy engine, named for the upstream file it is being
 //!   reassembled from. Today: making a destination directory, reading a source
-//!   one in the order GNU walks it, and the bookkeeping for permission bits
-//!   deliberately withheld while a copy is in flight. There is one
-//!   `copy_internal` in `copy.c` and `mv` is that engine with `move_mode` set,
-//!   so a recursive walk written separately for `mv` would be a second home for
-//!   every bug this one has.
+//!   one in the order GNU walks it, the bookkeeping for permission bits
+//!   deliberately withheld while a copy is in flight, and the *preserve tail* —
+//!   the timestamps, ownership, extended attributes and mode that `-p` puts
+//!   back once the bytes have arrived, in the order that is the only correct
+//!   one. There is one `copy_internal` in `copy.c` and `mv` is that engine with
+//!   `move_mode` set, so a recursive walk written separately for `mv` would be
+//!   a second home for every bug this one has — and the tail already was one,
+//!   twice over, with each of two halves of a single fix landing on a different
+//!   program.
 //!
 //! The twenty-seventh is one question inside that copy, and it is here for the
 //! reason [`human`] is: the obvious implementation is wrong, and wrong in a way

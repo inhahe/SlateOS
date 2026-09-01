@@ -4800,10 +4800,21 @@ def report(previous, current_entries, threshold_pct,
                                              this_run)
         for name, median, value, adjusted, band, n in shifts:
             lo, hi, _med, _n = band
+            # Clamped for the same reason `describe_band` clamps, and this line
+            # was simply missed when that convention was set: a Tukey fence is
+            # `q1 - k*iqr`, which goes negative whenever the spread is wide
+            # relative to the level, and a run of this report duly printed
+            # "pre-window baseline -434-38288ns over 8 runs". A negative
+            # nanosecond lower bound is not a number a reader can act on -- it
+            # reads as a bug in the measurement rather than as what it is, a
+            # spread so wide it establishes no lower bound at all. Clamping is
+            # display-only and changes no verdict: `band_verdict` compares
+            # against the unclamped `lo`, and no duration is ever below zero, so
+            # the two agree on every value that can actually occur.
             print(
                 f"    {name}: was ~{median:.0f}ns -> now {value}ns "
                 f"({adjusted:+.0f}% vs suite); pre-window baseline "
-                f"{lo:.0f}-{hi:.0f}ns over {n} runs"
+                f"{max(lo, 0.0):.0f}-{hi:.0f}ns over {n} runs"
             )
             # Before pointing anyone at a bisect, ask whether this fence
             # separates binaries or runs. `http_build_response_1KiB` was

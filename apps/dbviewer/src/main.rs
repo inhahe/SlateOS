@@ -4270,7 +4270,17 @@ impl DbViewerApp {
         // The box takes what it needs off the top of the pane and no more, and
         // the history starts where the box ends. Both used to be placed at
         // fixed offsets from the top of a pane whose height nobody asked for.
-        let box_h = 80.0_f32.min((area.h - 24.0).max(0.0));
+        //
+        // What it needs is one line. The editor draws a *single* run of tokens
+        // -- there is no wrapping, no second line, and no way to put a caret on
+        // one -- so the 80 points it used to ask for were 64 points of empty
+        // box. In the 114-point pane the layout actually gives it, those 64
+        // points were enough to push every history row past the bottom edge:
+        // `HISTORY (n queries)` was drawn as a title over an empty strip in
+        // every window there has ever been, and no query could be recalled or
+        // starred because neither control was ever drawn at all.
+        let line_h = 16.0_f32;
+        let box_h = (line_h + 8.0).min((area.h - 24.0).max(0.0));
         let editor = Rect::new(area.x + 8.0, area.y + 4.0, (area.w - 16.0).max(0.0), box_h);
         if editor.is_empty() {
             return;
@@ -4291,7 +4301,7 @@ impl DbViewerApp {
             editor.x + 8.0,
             editor.y + 4.0,
             (editor.w - 16.0).max(0.0),
-            16.0,
+            line_h,
         );
         if self.sql_input.is_empty() {
             put_text(
@@ -4332,21 +4342,20 @@ impl DbViewerApp {
         if head.bottom() > area.bottom() {
             return;
         }
-        put_text(
-            f,
-            head,
-            &format!("HISTORY ({} queries)", self.history.len()),
-            10.0,
-            OVERLAY0,
-            FontWeightHint::Bold,
-        );
         hy += 16.0;
 
+        // Placed before anything is painted, so the heading can say how many
+        // of the queries are on the screen. The list is cut twice -- to the
+        // five newest, and again by whatever is left of the pane -- and a
+        // heading that only counted the queries let a pane showing three of
+        // twenty look like a pane showing all twenty.
+        //
         // Newest first, and each row carries its index in the history rather
-        // than its position on the screen -- the list is reversed and cut to
-        // five, so the two are different numbers and starring by the second
-        // would star the wrong query.
-        for (i, entry) in self.history.iter().enumerate().rev().take(5) {
+        // than its position on the screen: the list is reversed and cut, so the
+        // two are different numbers and starring by the second would star the
+        // wrong query.
+        let mut placed: Vec<(usize, Rect)> = Vec::new();
+        for (i, _) in self.history.iter().enumerate().rev().take(5) {
             let row = Rect::new(
                 area.x + 8.0,
                 hy,
@@ -4356,6 +4365,28 @@ impl DbViewerApp {
             if row.is_empty() || row.bottom() > area.bottom() {
                 break;
             }
+            placed.push((i, row));
+            hy += HISTORY_ROW_HEIGHT;
+        }
+
+        let total = self.history.len();
+        put_text(
+            f,
+            head,
+            &if placed.len() == total {
+                format!("HISTORY ({total} queries)")
+            } else {
+                format!("HISTORY ({} of {total} shown)", placed.len())
+            },
+            10.0,
+            OVERLAY0,
+            FontWeightHint::Bold,
+        );
+
+        for (i, row) in placed {
+            let Some(entry) = self.history.get(i) else {
+                continue;
+            };
             f.push(fill(row, SURFACE0, 2.0));
             let dot = Rect::new(row.x + 4.0, row.y + (row.h - 6.0) / 2.0, 6.0, 6.0);
             f.push(fill(dot, if entry.success { GREEN } else { RED }, 3.0));
@@ -4386,7 +4417,6 @@ impl DbViewerApp {
             // would swallow its own star.
             f.hit(Target::HistoryEntry(i), row);
             f.hit(Target::FavoriteEntry(i), star);
-            hy += HISTORY_ROW_HEIGHT;
         }
     }
 
@@ -5368,6 +5398,8 @@ mod tests {
         clippy::panic,
         clippy::arithmetic_side_effects
     )]
+
+    use guitk::probe;
 
     use super::*;
 
@@ -8039,5 +8071,427 @@ mod tests {
                 panel
             );
         }
+    }
+
+    #[test]
+    fn the_filters_button_shows_and_hides_the_builder() {
+        let mut app = wired();
+        assert!(
+            !shows(&app, FULL, "FILTER BUILDER"),
+            "the builder opens hidden"
+        );
+
+        click_text(&mut app, FULL, "Filters");
+        assert!(app.show_filter_builder, "the toolbar button set nothing");
+        assert!(
+            shows(&app, FULL, "FILTER BUILDER"),
+            "the flag changed and the sidebar did not"
+        );
+
+        click_text(&mut app, FULL, "Filters");
+        assert!(
+            !shows(&app, FULL, "FILTER BUILDER"),
+            "the button only works once"
+        );
+    }
+
+    #[test]
+    fn the_builder_steps_its_column_and_its_comparison() {
+        let mut app = wired();
+        app.show_filter_builder = true;
+
+        // `id` is the first column of `users`, `name` the second.
+        click_text(&mut app, FULL, "Column: id");
+        assert_eq!(app.filter_column_idx, 1, "the column did not step");
+        assert!(
+            shows(&app, FULL, "Column: name"),
+            "the builder still names the old column"
+        );
+
+        let first = FilterOp::all()
+            .first()
+            .expect("there is a first comparison");
+        let second = FilterOp::all()
+            .get(1)
+            .expect("there is a second comparison");
+        click_text(&mut app, FULL, &format!("Where: {}", first.label()));
+        assert_eq!(app.filter_op_idx, 1, "the comparison did not step");
+        assert!(
+            shows(&app, FULL, &format!("Where: {}", second.label())),
+            "the builder still names the old comparison"
+        );
+    }
+
+    #[test]
+    fn the_builder_takes_a_value_adds_a_filter_and_the_x_takes_it_away() {
+        let mut app = wired();
+        app.show_filter_builder = true;
+        click_text(&mut app, FULL, "Column: id");
+
+        click_text(&mut app, FULL, "Value: (type here)");
+        assert_eq!(
+            app.focus,
+            Focus::FilterValue,
+            "the value box took no keyboard"
+        );
+        probe::type_str(&mut app, "Alice");
+        assert_eq!(app.filter_value, "Alice", "the typing went somewhere else");
+        assert!(
+            shows(&app, FULL, "Value: Alice"),
+            "the builder does not show what was typed"
+        );
+
+        click_text(&mut app, FULL, "+ Add filter");
+        assert_eq!(
+            app.active_db_tab().map(|t| t.filters.len()),
+            Some(1),
+            "`Add filter` added nothing"
+        );
+        assert_eq!(
+            shown_names(&app),
+            vec![String::from("Alice")],
+            "the filter was added and the grid ignored it"
+        );
+
+        click_target(&mut app, FULL, Target::RemoveFilter(0));
+        assert_eq!(
+            app.active_db_tab().map(|t| t.filters.len()),
+            Some(0),
+            "the filter could not be removed"
+        );
+        assert_eq!(shown_names(&app).len(), 10, "the rows did not come back");
+    }
+
+    #[test]
+    fn export_puts_the_table_in_the_editor_and_import_reads_it_back() {
+        let mut app = wired();
+        click_text(&mut app, FULL, "Export CSV");
+        assert!(
+            app.sql_input.starts_with("id,name,email"),
+            "the export did not reach the editor: {:?}",
+            app.sql_input
+        );
+        assert_eq!(
+            app.bottom_panel,
+            BottomPanel::SqlEditor,
+            "the export was put somewhere nobody was looking"
+        );
+        assert_eq!(app.focus, Focus::Editor);
+
+        click_text(&mut app, FULL, "Import");
+        assert_eq!(
+            app.active_db_tab()
+                .and_then(|t| t.selected_table.as_deref()),
+            Some("imported2"),
+            "the import did not select what it read"
+        );
+        assert!(
+            shown_names(&app).contains(&String::from("Alice")),
+            "the round trip lost the rows: {:?}",
+            shown_names(&app)
+        );
+        assert_eq!(
+            shown_names(&app).len(),
+            10,
+            "the round trip changed how many rows there are"
+        );
+    }
+
+    #[test]
+    fn the_editor_takes_typing_and_enter_runs_what_was_typed() {
+        let mut app = wired();
+        click_target(&mut app, FULL, Target::SqlEditor);
+        assert_eq!(app.focus, Focus::Editor, "the editor took no keyboard");
+
+        for _ in 0..app.sql_input.chars().count() {
+            probe::key(&mut app, &probe::press(Key::Backspace));
+        }
+        assert!(app.sql_input.is_empty(), "backspace did not empty the box");
+
+        probe::type_str(&mut app, "SELECT * FROM products");
+        assert_eq!(app.sql_input, "SELECT * FROM products");
+
+        probe::key(&mut app, &probe::press(Key::Enter));
+        let result = app.query_result.as_ref().expect("Enter ran nothing");
+        assert!(
+            !result.is_error,
+            "the typed query failed: {}",
+            result.message
+        );
+        assert_eq!(app.history.len(), 1, "Enter did not remember the query");
+    }
+
+    #[test]
+    fn escape_releases_the_keyboard_and_typing_then_goes_nowhere() {
+        let mut app = wired();
+        click_target(&mut app, FULL, Target::SqlEditor);
+        let before = app.sql_input.clone();
+
+        probe::key(&mut app, &probe::press(Key::Escape));
+        assert_eq!(app.focus, Focus::None, "escape released nothing");
+        probe::type_str(&mut app, "zzz");
+        assert_eq!(
+            app.sql_input, before,
+            "typing reached the editor after the keyboard was released"
+        );
+    }
+
+    #[test]
+    fn the_history_puts_a_query_back_and_the_star_is_its_own_control() {
+        let mut app = wired();
+        app.sql_input = String::from("SELECT * FROM products");
+        app.execute_query();
+        app.sql_input = String::from("SELECT * FROM orders");
+        app.execute_query();
+        app.bottom_panel = BottomPanel::SqlEditor;
+        assert_eq!(app.history.len(), 2);
+
+        // Newest first on the screen, so the *second* history entry is the top
+        // row: a pass that numbered rows by screen position would recall the
+        // wrong query here and nowhere else.
+        click_target(&mut app, FULL, Target::HistoryEntry(0));
+        assert_eq!(
+            app.sql_input, "SELECT * FROM products",
+            "recall fetched the wrong query"
+        );
+
+        assert!(app.history.first().is_some_and(|e| !e.favorite));
+        click_target(&mut app, FULL, Target::FavoriteEntry(0));
+        assert!(
+            app.history.first().is_some_and(|e| e.favorite),
+            "the star did not star"
+        );
+        assert_eq!(
+            app.sql_input, "SELECT * FROM products",
+            "the star also recalled the query, so the row swallowed its own star"
+        );
+    }
+
+    #[test]
+    fn the_grid_says_how_many_columns_it_is_showing_when_it_cannot_show_them_all() {
+        let mut some_window_hid_a_column = false;
+        for (w, h) in GRID {
+            let app = wired();
+            let frame = app.frame(w, h);
+            let shown = frame
+                .hits()
+                .iter()
+                .filter(|(t, _)| matches!(t, Target::SortColumn(_)))
+                .count();
+            let Some((caption, ..)) = text_runs(&frame)
+                .into_iter()
+                .find(|(t, ..)| t.starts_with("Page 1 of "))
+            else {
+                continue;
+            };
+            if shown == 5 {
+                assert!(
+                    !caption.contains("columns shown"),
+                    "at {w}x{h} every column is shown and the caption says otherwise: \
+                     {caption:?}"
+                );
+            } else {
+                some_window_hid_a_column = true;
+                assert!(
+                    caption.contains(&format!("{shown} of 5 columns shown")),
+                    "at {w}x{h} the grid drew {shown} of 5 columns and the caption \
+                     reads {caption:?}"
+                );
+            }
+        }
+        assert!(
+            some_window_hid_a_column,
+            "no window in the grid was narrow enough to hide a column, so the \
+             caption's honesty was never tested"
+        );
+    }
+
+    #[test]
+    fn the_schema_pane_never_loses_its_third_column() {
+        let mut checked = 0_usize;
+        for (w, h) in GRID {
+            let mut app = wired();
+            app.bottom_panel = BottomPanel::Schema;
+            if !shows(&app, (w, h), "Column") {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                shows(&app, (w, h), "Constraints"),
+                "at {w}x{h} the schema pane heads a Column column and no \
+                 Constraints column: the third one is outside the pane and the \
+                 clip is hiding it"
+            );
+        }
+        assert!(checked > 0, "the schema pane was never drawn at all");
+    }
+
+    #[test]
+    fn the_diagram_wraps_its_boxes_and_says_how_many_it_is_showing() {
+        let mut some_window_hid_a_table = false;
+        for (w, h) in GRID {
+            let mut app = wired();
+            app.bottom_panel = BottomPanel::Diagram;
+            let body = Layout::solve(w, h).panel_body();
+            let frame = app.frame(w, h);
+            let runs = text_runs(&frame);
+            let Some((heading, ..)) = runs.iter().find(|(t, ..)| t.starts_with("SCHEMA DIAGRAM"))
+            else {
+                continue;
+            };
+            // Counted inside the pane: the sidebar names the same three tables,
+            // and counting the whole window would report the tree's rows as
+            // boxes the diagram drew.
+            let drawn = runs
+                .iter()
+                .filter(|(t, x, y, ..)| {
+                    body.contains(*x, *y) && ["users", "products", "orders"].contains(&t.as_str())
+                })
+                .count();
+            if drawn == 3 {
+                assert_eq!(
+                    heading, "SCHEMA DIAGRAM",
+                    "at {w}x{h} all three tables are drawn and the heading \
+                     apologises for something"
+                );
+            } else {
+                some_window_hid_a_table = true;
+                assert!(
+                    heading.contains(&format!("{drawn} of 3 tables shown")),
+                    "at {w}x{h} the diagram drew {drawn} of 3 tables and the \
+                     heading reads {heading:?}"
+                );
+            }
+        }
+        assert!(
+            some_window_hid_a_table,
+            "no window in the grid was small enough to drop a table box, so the \
+             heading's honesty was never tested"
+        );
+    }
+
+    /// A target's name, with any index it carries replaced by `_`.
+    ///
+    /// `SortColumn(0)` and `SortColumn(3)` are the same control drawn twice;
+    /// `Export(Csv)` and `Export(Json)` are two different controls.
+    fn control_name(target: Target) -> String {
+        match target {
+            Target::SelectTab(_)
+            | Target::CloseTab(_)
+            | Target::TreeNode(_)
+            | Target::RemoveFilter(_)
+            | Target::SortColumn(_)
+            | Target::DeleteRow(_)
+            | Target::HistoryEntry(_)
+            | Target::FavoriteEntry(_) => format!("{}(_)", probe::variant_name(target)),
+            other => format!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_action_the_program_knows_has_a_control_somewhere() {
+        let mut expected: Vec<String> = [
+            Target::Execute,
+            Target::NewTab,
+            Target::Import,
+            Target::AddTab,
+            Target::ToggleFilterBuilder,
+            Target::FilterColumn,
+            Target::FilterOp,
+            Target::FilterValue,
+            Target::AddFilter,
+            Target::PrevPage,
+            Target::NextPage,
+            Target::SqlEditor,
+            Target::SelectTab(0),
+            Target::CloseTab(0),
+            Target::TreeNode(0),
+            Target::RemoveFilter(0),
+            Target::SortColumn(0),
+            Target::DeleteRow(0),
+            Target::HistoryEntry(0),
+            Target::FavoriteEntry(0),
+        ]
+        .into_iter()
+        .map(control_name)
+        .collect();
+        for format in [
+            ExportFormat::Csv,
+            ExportFormat::Json,
+            ExportFormat::SqlInserts,
+        ] {
+            expected.push(control_name(Target::Export(format)));
+        }
+        for panel in BottomPanel::all() {
+            expected.push(control_name(Target::ShowPanel(*panel)));
+        }
+
+        let mut drawn: Vec<String> = Vec::new();
+        for (_, app) in states() {
+            for (w, h) in GRID {
+                for (target, _) in app.frame(w, h).hits() {
+                    let name = control_name(*target);
+                    if !drawn.contains(&name) {
+                        drawn.push(name);
+                    }
+                }
+            }
+        }
+
+        let missing: Vec<&String> = expected.iter().filter(|e| !drawn.contains(e)).collect();
+        assert!(
+            missing.is_empty(),
+            "the program can be asked to do these and nothing on the screen asks: \
+             {missing:?}"
+        );
+    }
+
+    #[test]
+    fn the_history_heading_is_never_a_title_over_an_empty_strip() {
+        let mut app = wired();
+        for i in 0..20 {
+            app.sql_input = format!("SELECT {i} FROM users");
+            app.execute_query();
+        }
+        app.bottom_panel = BottomPanel::SqlEditor;
+
+        let mut checked = 0_usize;
+        for (w, h) in GRID {
+            let frame = app.frame(w, h);
+            let runs = text_runs(&frame);
+            let Some((heading, ..)) = runs.iter().find(|(t, ..)| t.starts_with("HISTORY (")) else {
+                continue;
+            };
+            checked += 1;
+            let rows = frame
+                .hits()
+                .iter()
+                .filter(|(t, _)| matches!(t, Target::HistoryEntry(_)))
+                .count();
+            assert!(
+                rows > 0,
+                "at {w}x{h} the pane heads a history and draws none of it: {heading:?}"
+            );
+            assert!(
+                heading.contains(&format!("{rows} of 20 shown")),
+                "at {w}x{h} the pane draws {rows} of 20 queries and the heading \
+                 reads {heading:?}"
+            );
+        }
+        assert!(checked > 0, "the history was never drawn at all");
+    }
+
+    #[test]
+    fn the_history_heading_counts_queries_when_it_is_showing_all_of_them() {
+        let mut app = wired();
+        for i in 0..2 {
+            app.sql_input = format!("SELECT {i} FROM users");
+            app.execute_query();
+        }
+        app.bottom_panel = BottomPanel::SqlEditor;
+        assert!(
+            shows(&app, FULL, "HISTORY (2 queries)"),
+            "the heading apologises for hiding something it is showing"
+        );
     }
 }

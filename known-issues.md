@@ -105273,11 +105273,14 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
 
-**Status:** open, **now localised** — see the MEASURED section appended at the
-end of this entry (2026-09-01). The cause is being the parent of mount points,
-and it is *far* larger than the estimate below; being a filesystem's own root is
-ruled out. Not a regression — it has presumably always been true — and not a
-gate: the series that exposes it (`vfs_readdir_root`) is tracked, not scored.
+**Status:** **FIXED 2026-09-01** — see the two appended sections at the end of
+this entry: MEASURED (which localised it) and FIXED (which records the change
+and the after-numbers). The cause was being the parent of mount points, and
+specifically the by-path stat `finish_listing` ran per submount; per-submount
+cost fell 5.3x and mount parenthood fell from +237–292% of a listing to +34%.
+Being a filesystem's own root was ruled out. Never a regression — it had
+presumably always been true — and never a gate: the series that exposes it
+(`vfs_readdir_root`) is tracked, not scored.
 
 **In short:** listing the root directory is about four times more expensive per
 entry than listing an ordinary directory, even though on the boot-test both are
@@ -105426,6 +105429,70 @@ whole `resolve_mount` longest-prefix scan per submount, while preserving the
 §43 lock discipline that `submount_root_ino`'s doc comment turns on (VFS lock
 released before any filesystem lock is taken). The 2x2 above is the before/after
 harness for it.
+
+### FIXED 2026-09-01 — commit `7e3b02158`, per-submount cost down 5.3x
+
+`submount_children` now clones the mounted filesystem's `Arc` out of the mount
+table alongside the name, and `submount_root_ino` stats that handle's root
+directly instead of rebuilding a path and re-running `resolve_mount`. `Vfs::mount`
+refuses a duplicate mount path (`vfs.rs:1681`), so each path maps to exactly one
+table entry and the two are equivalent — that is what makes the substitution
+safe rather than merely faster. §43 lock discipline is unchanged: the VFS lock is
+still released before any filesystem lock is taken, which the old code needed
+too (it took the same filesystem lock inside `metadata_resolved`).
+
+The 2x2 as before/after, all figures the controlled `parent` − `elsewhere`
+comparison so mount-table growth is subtracted out:
+
+| | base | elsewhere | parent | delta | per submount | parenthood costs |
+|---|---|---|---|---|---|---|
+| before, run 1 | 20990 | 27807 | 109236 | 81429 | 16286 ns | **+292%** |
+| before, run 2 | 23747 | 28998 | 97932 | 68934 | 13787 ns | **+237%** |
+| after, clean run | 29986 | 37551 | 50530 | 12979 | **2595 ns** | **+34%** |
+
+**Per-submount cost fell from ~13800–16300 ns to 2595 ns — 5.3x, or 81% of it
+removed.** The scored `vfs_readdir_root` fell from 90145 ns on the run
+immediately before the fix to 36958 ns and then 37872 ns on the two runs after
+it (the harness scored the first of those `-50% vs suite, -59% raw`), so the
+headline is replicated across two independent boots.
+
+**Why there are three after-runs and only one is quoted.** The first post-fix
+boot was a `MEASUREMENT VOID`: `mp_parent` and `mp_elsewhere` came back 92% and
+82% split-half apart, and `elsewhere` landed *below* `base` — impossible, since
+five more mounts can only make `resolve_mount`'s scan longer. Its numbers are
+not in the table. The quoted run has all five arms at 0–1% split and none of
+them in the dispersion list; the run is flagged contaminated on the canary
+instrument alone, with dispersion and wall time both inside the host's band.
+
+**The benchmark's own verdict was wrong on that void run, and that is fixed
+too** (commit `3d140217f`). It printed a confident `STATS-DOMINATE` from samples
+the host-side report had just discarded, told the reader "the fix should recover
+most of this" about a binary that already contained the fix, and reported an
+impossible negative mount-table delta as a finding. Three guards were added: the
+ladder now refuses to conclude when any arm it rests on is split-half unstable;
+a negative `d_table` is named as noise instead of narrated, and is withheld from
+the fs-root arm's correction; and a `STATS-REMOVED` branch keys on `explained`
+exceeding 100%, which is only possible once the by-path stat is out of the loop.
+`explained` is deliberately not clamped — clamping is what made the void run
+misreport the fix as unapplied. See design-decisions.md §670.
+
+**What is left, and it is small.** 2595 ns per submount remains, against ~2000 ns
+for an ordinary file's stat. That is now `finish_listing`'s own loop — the
+`!entries.iter().any(...)` de-dup scan and the per-root filesystem lock — plus
+the mount-root stat itself, which is irreducible (the entry has to report an
+inode). Not worth chasing: the remaining per-submount cost is within ~30% of a
+plain stat, so there is at most ~600 ns per submount of overhead left to find.
+
+**One caveat on arm 4 that is now visible and was not before.** `vfs_readdir_fsroot`
+came out −62% below `base` this run (−54% the run before), which reads as "being
+a filesystem's own root is much *faster*". It is not a finding: `base` lists a
+directory inside the **root** filesystem, which holds the whole boot image's
+inodes, while `fsroot` lists a freshly-mounted memfs holding eight. The
+`vfs_readdir_breakdown` arms in the same boot measure that confound directly —
+2048 extra inodes elsewhere move an 8-entry listing by 7567 ns (53%). So arm 4
+is not controlled for inode-table size and its magnitude is uninterpretable. The
+*direction* is all it supports, and the original conclusion stands on that: being
+a filesystem's own root is not expensive. Logged as tech debt below.
 
 
 ---
@@ -105605,3 +105672,67 @@ orphan-module gate is in `boot-test.sh` with no such softening, so it does the
 thing that comment set out to prevent. Possibly intentional — an orphan is a
 whole-repo fact in a way a per-lane compile error is not — but the blast radius
 of one lane's orphan is presently all three lanes' ability to merge.
+
+
+---
+
+## A-READDIR-FSROOT-ARM-NOT-CONTROLLED-FOR-INODE-TABLE-SIZE
+
+**Status:** open, low priority. Tech debt in a benchmark, not a kernel bug. The
+arm's *direction* is sound and its conclusion stands; only the magnitude it
+prints is uninterpretable.
+
+**In short:** one arm of a benchmark compares two directories that differ in two
+ways at once, and reports the difference as if they differed in only one. It
+prints a number like "−62%" that reads as a discovery and is mostly an artifact
+of the comparison being unfair. Nothing in the kernel is wrong; the benchmark
+just cannot support the size of the claim it makes.
+
+**Where:** `kernel/src/bench.rs`, `bench_vfs_readdir_root_cost`, arm 4
+(`vfs_readdir_fsroot`), and the report line that compares it against
+`vfs_readdir_mp_base`.
+
+**What it does.** Arm 4 asks whether listing a directory that *is* a mounted
+filesystem's root costs more than listing an ordinary child directory holding
+the same eight entries. It mounts a fresh `MemFs`, puts eight files in it, and
+lists it — comparing against `base`, which lists a plain directory holding eight
+files.
+
+**Why the comparison is not controlled.** `base`'s directory lives in the **root**
+filesystem, whose inode table holds the entire boot image. Arm 4's memfs is
+brand new and holds eight inodes. `bench_vfs_readdir_breakdown`, in the same
+boot, measures exactly this confound: 2048 extra inodes elsewhere in the same
+filesystem move an 8-entry listing by 7567 ns (53%), and the whole reason that
+benchmark exists is `A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER`. So arm 4
+varies *two* things — mount-root-ness and inode-table size — and attributes the
+sum to the first.
+
+**How it shows.** The arm reports `fsroot` as *faster* than `base`, by −54% and
+−62% on the two 2026-09-01 runs after the `finish_listing` fix. A directory
+cannot be cheaper to list for being a mount root; the negative is the
+inode-table difference showing through with the opposite sign.
+
+**Why it was not visible earlier.** The first two runs put it at +7% and −9% —
+bracketing zero, which looked like a clean "no effect" result and was read as
+one. Those runs were heavily contaminated (~38% and ~22% slow), which
+compressed the arm toward the rest of the suite. The cleaner the run, the more
+plainly the confound shows.
+
+**What the arm still supports.** Its direction, which is all the parent entry
+ever claimed: being a filesystem's own root is *not* expensive. Since the
+uncontrolled difference biases the arm toward looking fast, a null-or-negative
+result rules out a *positive* cost a fortiori. That is why
+`readdir("/") costs 4x per entry` was closed with this arm's conclusion intact.
+
+**The proper fix.** Give arm 4 a fair partner: mount a second fresh `MemFs`
+elsewhere, populate it with the same eight files, and list a *child* directory
+inside it. Then both sides of the comparison sit in an equally-sized inode
+table, and the only remaining difference is mount-root-ness. Cheap to do — it
+is one more mount and one more populate call in a function that already has
+helpers for both (`readdir_mount_populate`, `readdir_mount_cleanup`) — and it
+would turn a direction into a measurement.
+
+**Until then**, the report line should be read as "not positive", never as a
+speedup, and the printed percentage should not be quoted anywhere. The FIXED
+section of `readdir("/") costs 4x per entry` states that caveat inline for the
+same reason.

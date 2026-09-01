@@ -102982,6 +102982,69 @@ window size it always does.
 
 ---
 
+### Lesson 108: a pass held to its caller's box is not held to its own (lane C, 2026-09-01)
+
+**In short:** dbviewer has a test that hands each drawing pass a box and checks
+the pass paints nothing outside it. It listed eight passes, one of them
+`draw_sidebar`. But `draw_sidebar` cuts its box in two — an object tree on top,
+a filter builder underneath — and hands each half to a sub-pass. So a tree row
+that overran the *tree's* box landed on the *builder*, which is still inside the
+sidebar, and the test that exists precisely to catch overruns reported nothing
+wrong. A mutation that deleted the tree's bottom-edge guard was caught only by
+an unrelated test, incidentally, and only in the states where the builder
+happened to be hidden.
+
+**The rule.** *List every pass that is handed a box, not every pass that is
+handed a **window** region.* A containment test's resolution is the size of the
+smallest box it knows about; overruns finer than that are invisible to it by
+construction, and the guard being tested almost always lives in the sub-pass,
+because that is where the cursor walks.
+
+The practical obstacle is worth naming, because it is what caused the omission:
+the two sub-passes each take the `DbTab` they draw, so they do not fit the
+`fn(&App, &mut Frame, Rect)` alias the pass list used, and were quietly left out
+rather than the alias being widened. Making `Pass` a `Box<dyn Fn(..)>` costs one
+allocation per pass per test and admits them. **A type alias that silently
+excludes members of the set it is enumerating is a coverage hole with a
+compile-time excuse.**
+
+**Fills are a complete witness; runs and hit boxes are one-way ones — and the
+distinction is not the same as Lesson 107's.** Widening the pass list *still*
+did not catch the mutation, because a tree row pushes a fill only when it is the
+selected table; every other row is two runs of text and a hit box. Lesson 107
+concluded that the assertion must be phrased over fills, and that is right for a
+test that draws a **window**, where a clip is in force. This test hands each pass
+an **unclipped** frame — so nothing is suppressing the runs and hit boxes, and
+they say what the fills cannot. The correct formulation is therefore:
+
+| surface | witnesses an overrun? |
+|---|---|
+| a fill | always — pushed exactly as asked, clip or no clip |
+| a run of text | only if no clip suppressed it: finding one proves an overrun, finding none proves nothing |
+| a hit box | same |
+
+So a one-way witness may always be *added*: it can only ever add catches, never
+cause a false failure. What it must never do is *replace* the fill, because its
+silence means nothing. Lesson 107 said "phrase it over fills"; the sharper
+statement is **"you may only conclude *absence* of an overrun from fills"**.
+
+Doing that here found a fourteenth production fault the moment it was added:
+three one-line placeholders (`No query results`, `Select a table to view its
+schema`, `No tables in database`) placed their line at a fixed inset from the
+top of their pane and inked it whatever the pane measured, so a pane shorter
+than the inset got a line below its own bottom edge.
+
+**Where else to look.** Any per-pass containment sweep: check that its pass list
+is closed under "is handed a sub-box". `alarmclock` was checked and is clean —
+its three passes are whole tabs, and the one sub-pass with a smaller box, the
+alarm editor, has its own containment test. The placeholder shape is worth its
+own grep across the campaign: a `put_text` at a *constant* offset from a pane's
+top edge, in an early-return arm for the empty case. Those arms are written
+first, before anyone has thought about small windows, and they are the only
+paint in the pass, so no sibling ever collides with them and reveals the fault.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31
@@ -103730,6 +103793,96 @@ yet, because it would regress the one thing the index accidentally gets right
 land before 664 is wired. If lane A declines the widening, apply the `0` and note
 it here.
 
+---
+
+## C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE (lane C)
+
+**Status:** FIXED 2026-09-01 (`cd35986ac`)
+
+**Fix.** Both parts of the proper fix below were done, and the sweeps then found
+two more faults in the same file that no part of this entry predicted:
+
+* Each of the three loops now tests the *item's* own edges against the pane and
+  `break`s at the first item past the bottom.
+* `text` (`:337`) asks `Frame::is_visible` before pushing, exactly as
+  `guitk::put_text` does — so ink and hit boxes are governed by one rule again.
+* `text_centred` declared its `max_width` from where the run *starts* rather
+  than from the box it was told to centre in, so every centred run in the file
+  was declared to overhang its box by half the slack. "Stopwatch" in a
+  120-point tab was declared to run to 385 in a 360-point window, and the
+  renderer trims at the bound it is given, so there was no ellipsis either.
+* The alarm editor laid its stack out at a fixed 308 points against a content
+  area that is 248 points tall at this app's own minimum window size, so Save
+  and Cancel were painted below the panel — hidden by the clip and with their
+  hit boxes dropped by `Frame::hit`. The editor covers the alarm tab, so with
+  neither button reachable it was a trap the pointer could not leave. The stack
+  is now solved for the height it was given.
+
+All three geometry sweeps are in the suite, which is 180 tests, and
+`the_editor_can_always_be_left_by_pointer` asks through `frame` at ten window
+sizes and clicks Cancel at each.
+
+**In short:** the alarm clock has three scrolling panes — the alarms, the timers
+and the stopwatch's lap table. Each one draws *every* item it holds, however
+many that is, and relies on the clip (the rectangle that hides ink outside a
+box) to make the ones past the bottom edge invisible. Hiding is not the same as
+not drawing. Twenty alarms in a pane with room for four means sixteen cards
+painted where nothing can ever show them, and unlike the contacts fault that
+produced Lesson 107, this app's helpers do not check visibility at all, so the
+*text* is emitted too.
+
+**Where.** `apps/alarmclock/src/main.rs`:
+
+| pane | loop | clip |
+|---|---|---|
+| lap table | `:1598` `for (i, lap) in self.laps.iter().rev().enumerate()` | `:1595` |
+| alarms | `:2433` `for alarm in &self.alarms` | `:2430` |
+| timers | `:2687` `for (i, timer) in self.timers.iter().enumerate()` | `:2685` |
+
+All three follow `f.clip(pane)` with `f.translate(0.0, -scroll)` and then walk
+the whole collection. None tests the item's rectangle against the pane's bottom
+edge, and none tests the top either — with the pane scrolled down, the items
+above it are drawn as well.
+
+The two module-level helpers are the reason it costs more here than it did in
+contacts: `fill` (`:325`) and `text` (`:337`) both `f.push(..)` unconditionally.
+`guitk`'s own `put_text` asks `Frame::is_visible` first; these do not, so a lap
+row four hundred points below the table is a `RenderCommand::Text` in the frame
+claiming to be a label that is present.
+
+**How it is reachable.** Add more alarms/timers/laps than the pane has room
+for — trivially, at the app's own opening size — or shrink the window. There is
+no upper bound on any of the three collections.
+
+**Why no test caught it.** The app has 175 tests and none of the three geometry
+sweeps this campaign now writes: not `nothing_is_painted_entirely_outside_the_clip_in_force`,
+not `every_run_of_text_is_bounded_and_inside_the_window`, not
+`no_pass_paints_outside_the_box_it_was_given`. It was wired before Lesson 107
+was written.
+
+**Found by** running Lesson 107's own "where else to look" over the campaign:
+a `for` loop inside an `f.clip(..)`/`f.unclip()` pair that advances a vertical
+position and never compares it to the bottom of the box. Of 140 apps, four
+loops matched and three of them are the ones above; the fourth
+(`apps/typingtutor/src/main.rs:1751`) is a false positive — it states the same
+guard as a line-index window (`line >= first_line + lines_visible`) rather than
+as a pixel comparison, which is correct.
+
+**Proper fix.** Two parts, and the second is the one that keeps it fixed.
+(1) Give each of the three loops the guard the shape asks for: compute the
+item's rectangle in pane coordinates, `continue` past it when it is entirely
+above the pane and `break` when it is entirely below — the item, not the
+cursor, since an item is drawn whole or not at all. (2) Add the three geometry
+sweeps to the suite, phrased over fills for the overrun rule (Lesson 107: the
+clip suppresses text and hit boxes, so only a fill can carry that assertion),
+so the guard cannot be removed again without a test going red.
+
+Not fixed in the commit that found it because that commit is the dbviewer
+wiring, and a fault in a different crate found by a scan does not belong inside
+it. It is the next task in the lane after dbviewer's roadmap entry lands.
+
+---
+
 ## A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS (lane A, 2026-08-31)
 
 **What:** On the four filesystems that have no per-object identity —
@@ -104271,7 +104424,7 @@ not a repository.
 
 ---
 
-## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — FIXED 2026-09-01
 
 **In short:** when `mv` moves a file between two filesystems it cannot rename it,
 so it copies the bytes and deletes the original. Ours copies the bytes and the
@@ -104283,6 +104436,16 @@ the moment of the move. Nothing user-visible is broken on a single-filesystem
 machine, which is why this has gone unnoticed: no case in `scripts/mv-diff.sh`
 crosses a filesystem boundary, because mounting a second one needs a password the
 harness must not ask for.
+
+**Correction, 2026-09-01 (same day, later).** That last sentence was wrong, and
+it was load-bearing. Nothing had to be *mounted*: Linux already has a second
+filesystem mounted and world-writable, at `$XDG_RUNTIME_DIR` or `/dev/shm`, and
+either is a different `st_dev` from the `/tmp` the harness works in. §22 of
+`scripts/mv-diff.sh` now crosses the boundary on every run, with no password and
+no namespace, and its first run found two further defects that the reasoning
+above had been quietly shielding — the two entries below. The claim was never
+checked against `stat -c %d`; it was inferred from "mounting needs root", which
+is true and irrelevant, because the mount was already there.
 
 **Where.** `userspace/coreutils/src/bin/mv.rs:1601`, in `copy_across_devices`:
 
@@ -104326,12 +104489,442 @@ sets `preserve_links`, so a group moved together should arrive as a group, and
 `fs::copy` gives one independent file per name. That is the same shape as the
 directory refusal and belongs with a recursive fallback rather than with this.
 
-**How it would be caught.** It would not be, by anything we have. A regression
-test needs two filesystems. The unit tests in `mv.rs` drive `copy_across_devices`
-directly, so a test that stamps a source, calls the function, and asserts the
-destination's mtime is the source's would catch the timestamp half today without
-any mount at all — and that test does not exist. Write it with the fix.
+**How it would be caught.** ~~It would not be, by anything we have. A regression
+test needs two filesystems.~~ **Superseded by the correction above:** it *is*
+caught, on every run, by §22 of `scripts/mv-diff.sh`, where six cases are
+`xfail_case`s naming this entry. They turn into XPASS the moment the fix lands,
+which is what will force them to be promoted to real cases. The original
+paragraph's other half still stands and is still worth doing: the unit tests in
+`mv.rs` drive `copy_across_devices` directly, so a test that stamps a source,
+calls the function, and asserts the destination's mtime is the source's pins the
+timestamp half at the function boundary where the differential harness can only
+see it through the whole program. Write it with the fix.
 
+**Fixed** by `copy_across_devices` doing the open, the create, the copy and the
+four preservation steps itself instead of calling `fs::copy`, in GNU's order:
+bytes, times, owner, mode. Three pieces are worth naming because none of them is
+obvious from the sentence above.
+
+* **The mode is written last, and a refused `chown` costs the set-ID bits.**
+  GNU's own comment is the argument — *"chown turns off set[ug]id bits for
+  non-root, so do the chmod last"* (`copy.c:3245`) — and `copy_reg`'s `case 0:
+  src_mode &= ~(S_ISUID | S_ISGID | S_ISVTX)` is why being *refused* the
+  ownership also drops them: a set-user-ID bit on a file that could not be given
+  to its source's owner is a privilege granted to whoever holds it now.
+* **The destination is created with the group and other bits held back**
+  (`create_destination`), which is GNU's `omitted_permissions`. Without it a
+  file whose source is world-readable is briefly world-readable *while holding
+  the source's contents and before the `chown`*.
+* **The ownership decision is shared with `cp`, not copied.**
+  `fsattr::owner_differs` and `fsattr::take_ownership` were split out of `cp`'s
+  `chown_to_source` in the commit before this one, so the group-only retry, the
+  root check and the set-ID consequence have exactly one implementation.
+
+Three unit tests pin it at the function boundary as this entry asked —
+`the_cross_device_fallback_carries_the_times`, `..._carries_the_set_user_id_bit`
+and `..._carries_a_links_own_time`, the last of which also asserts the link's
+target was *not* stamped through the link. Six `xfail_case`s in
+`scripts/mv-diff.sh` §22 became XPASS on the first run after the fix and are now
+plain `run_case`s.
+
+**Two things that did not fall out of it, and are still open.** The
+`UTIMECMP_TRUNCATE_SOURCE` half of `-u`'s comparison is now *reachable* — there
+is a preserved timestamp for the truncation to be about — and is still not
+implemented; see `destination_is_older`'s doc. And `preserve_links` across the
+fallback is untouched; that half has been split out into its own entry below,
+because leaving it under a heading marked FIXED would make a reader who found
+the §22 case believe it was already dealt with.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS — OPEN 2026-09-01
+
+**In short:** `mv /other/fs/a /other/fs/b dir/` moves two names for one inode
+and produces two independent files. A rename would have kept them one file, and
+`mv` promises to be indistinguishable from a rename: `cp_option_init`
+(`mv.c:129`) sets `preserve_links` unconditionally, with no option to turn it
+off. The bytes are all correct and nothing is lost, so this is invisible until
+someone writes to one of the names and the other does not change — or until a
+directory that fitted on the disk because of its links no longer does.
+
+**Split out of** `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`,
+which is now FIXED for the times, the owner and the mode. This is the one part
+of that entry the fix did not reach.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`. It is
+called once per source with no memory of the sources before it, so there is
+nowhere for the "I have already copied this inode" table to live. The refusal is
+structural rather than a missing line.
+
+**What GNU does.** `copy.c` keeps `src_to_dest`, a hash of (`st_dev`, `st_ino`)
+to the destination name already created, consulted in `copy_internal` before
+anything is copied. A source found in it is `link`ed to the name that is already
+there instead of being copied again. The table is per-invocation, which is why
+two separate `mv` commands correctly produce two separate files.
+
+**The proper fix.** The same table, keyed on `coreutils::fileid::FileId`, owned
+by the loop over the operands rather than by `copy_across_devices`, and only
+consulted for a source with `nlink > 1` — both of which `fileid` already
+provides for `cp`, which has exactly this table for `-l` and `--preserve=links`.
+It should land with the recursive directory fallback
+(`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`) rather than before it: a walk
+that recreates a tree needs the identical table, and building it twice is how the
+two would come to disagree.
+
+**How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
+entry: `mv -v @FAR@/a @FAR@/b d` with the fixture `printf hello > a; ln a b`. The
+`links{...}` column is the whole case — the tree and the bytes agree either way,
+which is exactly why the harness grew that column.
+
+---
+
+## B-MVS-CROSS-DEVICE-COPY-WRITES-THROUGH-THE-DESTINATION — FIXED 2026-09-01
+
+**In short:** moving a file onto an existing name, across a filesystem boundary,
+overwrites *every* name that file had, not the one that was asked for. If `g` and
+`g2` are two names for one file and you run `mv /other/fs/f g`, `g2` should still
+hold what it always held — a rename replaces a directory entry, it does not write
+through it — but ours rewrites the shared inode, so `g2` silently becomes a copy
+of `f`. A file the user never mentioned is destroyed.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`'s plain-file
+arm, which reaches the destination with `fs::copy(src, target)`. `fs::copy`
+opens the destination with `O_CREAT|O_WRONLY|O_TRUNC`; when the destination
+exists, that truncates and rewrites the inode already there and every other link
+to it sees the new bytes and the new mode.
+
+**What GNU does.** `copy.c:2870`, inside the `EXDEV` block and *before* the copy
+is started, unlinks the destination outright:
+
+```c
+      /* Remove any existing destination file so that a cross-device `mv'
+         acts as if it were really using the rename syscall.  */
+      if (unlinkat (dst_dirfd, drelname, S_ISDIR (src_mode) ? AT_REMOVEDIR : 0)
+          != 0 && errno != ENOENT)
+```
+
+so the copy always creates a fresh inode. Note the failure path: it prints
+`inter-device move failed: %s to %s; unable to remove target` and returns
+*without* running `un_backup`, which is the one place in `copy.c` where a backup
+already taken is deliberately left in place.
+
+**The proper fix.** Unlink the destination before copying, exactly there in the
+sequence, with `ENOENT` treated as success. Two orderings matter and neither is
+free: the unlink must come *after* whatever refuses the move (this `mv` cannot
+copy a directory, and clearing the destination and then refusing would destroy a
+file for a move that never happened), and its own failure must not undo a backup.
+
+**How it is caught.** `scripts/mv-diff.sh` §22, the case whose fixture is
+`printf XXXXXXXXXX > g; chmod 606 g; ln g g2`. Measured before the fix, ours left
+both names at five bytes and mode 644 and still hard-linked to each other; GNU
+left `g2` at ten bytes, mode 606, and unlinked from `g`. Note what the case's
+fixture does *not* carry: no set-user-ID bit and no pinned time, because a case
+that also measured the copy's attribute losses would have gone on differing after
+this fix and so could never have reported it.
+
+**Fixed** by `move_one`'s `clear_destination` call, placed exactly where GNU's
+`unlinkat` sits — after the directory refusal (hoisted above it, since this `mv`
+cannot copy a directory and clearing-then-refusing would destroy a file for a
+move that never happened) and before the `copied` line. `ENOENT` is the only
+excused error, and the failure path deliberately does not `un_backup`, matching
+`copy.c:2884`. Four unit tests cover `clear_destination` directly — the
+hard-link case, the absent destination, a symlink destination that must not be
+followed, and a destination that will not go — and the §22 case is now a plain
+`run_case`.
+
+---
+
+## B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP — FIXED 2026-09-01
+
+**In short:** when a cross-filesystem move fails, ours says `mv: cannot move 'a'
+to 'b': Permission denied` whatever went wrong, while GNU says which half of the
+copy was refused — `cannot open 'a' for reading` or `cannot create regular file
+'b'`. Same errno, same exit status, strictly less information: with a denial that
+could plausibly be at either end, "cannot move A to B" leaves the reader to guess
+which of the two paths to go and look at.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `move_one`'s cross-device arm,
+which funnels every `io::Error` out of `copy_across_devices` through a single
+`cannot move {src} to {target}: {why}` diagnostic. The information is lost inside
+`fs::copy`, which returns one `io::Error` for the open of the source and the
+create of the destination alike and does not say which it was.
+
+**What GNU does.** `copy.c` reports at the step. `copy_reg` has separate
+`error (0, errno, _("cannot open %s for reading"), quoteaf (src_name))` and
+`error (0, errno, _("cannot create regular file %s"), quoteaf (dst_name))` sites,
+because it does the open and the create itself rather than through a library call
+that does both.
+
+**The proper fix.** It falls out of
+`B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`'s fix rather
+than needing its own: preserving the mode, the owner and the times requires
+holding the two file descriptors, which means opening the source and creating the
+destination as separate steps, each with its own error site. Do the wording then;
+doing it before would mean writing an open/create pair that the next commit
+replaces.
+
+**How it is caught.** `scripts/mv-diff.sh` §22, two `xfail_case`s naming this
+entry: a far source at mode 000 (the read end) and a near destination directory at
+mode 555 (the create end). Both sides fail with the same errno after the same
+`copied` line; only the sentence differs.
+
+**Fixed**, and it did fall out of the other fix exactly as predicted: holding two
+descriptors to preserve the mode, the owner and the times meant opening the
+source and creating the destination as separate steps, and each got its own error
+site. The sentence is carried out of `copy_across_devices` in a `Failed` struct
+rather than derived from the errno, because deriving it is impossible — an
+unreadable source and an unwritable destination directory both give `EACCES`. It
+carries the diagnostic already quoted, since GNU's quoting style is not uniform
+across the family: `quoteaf` in all of them bar `preserving permissions for %s`,
+which uses `quotef`, and the symlink arm's `failed to preserve ownership for %s`,
+which GNU prints with no quoting at all. All three are reproduced as written.
+
+Both §22 cases became XPASS on the first run after the fix and are now plain
+`run_case`s. **One sentence in the fallback is still not GNU's**, and cannot be:
+`cannot move X to Y`, the directory refusal, for which GNU has no equivalent
+because it does the move. It keeps the old wording deliberately — it is a refusal
+of the *operation*, not of a step inside it.
+
+**What is still funnelled.** The bytes. A failure part-way through the copy is
+reported as `error writing %s` whichever end failed, because `io::copy` returns
+one error for both — see
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`, which
+is the residue of this entry and was logged rather than folded into it, since its
+fix trades against `copy_file_range` and this one did not.
+
+---
+
+## B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED — OPEN 2026-09-01
+
+**In short:** `mv dir /other/filesystem/` fails. Moving a directory between two
+filesystems means copying the whole subtree and then removing the original, and
+this `mv` does not do it — it refuses with "moving a directory across filesystems
+is not implemented by this mv" rather than doing it wrong. On a machine with a
+single filesystem nothing is affected; on one with `/home` on its own volume this
+is the ordinary thing a user does with `mv`.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`'s directory
+arm, and the refusal `move_one` hoists above the destination-clearing. The
+hoisting is deliberate and must survive the fix: GNU clears the destination first
+and then copies, which would become clear-then-refuse here and destroy a file for
+a move that never happened.
+
+**What GNU does.** `copy.c`'s `copy_internal` recurses through `readdir`,
+recreating each entry and then `rmdir`-ing the source directory once its contents
+are gone, with the parent's mode set last so that a directory that was not
+writable during the copy still ends up with the mode it had.
+
+**The proper fix.** A recursive fallback. `cp.rs` already has the whole of it —
+the `fts` walk, the `fileid`-keyed hard-link table that `preserve_links` needs,
+and `fsattr`'s preserve ordering — which is the reason `cp`'s source-side
+attribute readers were moved into `fsattr` in the first place. The work is to
+share the walk rather than to write a second one, and it should follow
+`B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`, because a
+recursive copy that does not preserve attributes would only multiply that defect
+by the number of files in the tree.
+
+**How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
+entry, whose fixture carries a setgid bit and a subdirectory so that the case
+keeps measuring something after the refusal is lifted.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+
+**In short:** a file moved across a filesystem boundary arrives without its
+extended attributes. Its times, owner, mode and access-control lists are carried
+now; everything else in the `user.*`, `trusted.*` and `security.*` namespaces is
+not. On a machine that stores nothing there this is invisible; on one that does,
+`mv` silently strips whatever was stored — a SELinux label, a `user.mime_type`, a
+backup tool's bookkeeping — and there is no diagnostic, because nothing looked.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `preserve_onto_file`. It runs
+`fsattr::set_times`, `fsattr::take_ownership` and `fsattr::copy_permissions`, and
+the last of those carries `Xattrs::Permissions` only — the ACL attributes, which
+are part of the mode's meaning. There is no `Xattrs::All` step, and
+`preserve_onto_link` has none either.
+
+**What GNU does.** `cp_option_init` (`mv.c:129`) sets `preserve_xattr = true`
+with `require_preserve_xattr = false`, so `copy_reg` calls `copy_attr` between
+the `set_owner` and the `copy_acl` (`copy.c:1668`) and a failure is a diagnostic
+rather than a failed move. There is a second, smaller thing tied to it:
+`copy.c:1457` ORs `S_IWUSR` into the mode the destination is created with, when
+copying attributes as a process that does not own the file, because the kernel's
+`xattr_permission` wants write access to the inode. `create_destination`'s doc
+says why that bit is deliberately not there yet.
+
+**The proper fix.** A `fsattr::copy_xattrs(On::File(source), On::File(dest),
+Xattrs::All)` between the ownership step and the permissions step, reporting each
+`XattrError` the way `cp` does and failing at none of them, plus the `S_IWUSR`
+widening in `create_destination`. `cp` already has all of the machinery —
+`Xattrs`, `XattrStep` and `XattrError` exist in `fsattr` for it — so this is
+wiring rather than new code. The ordering is not free: it must be after the
+`chown`, because on Linux a `chown` can drop `security.capability`, and before
+the mode, for the reason the whole tail is in that order.
+
+**How it would be caught.** Not by `scripts/mv-diff.sh` as it stands: the harness
+compares the tree, the bytes, the modes and the hard-link groups, and has no
+notion of extended attributes at all. Catching it means teaching `snapshot` to
+run `getfattr -d -m -` per file, which is worth doing in the same change and
+would also cover `cp`'s xattr cases, currently unmeasured for the same reason.
+Until then the unit tests in `mv.rs` are the place: they drive
+`copy_across_devices` directly and can set an attribute on the source and assert
+it on the destination, on a `/tmp` that supports one.
+
+---
+
+## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — OPEN 2026-09-01
+
+**In short:** if the bytes cannot be moved, ours always blames the destination.
+GNU says `error reading 'src'` when the source medium fails and `error writing
+'dst'` when the destination fills up; ours says `error writing 'dst'` for both.
+The exit status and the errno are right, and the errno usually gives it away
+(`ENOSPC` is not a read failure) — but `EIO` does not, and `EIO` is exactly the
+case where the reader most needs to know which of the two disks is dying.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`:
+
+```rust
+io::copy(&mut source, &mut dest)
+    .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
+```
+
+`io::copy` returns one `io::Error` for both ends and does not say which end it
+came from.
+
+**What GNU does.** `copy_reg` reads and writes itself, so the two have separate
+error sites (`copy.c:1287` and `copy.c:1300`). It reaches `copy_file_range`
+first and falls back to a read/write loop, and *its* fallback keeps the
+distinction because the loop is its own code.
+
+**Why it is written this way.** `io::copy` is specialised by `std` to
+`copy_file_range` when both sides are files, which is the same kernel-side copy
+GNU reaches for and matters for two reasons: the bytes never cross into
+userspace, and a sparse file's holes are reproduced as holes rather than written
+out as zeroes. A hand-written loop would tell the two failures apart and would
+lose both of those. The destination's sentence is the one kept because that is
+the end that fails in practice — a full filesystem, an exceeded quota, a device
+unplugged mid-write — while a read error means the source medium is failing,
+which is rarer.
+
+**The proper fix.** Keep `io::copy` for the common path and learn the side from
+the descriptors after it fails, rather than from the error: on failure, check
+whether the source is still readable (a zero-length `read` at the current
+offset). If it is not, the failure was the read. That gets the distinction back
+without giving up `copy_file_range`, at the cost of one syscall on a path that
+has already failed. The alternative — a loop — is the one GNU uses and is not
+worth the sparse-file regression.
+
+**How it would be caught.** Nothing measures it today. `scripts/mv-diff.sh` §22
+has cases for a source that cannot be *opened* and a destination directory that
+cannot be *created in*, which are the surrounding steps; a failure part-way
+through the bytes needs a source that opens and then fails to read, which means
+a device that can be made to fail on demand. The reachable version is a
+destination on a filesystem small enough to fill — `/dev/shm` with a size limit,
+or a loopback image — which is a fixture the harness does not have and would be
+the same fixture several other unmeasured cases want.
+
+---
+
+### BUG-GETDENTS64-MISSING-BUFCAP-ARG3. The raw `getdents64` had the same missing-capacity bug `opendir` was fixed for in July, and returned an empty directory for every fd — 2026-09-01 — ✅ RESOLVED 2026-09-01
+
+**What it was.** `posix::dirent::getdents64` snapshotted the directory with
+
+```rust
+syscall3(SYS_FS_LIST_DIR, path_ptr, path_len, buf_ptr)
+```
+
+`SYS_FS_LIST_DIR` (603) reads the buffer's capacity from **arg3** and computes
+`max_entries = capacity / entry_size`. Passing the buffer pointer as arg3 and
+nothing as the capacity meant the kernel was told the buffer held zero entries,
+so it filled none and answered `0` — which `getdents64` reported to the caller
+as an empty directory. Not an error, not a short read: a directory with no files
+in it, for every fd, always.
+
+**Why it is the same bug twice.** This is
+`BUG-OPENDIR-MISSING-BUFCAP-ARG3` (2026-07-22, above) in a second call site.
+That one was found because `ls` uses `opendir`, so it was visible the moment
+anyone listed a directory. This one was not found for six weeks because **nothing
+in-tree calls the raw syscall wrapper** — our coreutils go through `opendir`, and
+`getdents64` exists for foreign programs (Go and Rust runtimes, `ls -f`
+implementations, `busybox`) that bypass libc's dir streams. A wrapper with no
+in-tree caller gets no in-tree coverage; the fix for the first instance came with
+a regression test on `opendir`, and there was no equivalent test here to fail.
+
+**How it was fixed.** Not by adding the missing argument. `getdents64` now takes
+its snapshot through the descriptor with `SYS_FS_GETDENTS_PINNED` (664), whose
+ABI has the capacity in the argument it is documented to be in and which reports
+the size of the *complete* listing so a short buffer is retried rather than
+silently truncated. The path-based call is gone from this file entirely, which is
+what makes a third instance of this mistake impossible rather than merely
+unlikely.
+
+**What now covers it.** `fill_dirent64_batch` is a pure function over the
+kernel's packed records and the caller's buffer, and is unit-tested on the host —
+including the batching boundary, the skip cases, and that `d_ino` is the
+filesystem's inode rather than the entry's index. The syscall itself still cannot
+be exercised on the host (it answers `ENOSYS`), which is exactly why the decoding
+was factored out of it.
+
+---
+
+## B-RENAME-CROSS-MOUNT-COPIES-INSTEAD-OF-ANSWERING-EXDEV — OPEN 2026-09-01
+
+**In short:** `rename(2)` on this system never returns `EXDEV`. Asked to rename
+across a mount boundary, the kernel's `SYS_FS_RENAME` copies the file and deletes
+the original, and reports success. Every other Unix refuses, and POSIX says it
+must; `mv`'s entire cross-device fallback — the one made attribute-preserving on
+2026-09-01 — is therefore unreachable on the target, and reachable only on the
+Linux and Windows hosts the unit tests run on.
+
+**Why it matters more than a spec deviation.** The kernel's copy is not `mv`'s
+copy, and the differences are user-visible:
+
+- **It is not `mv`'s.** `-v` prints `renamed 'a' -> 'b'` for something that was
+  copied; `--backup` has already been resolved on the assumption that a rename
+  either replaces or refuses; a partially-copied file left by a failure is not
+  cleaned up by the code that knows it should be.
+- **It moves directories silently.** `mv` refuses a cross-device directory move
+  (`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`) because it has no recursive
+  walk yet. If the kernel's rename copies a directory tree instead, the refusal
+  never fires and the tree is copied by machinery `mv` does not control.
+- **It cannot be pinned.** `SYS_FS_RENAMEAT_PINNED` (670) refuses a cross-mount
+  rename precisely because a pin cannot span a copy — a `stat`, a `copy`, a
+  `set_permissions`, a `set_owner` and a `remove`, each taking and releasing its
+  own lock (lane A's `design-decisions.md` §666). So the operation that most
+  wants the containment guarantee is the one shape that cannot have it, and the
+  reason is that the kernel is doing something other than a rename.
+
+**Where.** Kernel side: `sys_fs_rename`'s cross-mount arm — lane A's, not
+writable from here. libc side: `posix/src/file.rs`, `rename_ex` forwards to
+`SYS_FS_RENAME` and reports whatever it says, and `try_pinned_renameat` deletes
+670's `CrossDevice` answer so the two routes agree (`design-decisions.md` §742).
+
+**The proper fix.** A request to lane A to make `SYS_FS_RENAME` answer
+`CrossDevice` for a cross-mount rename, in one commit with 670 already doing so,
+after which:
+
+1. `try_pinned_renameat`'s three-line `CrossDevice` fallback is deleted and the
+   refusal is forwarded — both routes then agree on the POSIX answer.
+2. `mv`'s `copy_across_devices` becomes live on the target for the first time,
+   which is where the ordering matters: it must not be switched on before
+   `B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS` and
+   `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` are closed, or a
+   cross-mount `mv -r`-shaped move that silently worked would start failing.
+3. Anything else in the tree that renames across mounts and relied on the copy
+   has to grow its own fallback. Nothing does today.
+
+**Ordering, therefore.** This is not a change to make first. The two `mv` gaps
+above are the prerequisites, because closing this one converts a silent,
+kernel-performed copy into `mv`'s copy, and `mv`'s copy currently refuses two
+shapes the kernel's accepts. Doing them in the other order is a regression that
+looks like a fix.
+
+**How it would be caught.** `scripts/mv-diff.sh` runs against a real Linux and
+already has a second filesystem (`@FAR@`, `$XDG_RUNTIME_DIR`), so it measures
+GNU's behaviour correctly and cannot see this at all — the divergence is in the
+SlateOS kernel, which the harness does not run. It needs a `vfs_selftest` case,
+or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ---
 

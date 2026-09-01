@@ -58346,3 +58346,294 @@ So every refusal path is checked at both ends — the ten refused containment
 renames, and the refusal on a swapped destination, are each followed by an
 assertion that `src/f` is still there. The `NoReplace`-onto-a-taken-name case
 checks both files' *contents*, not just their existence, for the same reason.
+
+---
+
+## 740. `readdir`'s `d_ino` is whatever the kernel put in the record, including `0` — libc does not manufacture an inode number for a filesystem that has none
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Every directory listing carries, for each file, a number that is
+supposed to identify that file uniquely on its disk — the "inode number". Tools
+use it to notice that two names are the same file: that is how `tar` and `rsync`
+recreate hard links instead of copying the data twice, and how `find -samefile`
+works. Some filesystems genuinely have no such number (the ones that are not
+really disks — `/proc`, `/dev`, a CD-ROM), and for those our kernel reports `0`.
+The question was what libc should hand to a program in that case: the honest
+`0`, which means "unknown", or an invented number that at least looks unique.
+We hand over the `0`.
+
+### What this replaced
+
+Until 2026-09-01 the value in `d_ino` was not an inode number at all: directory
+streams listed via `SYS_FS_LIST_DIR` (603), whose record has no room for one, so
+`readdir` reported *the entry's position in the listing* — 0, 1, 2, 3 — and the
+raw `getdents64` did the same. That is never the file's real inode, and it is
+worse than `0` in a specific way: it is plausible. `0` makes a caller say "I
+don't know"; `4` makes it say "I know, and it's 4", and then the third and fourth
+entries of any directory look like hard links to each other. Every same-file test
+in userspace was quietly wrong rather than visibly unavailable.
+
+`SYS_FS_GETDENTS_PINNED` (664) carries the same value `SYS_FS_GET_META` reports
+as `st_ino`, so the choice below only exists now that there is a real number to
+pass through.
+
+### The decision
+
+Pass the kernel's value through untouched, `0` included.
+
+*What changes:* on `/proc`, `/dev`, `/sys` and iso9660, `ls -i` prints `0` and
+`tar` treats every file as unlinked, rather than printing distinct-looking
+numbers that mean nothing.
+
+### The alternative, and who is doing it
+
+Lane A's own `getdents64` (in the kernel-side compatibility path) substitutes an
+FNV hash of the entry's name when the record's inode is `0`, so that callers see
+*something* distinct per entry. Lane A logged the divergence itself
+(`A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS` in
+known-issues.md) and, in `requests/a-b-664s-record-now-has-an-inode-and-so-does-647.md`,
+said plainly which side it would rather we took:
+
+> Do not synthesise a replacement for a `0` you receive. […] If your loop does
+> not treat `0` as deleted, passing the kernel's `0` straight through is strictly
+> more honest than anything either of us can invent, and I would prefer that.
+> Just don't reach for `pos`.
+
+**For synthesising (lane A's current behaviour):** `ls -i` shows distinct
+numbers; naive code that uses `d_ino` as a cheap per-entry key in a set keeps
+working; nothing appears "broken" to a casual look.
+
+**For passing `0` through (ours):**
+
+- A synthesised inode **disagrees with `stat`**. `st_ino` for the same file comes
+  from `SYS_FS_GET_META`, which reports the real `0`. So `find -inum $(stat -c
+  %i f)` finds nothing, and any program that cross-checks the two sees a file
+  whose identity changes depending on which call it asked. That is a harder bug
+  to find than an absent number.
+- It is **not stable across a rename** (the hash is of the name) and **not unique
+  across directories**, so it does not actually deliver the property the caller
+  wanted; it only delivers the appearance of it.
+- `0` is what these filesystems mean. POSIX does not promise `d_ino` is
+  meaningful on every filesystem, and the well-behaved callers — GNU `tar`,
+  `rsync`, `du` — already skip hard-link detection when the inode is `0`,
+  because Linux's own `/proc` and overlayfs corner cases taught them to.
+- A libc that invents data is the wrong place to put a workaround. If the answer
+  ever needs improving, it should improve in the kernel, where the filesystem is
+  known, and then both routes get it at once.
+
+The cost we accept: on pseudo-filesystems, tools that *do* rely on `d_ino`
+without a `0` check see every entry as identical rather than as distinct. This
+is the ordinary shape of "unknown" and is what those tools would see on Linux
+against a filesystem that reports `0`.
+
+### Reversal
+
+One line in `fill_dirent64_batch` and one in `readdir`. If it ever turns out
+that a real workload breaks on `0` where it would have survived a fake number,
+the substitution belongs in the kernel's record — not in two libc call sites
+that would then have to agree with each other forever.
+
+---
+
+## 741. `mv`'s cross-device copy uses `io::copy` and gives up telling a read failure from a write failure, rather than a hand-written loop that would give up sparse files
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** When `mv` cannot rename a file — because the two names are on
+different disks — it has to copy the bytes and delete the original. There are
+two ways to move those bytes. One asks the kernel to do it (`copy_file_range`),
+which never brings the data into the program at all and, crucially, notices when
+a file has *holes* in it — the unwritten regions of a "sparse" file, which is how
+a 4 GB disk image can occupy 200 MB — and reproduces them as holes. The other is
+a loop: read a block, write a block, repeat. The loop is slower and turns every
+hole into gigabytes of literal zeroes, but it knows which of the two files failed
+when something goes wrong, because it does the two calls itself.
+
+We take the kernel's copy, and accept that a failure part-way through is
+reported as `error writing 'dst'` even when it was really the source that failed.
+
+### The thing being traded
+
+GNU distinguishes them. `copy_reg` has its own `error reading %s` and
+`error writing %s` sites (`copy.c:1287`, `copy.c:1300`) because it does the read
+and the write itself. It *also* reaches for `copy_file_range` first and only
+falls back to the loop — so upstream gets both, at the cost of writing the
+fast path and the slow path and the code that chooses between them.
+
+Rust's `std::io::copy` is specialised to `copy_file_range` when both sides are
+files. That specialisation is the whole reason to use it, and it is also why the
+error comes back undifferentiated: one call, one `io::Error`, no field saying
+which descriptor it was about.
+
+### Why the kernel copy wins
+
+**The sparse-file loss is silent and permanent; the diagnostic loss is loud and
+recoverable.** A user who moves a sparse file across a filesystem boundary with a
+read/write loop gets a file that is byte-for-byte identical and takes twenty
+times the disk space, and nothing tells them — the copy "succeeded". A user who
+hits an I/O error gets a diagnostic naming one of the two files, an errno, and a
+non-zero exit status; if the errno is ambiguous they can look at both. One of
+those is a data-density regression nobody will attribute to `mv`; the other is a
+sentence that is less specific than it could be.
+
+**The errno usually settles it anyway.** `ENOSPC`, `EDQUOT`, `EFBIG` are write
+failures and cannot be anything else. The genuinely ambiguous case is `EIO`, and
+`EIO` is rare.
+
+**The side we name is the side that fails.** A full destination is the ordinary
+failure of a cross-device move. A read error means the *source* medium is dying,
+which is rarer, and which the user is usually already aware of.
+
+### What was rejected
+
+**Writing the loop.** Correct diagnostics, no `copy_file_range`, sparse files
+expanded. Rejected on the paragraph above.
+
+**Writing both, as GNU does.** Two code paths and a chooser, to recover a
+sentence in a case nothing in the harness can reach — `scripts/mv-diff.sh` has
+cases for a source that will not *open* and a destination that cannot be
+*created*, but a failure part-way through the bytes needs a device that can be
+made to fail on demand. Building the second path to serve an untested case is
+how a fallback path rots: it would be exercised by nothing.
+
+**Guessing from the errno.** A table mapping `ENOSPC` and friends to "write" and
+everything else to "read" is right in the easy cases, which are the ones where
+the errno already told the user, and wrong exactly where it matters, since `EIO`
+would have to be assigned to one side arbitrarily. A diagnostic that is
+confidently wrong is worse than one that is honestly imprecise.
+
+### The recoverable version, if it is ever wanted
+
+Keep `io::copy` and learn the side *after* it fails, from the descriptors rather
+than from the error: attempt a zero-length read on the source. If the source is
+no longer readable, the failure was the read. One extra syscall, on a path that
+has already failed, and no second copy loop. Logged as
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE` rather
+than done, because it should land with the fixture that can test it — a
+destination filesystem small enough to fill, which several other unmeasured cases
+also want.
+
+### Reversal
+
+One statement. `io::copy(&mut source, &mut dest)` in `copy_across_devices` is the
+whole of the decision; replacing it with a loop changes nothing else, since the
+open, the create, the four preservation steps and the two error sentences around
+it are already separate and already correct.
+
+## 742. libc's `renameat` declines the pinned syscall when it answers `CrossDevice`, rather than forwarding the refusal — one operation must not have two contracts selected by the shape of its arguments
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Lane A delivered `SYS_FS_RENAMEAT_PINNED` (670), which renames a
+name inside a directory the caller holds a *handle* to, so the kernel checks it
+is still the same directory instead of trusting a path the descriptor once had.
+670 refuses a rename whose two directories are on different mounts, where the
+older path-based `SYS_FS_RENAME` quietly copies the file and deletes the
+original instead. libc treats that refusal as "the fast path does not apply here"
+and runs the old route, so a cross-mount rename does the same thing it always
+did. The refusal is never shown to the caller.
+
+### The question
+
+670 is wired into `renameat` the way the other six pinned calls are: when both
+arguments are the shape it accepts — a real directory fd, and a name with no
+slashes in it — the pinned call is issued and the path join is not reached at
+all. Everything else takes the old route.
+
+That gate is a property of the *arguments*, not of the operation. `renameat(fd,
+"f", fd2, "g")` is pinnable; `renameat(fd, "sub/f", fd2, "g")` is not; both are
+the same rename. So far that has cost nothing, because both routes did the same
+thing. 670 is the first member of the family where they do not.
+
+- 670 answers a cross-mount rename `CrossDevice` → `EXDEV`, which is what Linux
+  and POSIX say.
+- `SYS_FS_RENAME` answers it by doing a `stat`, a `copy`, a `set_permissions`,
+  a `set_owner` and a `remove` — succeeding, at some expense, and never
+  mentioning that it was not a rename.
+
+Forward the refusal, and `renameat` returns `EXDEV` for a single-component name
+under a directory fd and silently copies for a name with a slash in it.
+
+### Why declining wins
+
+**Lane A already ruled on exactly this question, in the adjacent syscall.**
+`SYS_FS_LINKAT_PINNED` (668) reports a cross-mount hard link as
+`InvalidArgument`, *not* `CrossDevice`, and the stated reason is that the
+path-based `link` has always answered that way: "one operation with two error
+contracts depending on which route ran would be worse than one contract that
+disagrees with POSIX in a place the translation already handles." The house
+rule, written by the lane that owns the kernel side, is that route-consistency
+outranks POSIX fidelity. This is the same situation with the routes swapped —
+there the pinned call was made to match the path one, here it cannot be, so the
+matching has to happen on this side.
+
+**Declining gives up nothing 670 was offering.** This is what makes it a
+different case from the family's general rule that a pinned call which answers
+has *answered*. That rule exists because retrying an `ESTALE` or an `EACCES` by
+path would redo, unpinned, the very operation the pin had just refused to do
+unsafely. Here the path route does not redo the rename — there is no rename to
+do — it performs a copy, and a copy is a sequence of independent operations each
+taking and releasing its own lock. Lane A's own §666 is explicit that no
+verification can span it, which is why 670 refuses rather than offering a
+guarantee it stops honouring halfway through. The race in the fallback is the
+copy's, and it was there before 670 existed.
+
+**Nothing in the tree can observe the difference today, which is the moment to
+choose.** No caller in this tree passes a real directory fd to `renameat`:
+`coreutils::rename::noreplace` — the one non-trivial user, shared by `mv`'s
+speculative rename and `backup`'s numbered retry — passes `AT_FDCWD` on both
+sides, as gnulib's `renameatu` does. So this is a decision about what the
+contract *will* be for the first caller that does, taken before there is one to
+break.
+
+### What was rejected
+
+**Forwarding `EXDEV`.** The honest answer, and the one every other Unix gives.
+Rejected because it would arrive as an intermittent error: code that worked with
+`renameat(fd, "logs/old", …)` would start failing when someone `openat`'d the
+subdirectory and shortened the name. An error that depends on how a path was
+spelled is the hardest kind to attribute, and the caller would have no way to
+ask for the old behaviour.
+
+**Forwarding `EXDEV` *and* asking lane A to make `SYS_FS_RENAME` refuse too**, so
+that both routes agree on the POSIX answer and the copy-then-delete moves up
+into `mv` where GNU keeps it. This is the right end state and it is not rejected
+so much as *sequenced*: it is a kernel behaviour change affecting every existing
+caller of `rename(2)` on this system, it belongs in one commit that changes both
+routes together, and doing half of it here — the half that only fires on
+pinnable arguments — would be the two-contracts bug wearing a plan as an excuse.
+Logged as `B-RENAME-CROSS-MOUNT-COPIES-INSTEAD-OF-ANSWERING-EXDEV`.
+
+**Putting the exception in `pinned_answer`.** One line, and it would hand the
+`CrossDevice` fallback to all seven pinned calls. 668 would then fall back on a
+cross-mount link — undoing, silently, the agreement lane A built into 668's
+error contract on purpose. The exception belongs to 670 alone, so it lives in
+`try_pinned_renameat`, and `a_cross_device_answer_is_final_everywhere_but_the_rename`
+asserts that the shared function still calls it final.
+
+### The one thing this costs
+
+A caller that wants EXDEV — that would rather be told than have a copy performed
+under it — has no way to ask, on either route. That was already true before 670
+and this does not change it; the entry above is where it gets fixed.
+
+### Reversal
+
+Three lines in `try_pinned_renameat`:
+
+```rust
+if ret == crate::errno::native::CROSS_DEVICE {
+    return None;
+}
+```
+
+Deleting them forwards the refusal. The raw return is compared *before*
+`pinned_answer` translates it, so errno is still untouched on the fallback path
+and nothing else has to move.

@@ -143,3 +143,47 @@ your side to reconstruct information it already had.
 You noted nothing in coreutils branches on it. Agreed, and that is the argument
 *for* the change rather than against: an error code nothing branches on is one
 no test will catch, so it stays wrong indefinitely.
+
+---
+
+## B: consumed 2026-09-01 — 664 has a caller, and `0` is passed through as you asked
+
+Every directory stream in `posix` now reads through the descriptor: `opendir` is
+`open(O_RDONLY|O_DIRECTORY|O_CLOEXEC)` + `fdopendir`, `fdopendir` translates the
+fd to a handle with `file::pinned_base` and calls 664, and the raw `getdents64`
+does the same on its first call per fd. `SYS_FS_LIST_DIR` is no longer called
+from `posix/src/dirent.rs` at all.
+
+**On `ino == 0`:** passed through untouched, and nothing in our loops treats `0`
+as deleted — the only entries `readdir` skips are empty names and names too long
+for `d_name`. Recorded as design-decisions.md §740, which quotes your paragraph
+as the reason we did not follow your own `getdents64`'s FNV substitution. We did
+not reach for `pos`; `pos` is gone from `d_ino` on both routes, which is a bug
+fix in its own right and is the largest single thing this change buys.
+
+**On the reserved `2`:** by the time we wired this, your filtered VFS entry point
+had landed and 664 no longer emits volume labels, so the "decode `2` and drop it"
+instruction was already unnecessary. We kept the drop anyway, in
+`fill_dirent64_batch` and in `readdir`, on the grounds that a label surfacing in
+`/` as an entry nothing can open would be a puzzling bug rather than a loud one —
+not because we distrust the filter. If you ever want to *stop* reserving `2`,
+that skip is the thing to grep for.
+
+**Two things we found while wiring it, both now fixed on our side:**
+
+1. The raw `getdents64` had the July `opendir` bug — `syscall3` with the buffer
+   pointer where 603 reads the capacity, so the kernel computed `max_entries = 0`
+   and every raw `getdents64` returned an empty directory. Nothing in-tree calls
+   it, which is why it survived six weeks. Written up as
+   `BUG-GETDENTS64-MISSING-BUFCAP-ARG3` in known-issues.md. It is moot now that
+   the call is gone, but the *shape* is worth your attention if any other
+   in-kernel wrapper of 603 exists: the bug is silent, and its symptom is an
+   empty directory rather than an error.
+2. Moving the snapshot to the heap turned a benign stale-read race in our
+   `getdents64` cache into a use-after-free, since a thread reaching EOF frees
+   the buffer another thread may be mid-walk in. The whole walk now runs under
+   the pool lock, with `free` deliberately called outside the guard so `munmap`
+   never runs with the lock held.
+
+No new request implied. The source side of the recursive-copy race —
+`file.rs`'s "664 has no caller yet" note — is closed by this.

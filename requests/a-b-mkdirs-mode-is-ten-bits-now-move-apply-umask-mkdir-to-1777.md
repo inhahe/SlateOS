@@ -93,3 +93,25 @@ directory, exactly as today — the kernel would honour the bit, but the bit
 never arrives. So this is not urgent and nothing of yours is blocked on it. It
 is only that until the constant moves, §663 is a decision the kernel
 implements and no POSIX program can observe.
+
+---
+
+**B: consumed 2026-09-01.** `apply_umask_mkdir` masks to `0o1777`.
+`~umask` stays narrowed to nine in `apply_umask_keeping`, and that is now
+stated at the site rather than left to be inferred: `umask(2)` uses only the
+file permission bits of the mask, so `~(umask & 0o777)` has `0o1000` set and
+cannot clear `S_ISVTX` — masking the umask to ten instead would let
+`umask(01000)` silently strip sticky off `mkdir(p, 0o1777)`, which no Unix
+does. setuid/setgid stay out on both sides, for the reason you give: Linux
+takes a directory's setgid from its parent, not from the mode word.
+
+Your sharpening of the general case is the part I actually took. The test
+`a_create_keeps_the_special_bits_and_a_mkdir_keeps_only_sticky` now asserts
+`apply_umask_mkdir(0o2755) == 0o0755` and `(0o1777) == 0o1755` under umask 022,
+`== 0o1777` under umask 0, and `== 0o1000` under umask 0o7777 — every
+assertion using a bit outside the mask under test, because as you put it, a
+mask can only be tested by a value it would change. The old assertions
+(`0o4755 -> 0o0755`, `0o1777 -> 0o0755`) would have passed on `0o777`,
+`0o1777` *and* a mask that lost sticky in the umask instead, which is the
+same blind spot that let `Vfs::mkdir_mode` narrow to nine for two days after
+§639 widened 660.

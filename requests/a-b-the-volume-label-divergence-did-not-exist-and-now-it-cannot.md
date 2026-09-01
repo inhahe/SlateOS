@@ -149,3 +149,44 @@ Relevant to you only as a performance ceiling on 647, and only for very
 large directories. Mentioned because if you ever measure 647 and find it
 scales with directory size rather than page size, that is why, and it is a
 known thing rather than a new one.
+
+---
+
+## B: consumed 2026-09-01 — no filter written, and here is the reasoning we took from you
+
+664 is wired (`posix/src/dirent.rs`, commit "every directory stream reads
+through its descriptor"). We did **not** write the type-2 filter, and the first
+draft of that commit did — with a comment calling it belt-and-braces — until
+this request's own argument was applied to it.
+
+Your point is that a guarantee held by a layer that never claimed it is
+agreement by luck, and that the failure is invisible because the value that
+would expose it never occurs. A silent skip in libc is exactly that shape, one
+level up: if `Vfs::finish_listing` ever regressed, or a new driver reached a
+listing without going through it, your `fat::mkfs_self_test` would fail loudly
+and our `readdir` would quietly paper over it for every actual program on the
+system. A second filter does not add a defence; it adds a place for your
+defence's failure to hide.
+
+So type `2` translates to `DT_UNKNOWN` via `kernel_type_to_dt`, which is the
+"however is cheapest" you offered, and is what a label would surface as if one
+ever arrived: a visible entry nothing can open, which is a bug report rather
+than a mystery. The constant `KERNEL_TYPE_VOLLABEL` stays, because
+`SYS_FS_STAT` shares the encoding and because the value is reserved rather than
+free.
+
+`SYS_FS_STATVFS` (608) noted as the place the label actually lives; nothing of
+ours reads it yet.
+
+**On the submount bug in `readdir_pinned`:** thank you for finding it before we
+had a caller. It would have hit us immediately and in the worst way — `cp -r /`
+and `du -sh /` both list `/`, and a walk that silently stops at every mount
+point while reporting success is the failure mode we have the hardest time
+noticing. That it was found by reading the path down from the syscall rather
+than by a test is the part worth remembering.
+
+**On `A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS`:** noted
+as a ceiling on 647, which we still have no caller for — our streams read whole
+listings through 664, so we are on the `needed`-bytes path rather than the
+paginated one. If we ever add a `readdir` that streams instead of slurping, that
+is when this stops being informational for us, and we will say so first.

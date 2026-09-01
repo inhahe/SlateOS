@@ -246,6 +246,24 @@ pub(crate) mod native {
     /// (`requests/a-b-cap-query-enumeration-landed.md`). Until it was mapped
     /// here it fell through to the catch-all `EIO`, which no caller retries on.
     pub const BUFFER_TOO_SMALL: i64 = -9;
+    /// The syscall number names an **empty slot** — the kernel has never heard
+    /// of it.
+    ///
+    /// This is the fact [`NOT_SUPPORTED`] used to have to carry as well, and
+    /// the two are acted on differently by the caller: "the kernel is older
+    /// than this call, take the previous route" against "the call ran and this
+    /// filesystem cannot do the thing, stop". While both were `-2` the
+    /// difference could only be guessed at, and [`crate::file::pinned_answer`]
+    /// did the guessing with a per-syscall latch — sound, but wrong for exactly
+    /// as long as no answer had yet arrived, which silently downgraded a
+    /// genuine first-call refusal to the racy path-based route.
+    ///
+    /// `ENOSYS`, which is also what `linux_errno_for` gives `NotSupported`:
+    /// Linux has one errno for both facts, so only the native ABI can tell them
+    /// apart, and only callers on the native ABI need to.
+    ///
+    /// Added by lane A in `dispatch.rs`'s unregistered-slot arm.
+    pub const NO_SUCH_SYSCALL: i64 = -10;
 
     // --- Memory (100 range: -100 to -103) ---
     pub const OUT_OF_MEMORY: i64 = -100;
@@ -356,6 +374,13 @@ pub fn errno_for(code: i64) -> i32 {
         native::INTERRUPTED => EINTR,
         // ERANGE, not EINVAL: the caller should retry with a bigger buffer.
         native::BUFFER_TOO_SMALL => ERANGE,
+        // ENOSYS — "function not implemented" — which is what POSIX has always
+        // said an unimplemented call should report, and which an unwired slot
+        // could not report while it shared `-2` with `NOT_SUPPORTED` and so
+        // arrived as `ENOTSUP`. So this is a small user-visible improvement as
+        // well as an internal one: a caller probing for a syscall's existence
+        // now gets the errno it is written to test for.
+        native::NO_SUCH_SYSCALL => ENOSYS,
 
         // Memory errors
         native::OUT_OF_MEMORY | native::RESOURCE_EXHAUSTED => ENOMEM,

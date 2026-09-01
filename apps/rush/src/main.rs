@@ -3773,33 +3773,86 @@ mod tests {
 
     #[test]
     fn a_letter_too_big_for_its_car_is_dropped_rather_than_spilled() {
-        // 60x40 rather than one of `WINDOWS`: at every size in that list the
-        // glyph fits, so the drop branch would never be entered and the test
-        // would pass by never testing anything. Here the cells are under six
-        // pixels tall and the smallest glyph's line height is not.
+        // Not one of `WINDOWS`: at every size in that list every glyph fits, so
+        // the drop branch is never entered and a test standing only on them
+        // passes by never testing anything.
+        //
+        // Two sizes rather than one, because the guard has two halves and only
+        // one of them is its own bound. `label_centred` refuses through
+        // `centre_line` whenever the box is shorter than a line, which is the
+        // *height* half of this guard word for word — so deleting the guard
+        // entirely still draws nothing at a size where the cells are too short,
+        // and a test standing only on such a size cannot tell the guard from its
+        // absence. That is the fit-check-feeding-a-fit-check shape: the second
+        // check does not spill, it blanks, and blank passes everything.
+        //
+        // The *width* half has no such backstop — `label_centred` clamps a run
+        // to `r.w` and ellipsises it rather than refusing — so it is the half
+        // that must be exercised, and it needs a car that is tall enough for its
+        // letter and too narrow for it. Only a vertical car can be that: its box
+        // is one cell wide and two or three tall, so its height clears the line
+        // while its width does not. 40x55 is such a size (cell ≈ 4.57: a letter
+        // at the 7pt floor is wider than that and a two-cell column is taller
+        // than the line). 60x40 is kept alongside it for the height half.
         let g = game();
-        let (w, h) = (60.0, 40.0);
-        let l = Layout::new(w, h);
-        let f = g.frame(w, h);
-        let commands = text_commands(&f);
-        let mut dropped = 0;
-        for v in g.vehicles() {
-            let r = l.vehicle_rect(v);
-            let glyph = v.label.to_string();
-            match commands.iter().find(|(t, ..)| *t == glyph) {
-                Some((_, _, _, size, weight)) => assert!(
-                    text::measure(&glyph, *size, *weight) <= r.w + 0.01
-                        && text::line_height(*size, *weight) <= r.h + 0.01,
-                    "car {}'s letter does not fit the car it is drawn on",
-                    v.label
-                ),
-                None => dropped += 1,
+        let mut by_height = 0;
+        let mut by_width = 0;
+        for (w, h) in [(60.0_f32, 40.0_f32), (40.0, 55.0)] {
+            let l = Layout::new(w, h);
+            let f = g.frame(w, h);
+            let commands = text_commands(&f);
+            for v in g.vehicles() {
+                let r = l.vehicle_rect(v);
+                let glyph = v.label.to_string();
+                // The contract is a biconditional, and it has to be asserted in
+                // both directions: "drawn only if it fits" alone is satisfied by
+                // a program that draws nothing, which is exactly what the
+                // mutation of this guard degenerates into on the height half.
+                let size = (l.cell * 0.34).clamp(7.0, l.font);
+                let fits_w = text::measure(&glyph, size, FontWeightHint::Bold) <= r.w;
+                let fits_h = text::line_height(size, FontWeightHint::Bold) <= r.h;
+                let want = !r.is_empty() && fits_w && fits_h;
+                match commands.iter().find(|(t, ..)| *t == glyph) {
+                    Some((_, _, _, drawn_size, weight)) => {
+                        assert!(
+                            want,
+                            "at {w}x{h} car {}'s letter was drawn on a car it does not fit: \
+                             box {r:?}, width {} vs {}, line {} vs {}",
+                            v.label,
+                            text::measure(&glyph, size, FontWeightHint::Bold),
+                            r.w,
+                            text::line_height(size, FontWeightHint::Bold),
+                            r.h
+                        );
+                        assert!(
+                            text::measure(&glyph, *drawn_size, *weight) <= r.w + 0.01
+                                && text::line_height(*drawn_size, *weight) <= r.h + 0.01,
+                            "at {w}x{h} car {}'s letter does not fit the car it is drawn on",
+                            v.label
+                        );
+                    }
+                    None => {
+                        assert!(
+                            !want,
+                            "at {w}x{h} car {}'s letter fits its box {r:?} and was dropped anyway",
+                            v.label
+                        );
+                        if !r.is_empty() {
+                            if !fits_h {
+                                by_height += 1;
+                            } else {
+                                by_width += 1;
+                            }
+                        }
+                    }
+                }
             }
         }
-        assert!(
-            dropped > 0,
-            "every letter fitted even at {w}x{h}, so nothing here exercises the drop"
-        );
+        // Both halves reached. Without these the sweep above is a sweep over
+        // sizes that happen to agree, and the half that was never exercised is
+        // a bound that has not been tested.
+        assert!(by_height > 0, "no letter was dropped for being too tall");
+        assert!(by_width > 0, "no letter was dropped for being too wide");
     }
 
     #[test]

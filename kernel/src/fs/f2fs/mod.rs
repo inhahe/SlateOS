@@ -339,6 +339,9 @@ impl FileSystem for F2fsFs {
                 name: PathBuf::from(entry.name.as_slice()),
                 entry_type,
                 size,
+                // Free: the directory entry already carries the node number,
+                // and it is the same one `metadata` reports as `st_ino`.
+                ino: u64::from(entry.ino),
             });
         }
         Ok(out)
@@ -368,7 +371,7 @@ impl FileSystem for F2fsFs {
 
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         self.ops = self.ops.saturating_add(1);
-        let (_, inode) = self.resolve(path)?;
+        let (ino, inode) = self.resolve(path)?;
         let entry_type = Self::entry_type_of(&inode);
         let name = path
             .file_name()
@@ -381,6 +384,7 @@ impl FileSystem for F2fsFs {
             } else {
                 inode.size
             },
+            ino: u64::from(ino),
         })
     }
 

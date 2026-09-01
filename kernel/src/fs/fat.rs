@@ -767,6 +767,11 @@ impl FatDirEntry {
                 EntryType::File
             },
             size: u64::from(self.file_size),
+            // FAT has no inode table; the first cluster is the closest stable
+            // per-file identifier, and is exactly what `metadata` reports as
+            // `st_ino`.  Empty files (cluster 0) report 0 = "not available",
+            // which is the same answer from both routes.
+            ino: u64::from(self.first_cluster),
         }
     }
 }
@@ -3201,6 +3206,12 @@ impl FileSystem for FatFs {
                     name,
                     entry_type: EntryType::Directory,
                     size: 0,
+                    // `resolve_path` yields `None` only for the root, which
+                    // has no directory entry and so no first cluster to use
+                    // as an identity.  `metadata` answers the same path with
+                    // `FileMeta::minimal`, whose `ino` is likewise 0, so both
+                    // routes report "not available" rather than disagreeing.
+                    ino: 0,
                 })
             }
             Some(e) => Ok(e.to_vfs_entry()),

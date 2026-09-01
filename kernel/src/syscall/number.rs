@@ -3038,9 +3038,28 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 ///     `arg4`: output buffer capacity in bytes.
 ///
 /// Each entry is serialized as:
-///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size`
+///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size | u64 ino`
 ///   (entry_type: 0=file, 1=dir, 2=volume_label, 3=symlink,
 ///    4=char_device, 5=block_device)
+///
+/// All multi-byte fields are little-endian. A record is therefore
+/// `21 + name_len` bytes, and the same layout is what
+/// [`SYS_FS_GETDENTS_PINNED`] emits — both call one `entry_record_len` so
+/// the two cannot drift.
+///
+/// `ino` is the backing filesystem's inode number for the object the name
+/// refers to, and is the same value [`SYS_FS_GET_META`] reports as `st_ino`
+/// for that object; `0` means the filesystem has no stable per-object
+/// identity (FAT files with no allocated cluster, `procfs`, `sysfs`,
+/// `devfs`, `iso9660`), not that the entry is deleted. It was appended
+/// 2026-08-31, while neither this call nor [`SYS_FS_GETDENTS_PINNED`] had a
+/// decoder outside the kernel — a record layout is only free to change
+/// while nothing decodes it. Callers must use this field rather than
+/// synthesise a number from the path: `d_ino` and `st_ino` are cross-checked
+/// by `find -inum`, by `ls -i` against `stat`, and by the hard-link
+/// detection in `tar`, `rsync` and `du`, so a synthetic value — which by
+/// construction never equals the real inode — makes all of those silently
+/// wrong rather than visibly broken.
 ///
 /// This table read `2=symlink, 3=volume_label` until 2026-08-31 and omitted
 /// 4 and 5 entirely. Both handlers have always emitted `2=VolumeLabel,
@@ -3377,10 +3396,14 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// `InvalidHandle` (§648).
 /// `arg1`: output buffer.  `arg2`: output buffer capacity.
 ///
-/// Entries are packed as `[u8 type][u32 name_len][name bytes][u64 size]`,
-/// the same encoding [`SYS_FS_READDIR_AT`] uses.  A buffer too small for the
-/// whole listing truncates it — at a record boundary, never mid-record —
-/// rather than failing.
+/// Entries are packed as
+/// `[u8 type][u32 name_len][name bytes][u64 size][u64 ino]` — little-endian,
+/// `21 + name_len` bytes per record — the same encoding
+/// [`SYS_FS_READDIR_AT`] uses, whose note is the authority for the meaning
+/// of `type` and `ino` and which both calls compute a record length for with
+/// the same `entry_record_len`.  A buffer too small for the whole listing
+/// truncates it — at a record boundary, never mid-record — rather than
+/// failing.
 ///
 /// Returns: on success, the bytes the *complete* listing occupies, which is
 /// not necessarily the number written.  `ret <= arg2` means the listing is

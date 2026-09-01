@@ -9328,7 +9328,7 @@ pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// Bytes one `SYS_FS_GETDENTS_PINNED` record occupies for a name of this
-/// length: `[u8 type][u32 name_len][name bytes][u64 size]`.
+/// length: `[u8 type][u32 name_len][name bytes][u64 size][u64 ino]`.
 ///
 /// Shared by the size computation and the packing loop so the two cannot
 /// disagree — a requirement reported from one formula and satisfied by
@@ -9337,7 +9337,8 @@ fn entry_record_len(name_len: usize) -> usize {
     1usize
         .saturating_add(4)
         .saturating_add(name_len)
-        .saturating_add(8)
+        .saturating_add(8) // size
+        .saturating_add(8) // ino
 }
 
 /// Recover the caller's `dirfd` argument as a [`crate::fs::PinnedDir`].
@@ -9784,6 +9785,14 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                 put(&(name_bytes.len() as u32).to_le_bytes());
                 put(name_bytes);
                 put(&entry.size.to_le_bytes());
+                // The inode the backing filesystem reports for this name, or
+                // 0 where it has none. A caller must use this rather than
+                // invent one: `d_ino` and `st_ino` are cross-checked by
+                // `find -inum`, by `ls -i` against `stat`, and by the
+                // hard-link detection in `tar`/`rsync`/`du`, and a synthetic
+                // value that never equals the real inode makes all of those
+                // silently wrong.
+                put(&entry.ino.to_le_bytes());
                 pos = pos.saturating_add(entry_size);
             }
             Ok(pos)
@@ -11730,17 +11739,22 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
 
     let mut written = 0u32;
 
-    // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
+    // Format: [u8 type][u32 name_len][name bytes][u64 size][u64 ino] per
+    // entry.
     let copied =
         match crate::mm::user::with_user_out_buf(args.arg3, out_cap, READDIR_BUF_MAX, |out_slice| {
             let mut pos = 0usize;
             for entry in &entries {
                 let name_bytes = entry.name.as_bytes();
-                // Each entry needs: 1 + 4 + name_len + 8 bytes.
-                let entry_size = 1usize
-                    .saturating_add(4)
-                    .saturating_add(name_bytes.len())
-                    .saturating_add(8);
+                // `entry_record_len` rather than a second copy of the
+                // formula: `SYS_FS_GETDENTS_PINNED`'s ABI note defines its
+                // record as "the same encoding `SYS_FS_READDIR_AT` uses", so
+                // the two must agree by construction and not by two authors
+                // remembering to edit both. This function carried its own
+                // inline `1 + 4 + name_len + 8` until the inode was appended,
+                // which is exactly the drift that helper's doc comment warns
+                // about.
+                let entry_size = entry_record_len(name_bytes.len());
 
                 if pos.saturating_add(entry_size) > out_cap {
                     break; // Buffer full — stop writing (not an error).
@@ -11792,6 +11806,21 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 // Size (u64 LE).
                 if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(8)) {
                     dst.copy_from_slice(&entry.size.to_le_bytes());
+                }
+                pos = pos.saturating_add(8);
+
+                // Inode (u64 LE), or 0 where the backing filesystem has no
+                // stable per-object identity. Appended 2026-08-31, while
+                // neither this call nor `SYS_FS_GETDENTS_PINNED` had a
+                // decoder outside the kernel — the only moment a record
+                // layout is free to change. It is here because the
+                // alternative userspace has to fall back on is inventing a
+                // number, and an invented `d_ino` is worse than an absent
+                // one: it is never equal to `st_ino`, so `find -inum`
+                // matches nothing, `ls -i` contradicts `stat`, and `tar`,
+                // `rsync` and `du` fail to recognise two names for one file.
+                if let Some(dst) = out_slice.get_mut(pos..pos.saturating_add(8)) {
+                    dst.copy_from_slice(&entry.ino.to_le_bytes());
                 }
                 pos = pos.saturating_add(8);
 

@@ -726,6 +726,7 @@ impl FileSystem for SysFs {
                 let entries = TOP_DIRS
                     .iter()
                     .map(|name| DirEntry {
+                        ino: 0,
                         name: PathBuf::from(*name),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -739,6 +740,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_kernel_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -755,6 +757,7 @@ impl FileSystem for SysFs {
                     .map(|p| {
                         let val_str = format!("{}\n", p.value);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(p.name),
                             entry_type: EntryType::File,
                             size: val_str.len() as u64,
@@ -769,6 +772,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_fs_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -781,11 +785,13 @@ impl FileSystem for SysFs {
                 // "pci/" (PCI devices) and "system/" (CPU/topology tree).
                 Ok(vec![
                     DirEntry {
+                        ino: 0,
                         name: PathBuf::from("pci"),
                         entry_type: EntryType::Directory,
                         size: 0,
                     },
                     DirEntry {
+                        ino: 0,
                         name: PathBuf::from("system"),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -795,6 +801,7 @@ impl FileSystem for SysFs {
             SysPath::SystemDir => {
                 // Just "cpu/" for now (memory/node trees can follow).
                 Ok(vec![DirEntry {
+                    ino: 0,
                     name: PathBuf::from("cpu"),
                     entry_type: EntryType::Directory,
                     size: 0,
@@ -806,6 +813,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -815,6 +823,7 @@ impl FileSystem for SysFs {
                 // One cpuN directory per present CPU.
                 for i in 0..crate::acpi::processor_count() {
                     entries.push(DirEntry {
+                        ino: 0,
                         name: PathBuf::from(format!("cpu{i}")),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -827,12 +836,14 @@ impl FileSystem for SysFs {
                 // the kernel detected cache geometry), and — for cpu1+ — an
                 // online toggle (cpu0 cannot be offlined).
                 let mut entries = vec![DirEntry {
+                    ino: 0,
                     name: PathBuf::from("topology"),
                     entry_type: EntryType::Directory,
                     size: 0,
                 }];
                 if cache_index_count() > 0 {
                     entries.push(DirEntry {
+                        ino: 0,
                         name: PathBuf::from("cache"),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -840,6 +851,7 @@ impl FileSystem for SysFs {
                 }
                 if idx >= 1 {
                     entries.push(DirEntry {
+                        ino: 0,
                         name: PathBuf::from("online"),
                         entry_type: EntryType::File,
                         size: gen_cpu_online_file(idx).len() as u64,
@@ -851,6 +863,7 @@ impl FileSystem for SysFs {
                 // One indexI directory per detected cache level/type.
                 let entries = (0..cache_index_count())
                     .map(|ci| DirEntry {
+                        ino: 0,
                         name: PathBuf::from(format!("index{ci}")),
                         entry_type: EntryType::Directory,
                         size: 0,
@@ -864,6 +877,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -878,6 +892,7 @@ impl FileSystem for SysFs {
                     .map(|name| {
                         let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(*name),
                             entry_type: EntryType::File,
                             size,
@@ -897,6 +912,7 @@ impl FileSystem for SysFs {
                             dev.address.bus, dev.address.device, dev.address.function
                         );
                         DirEntry {
+                            ino: 0,
                             name: PathBuf::from(name),
                             entry_type: EntryType::File,
                             size: 0,
@@ -941,11 +957,13 @@ impl FileSystem for SysFs {
 
         match classify_path(rel) {
             SysPath::Root => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::SubDir(name) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from(name),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -953,6 +971,7 @@ impl FileSystem for SysFs {
             SysPath::KernelFile(name) => {
                 let size = gen_kernel_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
@@ -961,17 +980,20 @@ impl FileSystem for SysFs {
             SysPath::FsFile(name) => {
                 let size = gen_fs_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::DevicesDir => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("devices"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::PciDir => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("pci"),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -979,6 +1001,7 @@ impl FileSystem for SysFs {
             SysPath::ParamFile(name) => {
                 let size = gen_param_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
@@ -987,17 +1010,20 @@ impl FileSystem for SysFs {
             SysPath::PciDevice(bdf) => {
                 let size = gen_pci_device(bdf).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(bdf),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::SystemDir => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("system"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::SystemCpuDir => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("cpu"),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -1005,22 +1031,26 @@ impl FileSystem for SysFs {
             SysPath::CpuFile(name) => {
                 let size = gen_cpu_file(name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::CpuN(idx) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from(format!("cpu{idx}")),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuNOnline(idx) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("online"),
                 entry_type: EntryType::File,
                 size: gen_cpu_online_file(idx).len() as u64,
             }),
             SysPath::CpuNTopologyDir(_) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("topology"),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -1028,17 +1058,20 @@ impl FileSystem for SysFs {
             SysPath::CpuTopoFile(idx, name) => {
                 let size = gen_cpu_topo_file(idx, name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,
                 })
             }
             SysPath::CpuCacheDir(_) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from("cache"),
                 entry_type: EntryType::Directory,
                 size: 0,
             }),
             SysPath::CpuCacheIndexDir(_, ci) => Ok(DirEntry {
+                ino: 0,
                 name: PathBuf::from(format!("index{ci}")),
                 entry_type: EntryType::Directory,
                 size: 0,
@@ -1046,6 +1079,7 @@ impl FileSystem for SysFs {
             SysPath::CpuCacheFile(idx, ci, name) => {
                 let size = gen_cpu_cache_file(idx, ci, name).map_or(0, |d| d.len() as u64);
                 Ok(DirEntry {
+                    ino: 0,
                     name: PathBuf::from(name),
                     entry_type: EntryType::File,
                     size,

@@ -553,6 +553,9 @@ impl FileSystem for BtrfsFs {
                 name: PathBuf::from(item.name.as_slice()),
                 entry_type,
                 size,
+                // The DIR_ITEM's location key already names the target
+                // object, which is what `metadata` reports as `st_ino`.
+                ino: item.location.objectid,
             });
         }
         Ok(out)
@@ -582,7 +585,7 @@ impl FileSystem for BtrfsFs {
 
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         self.ops = self.ops.saturating_add(1);
-        let (_, inode) = self.resolve(path)?;
+        let (ino, inode) = self.resolve(path)?;
         let entry_type = Self::entry_type_of(&inode);
         let name = path
             .file_name()
@@ -595,6 +598,7 @@ impl FileSystem for BtrfsFs {
             } else {
                 inode.size
             },
+            ino,
         })
     }
 

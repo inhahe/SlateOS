@@ -683,6 +683,9 @@ impl FileSystem for ZfsFs {
                 name: PathBuf::from(name.as_slice()),
                 entry_type,
                 size,
+                // The ZAP entry already carries the object number, which is
+                // what `metadata` reports as `st_ino`.
+                ino: obj,
             });
         }
         Ok(out)
@@ -726,6 +729,7 @@ impl FileSystem for ZfsFs {
             } else {
                 zn.size
             },
+            ino: zn.obj,
         })
     }
 

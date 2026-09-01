@@ -318,6 +318,10 @@ impl MemFsNode {
             name: PathBuf::from(name),
             entry_type: self.entry_type(),
             size: self.size(),
+            // Same value `to_file_meta` reports as `st_ino`, from the same
+            // field, so a listing and a stat of the same object never
+            // disagree about its identity.
+            ino: self.ino,
         }
     }
 
@@ -667,11 +671,14 @@ impl FileSystem for MemFs {
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let components = Self::path_components(path);
         if components.is_empty() {
-            // Root directory.
+            // Root directory.  Its inode comes from the root node rather than
+            // a literal, so `stat("/")` agrees with the `..` entry a child
+            // directory listing reports for it.
             return Ok(DirEntry {
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
+                ino: self.root.ino,
             });
         }
 
@@ -1222,6 +1229,7 @@ impl FileSystem for MemFs {
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
+                ino: self.root.ino,
             });
         }
 

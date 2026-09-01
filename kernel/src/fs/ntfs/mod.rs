@@ -898,6 +898,13 @@ impl FileSystem for NtfsFs {
                 name: PathBuf::from(key.name.as_str()),
                 entry_type,
                 size: key.data_size,
+                // The index entry stores a *reference* — record number in the
+                // low 48 bits, sequence number in the high 16.  `metadata`
+                // reports the bare record number, and `mft_ref_record` is the
+                // same conversion `resolve_file` applies, so the two agree.
+                // Handing the raw reference through would differ from
+                // `st_ino` by the sequence number on every reused record.
+                ino: mft_ref_record(entry.reference),
             });
         }
         Ok(out)
@@ -942,6 +949,7 @@ impl FileSystem for NtfsFs {
             name: PathBuf::from(name),
             entry_type,
             size,
+            ino: file.record_number,
         })
     }
 

@@ -99,6 +99,37 @@ pub struct DirEntry {
     pub entry_type: EntryType,
     /// File size in bytes (0 for directories).
     pub size: u64,
+    /// Inode number of the object this name refers to, or `0` when the
+    /// filesystem has no stable per-object identity to report.
+    ///
+    /// This is the **same number** [`FileMeta::ino`] carries for the same
+    /// object, and that is the whole point of the field: `readdir`'s `d_ino`
+    /// and `stat`'s `st_ino` are cross-checked by real programs, and two
+    /// answers that disagree are worse than one answer that is missing.
+    /// Every backend has the inode bound at the moment it builds a
+    /// `DirEntry` — the ext4 arms take it as a closure parameter and use it
+    /// on the line above — so filling it in costs nothing and makes the two
+    /// agree *by construction* rather than by two implementations
+    /// independently getting it right.
+    ///
+    /// Before this existed the wire record had no such field and both
+    /// consumers invented one. `posix`'s `readdir` used the entry's index in
+    /// the listing, which gives the first entry of every directory
+    /// `d_ino == 0` — the value the ABI reserves for "not available" — and
+    /// makes `/a/foo` and `/b/bar` the same inode, so `du` and `tar`
+    /// coalesce them. The Linux-ABI `getdents64` used an FNV hash of
+    /// `path + "/" + name`, which is stable and collision-resistant but can
+    /// never equal the `st_ino` its own `stat` reports for the same file, so
+    /// `find -inum`, `ls -i` compared against `stat`, and `rsync`'s and
+    /// `tar`'s hard-link detection all cross-check two numbers guaranteed to
+    /// differ. A client cannot manufacture this value; only the filesystem
+    /// knows it.
+    ///
+    /// `0` is honest rather than absent: FAT, ISO9660 and the
+    /// pseudo-filesystems have no inode to report and their [`FileMeta`]
+    /// says `0` as well, so the two still agree. See
+    /// `requests/b-a-664s-record-has-no-inode-and-647-turns-out-to-have-no-callers-either.md`.
+    pub ino: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -2219,10 +2250,12 @@ impl Vfs {
         // Inject submount directories that the underlying FS doesn't know about.
         for name in submount_names {
             if !entries.iter().any(|e| e.name == name) {
+                let ino = Self::submount_root_ino(&path, &name);
                 entries.push(DirEntry {
                     name,
                     entry_type: EntryType::Directory,
                     size: 0,
+                    ino,
                 });
             }
         }
@@ -2269,10 +2302,12 @@ impl Vfs {
         // Inject submount directories.
         for name in submount_names {
             if !entries.iter().any(|e| e.name == name) {
+                let ino = Self::submount_root_ino(path, &name);
                 entries.push(DirEntry {
                     name,
                     entry_type: EntryType::Directory,
                     size: 0,
+                    ino,
                 });
             }
         }
@@ -3274,6 +3309,28 @@ impl Vfs {
         }
 
         names
+    }
+
+    /// The inode a synthesised submount directory entry should report.
+    ///
+    /// A mount point that the underlying filesystem has no directory for is
+    /// still a real object to a caller: `stat`ting it resolves *through* the
+    /// mount and answers with the mounted filesystem's root inode.  A
+    /// listing that reported 0 for the same name would therefore disagree
+    /// with `stat` on an entry that `stat` can answer for — which is exactly
+    /// the `d_ino` vs `st_ino` mismatch this field exists to prevent.
+    ///
+    /// Returns 0 when the mounted filesystem has no stable identity to
+    /// report, or when its root cannot be statted at all; 0 is the field's
+    /// documented "not available", and it is what `stat` would report in the
+    /// first of those cases anyway.  Errors are deliberately swallowed
+    /// rather than propagated: a filesystem that cannot answer for its own
+    /// root must not make listing the directory *above* it fail.
+    ///
+    /// Callers must not hold the VFS lock or any filesystem lock — this
+    /// re-enters [`resolve_mount`].
+    fn submount_root_ino(dir_path: &Path, name: &Path) -> u64 {
+        Self::metadata_resolved(dir_path.join(name)).map_or(0, |m| m.ino)
     }
 
     // --- Extended metadata VFS methods ---
@@ -6668,6 +6725,38 @@ pub fn self_test() -> KernelResult<()> {
             all.len(),
             total
         );
+
+        // Every listed inode must equal the one `metadata` reports for the
+        // same name.  This is the invariant `DirEntry::ino` exists to hold:
+        // userspace cross-checks `d_ino` against `st_ino` in `find -inum`,
+        // in `ls -i` versus `stat`, and in the hard-link detection of `tar`,
+        // `rsync` and `du`, and a mismatch is silent in all of them — no
+        // error code is produced, the wrong answer is simply believed.  A
+        // listing that reported a *synthesised* number would pass every
+        // other assertion in this test.
+        for entry in &all {
+            let child = format!("{}/{}", pg_dir, entry.name.display());
+            let meta = Vfs::metadata(&child)?;
+            if entry.ino != meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: {} d_ino={} but st_ino={}",
+                    child,
+                    entry.ino,
+                    meta.ino
+                );
+                let _ = Vfs::remove_recursive(pg_dir);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // memfs assigns every node a distinct number at creation, so a zero
+        // here would mean the listing lost it rather than that the backing
+        // filesystem had none to give.
+        if all.iter().any(|e| e.ino == 0) {
+            serial_println!("[vfs]   FAIL: memfs listing reported ino=0");
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at d_ino == st_ino for all 10 entries OK");
 
         // Read first page (3 entries).
         let (page1, total1) = Vfs::readdir_at(pg_dir, 0, 3)?;

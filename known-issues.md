@@ -104261,7 +104261,7 @@ documented rather than silent, which is the difference that matters.
 
 ---
 
-### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN (the three instances are FIXED; the hole that produced them is not)**
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED 2026-09-01 in `63936036a`/`58d6caebe` (the three instances are FIXED; the *domain* half of the missing test now exists as `fs::conformance` and runs on every boot; the *declared-value* half — the half that would actually have caught this bug — does not yet. See "Narrowed" below.)**
 
 **Lane:** A
 
@@ -104311,6 +104311,55 @@ have caught this specific class on the day it was written.
 **Reproduce (before the fix):** mount any btrfs/zfs/f2fs image containing a
 sticky or setuid file and `stat` it; the special bits read back as 0 while the
 same file on ext4 reports them.
+
+#### NARROWED 2026-09-01 — `kernel/src/fs/conformance.rs` (`63936036a`, `58d6caebe`)
+
+**What landed.** A boot-time harness, dispatched from `main.rs` after every
+per-backend self-test, that reads the *contract* rather than any
+implementation. It runs a memfs fixture it builds itself, then every live VFS
+mount among `/`, `/proc`, `/sys`, `/dev`, `/tmp`, and asserts per object:
+
+| Clause | Catches |
+|---|---|
+| `permissions & !0o7777 == 0` | a mode outside the documented domain |
+| `nlinks >= 1` | a link count of zero on an object that exists |
+| each of the four `*_ns` in `[1e16, 1e19]` when nonzero | a timestamp in the wrong *unit* — seconds, ms or µs all land below the floor; see the constant's doc table |
+| `readdir` `ino` == `stat` `ino` | the cross-route disagreement of `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS` |
+| `readdir` `entry_type` == `stat` `entry_type` | the same, for type |
+| `readdir` `size` == `stat` `size`, files only | the same, for size (directories excluded: `DirEntry::size` is documented as 0 for them, which is a different quantity, not a disagreement) |
+
+Two structural guards, because a harness that reports a pass it did not earn
+is worse than no harness: a **vacuous-run** check fails the boot if zero
+objects were inspected (the memfs fixture is unconditional, so zero can only
+mean the harness itself broke), and every skip is either read from the mount
+table or classified through `fs::selftest::classify`, so a backend can never
+skip its own check by failing it. That second property is not decoration —
+the first draft got it wrong in three places and the `[selftest-skips]` gate
+caught all three.
+
+**What is still open, and why this is the important half.** The domain layer
+above would **not** have caught the btrfs/zfs/f2fs bug. Masking `& 0o777`
+violates no domain rule: every value it can produce is inside `0o7777`. A
+narrowing is only visible against a fixture that *declares* the bits it wrote,
+and that layer is not built.
+
+**The blocker this entry originally named is gone.** It said the test "requires
+a small fixture per filesystem, which is the reason it does not exist yet."
+That is no longer true: btrfs, f2fs and ntfs already build a synthetic volume
+in RAM (`build_image()` / `mount_image()` in each backend's `tests.rs`) and zfs
+takes one through `ZfsFs::open_source(Box::new(MemorySource::new(bytes)))` —
+all on *every* boot, not only when a disk is attached. The remaining work is
+therefore plumbing, not fixture authoring:
+
+1. Expose each backend's existing image builder as `pub(crate)` so
+   `conformance::check_tree` can drive it as a `dyn FileSystem`.
+2. Set a special bit in each builder — `0o755` → `0o4755` on one file — and
+   assert the mode reads back whole. That single assertion is what turns this
+   from a harness that would have missed the bug into one that catches it.
+
+**Trigger to close:** step 2 landing for btrfs, zfs and f2fs — the three
+backends that had the bug — with the setuid file surviving the round trip on a
+green boot.
 
 ### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
 

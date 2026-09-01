@@ -440,6 +440,114 @@ pub fn owner_of(_meta: &std::fs::Metadata) -> Owner {
     Owner::default()
 }
 
+/// Whether the destination's owner or group is not already the source's.
+///
+/// GNU's `SAME_OWNER_AND_GROUP`, negated, and it is an optimisation with teeth:
+/// the `chown` it skips would strip the set-user-ID bit off a destination that
+/// needed no change at all.
+#[cfg(unix)]
+#[must_use]
+pub fn owner_differs(on: On<'_>, src_meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let dst = match on {
+        On::File(f) => f.metadata(),
+        On::Path(path, Link::Follow) => std::fs::metadata(path),
+        On::Path(path, Link::NoFollow) => std::fs::symlink_metadata(path),
+    };
+    // A destination that cannot be stat'd counts as differing: the `chown` is
+    // then attempted and reports its own failure, which says more than skipping
+    // it silently on the strength of a lookup that failed.
+    !dst.is_ok_and(|d| d.uid() == src_meta.uid() && d.gid() == src_meta.gid())
+}
+
+/// See [`owner_of`]'s non-unix arm: there is no ownership to compare.
+#[cfg(not(unix))]
+#[must_use]
+pub fn owner_differs(_on: On<'_>, _src_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Whether a refused `chown` is followed by the half of it that needs no
+/// privilege.
+///
+/// Not a `bool`, for [`Link`]'s reason: `take_ownership(on, want, true)` reads
+/// as neither the question nor the answer, and the two things it could be read
+/// as — "retry" and "this is a symlink" — happen to be opposites here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+pub enum GroupRetry {
+    /// After both halves were refused, try `chown(-1, gid)`. An ordinary user
+    /// may not *give a file away* but may put it in a group they belong to, so
+    /// this recovers the half that was never the privileged one. GNU does it in
+    /// `set_owner` (`copy.c:932` and `:947`), ignoring the result and keeping
+    /// the original `errno`, because whether it worked changes nothing about
+    /// what to say next.
+    Yes,
+    /// Do not. GNU's symlink arm (`copy.c:3178`) is a bare `lchownat` with no
+    /// retry, unlike `copy_reg` and the shared tail, and the difference is
+    /// visible in `ls -l` on the copied link.
+    No,
+}
+
+/// What an attempt to give a copy its source's owner came to.
+///
+/// GNU's `set_owner` returns 1, 0 or -1 and the three are three different
+/// things rather than a success and a failure. The -1 arm is not here: upstream
+/// reaches it only under `require_preserve`, which is the *caller's* policy —
+/// `cp --preserve=ownership` sets it and `mv` never does — so this reports what
+/// happened and the caller decides whether that ends the copy.
+#[cfg_attr(test, derive(Debug))]
+pub enum Ownership {
+    /// The owner and group are the source's now. GNU's 1.
+    Taken,
+    /// They are not, and the kernel was right: an ordinary user cannot give a
+    /// file away, and this is the overwhelmingly common outcome of `cp -p`.
+    /// Nothing to report — a diagnostic here would print on every `cp -p` any
+    /// non-root user has ever run.
+    ///
+    /// **The caller must drop the set-user-ID, set-group-ID and sticky bits**
+    /// from the mode it is about to restore (GNU's `src_mode &= ~(S_ISUID |
+    /// S_ISGID | S_ISVTX)`): a set-user-ID bit on a file that is now *theirs*
+    /// would be a privilege nobody granted.
+    Denied,
+    /// It failed for a reason worth a diagnostic — either this process is root,
+    /// for whom "not permitted" is a real fault, or the errno was not a refusal
+    /// at all. The caller writes the sentence, which is not the same in the two
+    /// programs that need one. The set-ID bits must be dropped for this outcome
+    /// too; GNU falls through to the same `return 0`.
+    Failed(io::Error),
+}
+
+/// Give `on` the owner and group in `want`, with GNU's retry and GNU's reading
+/// of what a refusal means.
+///
+/// The whole of `set_owner` (`copy.c:895`) bar two things the caller keeps: the
+/// diagnostic, whose wording differs between programs, and the narrowing of an
+/// *existing* destination's mode before the handover, which `cp` alone reaches
+/// — `mv`'s cross-device fallback has always just unlinked the destination, so
+/// its `new_dst` is unconditionally true.
+///
+/// Shared rather than written twice for the reason the readers above it are:
+/// the retry, the `EPERM`-or-`EINVAL` test and the root check are one decision
+/// with three moving parts, and a second copy of it would be three more chances
+/// for `cp -p` and `mv` across devices to disagree about who owns the result.
+pub fn take_ownership(on: On<'_>, want: Owner, retry: GroupRetry) -> Ownership {
+    let Err(e) = set_owner(on, want) else {
+        return Ownership::Taken;
+    };
+    if is_denied_ownership(&e) {
+        if retry == GroupRetry::Yes {
+            // Deliberately discarded, and the original error deliberately kept:
+            // see [`GroupRetry::Yes`].
+            let _ = set_owner(on, want.group_only());
+        }
+        if !chown_privileges() {
+            return Ownership::Denied;
+        }
+    }
+    Ownership::Failed(e)
+}
+
 /// Whether a [`set_owner`] was refused for want of privilege rather than for a
 /// reason worth reporting.
 ///

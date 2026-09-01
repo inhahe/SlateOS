@@ -252,7 +252,8 @@ use coreutils::fileid::{
     EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
 };
 use coreutils::fsattr::{
-    self, Link, On, chown_privileges, is_denied_ownership, owner_of, permission_bits, times_of,
+    self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
+    owner_of, permission_bits, times_of,
 };
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
@@ -3627,42 +3628,32 @@ fn chown_to_source<O: Write, E: Write>(
         return fatal;
     }
 
-    let want = owner_of(src.meta);
-    let Err(e) = fsattr::set_owner(on, want) else {
-        return Chowned::Done;
+    // The retry after a refusal, the `EPERM`-or-`EINVAL` test and the root check
+    // are [`fsattr::take_ownership`]; what stays here is the sentence and
+    // whether it ends the copy, which is the half `mv` does differently.
+    //
+    // A symlink gets no retry, which is GNU's asymmetry rather than ours: its
+    // symlink arm (`copy.c:3178`) is a bare `lchownat`, while `copy_reg` and the
+    // shared tail both retry. Matching it matters because the difference is
+    // visible in `ls -l` on the copied link.
+    let retry = if made == Made::Symlink {
+        GroupRetry::No
+    } else {
+        GroupRetry::Yes
     };
-
-    if is_denied_ownership(&e) {
-        // Both halves failed together, so try the half that does not need
-        // privilege: an ordinary user may not *give a file away*, but may put
-        // it in a group they belong to. GNU ignores this call's result and
-        // keeps the original `errno`, because whether it worked changes
-        // nothing about what to say next.
-        //
-        // Not done for a symlink, which is GNU's asymmetry rather than ours:
-        // its symlink arm (`copy.c:3178`) is a bare `lchownat` with no retry,
-        // while `copy_reg` and the shared tail both retry. Matching it matters
-        // because the difference is visible in `ls -l` on the copied link.
-        if made != Made::Symlink {
-            // The result is deliberately discarded: see above.
-            let _ = fsattr::set_owner(on, want.group_only());
-        }
-        // GNU's `chown_failure_ok`. For anyone but root, "you may not give
-        // files away" is the kernel working as designed rather than a fault,
-        // and reporting it would put a diagnostic on every `cp -p` an ordinary
-        // user has ever run.
-        if !chown_privileges() {
-            return Chowned::Disowned;
+    match fsattr::take_ownership(on, owner_of(src.meta), retry) {
+        Ownership::Taken => Chowned::Done,
+        Ownership::Denied => Chowned::Disowned,
+        Ownership::Failed(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                job.err,
+                "cp: failed to preserve ownership for {}: {why}",
+                quoteaf_os(dst)
+            );
+            fatal
         }
     }
-
-    let why = strerror(&e);
-    let _ = writeln!(
-        job.err,
-        "cp: failed to preserve ownership for {}: {why}",
-        quoteaf_os(dst)
-    );
-    fatal
 }
 
 /// Narrow an existing destination's mode to something its incoming owner cannot
@@ -3895,31 +3886,6 @@ fn current_mode(on: On<'_>) -> io::Result<u32> {
         On::Path(path, Link::NoFollow) => fs::symlink_metadata(path)?,
     };
     Ok(permission_bits(&meta))
-}
-
-/// Whether the destination's owner or group is not already the source's.
-///
-/// GNU's `SAME_OWNER_AND_GROUP`, negated, and it is an optimisation with teeth:
-/// the `chown` it skips would strip the set-user-ID bit off a destination that
-/// needed no change at all.
-#[cfg(unix)]
-fn owner_differs(on: On<'_>, src_meta: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let dst = match on {
-        On::File(f) => f.metadata(),
-        On::Path(path, Link::Follow) => fs::metadata(path),
-        On::Path(path, Link::NoFollow) => fs::symlink_metadata(path),
-    };
-    // A destination that cannot be stat'd counts as differing: the `chown` is
-    // then attempted and reports its own failure, which says more than skipping
-    // it silently on the strength of a lookup that failed.
-    !dst.is_ok_and(|d| d.uid() == src_meta.uid() && d.gid() == src_meta.gid())
-}
-
-/// See [`owner_of`]'s non-unix arm: there is no ownership to compare.
-#[cfg(not(unix))]
-fn owner_differs(_on: On<'_>, _src_meta: &fs::Metadata) -> bool {
-    false
 }
 
 /// Why a destination could not be opened for writing.

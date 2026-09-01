@@ -7362,18 +7362,22 @@ fn bench_vfs_readdir_root_cost() {
     // out rather than built with `format!` so the measured closure allocates
     // nothing that `readdir` would not.
     let stat_target = "/tmp/_rdm/d/m0";
+    // Arm 4b: a second fresh memfs, whose eight files sit one level down so the
+    // listed directory is an ordinary child rather than a mount root. See arm 4.
+    let peer = "/tmp/_rdm/p";
+    let peer_child = "/tmp/_rdm/p/c";
 
     // A previous boot that died mid-benchmark can have left mounts registered,
     // and a leftover mount is worse than a leftover directory: it would sit in
     // the very table this benchmark is trying to hold constant.
-    readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+    readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
 
     if Vfs::mkdir_all(dir).is_err() || Vfs::mkdir_all(sibling).is_err() {
         serial_println!(
             "[bench] vfs_readdir_root_cost: SKIP (cannot create {})",
             ROOT
         );
-        readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+        readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
         return;
     }
     if !readdir_mount_populate(dir) {
@@ -7381,7 +7385,7 @@ fn bench_vfs_readdir_root_cost() {
             "[bench] vfs_readdir_root_cost: SKIP (cannot populate {})",
             dir
         );
-        readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+        readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
         return;
     }
 
@@ -7406,7 +7410,7 @@ fn bench_vfs_readdir_root_cost() {
             READDIR_MOUNT_ARM,
             sibling
         );
-        readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+        readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
         return;
     }
     let elsewhere = run("vfs_readdir_mp_elsewhere", 200, || {
@@ -7423,7 +7427,7 @@ fn bench_vfs_readdir_root_cost() {
             READDIR_MOUNT_ARM,
             dir
         );
-        readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+        readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
         return;
     }
     let parent = run("vfs_readdir_mp_parent", 200, || {
@@ -7461,9 +7465,33 @@ fn bench_vfs_readdir_root_cost() {
 
     // Arm 4: a directory that IS a filesystem's root, holding the same eight
     // entries, with no submounts of its own.
+    //
+    // Arm 4b is its partner, and the arm exists to be compared against 4b and
+    // NOT against `base`. Comparing to `base` is what the first version did,
+    // and it varied two things at once: `base`'s directory lives in the root
+    // filesystem, whose inode table holds the whole boot image, while this one
+    // is a fresh memfs holding nine inodes. `bench_vfs_readdir_breakdown`
+    // measures that confound directly -- 2048 extra inodes elsewhere in the
+    // same filesystem move an 8-entry listing by ~7600ns (53%) -- so the
+    // difference was mostly table size wearing mount-root-ness's name, and it
+    // reported the fs-root arm as 62% *faster*, which reads as a discovery and
+    // was an artifact. See known-issues.md
+    // A-READDIR-FSROOT-ARM-NOT-CONTROLLED-FOR-INODE-TABLE-SIZE.
+    //
+    // 4b is a second fresh memfs with the eight files one level down, so the
+    // listed directory is an ordinary child of a filesystem whose inode table
+    // is the same size (ten inodes against nine -- the extra is 4b's own child
+    // directory). Both are measured with both filesystems mounted, so the mount
+    // table is the same size for each. That leaves mount-root-ness as the only
+    // difference between them, which is the question the arm was asking.
     let mut fsroot_ok = Vfs::mount(fsroot, alloc::boxed::Box::new(MemFs::new())).is_ok();
     if fsroot_ok {
         fsroot_ok = readdir_mount_populate(fsroot);
+    }
+    // Mounted before either window so that both arms see the same mount table.
+    let mut peer_ok = fsroot_ok && Vfs::mount(peer, alloc::boxed::Box::new(MemFs::new())).is_ok();
+    if peer_ok {
+        peer_ok = Vfs::mkdir_all(peer_child).is_ok() && readdir_mount_populate(peer_child);
     }
     let fsroot_result = if fsroot_ok {
         Some(run("vfs_readdir_fsroot", 200, || {
@@ -7472,8 +7500,15 @@ fn bench_vfs_readdir_root_cost() {
     } else {
         None
     };
+    let peer_result = if peer_ok {
+        Some(run("vfs_readdir_fsroot_peer", 200, || {
+            let _ = core::hint::black_box(Vfs::readdir(peer_child));
+        }))
+    } else {
+        None
+    };
 
-    readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
+    readdir_mount_cleanup(ROOT, dir, sibling, fsroot, peer);
 
     track("vfs_readdir_mp_base", &base);
     track("vfs_readdir_mp_elsewhere", &elsewhere);
@@ -7481,6 +7516,9 @@ fn bench_vfs_readdir_root_cost() {
     track("vfs_readdir_mp_submount_stat", &submount_stat);
     if let Some(r) = fsroot_result.as_ref() {
         track("vfs_readdir_fsroot", r);
+    }
+    if let Some(r) = peer_result.as_ref() {
+        track("vfs_readdir_fsroot_peer", r);
     }
 
     // Signed throughout, on the same rule as `bench_vfs_readdir_breakdown`: the
@@ -7547,42 +7585,49 @@ fn bench_vfs_readdir_root_cost() {
         }
     );
 
-    match fsroot_result {
-        Some(r) => {
-            // One mount's worth of table growth is subtracted, priced from this
-            // boot's own first delta rather than assumed to be negligible.
-            let d_fsroot = i64::from(r.min_ns as i32) - i64::from(base.min_ns as i32);
-            if d_table < 0 {
-                // The correction term came from a void arm, so applying it
-                // would launder noise into a number that looks corrected.
+    // Arm 4 against arm 4b, never against `base`. Both sides are a fresh memfs
+    // of nine/ten inodes measured with the same mount table in place, so no
+    // per-mount correction is needed here -- the term the earlier version
+    // subtracted existed only because it was comparing across mount tables, and
+    // the inode-table difference it could NOT correct for was the larger error
+    // of the two. See the arm's own comment above.
+    match (&fsroot_result, &peer_result) {
+        (Some(r), Some(p)) => {
+            let d_fsroot = i64::from(r.min_ns as i32) - i64::from(p.min_ns as i32);
+            if r.split.is_unstable() || p.split.is_unstable() {
                 serial_println!(
-                    "[bench]   vfs_readdir_root_cost: listing a filesystem's OWN ROOT costs {}ns \
-                     = {}% more than the same {} entries in a plain child ({}ns -> {}ns), \
-                     UNCORRECTED — the mount-table arm was void this boot, so the one mount's \
-                     worth of table growth in this figure could not be priced and is still in it.",
-                    d_fsroot,
-                    readdir_signed_pct(d_fsroot, base.min_ns),
-                    READDIR_MOUNT_ENTRIES,
-                    base.min_ns,
-                    r.min_ns
+                    "[bench]   vfs_readdir_root_cost: fs-root arm VOID — the measurement window \
+                     moved during the run (split-half instability: root {}, peer {}), so the {}ns \
+                     difference is not a measurement of anything.",
+                    r.split,
+                    p.split,
+                    d_fsroot
                 );
             } else {
-                let table_1 = d_table / READDIR_MOUNT_ARM as i64;
                 serial_println!(
                     "[bench]   vfs_readdir_root_cost: listing a filesystem's OWN ROOT costs {}ns \
-                     = {}% more than the same {} entries in a plain child ({}ns -> {}ns), or {}ns \
-                     once this boot's per-mount table cost ({}ns) is subtracted",
+                     = {}% against the same {} entries in an ordinary child of an equally-sized \
+                     filesystem ({}ns -> {}ns). Controlled: same mount table, same inode-table \
+                     size, so mount-root-ness is the only difference left.",
                     d_fsroot,
-                    readdir_signed_pct(d_fsroot, base.min_ns),
+                    readdir_signed_pct(d_fsroot, p.min_ns),
                     READDIR_MOUNT_ENTRIES,
-                    base.min_ns,
-                    r.min_ns,
-                    d_fsroot - table_1,
-                    table_1
+                    p.min_ns,
+                    r.min_ns
                 );
             }
         }
-        None => serial_println!(
+        (Some(r), None) => serial_println!(
+            "[bench]   vfs_readdir_root_cost: fs-root arm UNCONTROLLED — the peer memfs at {} \
+             could not be set up, so the only available comparison is against `base` ({}ns -> \
+             {}ns), which varies inode-table size as well as mount-root-ness and is NOT quotable \
+             as a mount-root cost. See known-issues.md \
+             A-READDIR-FSROOT-ARM-NOT-CONTROLLED-FOR-INODE-TABLE-SIZE.",
+            peer,
+            base.min_ns,
+            r.min_ns
+        ),
+        (None, _) => serial_println!(
             "[bench]   vfs_readdir_root_cost: fs-root arm UNAVAILABLE — could not mount a memfs \
              at {}, so that half of the 2x2 is untested this boot",
             fsroot
@@ -7805,15 +7850,18 @@ fn readdir_unmount_many(parent: &str) {
 /// directory with a filesystem mounted under it cannot be meaningfully emptied,
 /// and a mount left registered would stay in the table for the rest of the boot
 /// — perturbing every later benchmark's path lookups, not just this one's.
-fn readdir_mount_cleanup(root: &str, dir: &str, sibling: &str, fsroot: &str) {
+fn readdir_mount_cleanup(root: &str, dir: &str, sibling: &str, fsroot: &str, peer: &str) {
     use crate::fs::vfs::Vfs;
 
     readdir_unmount_many(dir);
     readdir_unmount_many(sibling);
-    // The fs-root arm's own contents die with the filesystem; unmounting is the
-    // whole cleanup for it, and the leftover mount point was never a real
-    // directory to remove.
+    // The fs-root arms' own contents die with their filesystems; unmounting is
+    // the whole cleanup for them, and the leftover mount points were never real
+    // directories to remove. `peer`'s child directory goes the same way -- it
+    // lives *inside* the unmounted memfs, so removing it separately would be
+    // both unnecessary and, after the unmount, a path that no longer resolves.
     let _ = Vfs::unmount(fsroot); // Best-effort: see fn doc.
+    let _ = Vfs::unmount(peer); // Best-effort: see fn doc.
     readdir_cleanup_dir(dir);
     readdir_cleanup_dir(sibling);
     let _ = Vfs::rmdir(root); // Best-effort: see fn doc.

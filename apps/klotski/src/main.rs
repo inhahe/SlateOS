@@ -452,6 +452,23 @@ pub struct Layout {
     pub window: Rect,
     /// Title and puzzle name.
     pub header: Rect,
+    /// The room the board is solved from: what is left of the window once the
+    /// chrome has taken its bands and `pad` has been charged on every side.
+    ///
+    /// A field rather than a local, and that is the whole point of it. The
+    /// solve's contract is "the frame fits the room", and while the room had no
+    /// name the contract had no test: `board_frame` is *derived* from the solve,
+    /// so a solve that oversizes the mat oversizes the region the board pass is
+    /// measured against by exactly as much and every containment test stays
+    /// green. Checking it against the window or the chrome does not help either
+    /// — `pad` separates the band from both, so a mat that has overrun its room
+    /// by a gap is still clear of them. Only the room it was solved from can
+    /// say so.
+    pub board_band: Rect,
+    /// Everything the board pass paints: the mat, the grid it wraps, and the
+    /// exit strip below. This — not `board` — is the region that pass owns, for
+    /// the same reason a picture's region is its frame and not its canvas.
+    pub board_frame: Rect,
     /// The 4x5 grid, gaps included.
     pub board: Rect,
     /// The strip below the board marking the way out.
@@ -547,10 +564,18 @@ impl Layout {
         // dimensions at once is what stops a 4x5 grid from being stretched to
         // fill a band that is not 4:5 — a stretched grid is one whose cells are
         // no longer where a square hit box says they are.
-        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 - 1.0) * GAP_PER_CELL;
+        //
+        // The per-cell figures count the *well* as well as the grid: what
+        // `draw_board` paints first is a mat one gap wider than the grid on
+        // every side, and a solve that sizes only the grid hands out a mat that
+        // does not fit. The old figures did exactly that, and on any window
+        // wider than it is tall — where the height is the binding constraint and
+        // the vertical shortfall is therefore nought — the mat's top edge landed
+        // one gap *above* the band it was solved from.
+        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 + 1.0) * GAP_PER_CELL;
         let per_h = GRID_ROWS as f32
             + (GRID_ROWS as f32 - 1.0) * GAP_PER_CELL
-            + GAP_PER_CELL
+            + GAP_PER_CELL * 2.0
             + EXIT_PER_CELL;
         let cell = (band.w / per_w).min(band.h / per_h).max(0.0);
         let gap = cell * GAP_PER_CELL;
@@ -560,25 +585,41 @@ impl Layout {
         let exit_h = cell * EXIT_PER_CELL;
         let stack_h = grid_h + gap + exit_h;
 
-        let (board, exit) = if cell > 0.0 {
-            let bx = band.x + (band.w - grid_w) / 2.0;
-            let by = band.y + (band.h - stack_h) / 2.0;
+        let (board_frame, board, exit) = if cell > 0.0 {
+            // Not routed through `centre_line`, and deliberately: `cell` is
+            // `min(band.w / per_w, band.h / per_h)`, so `frame_w == cell * per_w
+            // <= band.w` and `frame_h == cell * per_h <= band.h` by
+            // construction. Both shortfalls are non-negative, so neither half is
+            // a centring that can escape its band. A `centre_line` here would be
+            // a refusal nothing could ever trigger, which reads as a bound and
+            // is not one; the bound that does the work is the `min` above.
+            //
+            // What is centred is the *mat*, not the grid: centring the grid and
+            // then painting a mat around it is how the mat ends up outside.
+            let frame_w = grid_w + gap * 2.0;
+            let frame_h = stack_h + gap;
+            let fx = band.x + (band.w - frame_w) / 2.0;
+            let fy = band.y + (band.h - frame_h) / 2.0;
+            let (bx, by) = (fx + gap, fy + gap);
             // The exit spans the two middle columns, which is exactly the
             // footprint the big block must reach to win — the strip is a
             // picture of `WIN_COL`, not an independent guess at where it is.
             let exit_x = bx + WIN_COL as f32 * (cell + gap);
             let exit_w = 2.0 * cell + gap;
             (
+                Rect::new(fx, fy, frame_w, frame_h),
                 Rect::new(bx, by, grid_w, grid_h),
                 Rect::new(exit_x, by + grid_h + gap, exit_w, exit_h),
             )
         } else {
-            (Rect::EMPTY, Rect::EMPTY)
+            (Rect::EMPTY, Rect::EMPTY, Rect::EMPTY)
         };
 
         Self {
             window: Rect::new(0.0, 0.0, w, h),
             header,
+            board_band: band,
+            board_frame,
             board,
             exit,
             controls,
@@ -637,6 +678,10 @@ impl Layout {
         if bw <= 0.0 || bh <= 0.0 {
             return [Rect::EMPTY; 4];
         }
+        // Bounded for the same reason as the board: `bh` is `controls.h - pad`
+        // floored at zero, so the shortfall is `pad` when the band is tall
+        // enough and the `bh <= 0.0` bail above has already returned when it is
+        // not. The offset is `pad / 2`, never negative.
         let y = self.controls.y + (self.controls.h - bh) / 2.0;
         let mut out = [Rect::EMPTY; 4];
         for (i, slot) in out.iter_mut().enumerate() {
@@ -654,6 +699,12 @@ impl Layout {
     /// that what it covers is the thing it is talking about.
     #[must_use]
     pub fn win_panel(&self) -> Rect {
+        // The third centring that is bounded by construction rather than by a
+        // `centre_line`, and for the plainest reason of the three: the panel is
+        // a *fraction* of the window it is centred in, so the shortfall is
+        // `0.18 * window.w` and `0.58 * window.h` — positive for any window at
+        // all, and `window` is floored at one point in each direction. The
+        // `.min` ceilings only ever shrink it further.
         let w = (self.window.w * 0.82).min(320.0);
         let h = (self.window.h * 0.42).min(180.0);
         Rect::new(
@@ -1043,20 +1094,50 @@ impl Klotski {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        if l.header.is_empty() {
-            return;
-        }
+        // No `if l.header.is_empty() { return; }`: `fill` refuses a rectangle
+        // with no area and `centre_line` refuses a band it cannot fill, so the
+        // bail would be a guard nothing can reach. This pass is allowed to drop
+        // it only because it does not clip — `Frame::clip` pushes a command
+        // whether or not the rectangle has area, so a pass that clips before it
+        // has refused its band cannot be silent about a band it never had.
         fill(f, l.header, MANTLE, CornerRadii::ZERO);
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let sub_h = text::line_height(l.small, FontWeightHint::Regular);
         let two_lines = title_h + sub_h <= l.header.h;
 
-        let top = if two_lines {
-            l.header.y + (l.header.h - title_h - sub_h) / 2.0
-        } else {
-            l.header.y + (l.header.h - title_h) / 2.0
+        // One `centre_line` for both branches, and the whole pass gives up when
+        // it says no. The version this replaced centred whichever stack it had
+        // chosen without asking whether the band could hold it, so a header
+        // shorter than one line of its own title drew that title with a negative
+        // offset: above the window's top edge, and out the bottom of the band
+        // onto the board.
+        let stack = if two_lines { title_h + sub_h } else { title_h };
+        let Some(top) = centre_line(l.header, stack) else {
+            return;
         };
+
+        // Right-aligned from the strings' own measured widths. The version this
+        // replaced drew both at `total_width - PADDING - 100.0`, a guess at how
+        // wide "Moves: 1234" would turn out to be.
+        let moves = format!("Moves: {}", self.moves);
+        let undo = format!("Undo: {}", self.undo_stack.len());
+        let left = l.header.x + l.pad;
+        let right = l.header.right() - l.pad;
+
+        // Where the left column has to stop. The two columns share one band, so
+        // "each is inside the header" is not enough to keep the title off the
+        // move counter — a bound per column against the band's own edges lets
+        // both be satisfied by a title that runs clean through the counters.
+        // The split is measured from the counters, because they are the column
+        // whose width is not ours to choose.
+        let counters = text::measure(&moves, l.font, FontWeightHint::Regular).max(if two_lines {
+            text::measure(&undo, l.small, FontWeightHint::Regular)
+        } else {
+            0.0
+        });
+        let split = (right - counters - l.pad).max(left);
+
         label(
             f,
             &Label {
@@ -1065,8 +1146,9 @@ impl Klotski {
                 weight: FontWeightHint::Bold,
                 color: LAVENDER,
             },
-            l.header.x + l.pad,
+            left,
             top,
+            split,
         );
         if two_lines {
             let subtitle = format!(
@@ -1082,17 +1164,12 @@ impl Klotski {
                     weight: FontWeightHint::Regular,
                     color: SUBTEXT0,
                 },
-                l.header.x + l.pad,
+                left,
                 top + title_h,
+                split,
             );
         }
 
-        // Right-aligned from the strings' own measured widths. The version this
-        // replaced drew both at `total_width - PADDING - 100.0`, a guess at how
-        // wide "Moves: 1234" would turn out to be.
-        let moves = format!("Moves: {}", self.moves);
-        let undo = format!("Undo: {}", self.undo_stack.len());
-        let right = l.header.right() - l.pad;
         label_right(
             f,
             &Label {
@@ -1101,6 +1178,7 @@ impl Klotski {
                 weight: FontWeightHint::Regular,
                 color: TEXT_COLOR,
             },
+            split,
             right,
             top,
         );
@@ -1113,6 +1191,7 @@ impl Klotski {
                     weight: FontWeightHint::Regular,
                     color: OVERLAY0,
                 },
+                split,
                 right,
                 top + title_h,
             );
@@ -1123,18 +1202,11 @@ impl Klotski {
         if l.board.is_empty() {
             return;
         }
-        // The well the blocks sit in.
-        fill(
-            f,
-            Rect::new(
-                l.board.x - l.gap,
-                l.board.y - l.gap,
-                l.board.w + l.gap * 2.0,
-                l.board.h + l.gap * 2.0,
-            ),
-            CRUST,
-            CornerRadii::all(l.gap.max(1.0)),
-        );
+        // The well the blocks sit in — read from the layout rather than
+        // recomputed here from `board` and `gap`. Two places deriving the same
+        // rectangle is two places to change when the solve does, and the one
+        // that gets missed is the one the containment test is measured against.
+        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));
 
         // Empty cells first, so a block drawn over one takes the click: the hit
         // test answers with the *last* target covering the point.
@@ -1149,22 +1221,23 @@ impl Klotski {
         // The exit. Deliberately not a hit target: a control that swallows a
         // click and does nothing is worse than no control, because the click it
         // ate would otherwise have reached the cell beneath.
-        if !l.exit.is_empty() {
-            fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));
-            let size = (l.exit.h * 0.72).clamp(6.0, l.small);
-            if text::line_height(size, FontWeightHint::Bold) <= l.exit.h {
-                label_centred(
-                    f,
-                    &Label {
-                        text: "EXIT",
-                        size,
-                        weight: FontWeightHint::Bold,
-                        color: CRUST,
-                    },
-                    l.exit,
-                );
-            }
-        }
+        //
+        // No `if !l.exit.is_empty()` wrapper, and no `if line_height(size) <=
+        // l.exit.h` either: `fill` refuses a strip with no area and
+        // `label_centred` asks `centre_line` exactly the second question. Both
+        // guards were the same tests written a second time, one level further
+        // out, where nothing can reach them.
+        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));
+        label_centred(
+            f,
+            &Label {
+                text: "EXIT",
+                size: (l.exit.h * 0.72).clamp(6.0, l.small),
+                weight: FontWeightHint::Bold,
+                color: CRUST,
+            },
+            l.exit,
+        );
 
         for block in &self.blocks {
             let r = l.block_rect(block.kind, block.row, block.col);
@@ -1172,7 +1245,13 @@ impl Klotski {
                 continue;
             }
             if self.selected == Some(block.id) {
-                let grow = (l.gap * 0.8).max(1.0);
+                // The halo grows into the mat's ring and no further. It was
+                // `(gap * 0.8).max(1.0)` — a floor that keeps the halo visible
+                // on a tiny board by drawing it outside the board, which on the
+                // top row means outside the mat and into the header's padding.
+                // A selection you cannot see on a 4-point cell is the honest
+                // answer; there is no room there for one.
+                let grow = l.gap;
                 fill(
                     f,
                     Rect::new(r.x - grow, r.y - grow, r.w + grow * 2.0, r.h + grow * 2.0),
@@ -1185,9 +1264,12 @@ impl Klotski {
             let text_of = block.kind.label();
             if !text_of.is_empty() {
                 let size = (l.cell * 0.22).clamp(7.0, l.font);
-                if text::line_height(size, FontWeightHint::Bold) <= r.h
-                    && text::measure(text_of, size, FontWeightHint::Bold) <= r.w
-                {
+                // The vertical half of this guard moved into `label_centred`.
+                // The horizontal half stays, and is not the same claim: a label
+                // too wide for its block is *suppressed* rather than ellipsised,
+                // because "Bi…" on a two-by-two block is noise where a blank
+                // block still reads as a block.
+                if text::measure(text_of, size, FontWeightHint::Bold) <= r.w {
                     label_centred(
                         f,
                         &Label {
@@ -1225,18 +1307,16 @@ impl Klotski {
                 CornerRadii::all(l.pad.max(1.0)),
             );
             let size = (r.h * 0.45).clamp(7.0, l.font);
-            if text::line_height(size, FontWeightHint::Regular) <= r.h {
-                label_centred(
-                    f,
-                    &Label {
-                        text: name,
-                        size,
-                        weight: FontWeightHint::Regular,
-                        color: if live { TEXT_COLOR } else { OVERLAY0 },
-                    },
-                    r,
-                );
-            }
+            label_centred(
+                f,
+                &Label {
+                    text: name,
+                    size,
+                    weight: FontWeightHint::Regular,
+                    color: if live { TEXT_COLOR } else { OVERLAY0 },
+                },
+                r,
+            );
             // Recorded even when it is drawn dim: `undo` on an empty stack
             // answers `false` and changes nothing, and a target that reports
             // "nothing happened" is the thing the tests can hold on to.
@@ -1245,17 +1325,20 @@ impl Klotski {
     }
 
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        if l.footer.is_empty() {
-            return;
-        }
+        // Same reasoning as `draw_header`: no band bail, because `fill` and
+        // `centre_line` between them refuse everything it would have caught.
+        // The order is what makes that safe — the refusal is *above* the clip,
+        // so the pass cannot push a `PushClip` for a band it has no room in.
         fill(f, l.footer, MANTLE, CornerRadii::ZERO);
         let size = l.small;
         let lh = text::line_height(size, FontWeightHint::Regular);
         let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };
-        if lh > l.footer.h {
+        // `if lh > l.footer.h { return; }` used to stand here, one line above an
+        // uncentred `top`. It is the single-line case of the question
+        // `centre_line` now asks for both cases at once.
+        let Some(top) = centre_line(l.footer, lh * shown as f32) else {
             return;
-        }
-        let top = l.footer.y + (l.footer.h - lh * shown as f32) / 2.0;
+        };
         f.clip(l.footer);
         for (i, line) in FOOTER_LINES.iter().take(shown).enumerate() {
             label(
@@ -1268,6 +1351,7 @@ impl Klotski {
                 },
                 l.footer.x + l.pad,
                 top + lh * i as f32,
+                l.footer.right() - l.pad,
             );
         }
         f.unclip();
@@ -1284,19 +1368,18 @@ impl Klotski {
         f.discard_hits();
 
         let panel = l.win_panel();
-        if panel.is_empty() {
-            return;
-        }
         fill(f, panel, SURFACE0, CornerRadii::all(l.pad * 1.2));
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let line_h = text::line_height(l.font, FontWeightHint::Regular);
         let btn_h = (panel.h * 0.28).clamp(0.0, 44.0);
         let stack = title_h + line_h + btn_h;
-        if stack > panel.h {
+        // `if stack > panel.h { return; }` and `if panel.is_empty()` both used
+        // to stand here. `centre_line` is both of them, asked once, and asked in
+        // the place that consumes the answer.
+        let Some(top) = centre_line(panel, stack) else {
             return;
-        }
-        let top = panel.y + (panel.h - stack) / 2.0;
+        };
 
         label_centred(
             f,
@@ -1338,18 +1421,16 @@ impl Klotski {
             let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
             fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
             let size = (r.h * 0.4).clamp(7.0, l.font);
-            if text::line_height(size, FontWeightHint::Regular) <= r.h {
-                label_centred(
-                    f,
-                    &Label {
-                        text: name,
-                        size,
-                        weight: FontWeightHint::Regular,
-                        color: TEXT_COLOR,
-                    },
-                    r,
-                );
-            }
+            label_centred(
+                f,
+                &Label {
+                    text: name,
+                    size,
+                    weight: FontWeightHint::Regular,
+                    color: TEXT_COLOR,
+                },
+                r,
+            );
             f.hit(target, r);
         }
     }
@@ -1468,6 +1549,21 @@ impl Klotski {
 
 // ── Drawing helpers ─────────────────────────────────────────────────
 
+/// The top of a run `height` tall centred in `band`, or `None` when the band
+/// cannot hold it.
+///
+/// `band.y + (band.h - height) / 2.0` is right when the run fits, slightly wrong
+/// when it nearly fits, and *badly* wrong when it does not: half of a negative
+/// shortfall is a negative offset, which lifts the run above the band's own top
+/// edge and drops its bottom below the band's floor — a header's title painted
+/// over the board, a footer's line painted over the controls. Centring is an
+/// arrangement, not a bound; the band has to be asked whether it has the room
+/// before it is asked where the middle is, and the only way to make every caller
+/// ask is to make the answer an `Option` they cannot ignore.
+fn centre_line(band: Rect, height: f32) -> Option<f32> {
+    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)
+}
+
 fn fill(f: &mut Frame<Target>, r: Rect, color: Color, corner_radii: CornerRadii) {
     if r.is_empty() {
         return;
@@ -1497,13 +1593,15 @@ struct Label<'a> {
 
 /// The one place a `Text` command is built.
 ///
-/// `limit` is passed straight through as `max_width`, so a caller that computed
-/// a width limit gets one the renderer will actually stop at. `TextOverflow`
-/// follows from it and is not a separate choice: no limit means the overflow
-/// question is vacuous, and a limit means the cut is real and had better be
-/// marked.
-fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: Option<f32>) {
-    if l.text.is_empty() {
+/// `limit` is an `f32` and not an `Option<f32>` on purpose: there is no such
+/// thing here as a string this program is willing to let run to the edge of the
+/// screen, so "no limit" should not be sayable. The version this replaced took
+/// an `Option` and two of its three callers passed `None`, which is what an
+/// optional bound is for — being omitted. A run with no room left is not drawn
+/// at all rather than drawn at zero width, because a bare ellipsis in a header
+/// says less than a gap does.
+fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: f32) {
+    if l.text.is_empty() || limit <= 0.0 {
         return;
     }
     f.push(RenderCommand::Text {
@@ -1513,47 +1611,61 @@ fn push_text(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, limit: Option<f32
         color: l.color,
         font_size: l.size,
         font_weight: l.weight,
-        max_width: limit,
-        overflow: if limit.is_some() {
-            TextOverflow::Ellipsis
-        } else {
-            TextOverflow::Clip
-        },
+        max_width: Some(limit),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
-/// Top-left corner at `(x, y)`, with no width limit.
-fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32) {
-    push_text(f, l, x, y, None);
-}
-
-/// Right-aligned at `right`, from the string's measured width.
-fn label_right(f: &mut Frame<Target>, l: &Label, right: f32, y: f32) {
-    let w = text::measure(l.text, l.size, l.weight);
-    push_text(f, l, right - w, y, None);
-}
-
-/// Centred in `r` — horizontally from the measured width, vertically from the
-/// line height — **and limited to `r`**.
+/// Top-left corner at `(x, y)`, cut at `right`.
 ///
-/// The width that decides the centre is the width the renderer is told to stop
-/// at, so the two cannot disagree. The version this replaced took the limit as
-/// a separate argument, used it to pick the centre, and then drew with
-/// `max_width: None`: a box that decided where the string started and then let
-/// it run as far past the right-hand edge as it liked.
+/// The limit is measured from `x`, not from the width of the band the caller had
+/// in mind: a run that starts one padding in and is given the *band's* width has
+/// been given licence to end one padding past the band's far edge.
+fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, right: f32) {
+    push_text(f, l, x, y, right - x);
+}
+
+/// Right-aligned at `right`, and never starting left of `left`.
+fn label_right(f: &mut Frame<Target>, l: &Label, left: f32, right: f32, y: f32) {
+    let room = (right - left).max(0.0);
+    let w = text::measure(l.text, l.size, l.weight).min(room);
+    // `(right - w).max(left)` — the shape this was first written in — is a clamp
+    // the line above already implies: `w <= room` gives `right - w >= right -
+    // room == left`, so the `max` can never fire. A clamp a stronger guard
+    // dominates reads as coverage and is not; the bound doing the work is the
+    // `.min(room)`.
+    let x = right - w;
+    push_text(f, l, x, y, right - x);
+}
+
+/// Centred in `r`, horizontally from the measured width and vertically from the
+/// line height, and stopped at `r`'s right-hand edge.
+///
+/// Two bounds live here rather than at the call sites, and each replaced the
+/// same mistake written a different way.
+///
+/// The vertical one: every caller used to guard with `if
+/// text::line_height(size, weight) <= r.h` before calling — the same test
+/// written out four times, and therefore four guards that a bound inside the
+/// helper makes unreachable. One reachable refusal beats four unreachable ones.
+///
+/// The horizontal one is subtler and is the reason this function is worth a
+/// paragraph. The limit used to be `r.w` — the box's own width, which sounds
+/// exactly right and is not, because the run does not start at the box's left
+/// edge. Centring insets it by half the slack, so a run given the *box's* width
+/// may end half the slack past the box's right edge; on a 120-point window the
+/// "Next" button's label was allowed to reach 123.5 in a band 120 wide. A limit
+/// is a distance from where the run starts, never a property of the box it sits
+/// in — the same rule `label` and `label_right` follow, and the one that is
+/// easiest to break here because "limited to its box" reads as true.
 fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
-    if l.text.is_empty() || r.is_empty() {
-        return;
-    }
     let w = text::measure(l.text, l.size, l.weight).min(r.w);
     let lh = text::line_height(l.size, l.weight);
-    push_text(
-        f,
-        l,
-        r.x + (r.w - w) / 2.0,
-        r.y + (r.h - lh) / 2.0,
-        Some(r.w),
-    );
+    let Some(y) = centre_line(r, lh) else {
+        return;
+    };
+    let x = r.x + (r.w - w) / 2.0;
+    push_text(f, l, x, y, r.right() - x);
 }
 
 // ── Window plumbing ─────────────────────────────────────────────────
@@ -1722,6 +1834,503 @@ mod tests {
             .collect()
     }
 
+    // ── Every pass stays inside the region it owns ─────────────────
+
+    /// Everything a command puts ink on, as a rectangle.
+    fn painted(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every run of type, as the box the renderer is entitled to fill.
+    ///
+    /// The height is `text::line_height` and not the font size, because that is
+    /// the extent this program's own centring reserves: `push_text` puts the
+    /// *top-left* corner where it is told, so a run occupies a full line height
+    /// below `y`. Measuring it as `font_size` would let a band a hair too short
+    /// pass the test that the thing it is testing already refuses.
+    fn inked(f: &Frame<Target>) -> Vec<(String, Rect)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let w =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    let h = text::line_height(*font_size, *font_weight);
+                    Some((text.clone(), Rect::new(*x, *y, w, h)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A box with no area is inside anything: it is a thing that was not drawn.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    fn check_containment(state: &str, pass: &str, region: Rect, f: &Frame<Target>) {
+        for r in painted(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, painted {r:?}"
+            );
+        }
+        for (s, r) in inked(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
+            );
+        }
+        for (target, rect) in f.hits() {
+            assert!(
+                inside(region, *rect),
+                "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+            );
+        }
+    }
+
+    /// Bands narrower and shorter than `Layout::new` would ever hand out.
+    ///
+    /// Absolute slivers *and* sixteenths of the band, because the two catch
+    /// different faults. A fixed 12-point band is below every font size this
+    /// program uses and so only ever reaches the outermost refusal; the
+    /// interesting failures live in the narrow window between "one line fits"
+    /// and "one line and the thing under it fits", which is a fraction of the
+    /// band and not a constant. The footer's two-line stack and the victory
+    /// card's title-plus-tally-plus-buttons are both wrong for a band of one
+    /// particular height and right either side of it.
+    fn squeezes(r: Rect) -> Vec<Rect> {
+        let mut out = vec![r];
+        let mut push_h = |h: f32| {
+            if h < r.h {
+                out.push(Rect::new(r.x, r.y, r.w, h));
+            }
+        };
+        for h in [0.0, 1.0, 3.0, 6.0, 12.0, 24.0] {
+            push_h(h);
+        }
+        for k in 1..16_u8 {
+            push_h(r.h * f32::from(k) / 16.0);
+        }
+        let mut push_w = |w: f32| {
+            if w < r.w {
+                out.push(Rect::new(r.x, r.y, w, r.h));
+            }
+        };
+        for w in [0.0, 1.0, 5.0, 30.0, 90.0] {
+            push_w(w);
+        }
+        for k in 1..16_u8 {
+            push_w(r.w * f32::from(k) / 16.0);
+        }
+        out
+    }
+
+    /// One drawing pass. All five have this shape, which is what lets a test
+    /// hold the list of them rather than repeating itself five times.
+    type Pass = fn(&Klotski, &mut Frame<Target>, &Layout);
+
+    /// A band, as something a test can both read and replace. Rust has no field
+    /// pointers, so an accessor closure is how one field is named.
+    type Band = fn(&mut Layout) -> &mut Rect;
+
+    /// The region a pass owns, read from the layout it was handed.
+    type Region = fn(&Layout) -> Rect;
+
+    /// Every pass and the region it owns.
+    ///
+    /// The board's region is the *mat*, not `board`: the mat is what is painted
+    /// first, it is a gap wider than the grid on every side, and it is the
+    /// rectangle the solve now sizes so that it fits.
+    const PASSES: [(&str, Pass, Region); 5] = [
+        ("header", Klotski::draw_header, |l| l.header),
+        ("board", Klotski::draw_board, |l| l.board_frame),
+        ("controls", Klotski::draw_controls, |l| l.controls),
+        ("footer", Klotski::draw_footer, |l| l.footer),
+        ("win", Klotski::draw_win, |l| l.window),
+    ];
+
+    /// The four bands a test may hand a box the layout would not.
+    ///
+    /// Four of the five, not all: the board's mat is *derived* in `Layout::new`
+    /// from the band together with `cell` and `gap`, so a mat replaced on its
+    /// own is a mat the cells were never sized for, and the overrun that
+    /// followed would be the test's doing rather than the program's.
+    /// `draw_board` is squeezed by squeezing the window it is solved from
+    /// instead, which is what the window list above already does.
+    const SQUEEZABLE: [(&str, Band, Pass); 4] = [
+        ("header", |l| &mut l.header, Klotski::draw_header),
+        ("controls", |l| &mut l.controls, Klotski::draw_controls),
+        ("footer", |l| &mut l.footer, Klotski::draw_footer),
+        ("win", |l| &mut l.window, Klotski::draw_win),
+    ];
+
+    /// The three screens, so every pass is run against a model that has
+    /// something to say as well as one that has not.
+    fn states() -> [(&'static str, Klotski); 3] {
+        // Found by kind, not by a literal id: `position` shares `load_puzzle`'s
+        // id counter precisely so that an id is never an index, and a test that
+        // wrote `0` here would be leaning on the thing that is arranged not to
+        // be true.
+        let mut solved = one_move_from_winning();
+        let big = solved
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::Big))
+            .map(|b| b.id)
+            .expect("the near-win position has a big block");
+        solved.move_block(big, Direction::Down);
+        assert!(solved.is_won(), "the 'solved' state is not in fact solved");
+
+        let mut selected = game();
+        selected.selected = selected.blocks.first().map(|b| b.id);
+        [
+            ("fresh", game()),
+            ("with a block picked up", selected),
+            ("solved", solved),
+        ]
+    }
+
+    #[test]
+    fn centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative() {
+        let band = Rect::new(10.0, 100.0, 80.0, 20.0);
+        assert_eq!(
+            centre_line(band, 20.0),
+            Some(100.0),
+            "an exact fit is a fit"
+        );
+        assert_eq!(centre_line(band, 10.0), Some(105.0));
+        assert_eq!(centre_line(band, 20.1), None, "a hair too tall is too tall");
+        assert_eq!(centre_line(band, 200.0), None);
+        assert_eq!(
+            centre_line(Rect::new(10.0, 100.0, 0.0, 20.0), 10.0),
+            None,
+            "a band with no width is no band, however tall it is"
+        );
+        assert_eq!(centre_line(Rect::EMPTY, 1.0), None);
+
+        // And the property, over the same grid the passes are swept on: a top
+        // edge that is offered is a top edge whose whole line fits.
+        for b in squeezes(Rect::new(0.0, 50.0, 100.0, 40.0)) {
+            for height in [0.5, 1.0, 6.0, 12.0, 40.0] {
+                if let Some(y) = centre_line(b, height) {
+                    assert!(
+                        y >= b.y - 0.01 && y + height <= b.bottom() + 0.01,
+                        "centre_line({b:?}, {height}) answered {y}, outside the band"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        for (state, g) in states() {
+            for &(w, h) in WINDOWS {
+                let l = Layout::new(w, h);
+                for (pass, draw, region) in PASSES {
+                    let mut f = Frame::new(w, h);
+                    draw(&g, &mut f, &l);
+                    check_containment(&format!("{state} at {w}x{h}"), pass, region(&l), &f);
+                }
+
+                // The same passes against bands `Layout::new` does not currently
+                // hand out. A bound nothing can squeeze is not a bound that has
+                // been verified: the footer's fit check and the victory card's
+                // stack check were both dominated by the band being generous, so
+                // breaking either changed no test's answer.
+                for (pass, band, draw) in SQUEEZABLE {
+                    let mut base = l;
+                    let full = *band(&mut base);
+                    for region in squeezes(full) {
+                        let mut sq = l;
+                        *band(&mut sq) = region;
+                        let mut f = Frame::new(w, h);
+                        draw(&g, &mut f, &sq);
+                        check_containment(
+                            &format!("{state} at {w}x{h}, squeezed"),
+                            pass,
+                            region,
+                            &f,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pass_with_room_paints_and_a_pass_with_none_paints_nothing() {
+        // Containment alone is satisfied by drawing nothing at all, so every
+        // bound added above needs the converse: with the band the layout really
+        // gives it, each pass reaches the *far end* of what it draws. "Drew
+        // something" is too weak on its own — a header that stops after its
+        // title has drawn something — so each pass names a run it only reaches
+        // if it ran the whole way.
+        let (w, h) = (900.0, 700.0);
+        let l = Layout::new(w, h);
+        let g = game();
+        let expect: [(&str, &[&str], Pass); 2] = [
+            (
+                "header",
+                &["Klotski", "#1: Heng Dao Li Ma", "Moves: 0", "Undo: 0"],
+                Klotski::draw_header,
+            ),
+            ("footer", &FOOTER_LINES, Klotski::draw_footer),
+        ];
+        for (pass, wanted, draw) in expect {
+            let mut f = Frame::new(w, h);
+            draw(&g, &mut f, &l);
+            let drawn: Vec<String> = inked(&f).into_iter().map(|(s, _)| s).collect();
+            for want in wanted {
+                assert!(
+                    drawn.iter().any(|s| s == want),
+                    "the {pass} pass, given the whole band, never drew {want:?}; it \
+                     drew {drawn:?}"
+                );
+            }
+        }
+        // The controls name their buttons; the board's cells have no type of
+        // their own worth naming, so it is held to its ink.
+        let mut f = Frame::new(w, h);
+        g.draw_controls(&mut f, &l);
+        let drawn: Vec<String> = inked(&f).into_iter().map(|(s, _)| s).collect();
+        for (_, name) in BUTTONS {
+            assert!(
+                drawn.iter().any(|s| s == name),
+                "the controls pass never drew {name:?}; it drew {drawn:?}"
+            );
+        }
+        let mut f = Frame::new(w, h);
+        g.draw_board(&mut f, &l);
+        assert!(
+            painted(&f).len() > GRID_ROWS * GRID_COLS,
+            "the board pass, given the whole band, painted only {} rectangle(s) \
+             — fewer than it has cells",
+            painted(&f).len()
+        );
+
+        // And the converse of the converse: a band of no height gets no
+        // commands at all, not one degenerate fill of a rectangle the pass
+        // never looked at.
+        for (state, g) in states() {
+            for (pass, band, draw) in SQUEEZABLE {
+                let mut sq = Layout::new(w, h);
+                let full = *band(&mut sq);
+                *band(&mut sq) = Rect::new(full.x, full.y, full.w, 0.0);
+                let mut f = Frame::new(w, h);
+                draw(&g, &mut f, &sq);
+                assert!(
+                    f.commands().is_empty(),
+                    "{state}: the {pass} pass pushed {} command(s) into a band of \
+                     no height",
+                    f.commands().len()
+                );
+            }
+        }
+    }
+
+    /// A band tall enough for a line draws one.
+    ///
+    /// The converse `centre_line` needs, and the one containment can never
+    /// supply. Both places that choose *how many* lines to stack — `two_lines`
+    /// in the header, `shown` in the footer — are fit checks feeding a second
+    /// fit check, so removing the first one does not make the band spill: it
+    /// makes `centre_line` refuse, and the band goes silently blank. Nothing is
+    /// inside everything, so every containment test in this file passes on a
+    /// program whose header has vanished.
+    ///
+    /// Only the height is squeezed. A band can be legitimately too *narrow* to
+    /// draw in — `split` collapses onto `left` and the title is left with no
+    /// room, which `push_text` is right to refuse — so a width sweep here would
+    /// be asserting the opposite of the test below.
+    #[test]
+    fn a_band_tall_enough_for_a_line_draws_one() {
+        let g = game();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let bands: [(&str, Band, Pass, f32); 2] = [
+                (
+                    "header",
+                    |l| &mut l.header,
+                    Klotski::draw_header,
+                    text::line_height(l.big, FontWeightHint::Bold),
+                ),
+                (
+                    "footer",
+                    |l| &mut l.footer,
+                    Klotski::draw_footer,
+                    text::line_height(l.small, FontWeightHint::Regular),
+                ),
+            ];
+            for (name, band, draw, line_h) in bands {
+                let mut base = l;
+                let full = *band(&mut base);
+                if full.w <= 0.0 {
+                    continue;
+                }
+                let mut heights: Vec<f32> = vec![full.h, line_h, line_h * 1.5, line_h * 2.0];
+                for k in 1..16_u8 {
+                    heights.push(full.h * f32::from(k) / 16.0);
+                }
+                for bh in heights {
+                    if bh < line_h || bh > full.h {
+                        continue;
+                    }
+                    let mut sq = l;
+                    *band(&mut sq) = Rect::new(full.x, full.y, full.w, bh);
+                    let mut f = Frame::new(w, h);
+                    draw(&g, &mut f, &sq);
+                    assert!(
+                        !inked(&f).is_empty(),
+                        "at {w}x{h} the {name} band is {bh} tall — room for a \
+                         {line_h}-point line — and it drew nothing"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A run is never handed a box it cannot be drawn in.
+    ///
+    /// Containment cannot see this one. `inked` takes a run's `max_width` as its
+    /// width, so a run told it may fill nought points measures as an empty
+    /// rectangle, and an empty rectangle is inside every region there is. The
+    /// command is still there, though: the program asked the renderer to draw a
+    /// string in no room, with `Ellipsis` overflow, and what comes back is the
+    /// renderer's business rather than the program's. `push_text` refuses the
+    /// call instead, and this is what says so.
+    ///
+    /// Swept over the squeezed bands as well as the real ones. `Layout::new`
+    /// never hands out a header narrow enough for `split` to collapse onto
+    /// `left`, so on the real windows alone `push_text`'s `limit <= 0.0` refusal
+    /// is a branch nothing enters — a guard no test can distinguish from its
+    /// own absence.
+    #[test]
+    fn no_run_is_pushed_into_a_box_with_no_room() {
+        fn check(state: &str, where_: &str, f: &Frame<Target>) {
+            for cmd in f.commands() {
+                let RenderCommand::Text {
+                    text, x, max_width, ..
+                } = cmd
+                else {
+                    continue;
+                };
+                let Some(max) = max_width else {
+                    unreachable!("push_text always sets a limit");
+                };
+                assert!(
+                    *max > 0.0,
+                    "{state}: {text:?} was pushed at x = {x} with {max} points \
+                     of room, {where_}"
+                );
+            }
+        }
+
+        for (state, g) in states() {
+            for &(w, h) in WINDOWS {
+                check(state, &format!("at {w}x{h}"), &g.frame(w, h));
+
+                let l = Layout::new(w, h);
+                for (pass, band, draw) in SQUEEZABLE {
+                    let mut base = l;
+                    let full = *band(&mut base);
+                    for region in squeezes(full) {
+                        let mut sq = l;
+                        *band(&mut sq) = region;
+                        let mut f = Frame::new(w, h);
+                        draw(&g, &mut f, &sq);
+                        check(
+                            state,
+                            &format!("in the {pass} pass at {w}x{h} given {region:?}"),
+                            &f,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The header's two columns do not overlap.
+    ///
+    /// The band is wide enough for both runs only some of the time, and what the
+    /// title does with the rest of it is the whole reason the columns are named.
+    /// Containment is blind here — a title given the *whole* band still stays
+    /// inside the header; it just runs underneath the counters — so the claim
+    /// has to be about the two runs and not about the band.
+    #[test]
+    fn the_headers_title_stops_where_its_counters_begin() {
+        let mut g = game();
+        // A four-digit move count and a stocked undo stack, so the right-hand
+        // column is as wide as this program can make it. A narrower one would
+        // leave the title more room than it will ever really have, and a test
+        // that only exercises the easy case is the one this campaign is about.
+        g.moves = 1234;
+        let ids: Vec<usize> = g.blocks.iter().map(|b| b.id).collect();
+        for _ in 0..4 {
+            for &id in &ids {
+                for dir in [
+                    Direction::Left,
+                    Direction::Right,
+                    Direction::Up,
+                    Direction::Down,
+                ] {
+                    g.move_block(id, dir);
+                }
+            }
+        }
+        assert!(
+            !g.undo_stack.is_empty(),
+            "nothing moved, so the undo counter is still one digit wide"
+        );
+        for &(w, h) in WINDOWS {
+            let mut f = Frame::new(w, h);
+            let l = Layout::new(w, h);
+            g.draw_header(&mut f, &l);
+            // Pairwise, and not "the title against everything": the subtitle
+            // shares the title's column and sits on the line below it, so the
+            // claim is that no two runs occupy the same point — which is what
+            // two named columns and two stacked lines are worth.
+            let runs = inked(&f);
+            for (i, (ta, a)) in runs.iter().enumerate() {
+                for (tb, b) in runs.iter().skip(i + 1) {
+                    let Some(over) = a.intersect(*b) else {
+                        continue;
+                    };
+                    assert!(
+                        over.w <= 0.01 || over.h <= 0.01,
+                        "at {w}x{h} {ta:?} at {a:?} and {tb:?} at {b:?} overlap by \
+                         {over:?}"
+                    );
+                }
+            }
+        }
+    }
+
     // ── The window exists at all ───────────────────────────────────
 
     #[test]
@@ -1765,6 +2374,16 @@ mod tests {
             let l = Layout::new(w, h);
             for (name, r) in [
                 ("header", l.header),
+                ("board band", l.board_band),
+                // The frame before the grid, and both, because the grid alone
+                // is the one region the mat's overhang cannot be seen against:
+                // a solve that forgets to reserve the mat's ring grows `cell`
+                // until the *grid* still fits and the mat no longer does, and
+                // `board` is by construction unable to say so. (The window is
+                // still too generous to catch that on its own — `pad` leaves the
+                // band room to spare — which is what
+                // `the_board_fits_the_room_it_was_solved_from` is for.)
+                ("board frame", l.board_frame),
                 ("board", l.board),
                 ("exit", l.exit),
                 ("controls", l.controls),
@@ -1781,26 +2400,71 @@ mod tests {
         }
     }
 
+    /// The solve's own contract: the frame fits the room it was solved from.
+    ///
+    /// Three separate ways of getting that wrong — dropping the mat's ring from
+    /// `per_h`, dropping it from `per_w`, and centring the grid rather than the
+    /// frame — survived every other test in this file, and for one reason:
+    /// `board_frame` is derived from the solve. A solve that oversizes the mat
+    /// oversizes the region the board pass is *checked against* by exactly as
+    /// much, so containment stays green however far the mat has escaped. The
+    /// window and the chrome cannot see it either, because `pad` separates the
+    /// band from both and the overrun is a gap, which is smaller. The room is
+    /// the only thing that holds still while the solve moves, which is why it is
+    /// a field.
     #[test]
-    fn the_board_never_overlaps_the_chrome() {
+    fn the_board_fits_the_room_it_was_solved_from() {
         for &(w, h) in WINDOWS {
             let l = Layout::new(w, h);
-            if l.board.is_empty() {
-                continue;
-            }
             for (name, r) in [
-                ("header", l.header),
-                ("controls", l.controls),
-                ("footer", l.footer),
+                ("frame", l.board_frame),
+                ("grid", l.board),
+                ("exit strip", l.exit),
             ] {
-                if r.is_empty() {
+                assert!(
+                    inside(l.board_band, r),
+                    "at {w}x{h} the board's {name} is {r:?}, outside the {:?} it \
+                     was solved from",
+                    l.board_band
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_board_never_overlaps_the_chrome() {
+        // Against `board_frame` and not `board`. The grid is inset from the mat
+        // by a gap on every side, so a mat that has climbed into the header
+        // leaves the grid clear of it, and a test that asks about the grid says
+        // the picture is fine while a dark mat is painted over the title bar.
+        // The region a pass owns is the region it *paints*, not the one the
+        // layout named after it.
+        //
+        // The *room* as well as the frame. The room is what
+        // `the_board_fits_the_room_it_was_solved_from` measures the frame
+        // against, so a room reported larger than the chrome really left over
+        // would relax that test to nothing while leaving it green — a check
+        // whose subject is itself a claim needs its subject pinned.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            for (what, board) in [("band", l.board_band), ("frame", l.board_frame)] {
+                if board.is_empty() {
                     continue;
                 }
-                assert!(
-                    l.board.intersect(r).is_none(),
-                    "at {w}x{h} the board sits on the {name}: board {:?}, {name} {r:?}",
-                    l.board
-                );
+                for (name, r) in [
+                    ("header", l.header),
+                    ("controls", l.controls),
+                    ("footer", l.footer),
+                ] {
+                    if r.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        board.intersect(r).is_none(),
+                        "at {w}x{h} the board {what} sits on the {name}: \
+                         {board:?}, {name} {r:?}"
+                    );
+                }
             }
         }
     }
@@ -2231,18 +2895,28 @@ mod tests {
     }
 
     #[test]
-    fn a_centred_label_is_given_the_width_of_the_box_it_sits_in() {
-        // `label_centred` used to take the limit as a separate argument, use it
-        // to pick a centre, and then draw with `max_width: None`. The renderer
+    fn a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box() {
+        // Two faults, one after the other, in the same three lines.
+        //
+        // First `label_centred` took the limit as a separate argument, used it
+        // to pick a centre, and then drew with `max_width: None`: the renderer
         // was never told to stop, so a button label too wide for its button was
-        // centred on the button and then drawn straight across its neighbour.
+        // centred on the button and drawn straight across its neighbour.
+        //
+        // The fix for that was `max_width: Some(r.w)`, and this test asserted
+        // exactly that — which is the second fault, and one this test was
+        // therefore holding *in place*. A centred run does not start at its
+        // box's left edge; it is inset by half the slack, so a run given the
+        // box's *width* may end half the slack past the box's right edge. What
+        // has to be true is not "the limit is the box's width" but "the run
+        // ends where the box does", so that is what is asserted now.
         let g = game();
         let l = Layout::new(SIZE.0, SIZE.1);
         let rects = l.button_rects();
         let mut checked = 0;
         for cmd in g.frame(SIZE.0, SIZE.1).commands() {
             let RenderCommand::Text {
-                text, max_width, ..
+                text, x, max_width, ..
             } = cmd
             else {
                 continue;
@@ -2251,12 +2925,21 @@ mod tests {
                 continue;
             };
             checked += 1;
-            assert_eq!(
-                *max_width,
-                Some(rects[i].w),
-                "the \"{text}\" label is centred in a {}-wide button and then \
-                 drawn with a limit of {max_width:?}",
-                rects[i].w
+            let Some(max) = max_width else {
+                unreachable!("push_text always sets a limit");
+            };
+            assert!(
+                (x + max - rects[i].right()).abs() < 0.01,
+                "the \"{text}\" label starts at {x} with {max} points of room, so \
+                 it may reach {}, in a button running to {}",
+                x + max,
+                rects[i].right()
+            );
+            assert!(
+                *x >= rects[i].x - 0.01,
+                "the \"{text}\" label starts at {x}, left of its button's edge at \
+                 {}",
+                rects[i].x
             );
         }
         assert_eq!(

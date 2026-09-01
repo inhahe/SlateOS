@@ -857,6 +857,14 @@ impl Layout {
             (bottom - top - gap * 2.0).max(0.0),
         );
 
+        // Bounded by construction, and left without a clamp on purpose. The
+        // sheet is a *fraction* of the window before it is anything else, so
+        // `w - help_w` is at least `0.06 * w` and the shortfall a centring
+        // divides can never be negative — it scales with the window instead of
+        // being a literal the window can undercut. A `.max(0.0)` here would be a
+        // claim no input could reach, and this campaign's whole complaint about
+        // unbounded centrings is that they make claims nothing checks; adding
+        // one in the other direction is the same mistake mirrored.
         let help_w = (w * 0.94).min(460.0);
         let help_h = (h * 0.94).min(400.0);
         let help = Rect::new((w - help_w) / 2.0, (h - help_h) / 2.0, help_w, help_h);
@@ -889,6 +897,12 @@ impl Layout {
         let gap = self.pad * 0.4;
         let total = band.w - self.pad * 2.0;
         let each = ((total - gap * (count.saturating_sub(1)) as f32) / count as f32).max(0.0);
+        // Bounded by construction: the button's height is the band's less a
+        // constant, so `band.h - h` is `min(pad * 0.6, band.h)` — never
+        // negative, and never more than the band. This is the one shape of
+        // vertical centring that needs no `centre_line`, because the thing being
+        // centred was derived by *subtracting* from the room rather than
+        // measured independently of it.
         let h = (band.h - self.pad * 0.6).max(0.0);
         Rect::new(
             band.x + self.pad + slot as f32 * (each + gap),
@@ -1767,13 +1781,24 @@ impl Magnifier {
                 let sy = src.y + (row as f32 + 0.5) * src.h / rows as f32;
                 let (r, g, b) = sample_pixel(sx as i32, sy as i32, sw, sh);
                 let (fr, fg, fb) = self.filter.apply(r, g, b);
+                let bx = pane.x + col as f32 * bw;
+                let by = pane.y + row as f32 * bh;
                 f.push(RenderCommand::FillRect {
-                    x: pane.x + col as f32 * bw,
-                    y: pane.y + row as f32 * bh,
+                    x: bx,
+                    y: by,
                     // A hair over, so that rounding between adjacent blocks
-                    // cannot leave a background-coloured seam between them.
-                    width: bw + 0.5,
-                    height: bh + 0.5,
+                    // cannot leave a background-coloured seam between them —
+                    // but cut to the pane, because the last block of each row
+                    // and column has no neighbour to cover and spends its half
+                    // pixel outside the pane instead. The clip below hid that,
+                    // which is both why it went unnoticed and why it is worth
+                    // fixing here rather than leaving to the clip: a block the
+                    // clip has to cut is a block drawn where it does not
+                    // belong, and no test that reads the commands can tell.
+                    // Every interior seam is still covered, because each is
+                    // covered by the block *before* it.
+                    width: (bw + 0.5).min(pane.right() - bx),
+                    height: (bh + 0.5).min(pane.bottom() - by),
                     color: Color::rgb(fr, fg, fb),
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -1838,16 +1863,38 @@ impl Magnifier {
         let text_str = format!("{:.0} px", self.ruler.screen_length());
         let size = (pane.h * 0.05).clamp(8.0, 13.0);
         let w = text::measure(&text_str, size, FontWeightHint::Bold);
-        label(
-            f,
+        // The reading is cut to the pane rather than left to the clip.
+        //
+        // Its box floats with the measurement — centred between the two ends
+        // and a line above them — so all four of its edges can leave the pane,
+        // and every one of them did: `Some(pane.w)` as a limit reaches the
+        // pane's full *width* from wherever the reading happens to start, and
+        // the `- line_h - 2.0` puts it above the pane whenever the measurement
+        // is taken near the top. The clip hid all of it. That is the worst
+        // shape a bound can have: the drawing is wrong, the picture is right,
+        // and no test that reads the commands can tell. `intersect` gives the
+        // four bounds and the refusal in one, and the clip stays for the line
+        // and its ticks, which genuinely want to be cut off rather than moved.
+        let line_h = text::line_height(size, FontWeightHint::Bold);
+        if let Some(box_) = Rect::new(
             f32::midpoint(x1, x2) - w / 2.0,
-            f32::midpoint(y1, y2) - text::line_height(size, FontWeightHint::Bold) - 2.0,
-            &text_str,
-            size,
-            YELLOW,
-            FontWeightHint::Bold,
-            Some(pane.w),
-        );
+            f32::midpoint(y1, y2) - line_h - 2.0,
+            w,
+            line_h,
+        )
+        .intersect(pane)
+        {
+            push_text(
+                f,
+                box_.x,
+                box_.y,
+                &text_str,
+                size,
+                YELLOW,
+                FontWeightHint::Bold,
+                box_.right() - box_.x,
+            );
+        }
         f.unclip();
     }
 
@@ -1855,23 +1902,38 @@ impl Magnifier {
         let v = l.viewport;
         let size = l.big.min(v.h * 0.2);
         let line_h = text::line_height(size, FontWeightHint::Bold);
+        let small = (size * 0.6).max(8.0);
+        let small_h = text::line_height(small, FontWeightHint::Regular);
+        // Both lines used to be placed by offsetting *from* a centring — one at
+        // `- line_h` and one at `+ line_h * 0.4` — which is worse than a bare
+        // centring rather than better. A centring is unbounded by one half of
+        // the overhang; a centring plus a further constant is unbounded by that
+        // and by the constant, and no amount of viewport is enough to make the
+        // second term safe because it does not scale with the viewport at all.
+        // The `* 0.4` also meant the two lines overlapped by 60% of a line at
+        // every size, which is what made the offsets look tuned.
+        //
+        // The stack is the thing being centred now, and `centre_line` refuses
+        // the whole of it when the viewport cannot hold both lines. Refusing
+        // both rather than drawing one is right here: the second line is the
+        // instruction for undoing the state the first line reports, so a
+        // viewport that shows "paused" without saying how to resume is worse
+        // than one that shows neither and leaves the button to say it.
+        let stack = line_h + small_h;
+        let Some(top) = centre_line(v, stack) else {
+            return;
+        };
         centred_in(
             f,
-            Rect::new(v.x, v.y + (v.h - line_h) / 2.0 - line_h, v.w, line_h),
+            Rect::new(v.x, top, v.w, line_h),
             "Magnifier paused",
             size,
             OVERLAY0,
             FontWeightHint::Bold,
         );
-        let small = (size * 0.6).max(8.0);
         centred_in(
             f,
-            Rect::new(
-                v.x,
-                v.y + (v.h - line_h) / 2.0 + line_h * 0.4,
-                v.w,
-                text::line_height(small, FontWeightHint::Regular),
-            ),
+            Rect::new(v.x, top + line_h, v.w, small_h),
             "Esc, or the Pause button, to resume",
             small,
             OVERLAY0,
@@ -1886,34 +1948,65 @@ impl Magnifier {
             return;
         }
         let size = l.big.min(l.header.h * 0.8);
-        let y = l.header.y + (l.header.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;
-        label(
-            f,
-            l.header.x + l.pad,
-            y,
-            "Magnifier",
-            size,
-            LAVENDER,
-            FontWeightHint::Bold,
-            Some((l.header.w * 0.5).max(0.0)),
-        );
-        let right = if self.paused {
+        let right_text = if self.paused {
             "paused".to_string()
         } else {
             trim_zoom(self.zoom())
         };
         let small = (size * 0.7).max(8.0);
-        let w = text::measure(&right, small, FontWeightHint::Bold);
-        label(
-            f,
-            (l.header.right() - l.pad - w).max(l.header.x + l.pad),
-            l.header.y + (l.header.h - text::line_height(small, FontWeightHint::Bold)) / 2.0,
-            &right,
-            small,
-            if self.paused { OVERLAY0 } else { GREEN },
-            FontWeightHint::Bold,
-            Some((l.header.w * 0.45).max(0.0)),
-        );
+        let left = l.header.x + l.pad;
+        let right = l.header.right() - l.pad;
+
+        // The reading is measured before the title is placed, and the title's
+        // column ends where the reading's begins. It used to be the other way
+        // about: the title took a flat `header.w * 0.5` and the reading a flat
+        // `* 0.45`, two guesses that sum to less than one only because they were
+        // chosen to — and a `pad` at each end plus a reading wider than 45% of a
+        // narrow header put the two through each other. Neither number knew
+        // what the other was drawing.
+        //
+        // `.min(right - left)` is the bound, and it is the only one needed for
+        // the reading's own left edge: `shows` will not let a band under 110
+        // wide reach here and `pad`'s clamp tops out at 10, so the column is at
+        // least 90 wide, and a reading cut to the column starts at
+        // `right - reading_w`, which is at or after `left` by construction. A
+        // `.max(left)` on top of that would be a guard nothing could enter,
+        // which is a guard no test could check — so it is a proof here rather
+        // than a second clamp. `split` keeps its `.max(left)`, because it
+        // subtracts a further `pad` and so genuinely can undershoot.
+        let reading_w = text::measure(&right_text, small, FontWeightHint::Bold).min(right - left);
+        let split = (right - reading_w - l.pad).max(left);
+
+        // `centre_line` per line, not one `y` for both: the two runs are set at
+        // different sizes, so they have different line heights and a single
+        // offset centres at most one of them. A header too short for the larger
+        // run still shows the reading, which is the half of this band that
+        // changes.
+        if let Some(y) = centre_line(l.header, text::line_height(size, FontWeightHint::Bold)) {
+            push_text(
+                f,
+                left,
+                y,
+                "Magnifier",
+                size,
+                LAVENDER,
+                FontWeightHint::Bold,
+                split - left,
+            );
+        }
+        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold)) {
+            let x = right - reading_w;
+            push_text(
+                f,
+                x,
+                y,
+                &right_text,
+                small,
+                if self.paused { OVERLAY0 } else { GREEN },
+                FontWeightHint::Bold,
+                right - x,
+            );
+        }
     }
 
     fn draw_info(&self, f: &mut Frame, l: &Layout) {
@@ -1924,10 +2017,17 @@ impl Magnifier {
         let line_h = text::line_height(size, FontWeightHint::Regular);
         // The swatch is charged for whether or not there is one, so the text
         // beside it does not change width the moment a colour is picked.
-        let swatch = (l.info.h * 0.6).clamp(0.0, 18.0);
+        // `.min(l.info.h)` on top of the `0.6` factor. The factor alone is a
+        // bound only while it stays a factor, and the `clamp`'s ceiling of 18
+        // is a literal that knows nothing about the band: it is inert today
+        // because `shows` will not let a band under 11 tall reach here and
+        // 0.6 x 11 is under 18, but the ceiling is the term that would bite
+        // first if either number moved, and a square swatch is as tall as it is
+        // wide so it is the height that has to be checked.
+        let swatch = (l.info.h * 0.6).clamp(0.0, 18.0).min(l.info.h);
         let swatch_rect = Rect::new(
             (l.info.right() - l.pad - swatch).max(l.info.x),
-            l.info.y + (l.info.h - swatch) / 2.0,
+            centre_line(l.info, swatch).unwrap_or(l.info.y),
             swatch,
             swatch,
         );
@@ -1935,31 +2035,80 @@ impl Magnifier {
             fill(f, swatch_rect, Color::rgb(r, g, b), swatch * 0.2);
             stroke(f, swatch_rect, SURFACE1, 1.0, swatch * 0.2);
         }
-        label(
+
+        // The status shares the reading's row rather than stacking under it,
+        // which is what `pick_colour_at`'s doc comment has always claimed
+        // ("the status line beside it") and what the code did not do. The
+        // stacked form was guarded by `line_h + status_h <= info.h`, and that
+        // guard is never true: two rows want `2.55 * size` at this font, and
+        // `Layout` gives the info band at most `2.28 * size` at *every* window
+        // height from 40 to 2160 — the closest it comes is 1.41px short, at
+        // h=309. So the status had never once been drawn at any window size.
+        // A guard that no input satisfies is not a bound, it is a delete
+        // button on the feature behind it, and it reads exactly like a bound;
+        // only a mutation that survived pointed at it. The band is a one-line
+        // strip by construction (16..=30px against a single font), so the room
+        // it actually has is horizontal.
+        //
+        // A bare factor, where this had a `.max(7.0)` legibility floor. The
+        // floor cannot bite: it needs `size` under 7.6, and `size` is
+        // `font.min(info.h * 0.7)` with `font` at least 8 and `shows` refusing
+        // any band under 11 tall, so `size >= min(8, 7.7) = 7.7` — inert, and
+        // inert by a tenth of a pixel, which is a coincidence rather than a
+        // margin. It is worth losing rather than keeping, because a floor is
+        // the one shape that can make the status *taller* than the reading it
+        // sits in, and centring a taller run inside a shorter one's line box
+        // lifts it out through the top of the band. Without the floor
+        // `status_size <= size` is arithmetic, so `status_h <= line_h` holds by
+        // monotonicity and the offset below is non-negative with nothing to
+        // prove about reachability. Legibility survives on the same bound that
+        // killed the floor: 0.92 x 7.7 is 7.08px at the very worst.
+        let status_size = size * 0.92;
+        let status_h = text::line_height(status_size, FontWeightHint::Regular);
+        let Some(top) = centre_line(l.info, line_h) else {
+            return;
+        };
+        let left = l.info.x + l.pad;
+        let run_right = swatch_rect.x - l.pad;
+
+        // Right-aligned against the swatch, so that a status arriving or
+        // departing never shifts the reading, and held to its own half of the
+        // run so a long message cannot crowd out the standing state it
+        // annotates. The separating gap comes out of the *status's* half, not
+        // the reading's: charged the other way a maximal status leaves the
+        // reading a padding short of half, which is the losing side of a split
+        // whose whole point is that the standing state is not the transient
+        // one's to spend. `.max(0.0)` twice over because a band narrow enough
+        // for the swatch and the paddings to have eaten the run leaves both
+        // terms negative.
+        let mid = left + ((run_right - left) * 0.5).max(0.0);
+        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular)
+            .min((run_right - mid - l.pad).max(0.0));
+        let status_x = run_right - status_w;
+        // A gap only when there is something to be kept apart from; charging
+        // it unconditionally would narrow the reading by a padding for a
+        // status that is not there.
+        let gap = if status_w > 0.0 { l.pad } else { 0.0 };
+        push_text(
             f,
-            l.info.x + l.pad,
-            l.info.y + (l.info.h - line_h) / 2.0,
+            left,
+            top,
             &self.info_line(),
             size,
             SUBTEXT0,
             FontWeightHint::Regular,
-            Some((swatch_rect.x - l.pad - (l.info.x + l.pad)).max(0.0)),
+            status_x - gap - left,
         );
-        // The status line goes under the header when there is room for a second
-        // row, and is dropped rather than overlapped when there is not.
-        let status_size = (size * 0.92).max(7.0);
-        if l.info.h >= line_h * 2.0 + 2.0 {
-            label(
-                f,
-                l.info.x + l.pad,
-                l.info.y + (l.info.h - line_h) / 2.0 + line_h,
-                &self.status,
-                status_size,
-                TEXT_COLOR,
-                FontWeightHint::Regular,
-                Some((l.info.w - l.pad * 2.0).max(0.0)),
-            );
-        }
+        push_text(
+            f,
+            status_x,
+            top + (line_h - status_h) / 2.0,
+            &self.status,
+            status_size,
+            TEXT_COLOR,
+            FontWeightHint::Regular,
+            run_right - status_x,
+        );
     }
 
     /// What a control's button says right now.
@@ -2041,57 +2190,126 @@ impl Magnifier {
         let h = l.help;
         fill(f, h, SURFACE0, 12.0);
         stroke(f, h, SURFACE1, 1.0, 12.0);
+        // Every run below is cut to the sheet with `Rect::intersect`, and none
+        // of them were before. The reason nothing complained is that this pass
+        // scrims the *window*, so it legitimately owns the window and a
+        // containment test measuring it against the region it owns has nothing
+        // to say about the sheet: a title hanging off the sheet onto the scrim
+        // is still inside the window. `centre_line` cannot see it either, since
+        // the box a run is centred in is one line tall and a one-line box always
+        // fits itself. A bound on a run is only as good as the box it is
+        // measured against, and the box with the claim on it is the sheet.
+        //
+        // The title's box is a nominal `pad` below the sheet's top and one line
+        // tall, which hangs off the bottom of any sheet shorter than
+        // `pad + title_h`; the footer's is a nominal `foot` above the bottom,
+        // which hangs off the top of the same sheet. `intersect` answers `None`
+        // for a sheet with no room and cuts all four edges otherwise, so it is
+        // both the bound and the refusal.
+        // The sheet's inner column, once its own left and right margins are
+        // taken out. A sheet narrower than the two margins together leaves a
+        // *negative* width here, and every run below would then be pushed at a
+        // left edge sitting to the right of its own right edge. Naming the
+        // column as a `Rect` is what makes that expressible at all; the
+        // alternative -- clamping the column split into `left..=right` -- does
+        // not merely fail to bound it, it panics outright, because `f32::clamp`
+        // requires `min <= max`, and that panic is how this was found, from a
+        // squeezed window in the sheet's own containment test.
+        //
+        // The early return is a fast path, **not** the bound, and the
+        // difference matters to anyone editing below it. An earlier version of
+        // this comment called it the bound, which would license loosening the
+        // `intersect`s that follow -- and those are what actually hold. With a
+        // negative `inner.w` every box built below is a rectangle of negative
+        // width, and `Rect::intersect` answers `None` for any of them, so each
+        // site already refuses on its own account. Deleting these four lines
+        // changes not one command in the frame; the sweep says so, and
+        // `mutate.py` records it as an equivalent mutant rather than a hole.
+        let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);
+        if inner.is_empty() {
+            f.hit(Target::ToggleHelp, l.window);
+            return;
+        }
+        let left = inner.x;
+        let right = inner.right();
         let title = (l.big * 0.8).clamp(9.0, 18.0);
-        label(
-            f,
-            h.x + l.pad * 1.5,
-            h.y + l.pad,
-            HELP_TITLE,
-            title,
-            BLUE,
-            FontWeightHint::Bold,
-            Some((h.w - l.pad * 3.0).max(0.0)),
-        );
+        let title_h = text::line_height(title, FontWeightHint::Bold);
+        if let Some(box_) = Rect::new(left, h.y + l.pad, inner.w, title_h).intersect(h)
+            && let Some(y) = centre_line(box_, title_h)
+        {
+            push_text(
+                f,
+                box_.x,
+                y,
+                HELP_TITLE,
+                title,
+                BLUE,
+                FontWeightHint::Bold,
+                box_.right() - box_.x,
+            );
+        }
 
-        let top = h.y + l.pad * 2.0 + text::line_height(title, FontWeightHint::Bold);
+        let top = h.y + l.pad * 2.0 + title_h;
         let foot = text::line_height(l.font * 0.8, FontWeightHint::Regular) + l.pad;
         let room = (h.bottom() - foot - top).max(0.0);
         let step = room / HELP_ROWS.len() as f32;
         let size = (step * 0.72).clamp(6.0, l.font);
+        // The two columns are split from one number, so neither can be drawn
+        // through the other. They were two independent guesses before — the keys
+        // took `h.w * 0.36` from `pad * 1.5` and the description started at
+        // `h.w * 0.42` — which overlap whenever `pad * 1.5` exceeds six percent
+        // of the sheet's width, and `pad` is a floor-bearing `clamp(2, 10)`
+        // while the sheet's width is not, so a narrow window is exactly where
+        // they cross. Taken as a fraction of `inner.w`, which is positive by
+        // the refusal above, the split lands inside `left..=right` by
+        // construction and needs no clamp to keep it there.
+        let split = left + inner.w * 0.42;
         for (i, (keys, what)) in HELP_ROWS.iter().enumerate() {
             let y = top + i as f32 * step;
-            label(
+            let Some(row) = Rect::new(left, y, inner.w, step).intersect(h) else {
+                continue;
+            };
+            let Some(y) = centre_line(row, text::line_height(size, FontWeightHint::Bold)) else {
+                continue;
+            };
+            push_text(
                 f,
-                h.x + l.pad * 1.5,
+                left,
                 y,
                 keys,
                 size,
                 YELLOW,
                 FontWeightHint::Bold,
-                Some(h.w * 0.36),
+                split - left,
             );
-            label(
+            push_text(
                 f,
-                h.x + h.w * 0.42,
+                split,
                 y,
                 what,
                 size,
                 TEXT_COLOR,
                 FontWeightHint::Regular,
-                Some((h.w * 0.58 - l.pad * 1.5).max(0.0)),
+                right - split,
             );
         }
+
         let small = (l.font * 0.8).max(7.0);
-        label(
-            f,
-            h.x + l.pad * 1.5,
-            h.bottom() - foot,
-            "Any click, or Esc, closes this",
-            small,
-            OVERLAY0,
-            FontWeightHint::Regular,
-            Some((h.w - l.pad * 3.0).max(0.0)),
-        );
+        let small_h = text::line_height(small, FontWeightHint::Regular);
+        if let Some(box_) = Rect::new(left, h.bottom() - foot, inner.w, small_h).intersect(h)
+            && let Some(y) = centre_line(box_, small_h)
+        {
+            push_text(
+                f,
+                box_.x,
+                y,
+                "Any click, or Esc, closes this",
+                small,
+                OVERLAY0,
+                FontWeightHint::Regular,
+                box_.right() - box_.x,
+            );
+        }
         f.hit(Target::ToggleHelp, l.window);
     }
 }
@@ -2141,7 +2359,31 @@ fn line(f: &mut Frame, x1: f32, y1: f32, x2: f32, y2: f32, color: Color, width: 
     });
 }
 
-fn label(
+/// Where a run of `height` sits so as to be centred in `band`, or `None` if the
+/// band cannot hold it.
+///
+/// The whole of this app's share of the centring campaign is this function
+/// existing and every vertical centring going through it. `band.y + (band.h -
+/// height) / 2.0` is not a bound: it is an *offset*, and when the run is taller
+/// than the band the offset is negative and the run is placed above the band it
+/// was meant to be centred in — by half the overhang at each end, so a centring
+/// spills symmetrically out of both sides rather than out of one. Refusing is
+/// the only correct answer, because there is nowhere in a band shorter than a
+/// line that a line can go.
+#[must_use]
+fn centre_line(band: Rect, height: f32) -> Option<f32> {
+    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)
+}
+
+/// Push a run of text starting at `x`, stopped at `limit` pixels further right.
+///
+/// `limit` is a width and not an `Option<f32>` on purpose. Every caller has a
+/// right-hand edge it must not cross, so "no limit" is never the right answer,
+/// and an `Option` makes forgetting it look deliberate. The `limit <= 0.0`
+/// refusal matters: a caller that computes `right - x` from a column that has
+/// been squeezed to nothing hands over a limit of zero or less, and a run
+/// ellipsised into a box with no room is a run drawn outside it.
+fn push_text(
     f: &mut Frame,
     x: f32,
     y: f32,
@@ -2149,9 +2391,9 @@ fn label(
     size: f32,
     color: Color,
     weight: FontWeightHint,
-    max_width: Option<f32>,
+    limit: f32,
 ) {
-    if size <= 0.0 || text_str.is_empty() || max_width.is_some_and(|w| w <= 0.0) {
+    if size <= 0.0 || text_str.is_empty() || limit <= 0.0 {
         return;
     }
     f.push(RenderCommand::Text {
@@ -2161,28 +2403,30 @@ fn label(
         color,
         font_size: size,
         font_weight: weight,
-        max_width,
+        max_width: Some(limit),
         overflow: TextOverflow::Ellipsis,
     });
 }
 
 /// A string centred in `r`, horizontally and vertically.
 fn centred_in(f: &mut Frame, r: Rect, s: &str, size: f32, color: Color, weight: FontWeightHint) {
-    if r.w <= 0.0 || r.h <= 0.0 || size <= 0.0 {
+    if r.is_empty() || size <= 0.0 {
         return;
     }
-    let w = text::measure(s, size, weight);
+    // `.min(r.w)`, and a limit measured from `x` rather than from `r.x`. Both
+    // halves of one fault: a centred run is inset by half the slack, so a run
+    // handed the box's *full* width as its limit may end half the slack past
+    // the box's right edge — and the wider the string, the further past. The
+    // limit a centred run needs is the distance from where it starts to where
+    // the box ends, and the width it is centred by must already have been cut
+    // to the box or the inset itself goes negative.
+    let w = text::measure(s, size, weight).min(r.w);
     let line_h = text::line_height(size, weight);
-    label(
-        f,
-        r.x + (r.w - w) / 2.0,
-        r.y + (r.h - line_h) / 2.0,
-        s,
-        size,
-        color,
-        weight,
-        Some(r.w),
-    );
+    let Some(y) = centre_line(r, line_h) else {
+        return;
+    };
+    let x = r.x + (r.w - w) / 2.0;
+    push_text(f, x, y, s, size, color, weight, r.right() - x);
 }
 
 /// A filled, labelled control.
@@ -4337,6 +4581,1076 @@ mod tests {
             a.lens_shape().radius(200.0, 200.0),
             100.0,
             "which for a 200 square lens is a radius of 100"
+        );
+    }
+
+    // ── The centring campaign ──────────────────────────────────────────────
+
+    /// Window sizes the containment tests sweep.
+    ///
+    /// Chosen for the *bands they lose*, not for being round. `Layout::new`
+    /// drops the header, then the controls, then the info line as the window
+    /// shortens, so a list of comfortable sizes never reads a band that is not
+    /// there; and the tall-and-narrow entries are the ones that keep every band
+    /// while starving each of width, which is the other axis a centring can
+    /// spill along.
+    const WINDOWS: &[(f32, f32)] = &[
+        (120.0, 60.0),
+        (160.0, 900.0),
+        (200.0, 150.0),
+        (240.0, 48.0),
+        (320.0, 240.0),
+        (400.0, 900.0),
+        (480.0, 700.0),
+        (640.0, 500.0),
+        (820.0, 620.0),
+        (900.0, 260.0),
+        (1280.0, 720.0),
+        (1920.0, 1080.0),
+    ];
+
+    /// Bands narrower and shorter than `Layout::new` would ever hand out.
+    ///
+    /// A fixed sliver would only ever reach the outermost refusal. The failures
+    /// that matter live in the narrow window between "one line fits" and "one
+    /// line and the row under it fits", which is a fraction of the band rather
+    /// than a constant — the info band's two-row stack and the paused overlay's
+    /// two-line stack are each wrong for one particular height and right either
+    /// side of it.
+    fn squeezes(r: Rect) -> Vec<Rect> {
+        let mut out = vec![r];
+        let mut push_h = |h: f32| {
+            if h < r.h {
+                out.push(Rect::new(r.x, r.y, r.w, h));
+            }
+        };
+        for h in [0.0, 1.0, 3.0, 6.0, 12.0, 24.0] {
+            push_h(h);
+        }
+        for k in 1..16_u8 {
+            push_h(r.h * f32::from(k) / 16.0);
+        }
+        let mut push_w = |w: f32| {
+            if w < r.w {
+                out.push(Rect::new(r.x, r.y, w, r.h));
+            }
+        };
+        for w in [0.0, 1.0, 5.0, 30.0, 120.0] {
+            push_w(w);
+        }
+        for k in 1..16_u8 {
+            push_w(r.w * f32::from(k) / 16.0);
+        }
+        out
+    }
+
+    type Pass = fn(&Magnifier, &mut Frame, &Layout);
+    type Band = fn(&mut Layout) -> &mut Rect;
+    type Region = fn(&Layout) -> Rect;
+
+    /// Every drawing pass and the region it owns.
+    ///
+    /// `help` owns the **window**, and that is not a mistake to be tidied away:
+    /// the sheet scrims the whole screen, so the window really is the region it
+    /// paints. The consequence is that this test says nothing whatever about
+    /// the sheet's own panel, which is why
+    /// `every_run_the_help_sheet_draws_stays_inside_its_panel` exists below.
+    const PASSES: [(&str, Pass, Region); 5] = [
+        ("viewport", Magnifier::draw_viewport, |l| l.viewport),
+        ("header", Magnifier::draw_header, |l| l.header),
+        ("info", Magnifier::draw_info, |l| l.info),
+        ("controls", Magnifier::draw_controls, |l| l.controls),
+        ("help", Magnifier::draw_help, |l| l.window),
+    ];
+
+    /// The bands a test may hand a box the layout would not.
+    ///
+    /// The viewport is squeezed through the window rather than directly: the
+    /// panes, the lens and the ruler's reading are all *derived* from it inside
+    /// the drawing, so a viewport replaced on its own is one the panes were
+    /// never solved for and any overrun would be the test's doing.
+    const SQUEEZABLE: [(&str, Band, Pass); 3] = [
+        ("header", |l| &mut l.header, Magnifier::draw_header),
+        ("info", |l| &mut l.info, Magnifier::draw_info),
+        ("controls", |l| &mut l.controls, Magnifier::draw_controls),
+    ];
+
+    /// The screens, so every pass runs against a model with something to say as
+    /// well as one without.
+    fn states() -> Vec<(&'static str, Magnifier)> {
+        let mut paused = app();
+        paused.paused = true;
+
+        let mut picked = app();
+        picked.picked = Some((0x89, 0xB4, 0xFA));
+        picked.status = "Picked #89B4FA".to_string();
+
+        let mut measuring = app();
+        measuring.ruler = Ruler::Done {
+            start: (100.0, 100.0),
+            end: (900.0, 700.0),
+        };
+        measuring.crosshair = true;
+
+        let mut helping = app();
+        helping.show_help = true;
+
+        let mut quiet = app();
+        quiet.status = String::new();
+
+        vec![
+            ("fresh", app()),
+            ("paused", paused),
+            ("with a colour picked", picked),
+            ("with a measurement", measuring),
+            ("with the shortcuts open", helping),
+            ("with nothing to report", quiet),
+        ]
+    }
+
+    /// Every filled rectangle, as the box it fills.
+    ///
+    /// Lines are deliberately not here. The crosshair's arms and the ruler's
+    /// bar are drawn *through* their pane and cut off by a clip, which is what
+    /// a crosshair is: a cross that runs to the edges. Text and fills are a
+    /// different matter — a run cut off by a clip is a run that was placed
+    /// wrongly and hidden — which is why the ruler's reading is cut to its pane
+    /// in the drawing rather than left to the clip, and is checked here.
+    fn painted(f: &Frame) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every run of type, as the box the renderer is entitled to fill.
+    ///
+    /// The height is `text::line_height` and not the font size: `push_text`
+    /// puts the run's *top-left* corner where it is told, so a run occupies a
+    /// full line height below `y`, and measuring it as the font size would let
+    /// a band a hair too short pass a test of the very thing it refuses.
+    fn inked(f: &Frame) -> Vec<(String, Rect)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let w =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    let h = text::line_height(*font_size, *font_weight);
+                    Some((text.clone(), Rect::new(*x, *y, w, h)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A box with no area is inside anything: it is a thing that was not drawn.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    fn check_containment(state: &str, pass: &str, region: Rect, f: &Frame) {
+        for r in painted(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, painted {r:?}"
+            );
+        }
+        for (s, r) in inked(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
+            );
+        }
+        for (target, rect) in f.hits() {
+            assert!(
+                inside(region, *rect),
+                "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative() {
+        let band = Rect::new(10.0, 100.0, 80.0, 20.0);
+        assert_eq!(
+            centre_line(band, 20.0),
+            Some(100.0),
+            "a run exactly as tall as its band sits at the band's top"
+        );
+        assert_eq!(
+            centre_line(band, 10.0),
+            Some(105.0),
+            "and one half as tall sits half the slack down"
+        );
+        assert_eq!(
+            centre_line(band, 20.001),
+            None,
+            "a run taller than its band has nowhere to go, and the answer is \
+             not a negative offset"
+        );
+        assert_eq!(
+            centre_line(Rect::EMPTY, 0.0),
+            None,
+            "a band with no area holds nothing at all, not even a run of no height"
+        );
+        assert_eq!(
+            centre_line(Rect::new(0.0, 0.0, 0.0, 50.0), 10.0),
+            None,
+            "and a band with height but no width is still a band with no area"
+        );
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        for &(w, h) in WINDOWS {
+            for chrome in [true, false] {
+                let l = Layout::new(w, h, chrome);
+                for (state, a) in states() {
+                    for (name, pass, region) in PASSES {
+                        let mut f = Frame::new(w, h);
+                        pass(&a, &mut f, &l);
+                        check_containment(
+                            &format!("{state} at {w}x{h} chrome={chrome}"),
+                            name,
+                            region(&l),
+                            &f,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out() {
+        // The window list alone is not enough. `Layout::new` gives every band a
+        // height its own text fits, so a bound checked only against the layout's
+        // own answers is a bound checked only where it was never going to bite.
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for (state, a) in states() {
+                for (name, band, pass) in SQUEEZABLE {
+                    for squeezed in squeezes(*band(&mut base.clone())) {
+                        let mut l = base;
+                        *band(&mut l) = squeezed;
+                        let mut f = Frame::new(w, h);
+                        pass(&a, &mut f, &l);
+                        check_containment(
+                            &format!("{state} at {w}x{h} with {name} squeezed to {squeezed:?}"),
+                            name,
+                            squeezed,
+                            &f,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_band_tall_enough_for_a_line_draws_one() {
+        // The converse of the containment tests, and they are worthless without
+        // it. Every bound this campaign added is a *refusal*, and a refusal
+        // satisfies containment trivially: nothing is inside everything. A
+        // program that drew no chrome at all would pass every test above.
+        //
+        // Height only, and not width. A band can legitimately be too narrow to
+        // draw in — the header's title column collapses onto its left edge when
+        // the reading takes the whole band, and `push_text` then refuses it,
+        // which is the bound working rather than failing. There is no such
+        // legitimate reason to refuse a band that is tall enough.
+        let mut a = app();
+        a.status = "Picked #89B4FA".to_string();
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for (name, band, pass) in SQUEEZABLE {
+                for squeezed in squeezes(*band(&mut base.clone())) {
+                    let mut l = base;
+                    *band(&mut l) = squeezed;
+                    if !l.shows(squeezed) {
+                        continue;
+                    }
+                    let mut f = Frame::new(w, h);
+                    pass(&a, &mut f, &l);
+                    assert!(
+                        !inked(&f).is_empty() || !painted(&f).is_empty(),
+                        "at {w}x{h} the {name} band was {squeezed:?}, which `shows` calls big \
+                         enough to draw in, and the pass drew nothing at all"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_run_the_help_sheet_draws_stays_inside_its_panel() {
+        // The sheet's pass owns the whole window — it scrims it, which is why
+        // `PASSES` gives it `window` — so the containment test has nothing to
+        // say about the panel, and a title hanging off its panel onto the scrim
+        // is still inside the window. That is the hole this fills.
+        //
+        // Swept over squeezed windows as well as real ones, and for the same
+        // reason `SQUEEZABLE` exists: at every size in `WINDOWS` the sheet is a
+        // generous enough fraction of the window that its nominal offsets land
+        // inside it, so a bound only those sizes exercise is a bound that has
+        // not been exercised. Squeezing `window` is what shrinks the sheet,
+        // since `help` is solved from it, while `pad` and the font sizes stay
+        // as the real window set them — which is precisely the mismatch that
+        // puts the title out.
+        let mut a = app();
+        a.show_help = true;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            let mut windows = vec![l.window];
+            windows.extend(squeezes(l.window));
+            for win in windows {
+                let mut sq = l;
+                sq.window = win;
+                // The sheet is a fraction of the window it is solved from, so
+                // squeezing the window is what makes the sheet too small for
+                // the runs the *unsqueezed* font sizes put in it.
+                let help_w = (win.w * 0.94).min(460.0);
+                let help_h = (win.h * 0.94).min(400.0);
+                sq.help = Rect::new(
+                    win.x + (win.w - help_w) / 2.0,
+                    win.y + (win.h - help_h) / 2.0,
+                    help_w,
+                    help_h,
+                );
+                let mut f = Frame::new(w, h);
+                Magnifier::draw_help(&a, &mut f, &sq);
+                for (text, r) in inked(&f) {
+                    assert!(
+                        inside(sq.help, r),
+                        "at {w}x{h} with the window read as {win:?}, the sheet drew {text:?} \
+                         at {r:?}, outside its panel at {:?}",
+                        sq.help
+                    );
+                }
+            }
+        }
+    }
+
+    /// The sheet's own layout, rebuilt from the numbers `draw_help` uses.
+    ///
+    /// Repeated from the drawing code rather than factored out of it. A shared
+    /// helper would make the tests below true by construction — they would be
+    /// checking that a number equals itself — whereas a copy disagrees with the
+    /// original the moment one of them changes, and disagreeing is the whole
+    /// job. Same reasoning as automator's sidebar-row invariant.
+    fn help_geometry(l: &Layout) -> (Rect, f32, f32, f32) {
+        let h = l.help;
+        let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);
+        let title = (l.big * 0.8).clamp(9.0, 18.0);
+        let title_h = text::line_height(title, FontWeightHint::Bold);
+        let top = h.y + l.pad * 2.0 + title_h;
+        let foot = text::line_height(l.font * 0.8, FontWeightHint::Regular) + l.pad;
+        let room = (h.bottom() - foot - top).max(0.0);
+        #[expect(clippy::cast_precision_loss, reason = "fourteen rows; exact in f32")]
+        let step = room / HELP_ROWS.len() as f32;
+        (inner, top, step, foot)
+    }
+
+    /// Every sheet the suite can put on screen: the real window sizes, and the
+    /// squeezed ones that shrink the sheet while leaving `pad` and the font
+    /// sizes as the real window set them.
+    ///
+    /// That mismatch is deliberate and is what makes the sheet interesting —
+    /// it is the case where the sheet is too small for the type it was asked to
+    /// carry, which no unsqueezed size reaches.
+    fn help_sheets() -> Vec<(f32, f32, Layout)> {
+        let mut out = Vec::new();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            let mut windows = vec![l.window];
+            windows.extend(squeezes(l.window));
+            for win in windows {
+                let mut sq = l;
+                sq.window = win;
+                let help_w = (win.w * 0.94).min(460.0);
+                let help_h = (win.h * 0.94).min(400.0);
+                sq.help = Rect::new(
+                    win.x + (win.w - help_w) / 2.0,
+                    win.y + (win.h - help_h) / 2.0,
+                    help_w,
+                    help_h,
+                );
+                out.push((w, h, sq));
+            }
+        }
+        out
+    }
+
+    /// A row is drawn in a strip `step` points tall, and the type in it is
+    /// sized *from* `step` — so when the sheet is short enough that `step` falls
+    /// under the six-point floor, the line wants more room than the strip has
+    /// and `centre_line` refuses the row rather than drawing it.
+    ///
+    /// Containment is structurally blind to that refusal, which is why this
+    /// test is separate from the one above rather than another assertion inside
+    /// it: a row drawn in a strip too short for it does not leave the sheet, it
+    /// lands on top of its neighbour. Both runs are still inside the panel and
+    /// both are unreadable. Overlap, not escape, is the fault here.
+    #[test]
+    fn no_two_help_rows_are_drawn_on_top_of_each_other() {
+        let mut a = app();
+        a.show_help = true;
+        let keys: Vec<&str> = HELP_ROWS.iter().map(|(k, _)| *k).collect();
+        let mut crowded = 0_u32;
+        for (w, h, l) in help_sheets() {
+            let mut f = Frame::new(w, h);
+            Magnifier::draw_help(&a, &mut f, &l);
+            let mut rows: Vec<Rect> = inked(&f)
+                .into_iter()
+                .filter(|(t, _)| keys.contains(&t.as_str()))
+                .map(|(_, r)| r)
+                .collect();
+            rows.sort_by(|p, q| p.y.total_cmp(&q.y));
+            let (_, _, step, _) = help_geometry(&l);
+            // The sheets that would overlap if the refusal were dropped: the
+            // strip is shorter than the line it is asked to hold. The first
+            // draft of this counted sheets where such a strip had *drawn* a
+            // row, which is a condition that can only hold when the refusal is
+            // already broken — a coverage assertion that fails against correct
+            // code and passes against faulty code, i.e. exactly backwards. What
+            // is being covered is the input, not the outcome.
+            let size = (step * 0.72).clamp(6.0, l.font);
+            if step > 0.0 && step < text::line_height(size, FontWeightHint::Bold) {
+                crowded += 1;
+            }
+            for pair in rows.windows(2) {
+                let (prev, next) = (pair[0], pair[1]);
+                assert!(
+                    next.y >= prev.bottom() - 0.01,
+                    "at {w}x{h} with the sheet at {:?}, a help row starting at {} runs into the \
+                     one above it, which ends at {} — the strip is {step} tall and the line \
+                     needs more",
+                    l.help,
+                    next.y,
+                    prev.bottom()
+                );
+            }
+        }
+        // The refusal has to actually be reached, or this test is a sweep over
+        // sheets that were all roomy enough and would pass against a version
+        // with no refusal in it at all.
+        assert!(
+            crowded > 0,
+            "no sheet in the sweep was short enough for its rows to want more room than \
+             their strips, so nothing here exercised the refusal"
+        );
+    }
+
+    /// The sheet keeps margins, and a run in the margin is a run outside the
+    /// column it belongs to even though it is comfortably inside the panel.
+    ///
+    /// This is the tighter half of the containment test above, and it is what
+    /// catches the split being computed from the wrong rectangle. Both columns
+    /// are placed from one `split`, so a split taken from the *panel*'s width
+    /// instead of the *column*'s moves the keys and the description together
+    /// and they stay consistent with each other — the pair simply slides into
+    /// the left margin. Measuring the pair against the panel cannot see that;
+    /// measuring each run against the column can. A bound on a run is only as
+    /// good as the box it is measured against, and here the box with the claim
+    /// on it is the column, not the sheet.
+    #[test]
+    fn every_run_the_help_sheet_draws_stays_inside_its_inner_column() {
+        let mut a = app();
+        a.show_help = true;
+        for (w, h, l) in help_sheets() {
+            let (inner, ..) = help_geometry(&l);
+            if inner.is_empty() {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            Magnifier::draw_help(&a, &mut f, &l);
+            for (text, r) in inked(&f) {
+                assert!(
+                    r.x >= inner.x - 0.01 && r.right() <= inner.right() + 0.01,
+                    "at {w}x{h} the sheet drew {text:?} spanning {}..{}, outside its column at \
+                     {}..{}",
+                    r.x,
+                    r.right(),
+                    inner.x,
+                    inner.right()
+                );
+            }
+        }
+    }
+
+    /// The row rects are inside the sheet before `intersect` is applied to
+    /// them, so the `intersect` never actually cuts one.
+    ///
+    /// That sounds like an argument for deleting it, and it is the opposite.
+    /// A sweep deleting the `intersect` survives, so without this test the cut
+    /// is a line no mutation can kill — and the reason it survives is not that
+    /// it is pointless but that the rows are held inside by *arithmetic
+    /// elsewhere*: `room` is measured down from `h.bottom()`, so `top + n·step`
+    /// cannot pass the sheet's foot. The `intersect` is what makes the rows
+    /// safe independently of that arithmetic, and this test is what makes the
+    /// arithmetic itself checked. If an edit to `room` or `top` ever lets a row
+    /// hang off the sheet, this fails and the `intersect` quietly starts doing
+    /// work — which is exactly the moment someone should be told.
+    ///
+    /// Recorded as the reason the two `draw_help` refusal mutations are marked
+    /// equivalent in `mutate.py` rather than left as open survivors.
+    #[test]
+    fn the_help_sheets_rows_are_inside_it_before_they_are_cut_to_it() {
+        let mut checked = 0_u32;
+        for (w, h, l) in help_sheets() {
+            let (inner, top, step, _) = help_geometry(&l);
+            if inner.is_empty() {
+                continue;
+            }
+            for i in 0..HELP_ROWS.len() {
+                #[expect(clippy::cast_precision_loss, reason = "fourteen rows; exact in f32")]
+                let y = step.mul_add(i as f32, top);
+                let row = Rect::new(inner.x, y, inner.w, step);
+                if row.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                // `inside`, not `intersect(..) == Some(row)`. The cut
+                // recomputes the height as `bottom - y`, which for a row that
+                // spans the sheet exactly returns a value half a millionth of a
+                // point from the one it went in with — so exact equality here
+                // reports a rounding step as a containment failure. What is
+                // being asserted is that the cut takes nothing away, and a
+                // tolerance is the honest way to say that about floats.
+                assert!(
+                    inside(l.help, row),
+                    "at {w}x{h} help row {i} at {row:?} is not wholly inside the sheet at {:?}, \
+                     so the cut that follows it is load-bearing after all",
+                    l.help
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "no sheet in the sweep produced a row at all, so nothing was checked"
+        );
+    }
+
+    /// `push_text`'s three refusals, tested on `push_text` rather than through
+    /// a window size that happens to reach them.
+    ///
+    /// The sweep test below is the one that was *meant* to cover the
+    /// `limit <= 0.0` arm, and a mutation deleting that arm survived it. Not
+    /// because the sweep is weak — because after the centring rewrite there is
+    /// no longer any band in the layout that produces a limit of zero. Every
+    /// column is now measured from a `Rect` that a refusal already emptied, so
+    /// the arm is real but unreached, and a guard the suite cannot reach is a
+    /// guard the suite cannot keep.
+    ///
+    /// Widening the layout sweep until it produced a zero limit would be
+    /// testing the wrong thing: the arm is a promise `push_text` makes to every
+    /// caller, present and future, not a fact about today's four bands. So it
+    /// is tested where it is made. This is the general shape — when a sweep
+    /// cannot reach a helper's guard, move the test to the helper instead of
+    /// contorting the sweep, and leave the sweep asserting what it is good at.
+    #[test]
+    fn push_text_refuses_a_box_with_no_room_in_it() {
+        let cases: [(&str, f32, &str, f32); 5] = [
+            ("no width at all", 12.0, "Zoom 4x", 0.0),
+            ("a width below zero", 12.0, "Zoom 4x", -3.0),
+            ("no type size", 0.0, "Zoom 4x", 80.0),
+            ("a type size below zero", -1.0, "Zoom 4x", 80.0),
+            ("nothing to say", 12.0, "", 80.0),
+        ];
+        for (why, size, text_str, limit) in cases {
+            let mut f = Frame::new(200.0, 100.0);
+            push_text(
+                &mut f,
+                10.0,
+                10.0,
+                text_str,
+                size,
+                TEXT_COLOR,
+                FontWeightHint::Regular,
+                limit,
+            );
+            assert!(
+                inked(&f).is_empty(),
+                "given {why}, push_text drew {:?} anyway",
+                inked(&f)
+            );
+        }
+        // The other half of the biconditional. Without it the assertions above
+        // are satisfied by a `push_text` that never draws anything at all, and
+        // the mutation that empties the function would pass a test named for
+        // guarding it.
+        let mut f = Frame::new(200.0, 100.0);
+        push_text(
+            &mut f,
+            10.0,
+            10.0,
+            "Zoom 4x",
+            12.0,
+            TEXT_COLOR,
+            FontWeightHint::Regular,
+            80.0,
+        );
+        assert_eq!(
+            inked(&f).len(),
+            1,
+            "given a real box and a real string, push_text drew nothing"
+        );
+    }
+
+    #[test]
+    fn no_run_is_pushed_into_a_box_with_no_room() {
+        // `push_text`'s `limit <= 0.0` refusal. A run given a limit of nothing
+        // is ellipsised into nothing and drawn at a point no column contains,
+        // and the guard is only *entered* where a column has been squeezed onto
+        // its own left edge — which the window list never does, so the squeezed
+        // sweep is what makes this test test anything at all.
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for (state, a) in states() {
+                for (_, band, pass) in SQUEEZABLE {
+                    for squeezed in squeezes(*band(&mut base.clone())) {
+                        let mut l = base;
+                        *band(&mut l) = squeezed;
+                        let mut f = Frame::new(w, h);
+                        pass(&a, &mut f, &l);
+                        for c in f.commands() {
+                            if let RenderCommand::Text {
+                                text, max_width, ..
+                            } = c
+                            {
+                                assert!(
+                                    max_width.is_some_and(|m| m > 0.0),
+                                    "{state} at {w}x{h}: {text:?} was drawn with a limit of \
+                                     {max_width:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_centred_string_is_stopped_at_the_right_hand_edge_of_its_box() {
+        // A centred run is inset by half the slack, so a run handed the box's
+        // full *width* as its limit may end half the slack past the box's right
+        // edge — and the wider the string the further past. What a centred run
+        // needs is the distance from where it starts to where the box ends.
+        //
+        // The buttons are the boxes this bites in: their text is centred in a
+        // control that a narrow controls band divides into slivers, and the
+        // labels are words like "Greyscale" that do not shrink with the band.
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            let a = app();
+            let mut f = Frame::new(w, h);
+            a.draw_controls(&mut f, &l);
+            for (slot, _) in CONTROLS.iter().enumerate() {
+                let r = l.button(l.controls, slot, CONTROLS.len());
+                if r.is_empty() {
+                    continue;
+                }
+                for c in f.commands() {
+                    if let RenderCommand::Text { x, max_width, .. } = c
+                        && *x >= r.x - 0.01
+                        && *x <= r.right() + 0.01
+                    {
+                        let limit = max_width.unwrap_or(f32::INFINITY);
+                        assert!(
+                            x + limit <= r.right() + 0.01,
+                            "at {w}x{h} a run centred in {r:?} starts at {x} and is allowed \
+                             {limit} more, which ends at {} — past the box",
+                            x + limit
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_header_title_gives_way_to_the_reading_rather_than_running_under_it() {
+        // Two flat fractions of the band — `0.5` for the title and `0.45` for
+        // the reading — sum to less than one only because they were chosen to,
+        // and neither knew what the other was drawing. A `pad` at each end plus
+        // a reading wider than 45% of a narrow header put the two through each
+        // other. The title's column ends where the reading's begins now, which
+        // is one number rather than two guesses.
+        //
+        // Squeezed widths, not just the real ones. At every size in `WINDOWS`
+        // the reading is far too short to reach a flat half of the band —
+        // "paused" is the longest thing it ever says, and the widest header the
+        // layout hands out is 1920 — so restoring the flat half changed nothing
+        // any real window could see, and the row for it survived the sweep
+        // saying so. What reaches the fault is a *narrow* band whose fonts were
+        // sized by a *tall* window: `small` follows `header.h` and the window's
+        // `big`, and neither of them shrinks when the width does. Height is left
+        // alone here because it is the width the two columns are dividing.
+        let mut a = app();
+        a.paused = true;
+        let mut narrow = 0;
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for band in squeezes(base.header) {
+                if band.h != base.header.h || !base.shows(band) {
+                    continue;
+                }
+                let mut l = base;
+                l.header = band;
+                let mut f = Frame::new(w, h);
+                a.draw_header(&mut f, &l);
+                let runs = inked(&f);
+                for (i, (a_text, a_rect)) in runs.iter().enumerate() {
+                    for (b_text, b_rect) in runs.iter().skip(i + 1) {
+                        assert!(
+                            a_rect.intersect(*b_rect).is_none(),
+                            "at {w}x{h} a {}-wide header drew {a_text:?} at {a_rect:?} and \
+                             {b_text:?} at {b_rect:?}, which overlap",
+                            band.w
+                        );
+                    }
+                }
+                // The coverage half of the claim. A no-overlap assertion over
+                // bands where the reading could not have overlapped anything
+                // is an assertion about nothing, and that is exactly the state
+                // this test was in. So: count the bands narrow enough that a
+                // flat half of them would have run the title into the reading,
+                // and require some.
+                if let Some((_, reading)) = runs.iter().find(|(t, _)| t == "paused")
+                    && reading.x < band.x + l.pad + band.w * 0.5
+                {
+                    narrow += 1;
+                }
+            }
+        }
+        assert!(
+            narrow > 0,
+            "no header was ever narrow enough for a flat half of it to reach the \
+             reading, so the split was never actually put to the question"
+        );
+    }
+
+    /// The other half of the header's bounds: both centrings are refusals, and
+    /// a refusal is invisible to a test that only asks where a run went. This
+    /// asks whether it went anywhere.
+    ///
+    /// The reading's centring is the tight one. `small` has a `.max(8.0)`
+    /// legibility floor, which is a literal that knows nothing about the band
+    /// it is drawn in, and at the shortest header `shows` admits — 11px — an
+    /// 8px line occupies 10.64 of them. It fits by a third of a pixel. That is
+    /// a coincidence, not a margin, and the only thing that keeps it a fact is
+    /// this assertion: move `shows`'s threshold, the floor, or the face's line
+    /// height, and the reading silently stops being drawn rather than
+    /// overflowing, which is the failure this campaign is least able to see.
+    #[test]
+    fn a_header_tall_enough_to_be_shown_always_says_what_the_zoom_is() {
+        let mut a = app();
+        a.paused = true;
+        let mut checked = 0;
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for band in squeezes(base.header) {
+                // Width held at what the layout gave: a header can legitimately
+                // be too narrow to draw the reading in, and that refusal is the
+                // bound working. Height is the dimension with no such excuse.
+                if band.w != base.header.w || !base.shows(band) {
+                    continue;
+                }
+                let mut l = base;
+                l.header = band;
+                let mut f = Frame::new(w, h);
+                a.draw_header(&mut f, &l);
+                let runs = inked(&f);
+                assert!(
+                    runs.iter().any(|(t, _)| t == "paused"),
+                    "at {w}x{h} a header {}px tall is tall enough for `shows` to draw in, \
+                     and it drew {} run(s), none of them the reading",
+                    band.h,
+                    runs.len()
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no header height was ever exercised, so this asserted nothing"
+        );
+    }
+
+    #[test]
+    fn the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport() {
+        // `draw_paused` is reached through the viewport pass, so the
+        // containment tests do measure it — against `l.viewport`, which is the
+        // box it centres in. But a centring is only unbounded when the box is
+        // smaller than the thing being centred, and `Layout::new` never hands
+        // out a viewport that small, so the bound is never *reached* there.
+        // Squeezing the viewport is what reaches it. Squeezing it is sound here
+        // where it is not in `SQUEEZABLE`, because this pass reads `l.viewport`
+        // and nothing derived from it — no pane was solved for a box this test
+        // then replaced.
+        //
+        // The second assertion is the one with the content in it. Both lines
+        // used to be offsets from a single centring, so a viewport with room
+        // for one drew "Magnifier paused" and swallowed the line that says how
+        // to resume — a state report with its own remedy cut off, which is
+        // worse than reporting nothing and leaving the button to say it. Both
+        // lines, or neither.
+        let mut a = app();
+        a.paused = true;
+        let mut whole = 0;
+        let mut refused = 0;
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            let mut boxes = vec![base.viewport];
+            boxes.extend(squeezes(base.viewport));
+            for v in boxes {
+                let mut l = base;
+                l.viewport = v;
+                let mut f = Frame::new(w, h);
+                a.draw_paused(&mut f, &l);
+                let runs = inked(&f);
+                for (text, r) in &runs {
+                    assert!(
+                        inside(v, *r),
+                        "at {w}x{h} with the viewport read as {v:?}, the notice drew {text:?} \
+                         at {r:?}"
+                    );
+                }
+                assert!(
+                    runs.len() == 2 || runs.is_empty(),
+                    "at {w}x{h} with the viewport read as {v:?} the notice drew {} of its two \
+                     lines rather than both or neither: {runs:?}",
+                    runs.len()
+                );
+                // The `+ line_h * 0.4` that used to place the second line put
+                // it 60% of a line inside the first at every size, which is
+                // what made a pair of hand-tuned offsets look tuned. Stacked
+                // properly the two cannot touch.
+                if let [(t1, r1), (t2, r2)] = runs.as_slice() {
+                    assert!(
+                        r1.intersect(*r2).is_none(),
+                        "at {w}x{h} with the viewport read as {v:?} the notice drew {t1:?} at \
+                         {r1:?} and {t2:?} at {r2:?}, which overlap"
+                    );
+                }
+                if runs.is_empty() {
+                    refused += 1;
+                } else {
+                    whole += 1;
+                }
+            }
+        }
+        // Both halves, because "drawn only where it fits" is satisfied outright
+        // by a program that never draws, and "always drawn" by one that never
+        // refuses.
+        assert!(
+            whole > 0,
+            "the notice was never drawn at any size, so `inside` was never asked anything"
+        );
+        assert!(
+            refused > 0,
+            "no viewport was ever too short for the notice, so the refusal is untested"
+        );
+    }
+
+    #[test]
+    fn the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in() {
+        // The reading floats with the measurement — centred between the two
+        // ends and a line above them — so all four of its edges can leave the
+        // pane, and every one of them did. `Some(pane.w)` as a limit reaches
+        // the pane's full *width* from wherever the reading happens to start,
+        // and the `- line_h - 2.0` puts it above the pane whenever the
+        // measurement is taken near the top. The clip hid all of it, and a clip
+        // is not a bound any test reading the drawing commands can see.
+        //
+        // The ends are chosen to put the midpoint at each corner of the screen
+        // as well as in the middle, since which edge the reading leaves depends
+        // on where in the screen the measurement was taken.
+        let mut a = app();
+        a.crosshair = false;
+        let mut cut = 0;
+        let mut whole = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            for (start, end) in [
+                ((0.0, 0.0), (40.0, 20.0)),
+                ((1900.0, 1060.0), (1860.0, 1040.0)),
+                ((100.0, 100.0), (900.0, 700.0)),
+                ((960.0, 0.0), (980.0, 30.0)),
+                ((0.0, 540.0), (30.0, 560.0)),
+            ] {
+                a.ruler = Ruler::Done { start, end };
+                let pane = a.showing_pane(&l);
+                if pane.is_empty() {
+                    continue;
+                }
+                let mut f = Frame::new(w, h);
+                a.draw_ruler(&mut f, pane);
+                match inked(&f).first() {
+                    Some((text, r)) => {
+                        assert!(
+                            inside(pane, *r),
+                            "at {w}x{h} a measurement from {start:?} to {end:?} put the reading \
+                             {text:?} at {r:?}, outside the pane at {pane:?}"
+                        );
+                        let size = (pane.h * 0.05).clamp(8.0, 13.0);
+                        if r.w < text::measure(text, size, FontWeightHint::Bold) - 0.01 {
+                            cut += 1;
+                        } else {
+                            whole += 1;
+                        }
+                    }
+                    // Refused outright, which is the same bound answering with
+                    // its other answer.
+                    None => cut += 1,
+                }
+            }
+        }
+        assert!(
+            whole > 0,
+            "the reading was cut at every size, so a reading that fits was never checked"
+        );
+        assert!(
+            cut > 0,
+            "no measurement ever put the reading past an edge, so the cut is untested"
+        );
+    }
+
+    /// The status was drawn by no window size at all, and every containment
+    /// test passed throughout: a run that is never emitted is trivially inside
+    /// every band it might have left. Containment is a test of where a thing
+    /// goes, and it says nothing about whether the thing goes anywhere. So the
+    /// band gets a second, blunter obligation — that what the app is told to
+    /// say, it says — and it is asserted at the ordinary sizes rather than the
+    /// squeezed ones, because the claim is about the app working, not about it
+    /// refusing gracefully.
+    #[test]
+    fn a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size() {
+        let mut a = app();
+        a.picked = Some((0x89, 0xB4, 0xFA));
+        a.status = "#89B4FA at 100, 200".to_string();
+
+        let mut shown = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            if !l.shows(l.info) {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            a.draw_info(&mut f, &l);
+            let runs = inked(&f);
+            // Not `contains`: the reading and the status are different runs,
+            // and a test that only asked whether the text appeared somewhere
+            // would be satisfied by the reading alone.
+            let status = runs.iter().find(|(t, _)| t == &a.status);
+            assert!(
+                status.is_some(),
+                "{w}x{h}: the info band drew {} run(s) and none of them was the status {:?}",
+                runs.len(),
+                a.status
+            );
+            if let Some((_, r)) = status {
+                assert!(
+                    inside(l.info, *r),
+                    "{w}x{h}: the status went outside the info band: {r:?} vs {:?}",
+                    l.info
+                );
+                let reading = runs
+                    .iter()
+                    .find(|(t, _)| t == &a.info_line())
+                    .expect("the reading is drawn whenever the band is shown");
+                // Not merely `intersect().is_none()`. Two runs that abut
+                // exactly do not intersect and still read as one word, so the
+                // contract is a *gap*, and it has to be asserted as one or the
+                // padding that separates them is free to go to zero unnoticed.
+                assert!(
+                    reading.1.right() <= r.x - l.pad + 0.01,
+                    "{w}x{h}: only {} of clear space between the reading and the \
+                     status, which is under the {} padding that should separate them",
+                    r.x - reading.1.right(),
+                    l.pad
+                );
+                // The status is the smaller of the two runs, and it is centred
+                // in the taller one's line box rather than hung from its top:
+                // sharing a row means sharing a centre.
+                assert!(
+                    (reading.1.y + reading.1.h / 2.0 - (r.y + r.h / 2.0)).abs() < 0.01,
+                    "{w}x{h}: the status is not centred on the reading it shares \
+                     the row with: {r:?} vs {:?}",
+                    reading.1
+                );
+            }
+            shown += 1;
+        }
+        assert!(
+            shown > 0,
+            "no window in the grid showed an info band, so this asserted nothing"
+        );
+    }
+
+    /// The status is capped at half the run so that it cannot crowd out the
+    /// standing state it annotates. A cap is only a cap where something
+    /// reaches it, so this asserts a message far too long to fit is *cut* and
+    /// the reading still gets its half.
+    #[test]
+    fn a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row() {
+        let mut a = app();
+        a.status = "x".repeat(400);
+
+        let mut cut = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            if !l.shows(l.info) {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            a.draw_info(&mut f, &l);
+            let runs = inked(&f);
+            let Some((_, status)) = runs.iter().find(|(t, _)| t == &a.status) else {
+                continue;
+            };
+            let Some((_, reading)) = runs.iter().find(|(t, _)| t == &a.info_line()) else {
+                continue;
+            };
+            assert!(
+                inside(l.info, *status),
+                "{w}x{h}: an overlong status left the band: {status:?}"
+            );
+            assert!(
+                reading.w >= status.w - 0.01,
+                "{w}x{h}: a 400-character status took more of the row than the \
+                 reading: status {} wide, reading {} wide",
+                status.w,
+                reading.w
+            );
+            cut += 1;
+        }
+        assert!(
+            cut > 0,
+            "the overlong status was never drawn, so the cap went unexercised"
         );
     }
 

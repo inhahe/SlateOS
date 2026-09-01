@@ -2268,6 +2268,19 @@ impl AutomatorApp {
             }
             right -= count_w + l.pad * 0.5;
             if mac.trigger.is_some() {
+                // Unlike the count above and the name below, this offset cannot
+                // refuse: `centre_line` answers `None` for a row too short, and
+                // a fill has no such answer. It is safe because `Layout` always
+                // makes a row taller than the dot -- but that is a relationship
+                // between `Layout::row` and `Layout::small`, which were not
+                // written to have one, and nothing here would notice if an edit
+                // to either closed the gap. A comment recording that coincidence
+                // would be worth about as much as the coincidence; a `.min` on
+                // the dot would be a clamp no input can reach, and so a line no
+                // mutation can kill. So the bound is written where it actually
+                // lives, as an assertion over `Layout` itself:
+                // `a_sidebar_row_is_taller_than_the_marks_it_carries` fails if
+                // the two formulas ever meet. See lesson 109 shape 28.
                 let dot = l.small * 0.8;
                 fill(
                     f,
@@ -5187,6 +5200,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The macro list's trigger dot is a fill centred in a row, and a fill has
+    /// no way to refuse a row too short for it. Its two neighbours in the same
+    /// loop -- the action count and the macro name -- both go through
+    /// `centre_line`, which does refuse; the dot is the one mark in that row
+    /// that cannot, so it is the one that would paint onto the row below.
+    ///
+    /// No window-size sweep can find that, and not by accident: the dot is safe
+    /// at *every* window size, because `Layout` derives both the dot's size and
+    /// the row's height from `font` and the two happen never to meet. A
+    /// containment test therefore passes for a reason it does not state, and
+    /// would go on passing right up until an edit to either formula made it
+    /// false. The unstated reason is what this test states.
+    ///
+    /// So this is deliberately an assertion about `Layout`, not about a frame.
+    /// It is the executable form of the comment at the fill: the safety of that
+    /// site is a relationship between two layout fields, so the relationship is
+    /// what gets checked, in the one place a reader would think to look when
+    /// changing either of them. See lesson 109 shape 28 in `known-issues.md`.
+    #[test]
+    fn a_sidebar_row_is_taller_than_the_marks_it_carries() {
+        // The row rect the sidebar builds, and the dot it centres in it. Both
+        // are repeated from `draw_sidebar` rather than factored out, because a
+        // shared constant would make this test true by construction -- it would
+        // check that a number equals itself. The duplication is the point: if
+        // the drawing code changes and this does not, they disagree and the
+        // assertion is what notices.
+        let mut worst = f32::INFINITY;
+        for (w, h) in sizes() {
+            let l = Layout::solve(w, h);
+            let row_h = l.row - 2.0;
+            let dot = l.small * 0.8;
+            // An empty sidebar draws no rows at all, so it has nothing to
+            // prove; `Layout` still reports a row height, and asserting on it
+            // there would be asserting about a row that is never built.
+            if l.sidebar.is_empty() {
+                continue;
+            }
+            assert!(
+                dot <= row_h + 0.01,
+                "at {w}x{h} the trigger dot is {dot} tall in a {row_h}-tall row, \
+                 so it paints onto the row beneath it"
+            );
+            worst = worst.min(row_h - dot);
+        }
+        // The margin is wide -- about 11 points at the tightest -- and saying so
+        // is the point of measuring it. A bound this slack is exactly the kind
+        // that gets closed by an edit nobody thinks of as risky, because at the
+        // time of the edit there is no sign it was ever near.
+        assert!(
+            worst.is_finite(),
+            "no window size in the grid produced a sidebar, so nothing was checked"
+        );
+        assert!(
+            worst > 5.0,
+            "the dot now clears the row by only {worst} points; it used to be \
+             about 11, so something has moved `Layout::row` or `Layout::small` \
+             toward each other"
+        );
     }
 
     #[test]

@@ -58749,6 +58749,7 @@ and nothing else has to move.
 
 **Date:** 2026-09-01
 **Decided by:** Claude (autonomous)
+**Lane:** B
 
 **In short:** `mv -u b/x a/x` between two *different* filesystems has to answer
 "is the copy that is already there as new as the thing I would replace it

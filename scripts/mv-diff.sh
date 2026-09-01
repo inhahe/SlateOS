@@ -261,6 +261,20 @@ hardlinks_in() {
       | LC_ALL=C sort )
 }
 
+# And the extended attributes — see `diff_xattrs_in` in `diff-wsl.sh` for what
+# is compared, what is elided and why it is read with Python rather than
+# `getfattr`. Both trees, the far one prefixed, exactly as the snapshot does it.
+#
+# `mv` carries attributes across a filesystem boundary by reading and rewriting
+# them, and across a rename by not touching the inode at all — so this column is
+# nearly always empty and is nearly always right, and the one shape where it can
+# be wrong is §22's.
+xattrs() {
+  diff_xattrs_in '' "$1"
+  [ -n "${2:-}" ] && diff_xattrs_in 'far/' "$2"
+  return 0
+}
+
 # And the bytes, so that a file which arrived with the right size and the wrong
 # contents is still caught. `-type f` does not follow, so a symlink is not read
 # here — its target is already in the snapshot above.
@@ -386,9 +400,10 @@ run_one() {
 judge() {
   local o_dir=$1 g_dir=$2 o_out=$3 g_out=$4 o_extra=$5 g_extra=$6 label=$7
   local o_far=$8 g_far=$9
-  local o_snap g_snap o_body g_body o_show g_show o_link g_link
+  local o_snap g_snap o_body g_body o_show g_show o_link g_link o_xat g_xat
   o_snap=$(snapshot "$o_dir" "$o_far"); g_snap=$(snapshot "$g_dir" "$g_far")
   o_link=$(hardlinks "$o_dir" "$o_far"); g_link=$(hardlinks "$g_dir" "$g_far")
+  o_xat=$(xattrs "$o_dir" "$o_far"); g_xat=$(xattrs "$g_dir" "$g_far")
   o_body=$(contents "$o_dir" "$o_far" | scrub "$o_dir" "$o_far")
   g_body=$(contents "$g_dir" "$g_far" | scrub "$g_dir" "$g_far")
   o_show=$(scrub "$o_dir" "$o_far" <"$o_out"); g_show=$(scrub "$g_dir" "$g_far" <"$g_out")
@@ -397,18 +412,18 @@ judge() {
 
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
      && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
-     && [ "$o_link" = "$g_link" ]; then
+     && [ "$o_link" = "$g_link" ] && [ "$o_xat" = "$g_xat" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s}' \
+  REPORT=$(printf '  ours: %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}\n  gnu : %s\n        out{%s}\n        tree{%s} files{%s} links{%s} xattr{%s}' \
     "$(printf '%s' "$o_extra" | tr '\n' '|')" "$(printf '%s' "$o_show" | tr '\n' '|')" \
     "$(printf '%s' "$o_snap" | tr '\n' '|')" "$(printf '%s' "$o_body" | tr '\n' '|')" \
-    "$(printf '%s' "$o_link" | tr '\n' '|')" \
+    "$(printf '%s' "$o_link" | tr '\n' '|')" "$(printf '%s' "$o_xat" | tr '\n' '|')" \
     "$(printf '%s' "$g_extra" | tr '\n' '|')" "$(printf '%s' "$g_show" | tr '\n' '|')" \
     "$(printf '%s' "$g_snap" | tr '\n' '|')" "$(printf '%s' "$g_body" | tr '\n' '|')" \
-    "$(printf '%s' "$g_link" | tr '\n' '|')")
+    "$(printf '%s' "$g_link" | tr '\n' '|')" "$(printf '%s' "$g_xat" | tr '\n' '|')")
   LABEL=$label
 }
 
@@ -475,6 +490,23 @@ if [ -n "$far_root" ]; then
   echo "  far:  $far_root"
 else
   echo "  far:  none found on a second device -- section 22 skipped"
+fi
+# Said out loud in both directions, because a harness that quietly stops
+# checking something is worse than one that never checked it: the run would
+# otherwise report the same counts while comparing one fewer thing.
+#
+# Two independent facts, and both are needed. The harness must be able to *set*
+# an attribute (Python, and a filesystem that accepts one), and the reference
+# must have been built with `USE_XATTR` — a coreutils compiled without libattr
+# has a `copy_attr` whose whole body is `return true`, so it drops every
+# attribute silently and a case comparing against it would report the loss as
+# *ours*.
+if [ -z "$DIFF_XATTR" ]; then
+  echo "  xattr: NOT COMPARED -- no working setxattr found, section 23 skipped"
+elif [ "$DIFF_XATTR_REF" != yes ]; then
+  echo "  xattr: NOT COMPARED -- reference built without USE_XATTR, section 23 skipped"
+else
+  echo "  xattr: $DIFF_XATTR, reference has USE_XATTR"
 fi
 
 # =============================================================================
@@ -1950,6 +1982,91 @@ run_case -uv @FAR@/f g
 TREE=''
 FAR='printf hello > f'
 missing --no-copy @FAR@/f g
+
+fi
+
+# =============================================================================
+# 23. Extended attributes
+# =============================================================================
+# The comparison these cases exist to exercise is `xattrs`, added the same day
+# as the section; before it, every case below would have passed with the
+# attributes thrown away.
+#
+# Measured, not assumed: with `preserve_xattrs` in `mv.rs` short-circuited to
+# `return` and nothing else changed, this run went from 351/0 to 348/3 — the
+# three cross-boundary cases below went red and the two same-filesystem ones did
+# not, which is exactly right, since a `rename(2)` carries attributes whatever
+# our code does. Three of five is the honest ceiling for this section until a
+# directory can cross.
+#
+# A same-filesystem `mv` is a `rename(2)`: it moves a directory entry and never
+# touches the inode, so the attributes cannot be lost and the first case is a
+# control rather than a test. Every case that can actually fail is a §22-shaped
+# one, where the fallback has to read each attribute off the source and write it
+# onto a new inode — which is why this section needs the far filesystem too and
+# is skipped with it.
+#
+# What is deliberately not here: an attribute on a *symlink*. Linux refuses
+# `user.*` on anything but a regular file or a directory (the permission model
+# for the namespace is the file's own mode, and a symlink has none), so such a
+# case would be testing the kernel's refusal on both sides and nothing about
+# `mv`. `security.*` on a link is allowed but needs privilege to set.
+if [ -z "$far_root" ] || [ -z "$DIFF_XATTR" ] || [ "$DIFF_XATTR_REF" != yes ]; then
+  echo "SKIP section 23: needs a second device, a working setxattr, and a"
+  echo "                reference built with USE_XATTR (see diff-wsl.sh's libattr"
+  echo "                block -- without it GNU's copy_attr is an empty stub that"
+  echo "                drops every attribute, so every case here would 'differ')"
+else
+
+# The control: one filesystem, so this is a rename and the attribute survives
+# because nothing was copied. If this one ever fails, the section is measuring
+# the fixture rather than the move.
+#
+# It is worth being explicit that this case is the *weak* kind: if `TREE`'s
+# `diff_setxattr` silently did nothing — `eval "$TREE"` discards its stderr —
+# both sides would hold no attributes and it would pass anyway. That is checked
+# separately rather than inferred: the temporary root the trees are built under
+# was confirmed to accept and return a `user.*` attribute, and `DIFF_XATTR`'s
+# own probe above sets one there on every run before naming a Python at all.
+TREE='printf hello > f; diff_setxattr f user.tag v1'
+FAR=':'
+run_case -v f g
+
+# The same file across the boundary. Now the fallback runs, and the attribute
+# has to be carried by hand.
+TREE=''
+FAR='printf hello > f; diff_setxattr f user.tag v1'
+run_case -v @FAR@/f g
+
+# Several attributes, one of them not printable ASCII. Two things at once, and
+# deliberately: the count, since a fallback that carried only the first would
+# pass the case above, and the value, since one that carried the *names* and
+# re-read the values as text would mangle this one.
+TREE=''
+FAR='printf hello > f
+      diff_setxattr f user.a one
+      diff_setxattr f user.b two
+      diff_setxattr f user.c "héllo"'
+run_case -v @FAR@/f g
+
+# A destination that already exists and carries its own attribute. A rename
+# replaces the inode entirely, so `user.old` must be *gone* afterwards and not
+# merged with the source's. This is the attribute half of §22's second case, and
+# it is the one a fallback that opened the destination in place would fail: the
+# attributes of a file that was written through rather than replaced are its own
+# plus the source's.
+TREE='printf XXXXXXXXXX > g; diff_setxattr g user.old keepme'
+FAR='printf hello > f; diff_setxattr f user.new v'
+run_case -v @FAR@/f g
+
+# An attribute on a directory rather than a file, moved within one filesystem.
+# A directory cannot cross the boundary at all yet
+# (`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`), so this is the only shape
+# a directory attribute can be tested in until that lands — and when it does,
+# the far version of this case is the one to add.
+TREE='mkdir d; printf x > d/f; diff_setxattr d user.dir v'
+FAR=':'
+run_case -v d e
 
 fi
 

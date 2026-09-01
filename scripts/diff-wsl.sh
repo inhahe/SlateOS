@@ -403,6 +403,105 @@ done
 # reference to rpl_mbrtoc32` -- a third error message that names neither cause.
 # Every failure path below therefore removes the tree, so the next run starts
 # from the tarball rather than inheriting a wreck.
+## The reference's extended-attribute support, which is not free
+#
+# A coreutils built by the block below on a host without libattr has `USE_XATTR`
+# undefined, which is not a small thing: `copy_attr`'s entire body becomes
+# `return true`, so the reference `cp` and `mv` silently carry no extended
+# attributes at all, and `cp --preserve=xattr` refuses to run. Every case a
+# harness writes about attributes then compares our correct behaviour against a
+# reference that cannot do it — the harness reports a difference *in us*, in the
+# one direction that is worst, because the natural reading of a red case is that
+# the subject is wrong.
+#
+# The host here has no `libattr-dev` and no way to install one (`sudo` wants a
+# password this script does not have), so libattr is **built from source into
+# the same cache**, exactly as coreutils itself is and for the same reason. It
+# is a small C library with no dependencies; the build takes a few seconds.
+#
+# The system is tried first and the source build is the fallback, so a host that
+# does have the development package pays nothing.
+#
+# Failure is never fatal. A host with no network, or a libattr that will not
+# build, gets the old behaviour — a reference without xattr support — and the
+# harnesses that care say so in their own headers rather than here.
+diff_xattr_cppflags=
+diff_xattr_ldflags=
+diff_xattr_ref=no
+diff_attr_version=2.5.2
+
+# Does a program using the two headers and `attr_copy_fd` link with these flags?
+# This is coreutils' own `m4/xattr.m4` probe, reduced to the part that decides.
+diff_attr_usable() {
+  command -v cc >/dev/null 2>&1 || return 1
+  # Its own scratch directory, and not `$DIFF_TMP`: this probe runs while the
+  # reference is still being *located*, which is a few hundred lines before the
+  # harness's own temporary tree is made. Reaching forward to a variable that
+  # does not exist yet is how the first version of this failed, under `set -u`,
+  # with `DIFF_TMP: unbound variable` and no other output.
+  diff_attr_dir=$(mktemp -d) || return 1
+  cat > "$diff_attr_dir/probe.c" <<'C_PROBE'
+#include <attr/error_context.h>
+#include <attr/libattr.h>
+static int perms(const char *n, struct error_context *c)
+{ return attr_copy_action(n, c) == ATTR_ACTION_PERMISSIONS; }
+int main(void) { return attr_copy_fd("/", 0, "/", 0, perms, 0); }
+C_PROBE
+  # shellcheck disable=SC2086
+  cc $1 -o "$diff_attr_dir/probe" "$diff_attr_dir/probe.c" $2 -lattr \
+    >/dev/null 2>&1
+  diff_attr_rc=$?
+  rm -rf "$diff_attr_dir"
+  return $diff_attr_rc
+}
+
+if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "${DIFF_GNU_DIR:-}" ]; then
+  diff_attr_cache=${DIFF_GNU_CACHE:-$HOME/.cache/slateos-diff-gnu}
+  diff_attr_prefix=$diff_attr_cache/attr-prefix
+  if diff_attr_usable '' ''; then
+    diff_xattr_ref=yes
+  else
+    # `-Wl,-rpath` and not `LD_LIBRARY_PATH`: the reference binaries are run
+    # through symlinks in a throwaway `PATH` directory, by two different
+    # harnesses, in an environment the case controls. A library path baked into
+    # the binary cannot be lost by any of that, and cannot leak into the
+    # *subject's* environment either — which matters, because our binaries must
+    # not accidentally acquire a library the target does not have.
+    diff_attr_cpp=-I$diff_attr_prefix/include
+    diff_attr_ld="-L$diff_attr_prefix/lib -Wl,-rpath,$diff_attr_prefix/lib"
+    if ! diff_attr_usable "$diff_attr_cpp" "$diff_attr_ld"; then
+      diff_attr_src=$diff_attr_cache/attr-$diff_attr_version
+      diff_attr_tar=attr-$diff_attr_version.tar.gz
+      if [ ! -f "$diff_attr_cache/$diff_attr_tar" ]; then
+        diff_attr_url=https://download.savannah.nongnu.org/releases/attr/$diff_attr_tar
+        mkdir -p "$diff_attr_cache" || exit 1
+        if command -v curl >/dev/null 2>&1; then
+          curl -fsSL -o "$diff_attr_cache/$diff_attr_tar.part" "$diff_attr_url" \
+            && mv "$diff_attr_cache/$diff_attr_tar.part" "$diff_attr_cache/$diff_attr_tar"
+        elif command -v wget >/dev/null 2>&1; then
+          wget -q -O "$diff_attr_cache/$diff_attr_tar.part" "$diff_attr_url" \
+            && mv "$diff_attr_cache/$diff_attr_tar.part" "$diff_attr_cache/$diff_attr_tar"
+        fi
+      fi
+      if [ -f "$diff_attr_cache/$diff_attr_tar" ]; then
+        rm -rf "$diff_attr_src"
+        ( cd "$diff_attr_cache" \
+          && tar xf "$diff_attr_tar" \
+          && cd "attr-$diff_attr_version" \
+          && ./configure --quiet --prefix="$diff_attr_prefix" \
+               --disable-nls --disable-static \
+          && make -s -j"$(nproc 2>/dev/null || echo 4)" \
+          && make -s install ) >/dev/null 2>&1 || rm -rf "$diff_attr_src"
+      fi
+    fi
+    if diff_attr_usable "$diff_attr_cpp" "$diff_attr_ld"; then
+      diff_xattr_cppflags=$diff_attr_cpp
+      diff_xattr_ldflags=$diff_attr_ld
+      diff_xattr_ref=yes
+    fi
+  fi
+fi
+
 gnu_dir=${DIFF_GNU_DIR:-}
 if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
   diff_gnu_cache=${DIFF_GNU_CACHE:-$HOME/.cache/slateos-diff-gnu}
@@ -412,7 +511,22 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
   # The marker, not `src/$DIFF_PROG`: it is written only after a whole `make`
   # returned 0, so it distinguishes "built" from "a binary happens to exist",
   # which is exactly the distinction the half-built tree above destroys.
-  if [ ! -f "$diff_gnu_src/.slateos-built" ]; then
+  #
+  # It carries the *flags the tree was configured with* and not merely the fact
+  # of a build, because the tree can now be built two ways. A cache holding a
+  # coreutils built before libattr was available would otherwise be reused
+  # forever, and the harnesses would go on comparing against a `cp` whose
+  # `copy_attr` is `return true` — with nothing to say so, since the tree looks
+  # built and is.
+  #
+  # The flags and not the *outcome*: a marker recording "xattr=no" on a host
+  # where the probe says yes but coreutils' own configure disagrees would be
+  # rebuilt on every single run, ninety seconds at a time, forever. Inputs
+  # change once; outcomes can disagree with intent indefinitely. What was
+  # actually achieved is read back from `config.h` below, where it costs a
+  # `grep` rather than a build.
+  diff_gnu_want="xattr-flags=$diff_xattr_cppflags|$diff_xattr_ldflags"
+  if [ "$(cat "$diff_gnu_src/.slateos-built" 2>/dev/null)" != "$diff_gnu_want" ]; then
     mkdir -p "$diff_gnu_cache" || exit 1
     if [ ! -f "$diff_gnu_cache/$diff_gnu_tar" ]; then
       diff_gnu_url=https://ftp.gnu.org/gnu/coreutils/$diff_gnu_tar
@@ -437,6 +551,7 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
       && tar xf "$diff_gnu_tar" \
       && cd "coreutils-$DIFF_GNU_SOURCE" \
       && ./configure --quiet --disable-nls \
+           CPPFLAGS="$diff_xattr_cppflags" LDFLAGS="$diff_xattr_ldflags" \
       && make -s -j"$(nproc 2>/dev/null || echo 4)" ) >&2 || {
       rm -rf "$diff_gnu_src"
       echo "$DIFF_PROG-diff: coreutils $DIFF_GNU_SOURCE did not build; SKIPPED"
@@ -444,10 +559,37 @@ if [ -n "$DIFF_GNU_SOURCE" ] && [ -z "$gnu_dir" ]; then
       echo "$diff_gnu_hint"
       exit 0
     }
-    : > "$diff_gnu_src/.slateos-built"
+    printf '%s\n' "$diff_gnu_want" > "$diff_gnu_src/.slateos-built"
   fi
   gnu_dir=$diff_gnu_src/src
 fi
+# What the reference can actually do, read from the tree rather than inferred
+# from what it was asked to do. `gl_FUNC_XATTR` can decide `use_xattr=no` and
+# only *warn*, so intent is not evidence: a tree configured with the flags can
+# still hold `/* #undef USE_XATTR */`, and that is precisely the reference that
+# silently drops every attribute. Harnesses that write cases about extended
+# attributes must test this, not `diff_xattr_ref` above.
+#
+# Read relative to `$gnu_dir` and not to `$diff_gnu_src`, so that a reference
+# supplied by hand through `DIFF_GNU_DIR` is judged by the same evidence. If it
+# is a bare directory of binaries with no `lib/config.h` beside it, the answer
+# is "no" -- which costs a skipped section and never a wrong verdict.
+if [ -z "$gnu_dir" ] \
+   || ! grep -q '^#define USE_XATTR 1' "$gnu_dir/../lib/config.h" 2>/dev/null
+then
+  diff_xattr_ref=no
+fi
+# The name the harnesses read; `diff_xattr_ref` is this file's working variable
+# and is not part of the interface. The suppression below is not a nuisance
+# silencer: this file is *sourced*, so its only reader is in another file, and
+# the checker works one file at a time and cannot see that use. It is left
+# unexported deliberately, matching `DIFF_XATTR` and `DIFF_TMP`: the case
+# scripts are run as children and have no business inheriting harness state.
+#
+# (A comment line beginning with the checker's own name is parsed as a
+# directive, which is why that sentence is worded around it.)
+# shellcheck disable=SC2034
+DIFF_XATTR_REF=$diff_xattr_ref
 
 # A reference of the wrong version is worse than none: it fails cases that are
 # right and passes cases that are wrong, in the same run. Fatal rather than a
@@ -893,3 +1035,121 @@ if [ -z "${DIFF_NO_BINDIR:-}" ]; then
       ;;
   esac
 fi
+
+# --- 8. extended attributes ---------------------------------------------------
+# An extended attribute is a small named blob a filesystem stores beside a file
+# — a SELinux label, a `user.mime_type`, a backup tool's bookkeeping. `cp -a`
+# and `mv` both carry them, and neither harness could see them until this was
+# written: `B-DIFF-HARNESSES-CANNOT-SEE-EXTENDED-ATTRIBUTES` was filed after a
+# fix for a *dropped* attribute landed with the harness reporting an identical
+# 341/0/11 before and after.
+#
+# ## Why Python and not `getfattr`
+#
+# `getfattr` is the obvious tool and is what the issue asked for. It is part of
+# the `attr` package, which is not installed here and cannot be installed
+# without a password this script does not have. Python is installed, is already
+# a dependency of half the repository's tooling, and is in three ways the better
+# instrument for this particular job:
+#
+# * **`os.listxattr(..., follow_symlinks=False)` reads a symlink's own
+#   attributes.** `getfattr` needs `-h` for that and it is easy to leave off,
+#   which would silently compare the *target's* attributes twice.
+# * **The value is bytes, and stays bytes.** `getfattr -d` picks an encoding per
+#   value (`text` or base64) by guessing, so an attribute whose value happens to
+#   contain a quote is printed differently from one that does not. Here the rule
+#   is fixed and stated in one place: printable ASCII as itself, anything else
+#   as hex.
+# * **The elision is one `if`** rather than a `-m` regex whose syntax differs
+#   between implementations.
+#
+# If `attr` is ever installed this can be reconsidered, but there is nothing to
+# gain by it: nothing about the comparison wants a subprocess per file.
+#
+# ## What is elided, and why only that
+#
+# `security.selinux` only. It is set by the *system's* policy from the path a
+# file is created at, so the two sides get different labels for the same reason
+# they get different inode numbers, and on a machine with SELinux disabled it is
+# absent from both. Everything else is compared, including the rest of
+# `security.*`: `security.capability` in particular is a real thing for these
+# two programs to lose, since `chown` clears it and the copy has to notice.
+DIFF_XATTR=
+for diff_xa in python3 python; do
+  command -v "$diff_xa" >/dev/null 2>&1 || continue
+  # Present is not the same as working: a Python built without `os.setxattr`,
+  # or a filesystem mounted `nouser_xattr`, would make every case report "no
+  # attributes" rather than failing, which is the silent-blind-spot outcome the
+  # issue was filed about. Probe by actually setting one.
+  if "$diff_xa" - "$DIFF_TMP" >/dev/null 2>&1 <<'PY'
+import os, sys, tempfile
+fd, p = tempfile.mkstemp(dir=sys.argv[1])
+os.close(fd)
+try:
+    os.setxattr(p, "user.diffprobe", b"1")
+    assert os.getxattr(p, "user.diffprobe") == b"1"
+finally:
+    os.unlink(p)
+PY
+  then DIFF_XATTR=$diff_xa; break; fi
+done
+
+# One tree's extended attributes as sorted text: `<prefix><path> <name> <value>`,
+# one line per attribute, nothing at all when the tree has none.
+#
+# Errors are swallowed per path rather than per run, which matches what
+# `snapshot` does with `find`'s: a case that leaves an unreadable directory
+# leaves one on both sides, so the blind spot is symmetric.
+diff_xattrs_in() {
+  [ -n "$DIFF_XATTR" ] || return 0
+  [ -d "$2" ] || return 0
+  "$DIFF_XATTR" - "$1" "$2" 2>/dev/null <<'PY'
+import os, sys
+
+prefix, root = sys.argv[1], sys.argv[2]
+ELIDE = {"security.selinux"}
+
+
+def show(value):
+    """Printable ASCII as itself, anything else as hex — fixed, not guessed."""
+    if value and all(32 <= b < 127 for b in value):
+        return value.decode("ascii")
+    return "0x" + value.hex()
+
+
+lines = []
+for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+    # A symlink to a directory lands in `dirnames` and is not descended into,
+    # so listing both lists reaches every entry exactly once.
+    for name in dirnames + filenames:
+        path = os.path.join(dirpath, name)
+        rel = os.path.relpath(path, root)
+        try:
+            names = os.listxattr(path, follow_symlinks=False)
+        except OSError:
+            continue
+        for attr in names:
+            if attr in ELIDE:
+                continue
+            try:
+                value = os.getxattr(path, attr, follow_symlinks=False)
+            except OSError:
+                continue
+            lines.append("%s%s %s %s" % (prefix, rel, attr, show(value)))
+sys.stdout.write("".join(line + "\n" for line in sorted(lines)))
+PY
+  return 0
+}
+
+# Set one, for a fixture. `diff_setxattr <path> <name> <value>`, on the link
+# itself rather than its target — a fixture that wants the target can name it.
+# Silent when there is no Python: the case still runs and still compares
+# everything else, and the missing comparison is announced once in the header
+# rather than once per case.
+diff_setxattr() {
+  [ -n "$DIFF_XATTR" ] || return 0
+  "$DIFF_XATTR" - "$1" "$2" "$3" <<'PY'
+import os, sys
+os.setxattr(sys.argv[1], sys.argv[2], sys.argv[3].encode(), follow_symlinks=False)
+PY
+}

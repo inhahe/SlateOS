@@ -4157,6 +4157,12 @@ pub fn run_all() {
     bench_vfs_stat_breakdown();
     bench_vfs_read_write();
     bench_vfs_readdir();
+    // After `bench_vfs_readdir`, never before: the breakdown creates and then
+    // deletes 2000-odd inodes, and running it first would leave the scored
+    // `vfs_readdir` measuring a memfs whose allocator and inode table had just
+    // been churned. The breakdown cleans up after itself, but "cleaned up" is
+    // not "never happened".
+    bench_vfs_readdir_breakdown();
 
     // --- Network benchmarks (net zone) ---
     bench_net_ipv4_parse();
@@ -6740,6 +6746,236 @@ fn bench_vfs_readdir() {
         result.mean_ns
     );
     score("vfs_readdir", &result, 50000);
+}
+
+/// Number of ballast files created by [`bench_vfs_readdir_breakdown`].
+///
+/// Chosen to move the memfs inode table by roughly an order of magnitude, not
+/// to model any real workload: the point is to change *only* the size of the
+/// table that every child lookup searches, while the directory being listed
+/// stays byte-for-byte what it was. A smaller number would leave the before
+/// and after within one another's noise; a much larger one would spend real
+/// boot time creating files nothing ever reads.
+const READDIR_BALLAST: usize = 2048;
+
+/// Decompose `vfs_readdir` into fixed cost, per-entry cost, and the part of
+/// the per-entry cost that depends on the size of the filesystem's inode
+/// table.
+///
+/// # Why this exists
+///
+/// `vfs_readdir` regressed ~3x (16.3us -> 50.2us) at the memfs flat-inode-table
+/// refactor, replicated on an A/A re-run of the identical image — see
+/// `known-issues.md` A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER. The
+/// *structural* explanation is that `MemFsNode` is now stored by value in a
+/// `BTreeMap<u64, MemFsNode>`, `BTreeMap` keeps values inline in its B-tree
+/// nodes, and `memfs::readdir` therefore performs one search of that
+/// large-valued tree per child where previously it iterated nodes its parent
+/// already owned.
+///
+/// That is an argument, not a measurement, and this file's standing rule is
+/// that you do not optimise against an argument. So the benchmark is built to
+/// be able to *falsify* it.
+///
+/// # The experiment
+///
+/// Three directories of 0, 8 and 64 entries give the intercept and the slope:
+/// whatever `finish_listing` and the mount walk cost is paid by the empty
+/// directory too, so it cancels out of the slope.
+///
+/// Then [`READDIR_BALLAST`] files are created **in a different directory**,
+/// and the 8- and 64-entry listings are repeated. The listed directories are
+/// unchanged; the only thing that moved is the number of inodes in the table
+/// their children have to be looked up in. That makes the two hypotheses give
+/// visibly different answers:
+///
+/// - **If the cost is the inode-table search**, the ballast slows both
+///   listings, and it slows the 64-entry one about eight times as much as the
+///   8-entry one, because the penalty is paid once per child.
+/// - **If the cost is per-entry work that does not touch the table** —
+///   `DirEntry` construction, the name clone, the `Vec` growth — the ballast
+///   changes nothing measurable, and boxing or slab-allocating the node would
+///   be effort spent in the wrong place.
+///
+/// Only the first outcome licenses the fix proposed in `known-issues.md`.
+fn bench_vfs_readdir_breakdown() {
+    use crate::fs::vfs::Vfs;
+
+    // `/tmp` is the memfs mount; the regression is memfs's, so measuring
+    // anywhere else would answer a different question.
+    const ROOT: &str = "/tmp/_bdr";
+    let dir_empty = "/tmp/_bdr/n0";
+    let dir_8 = "/tmp/_bdr/n8";
+    let dir_64 = "/tmp/_bdr/n64";
+    let dir_ballast = "/tmp/_bdr/ballast";
+
+    // Everything created below is torn down at the end, so a leftover tree
+    // from an aborted previous boot would make the counts wrong rather than
+    // merely untidy. Clear it first.
+    readdir_breakdown_cleanup(ROOT);
+
+    if Vfs::mkdir_all(dir_empty).is_err()
+        || Vfs::mkdir_all(dir_8).is_err()
+        || Vfs::mkdir_all(dir_64).is_err()
+    {
+        serial_println!("[bench] vfs_readdir_breakdown: SKIP (cannot create /tmp/_bdr)");
+        readdir_breakdown_cleanup(ROOT);
+        return;
+    }
+
+    // Names are built here, outside every measured window: `format!` allocates,
+    // and an allocation inside `run`'s closure would be charged to readdir.
+    for i in 0..64usize {
+        let leaf = alloc::format!("{}/f{:03}", if i < 8 { dir_8 } else { dir_64 }, i);
+        if Vfs::write_file(&leaf, b"").is_err() {
+            serial_println!("[bench] vfs_readdir_breakdown: SKIP (cannot populate /tmp/_bdr)");
+            readdir_breakdown_cleanup(ROOT);
+            return;
+        }
+    }
+    // `dir_64` got entries 8..64 from the loop above; give it the first eight
+    // too, so it holds 64 and `dir_8` holds 8 and the slope is over a real
+    // 56-entry difference rather than a 48-entry one.
+    for i in 0..8usize {
+        let leaf = alloc::format!("{}/f{:03}", dir_64, i);
+        if Vfs::write_file(&leaf, b"").is_err() {
+            serial_println!("[bench] vfs_readdir_breakdown: SKIP (cannot populate /tmp/_bdr)");
+            readdir_breakdown_cleanup(ROOT);
+            return;
+        }
+    }
+
+    let n0 = run("vfs_readdir_n0", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_empty));
+    });
+    let n8 = run("vfs_readdir_n8", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_8));
+    });
+    let n64 = run("vfs_readdir_n64", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_64));
+    });
+
+    // Now inflate the inode table without touching either measured directory.
+    let mut ballast_ok = Vfs::mkdir_all(dir_ballast).is_ok();
+    if ballast_ok {
+        for i in 0..READDIR_BALLAST {
+            let leaf = alloc::format!("{}/b{:05}", dir_ballast, i);
+            if Vfs::write_file(&leaf, b"").is_err() {
+                ballast_ok = false;
+                break;
+            }
+        }
+    }
+
+    if !ballast_ok {
+        // Report rather than skip silently: the three numbers above are still
+        // a valid decomposition, and saying so is different from saying the
+        // ballast arm agreed with the hypothesis.
+        serial_println!(
+            "[bench]   vfs_readdir_breakdown: n0 {}ns, n8 {}ns, n64 {}ns \
+             (ballast arm UNAVAILABLE — could not create {} files under {})",
+            n0.min_ns,
+            n8.min_ns,
+            n64.min_ns,
+            READDIR_BALLAST,
+            dir_ballast
+        );
+        track("vfs_readdir_n0", &n0);
+        track("vfs_readdir_n8", &n8);
+        track("vfs_readdir_n64", &n64);
+        readdir_breakdown_cleanup(ROOT);
+        return;
+    }
+
+    let n8_b = run("vfs_readdir_n8_ballasted", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_8));
+    });
+    let n64_b = run("vfs_readdir_n64_ballasted", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_64));
+    });
+
+    readdir_breakdown_cleanup(ROOT);
+
+    // Recorded, not merely printed. Each of these five is a listing of a
+    // directory of known size and so means something on its own next boot —
+    // which is `track`'s criterion, not `run_diagnostic`'s.
+    track("vfs_readdir_n0", &n0);
+    track("vfs_readdir_n8", &n8);
+    track("vfs_readdir_n64", &n64);
+    track("vfs_readdir_n8_ballasted", &n8_b);
+    track("vfs_readdir_n64_ballasted", &n64_b);
+
+    // Slope over the 56-entry gap, in picoseconds so integer division does not
+    // round a real per-entry cost down to zero.
+    let per_entry_ps = n64.min_ns.saturating_sub(n8.min_ns).saturating_mul(1000) / 56;
+    serial_println!(
+        "[bench]   vfs_readdir_breakdown: fixed {}ns (empty dir) + ~{}ps/entry \
+         (n8 {}ns -> n64 {}ns)",
+        n0.min_ns,
+        per_entry_ps,
+        n8.min_ns,
+        n64.min_ns
+    );
+
+    let d8 = n8_b.min_ns.saturating_sub(n8.min_ns);
+    let d64 = n64_b.min_ns.saturating_sub(n64.min_ns);
+    serial_println!(
+        "[bench]   vfs_readdir_breakdown: +{} inodes elsewhere costs n8 +{}ns, n64 +{}ns",
+        READDIR_BALLAST,
+        d8,
+        d64
+    );
+
+    // The verdict, stated in the log so the next reader does not have to
+    // re-derive it from four numbers. The test is the *ratio*: a per-child
+    // table search must scale with the number of children, so 64 entries
+    // should pay about 8x what 8 entries pay. A fixed cost that happens to
+    // land on both would show d64 ~= d8 and would not support the fix.
+    if d64 > d8.saturating_mul(3) && d64 > 0 {
+        serial_println!(
+            "[bench]   vfs_readdir_breakdown: CONFIRMED per-child inode-table lookup dominates \
+             — the ballast penalty scales with entry count ({}x from 8 to 64 entries). \
+             See known-issues.md A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.",
+            d64 / d8.max(1)
+        );
+    } else {
+        serial_println!(
+            "[bench]   vfs_readdir_breakdown: NOT CONFIRMED — inode-table size does not scale \
+             the per-entry cost (n8 +{}ns vs n64 +{}ns). The per-entry cost is elsewhere; \
+             boxing the node would not fix it.",
+            d8,
+            d64
+        );
+    }
+}
+
+/// Remove the tree [`bench_vfs_readdir_breakdown`] builds, if any of it exists.
+///
+/// Best-effort and idempotent: it runs both before and after the benchmark, so
+/// on the "before" call almost everything it tries is expected to fail with
+/// `NotFound`. Errors are therefore discarded deliberately — there is no
+/// failure here that the benchmark should react to, and a benchmark that
+/// aborted because its own cleanup found nothing to clean would be worse than
+/// useless.
+fn readdir_breakdown_cleanup(root: &str) {
+    use crate::fs::vfs::Vfs;
+
+    // Depth-first by construction: the four leaf directories, then the root.
+    for sub in ["n0", "n8", "n64", "ballast"] {
+        let dir = alloc::format!("{}/{}", root, sub);
+        if let Ok(entries) = Vfs::readdir(&dir) {
+            for e in entries {
+                // Joined as bytes rather than formatted through a string: a
+                // directory entry's name is arbitrary bytes, and rendering it
+                // lossily to build the path to delete would target the wrong
+                // file for any name that is not UTF-8.
+                let leaf = crate::fs::path::Path::new(&dir).join(&e.name);
+                let _ = Vfs::remove(&leaf); // Best-effort: see fn doc.
+            }
+        }
+        let _ = Vfs::rmdir(&dir); // Best-effort: see fn doc.
+    }
+    let _ = Vfs::rmdir(root); // Best-effort: see fn doc.
 }
 
 // ---------------------------------------------------------------------------

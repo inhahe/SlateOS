@@ -4045,7 +4045,6 @@ mod tests {
         clippy::unwrap_used,
         clippy::expect_used,
         clippy::panic,
-        clippy::float_cmp,
         clippy::arithmetic_side_effects
     )]
 
@@ -5750,5 +5749,337 @@ mod tests {
         assert_eq!(sched.run_due_tasks(10_000), vec![id]);
         assert_eq!(sched.history.count(), 1);
         assert_eq!(sched.history.success_count(), 0);
+    }
+
+    // --- containment --------------------------------------------------------
+
+    /// The window widths every containment claim is checked at.
+    ///
+    /// A rule about geometry is a rule at *every* size, so a handful of sampled
+    /// sizes tests a handful of points and nothing else. The sizes that break a
+    /// rule are the ones nobody would think to sample: 5 is narrower than
+    /// `PADDING`, so a run at a constant inset starts past the right edge; 40
+    /// fits neither of the four toolbar buttons; 400 is where the last three
+    /// list columns -- which run to 815 points -- fall off the edge.
+    const GRID_W: [f32; 8] = [0.0, 5.0, 40.0, 120.0, 400.0, 820.0, 1200.0, 1600.0];
+
+    /// The window heights every containment claim is checked at.
+    ///
+    /// The 6 is not a rounding of the 20 next to it. Between zero and one line
+    /// of text there is a band of heights at which a strip exists but cannot
+    /// show anything, and it is a band with its own bugs -- the toolbar's
+    /// buttons are 30-point fills centred in the strip, so at six points tall
+    /// they painted over the tab bar below and answered clicks there. Zero does
+    /// not find that (`take_top` hands out an empty band and the fills come out
+    /// empty too) and twenty does not either, because by then the button is
+    /// merely cramped. The 130 is the same sample one level down: it leaves the
+    /// content area six points tall, which is a list strip too short for its own
+    /// column headings.
+    const GRID_H: [f32; 8] = [0.0, 6.0, 20.0, 60.0, 130.0, 400.0, 600.0, 1000.0];
+
+    /// Every window size the containment sweeps run at.
+    fn sizes() -> impl Iterator<Item = (f32, f32)> {
+        GRID_W.into_iter().flat_map(|w| GRID_H.map(move |h| (w, h)))
+    }
+
+    /// Is `inner` within `outer`, allowing for a pixel of rounding?
+    ///
+    /// A rectangle with no area is "inside" anything: it is what a pass draws
+    /// when its band has been squeezed out of existence, and something that was
+    /// left out cannot hang off an edge.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// The states the containment sweeps are run in.
+    ///
+    /// Every branch that draws something has to be represented, because a
+    /// branch nobody enters is a branch nobody measures: the empty-state line,
+    /// the "N more" note, the caret, the chevron, the tick in the checkbox and
+    /// each dialog are all drawn by code the default state never reaches.
+    fn states() -> Vec<(&'static str, SchedulerUI)> {
+        let mut selected = ui_with_tasks(40);
+        let first = selected.scheduler.list_tasks().first().map(|t| t.id);
+        selected.selected_task_id = first;
+        selected.status_message = Some(String::from(
+            "A status message long enough to need eliding in a narrow window.",
+        ));
+
+        let mut long_names = ui_with_tasks(3);
+        for task in long_names.scheduler.tasks.values_mut() {
+            task.name = "a task name far wider than the column it goes in".to_string();
+            task.command =
+                "/usr/local/bin/a-command-with-a-very-long-path --and --flags".to_string();
+            task.enabled = false;
+        }
+
+        let mut failed_history = SchedulerUI::new();
+        failed_history.scheduler.history.record_failure(
+            1,
+            "nightly backup",
+            1_000,
+            120,
+            "no such file or directory",
+        );
+        failed_history.tab = UiTab::History;
+
+        let mut empty_history = SchedulerUI::new();
+        empty_history.tab = UiTab::History;
+
+        let mut add = SchedulerUI::new();
+        add.open_add_dialog();
+        add.focus = Some(FormField::Name);
+        add.form.name = "a name far wider than the field it is typed into".to_string();
+
+        let mut cron = SchedulerUI::new();
+        cron.open_add_dialog();
+        cron.form.frequency_index = 6;
+
+        let mut weekly = SchedulerUI::new();
+        weekly.open_add_dialog();
+        weekly.form.frequency_index = 2;
+        weekly.form.enabled = true;
+
+        let mut edit = ui_with_tasks(3);
+        if let Some(id) = edit.scheduler.list_tasks().first().map(|t| t.id) {
+            edit.open_edit_dialog(id);
+        }
+
+        let mut delete = ui_with_tasks(3);
+        if let Some(id) = delete.scheduler.list_tasks().first().map(|t| t.id) {
+            delete.open_delete_dialog(id);
+        }
+
+        vec![
+            ("an empty task list", SchedulerUI::new()),
+            ("a selected task with a status message", selected),
+            ("tasks with overlong text", long_names),
+            ("a full history", ui_with_history(40)),
+            ("a failed run in the history", failed_history),
+            ("an empty history", empty_history),
+            ("the add dialog with a focused field", add),
+            ("the add dialog on a cron schedule", cron),
+            ("the add dialog on a weekly schedule", weekly),
+            ("the edit dialog", edit),
+            ("the delete dialog", delete),
+        ]
+    }
+
+    /// Every rectangle a pass filled or stroked.
+    fn rects(f: &Frame) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                }
+                | RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        // A rectangle drawn past the edge is a rectangle the compositor pays to
+        // clip. More to the point it means the geometry believed in room the
+        // window does not have -- which is how both dialogs came to paint a
+        // 440x380 panel into a 120x60 window.
+        for (name, ui) in states() {
+            for (w, h) in sizes() {
+                let window = Rect::new(0.0, 0.0, w, h);
+                for r in rects(&ui.frame(w, h)) {
+                    assert!(
+                        inside(window, r),
+                        "{name}: a rect at {r:?} escapes a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        // The window test above is the coarsest bound there is, and until this
+        // test it was the only one. Every band is inside the window by
+        // construction, so a pass that overruns its own band paints on top of a
+        // *sibling* and the window test sees nothing at all: the header's title
+        // was placed by `band.y + (band.h - size) / 2.0` with nothing bounding
+        // it, and in a window too short for the header that put the title above
+        // the header and over the toolbar.
+        //
+        // Text and hit boxes are checked as well as fills, because whole passes
+        // here paint no fill of their own -- a list row's five cells are five
+        // runs and nothing else. Note the asymmetry: `frame()` clips the content
+        // area, and a clip hides an overrun from text and from hit boxes but not
+        // from fills, which is why the top-level test above can only ask about
+        // fills. Here each pass is handed an *unclipped* frame, so all three
+        // witnesses are available.
+        fn check(state: &str, pass: &str, region: Rect, f: &Frame) {
+            for r in rects(f) {
+                assert!(
+                    inside(region, r),
+                    "{state}: the {pass} pass, given {region:?}, filled {r:?}"
+                );
+            }
+            for c in f.commands() {
+                let RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                // A run has no height in the command stream, so the height has
+                // to be supplied before the question can be asked at all --
+                // which is exactly why the centring bug went unseen.
+                let bound =
+                    max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                let run = Rect::new(*x, *y, bound, *font_size);
+                assert!(
+                    inside(region, run),
+                    "{state}: the {pass} pass, given {region:?}, inked {text:?} at {run:?}"
+                );
+            }
+            for (target, rect) in f.hits() {
+                assert!(
+                    inside(region, *rect),
+                    "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+                );
+            }
+        }
+
+        /// `r`, and `r` squeezed to boxes the layout does not currently hand out.
+        ///
+        /// A sub-pass's contract is "stay inside the box you are given" for any
+        /// box, not for the boxes today's `Layout::new` happens to produce. A
+        /// text field is only ever handed a 280x24 rectangle from the dialog
+        /// today; the guard being tested lives in the field, and the field takes
+        /// its box as an argument, which means the test can simply hand it one.
+        fn squeezes(r: Rect) -> Vec<Rect> {
+            let mut out = vec![r];
+            for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+                if h < r.h {
+                    out.push(Rect::new(r.x, r.y, r.w, h));
+                }
+            }
+            for w in [0.0, 1.0, 5.0, 20.0] {
+                if w < r.w {
+                    out.push(Rect::new(r.x, r.y, w, r.h));
+                }
+            }
+            out
+        }
+
+        for (name, ui) in states() {
+            let task_id = ui.scheduler.list_tasks().first().map(|t| t.id).unwrap_or(0);
+            for (w, h) in sizes() {
+                let l = Layout::new(w, h, ui.status_message.is_some());
+                let state = format!("{name} at {w}x{h}");
+
+                // The passes whose box is a field of the layout. There is no
+                // squeezing these: the box is whatever `Layout::new` decided and
+                // the pass reads it back off the layout for itself.
+                type Panel = Box<dyn Fn(&SchedulerUI, &mut Frame)>;
+                let panels: Vec<(&'static str, Rect, Panel)> = vec![
+                    (
+                        "header",
+                        l.header,
+                        Box::new(move |u, f| u.render_header(f, &l)),
+                    ),
+                    (
+                        "toolbar",
+                        l.toolbar,
+                        Box::new(move |u, f| u.render_toolbar(f, &l)),
+                    ),
+                    (
+                        "tab bar",
+                        l.tab_bar,
+                        Box::new(move |u, f| u.render_tab_bar(f, &l)),
+                    ),
+                    (
+                        "task list",
+                        l.content,
+                        Box::new(move |u, f| u.render_task_list(f, &l)),
+                    ),
+                    (
+                        "history",
+                        l.content,
+                        Box::new(move |u, f| u.render_history(f, &l)),
+                    ),
+                    (
+                        "status bar",
+                        l.status,
+                        Box::new(move |u, f| u.render_status_bar(f, &l, "a status message")),
+                    ),
+                    (
+                        "add/edit dialog",
+                        l.window,
+                        Box::new(move |u, f| u.render_add_edit_dialog(f, &l, "Add Task")),
+                    ),
+                    (
+                        "delete dialog",
+                        l.window,
+                        Box::new(move |u, f| u.render_confirm_delete_dialog(f, &l, task_id)),
+                    ),
+                ];
+                for (pass, region, draw) in panels {
+                    let mut f = Frame::new(w, h);
+                    draw(&ui, &mut f);
+                    check(&state, pass, region, &f);
+                }
+            }
+
+            // The three controls that take their box as an argument. Their
+            // sizes come from constants, so the layout never squeezes them --
+            // but the dialog that hands out those boxes now cuts them to itself,
+            // and a control handed a sliver has to cope with one.
+            type Control = fn(&SchedulerUI, &mut Frame, Rect);
+            let controls: [(&'static str, Control); 4] = [
+                ("text field", |u, f, r| {
+                    u.render_text_field(
+                        f,
+                        Target::Field(FormField::Name),
+                        r,
+                        "a value far wider than the field",
+                    );
+                }),
+                ("empty text field", |u, f, r| {
+                    u.render_text_field(f, Target::Field(FormField::Name), r, "");
+                }),
+                ("picker", |u, f, r| {
+                    u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
+                }),
+                ("button", |u, f, r| {
+                    u.render_button(f, Some(Target::DialogSave), r, "Save", COLOR_GREEN);
+                }),
+            ];
+            for (pass, draw) in controls {
+                for region in squeezes(Rect::new(40.0, 60.0, FIELD_WIDTH, FIELD_HEIGHT)) {
+                    let mut f = Frame::new(800.0, 600.0);
+                    draw(&ui, &mut f, region);
+                    check(name, pass, region, &f);
+                }
+            }
+        }
     }
 }

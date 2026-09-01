@@ -107,13 +107,36 @@ MUTATIONS = [
         "        let status_h = STATUS_BAR_HEIGHT.min(h);\n"
         "        let status = Rect::new(0.0, (h - status_h).max(toolbar_h), w, status_h);\n"
         "        let bottom = status.y;",
-        ["every_run_of_text_is_bounded_and_inside_the_window"],
+        # Named for the geometry sweeps rather than for the text one. Giving
+        # the toolbar its full height first pushes the status bar past the
+        # window's bottom edge in a short window, and what shows that is a
+        # *fill* landing outside the region it was given -- the status text
+        # itself is refused by `put_text` the moment its box leaves the clip,
+        # so the run-bounding test sees a window with one less run in it and
+        # nothing wrong with the runs that remain.
+        [
+            "nothing_is_painted_entirely_outside_the_clip_in_force",
+            "the_layout_never_gives_a_region_a_negative_size",
+        ],
     ),
     (
         "the tab strip is taken without leaving the grid a row",
         "        let tabs_h = if toolbar_h + TAB_HEIGHT + MIN_GRID_HEIGHT <= bottom {",
         "        let tabs_h = if toolbar_h + TAB_HEIGHT <= bottom {",
         ["the_bottom_panel_and_the_tab_strip_are_given_up_before_the_grid_is"],
+    ),
+    (
+        "a placeholder line is inked whether or not its pane has room for it",
+        "    if line.is_empty() || line.bottom() > pane.bottom() || line.right() > pane.right() {\n"
+        "        return;\n"
+        "    }\n",
+        "",
+        # Named for the containment sweep and not for the window ones. In the
+        # window every placeholder is drawn under a clip, so `put_text` refuses
+        # the run and the window sweeps see a pane with one fewer run in it and
+        # nothing wrong with the runs that remain. Only the pass-level sweep,
+        # which hands each pass an unclipped frame, has anything left to see.
+        ["no_pass_paints_outside_the_box_it_was_given"],
     ),
     (
         "the bottom panel is taken without leaving the grid a row",
@@ -162,7 +185,10 @@ MUTATIONS = [
         "text is emitted wherever the caller asks, clip or no clip",
         "    if ink.is_empty() || s.is_empty() || !f.is_visible(ink) {",
         "    if false {",
-        ["every_run_of_text_is_bounded_and_inside_the_window"],
+        # Not a sweep: with every pass now guarding its own bottom edge, no
+        # state the sweeps cover asks for a run outside the clip, so the check
+        # is witnessed only by the caller written to ask for the impossible.
+        ["a_run_the_clip_cannot_show_is_not_put_in_the_picture"],
     ),
     (
         "the toolbar title is given a hundred points whatever the window measures",
@@ -388,8 +414,8 @@ MUTATIONS = [
     ),
     (
         "an export is thrown away rather than put where it can be seen",
-        "        Target::Export(format) => match self.export_current_table(format) {",
-        "        Target::Export(_) => match None::<String> {",
+        "            Target::Export(format) => match self.export_current_table(format) {",
+        "            Target::Export(format) => match self.export_current_table(format).filter(|_| false) {",
         ["export_puts_the_table_in_the_editor_and_import_reads_it_back"],
     ),
     # -- the entry points the platform calls ---------------------------------

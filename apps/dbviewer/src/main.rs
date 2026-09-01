@@ -439,6 +439,32 @@ fn inset_x(r: Rect, pad: f32) -> Rect {
     Rect::new(r.x + pad, r.y, (r.w - pad * 2.0).max(0.0), r.h)
 }
 
+/// Ink one line at `line`, or not at all if `pane` has no room for it.
+///
+/// Every walking pass in this file places a box and then measures it against
+/// the box it was given; the one-line placeholders -- "No query results",
+/// "Select a table to view its schema", "No tables in database" -- were the
+/// exception. Each put its line at a fixed inset from the top of its pane and
+/// inked it whatever the pane measured, so a pane shorter than the inset got a
+/// line below its own bottom edge. In the window a clip tidies that away, which
+/// is exactly why it went unnoticed: the ink is gone, but the pass still
+/// overran, and a pass that overruns by luck of the clip is a pass that will
+/// overrun into a sibling the day the clip is one box larger.
+fn put_line(
+    f: &mut Frame<Target>,
+    pane: Rect,
+    line: Rect,
+    text: &str,
+    size: f32,
+    color: Color,
+    weight: FontWeightHint,
+) {
+    if line.is_empty() || line.bottom() > pane.bottom() || line.right() > pane.right() {
+        return;
+    }
+    put_text(f, line, text, size, color, weight);
+}
+
 /// The box a run of text actually inks, given the box it was asked to sit in
 /// and the point size it was asked for.
 ///
@@ -4423,8 +4449,9 @@ impl DbViewerApp {
     /// The last query's message, and the rows it returned under it.
     fn draw_results(&self, f: &mut Frame<Target>, area: Rect) {
         let Some(result) = self.query_result.as_ref() else {
-            put_text(
+            put_line(
                 f,
+                area,
                 Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
                 "No query results. Execute a query first.",
                 12.0,
@@ -4558,8 +4585,9 @@ impl DbViewerApp {
             return;
         };
         let Some(table_name) = tab.selected_table.as_ref() else {
-            put_text(
+            put_line(
                 f,
+                area,
                 Rect::new(area.x + 16.0, area.y + 8.0, (area.w - 32.0).max(0.0), 16.0),
                 "Select a table to view its schema.",
                 12.0,
@@ -4715,8 +4743,9 @@ impl DbViewerApp {
                 BLUE,
                 FontWeightHint::Bold,
             );
-            put_text(
+            put_line(
                 f,
+                area,
                 Rect::new(area.x + 16.0, area.y + 28.0, (area.w - 32.0).max(0.0), 14.0),
                 "No tables in database.",
                 11.0,
@@ -7676,6 +7705,24 @@ mod tests {
         }
     }
 
+    /// Every region a [`Layout`] hands out, named, so the two tests that walk
+    /// them cannot drift into checking different sets.
+    fn regions(l: &Layout) -> [(&'static str, Rect); 11] {
+        [
+            ("toolbar", l.toolbar),
+            ("tabs", l.tabs),
+            ("sidebar", l.sidebar),
+            ("grid", l.grid),
+            ("panel", l.panel),
+            ("status", l.status),
+            ("grid header", l.grid_header()),
+            ("grid rows", l.grid_rows()),
+            ("page bar", l.page_bar()),
+            ("panel tabs", l.panel_tabs()),
+            ("panel body", l.panel_body()),
+        ]
+    }
+
     #[test]
     fn the_layout_never_gives_a_region_a_negative_size() {
         // `content_height`, `grid_height` and `main_width` were all computed by
@@ -7691,19 +7738,7 @@ mod tests {
             let v = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 7.0;
             for (w, h) in [(v, 600.0), (900.0, v), (v, v)] {
                 let l = Layout::solve(w, h);
-                for (what, r) in [
-                    ("toolbar", l.toolbar),
-                    ("tabs", l.tabs),
-                    ("sidebar", l.sidebar),
-                    ("grid", l.grid),
-                    ("panel", l.panel),
-                    ("status", l.status),
-                    ("grid header", l.grid_header()),
-                    ("grid rows", l.grid_rows()),
-                    ("page bar", l.page_bar()),
-                    ("panel tabs", l.panel_tabs()),
-                    ("panel body", l.panel_body()),
-                ] {
+                for (what, r) in regions(&l) {
                     assert!(
                         r.w >= 0.0 && r.h >= 0.0,
                         "{w}x{h}: the {what} is {}x{}",
@@ -7770,6 +7805,22 @@ mod tests {
             (1200.0, f32::NEG_INFINITY),
             (f32::NAN, f32::NAN),
         ] {
+            // "It did not panic" is the weakest thing a test can say, and on its
+            // own it lets the whole guard be deleted: `f32::NAN.max(0.0)` is
+            // `0.0` in Rust, so dropping `is_finite` changes nothing for the NaN
+            // cases and merely lets an *infinite* width through -- which then
+            // lays out infinitely wide regions that no `>= 0.0` comparison
+            // objects to, because every comparison against an infinity that is
+            // supposed to be a width happens to come out the right way round.
+            // So the claim is finiteness, which is what the guard is actually
+            // for, and it is made of every region rather than of the frame.
+            let l = Layout::solve(w, h);
+            for (what, r) in regions(&l) {
+                assert!(
+                    r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite(),
+                    "at {w}x{h} the {what} is {r:?}, which is not a rectangle"
+                );
+            }
             for (name, app) in states() {
                 let frame = app.frame(w, h);
                 assert!(
@@ -7866,6 +7917,25 @@ mod tests {
         // safe to aim at.
         click_text(&mut app, FULL, "sample.db");
         assert_eq!(app.active_tab, 0, "the strip did not switch back");
+
+        // Switching back to the *first* database is the one move that a strip
+        // recording `SelectTab(0)` under every cell would also get right, so on
+        // its own the check above says nothing about the cells. Each database
+        // is now asked for by name in turn. The name clicked is always the
+        // inactive one at the moment it is clicked -- the sidebar carries a
+        // second copy of the active database's name, and aiming at that would
+        // be aiming at the wrong control.
+        app.add_tab("ledger.db");
+        app.add_tab("archive.db");
+        // Indices 0 and 1 are `sample.db` and the one the `+` opened above.
+        for (want, name) in [(0_usize, "sample.db"), (2, "ledger.db"), (3, "archive.db")] {
+            click_text(&mut app, FULL, name);
+            assert_eq!(
+                app.active_tab, want,
+                "the strip cell reading {name:?} selected database {} instead",
+                app.active_tab
+            );
+        }
     }
 
     #[test]
@@ -7951,6 +8021,20 @@ mod tests {
         assert_eq!(
             app.status, before,
             "pressing the `Tables` heading did something"
+        );
+
+        // The status line is a weak witness: a press that lands on a real
+        // control which then declines to act leaves it unchanged too, so this
+        // test passed with a heading that recorded `TreeNode` under itself
+        // exactly like the rows beneath it. The claim is that the heading *is
+        // not a control*, and that is a claim about the picture -- so it is
+        // made of the picture: nothing is recorded under the words.
+        let at = point(&app, FULL, "Tables");
+        let frame = app.frame(FULL.0, FULL.1);
+        assert_eq!(
+            frame.hit_test(at.0, at.1),
+            None,
+            "the `Tables` heading records a control under its own words"
         );
     }
 
@@ -8255,14 +8339,28 @@ mod tests {
             "recall fetched the wrong query"
         );
 
+        // And the *other* row. Pressing entry 0 alone is the one press a pass
+        // that recorded `HistoryEntry(0)` under every row would also answer
+        // correctly, so on its own it says nothing about which row is which.
+        app.sql_input.clear();
+        click_target(&mut app, FULL, Target::HistoryEntry(1));
+        assert_eq!(
+            app.sql_input, "SELECT * FROM orders",
+            "the second history row recalled something else"
+        );
+
         assert!(app.history.first().is_some_and(|e| !e.favorite));
+        // Whatever the editor happens to hold, the star must leave it alone.
+        // Stated as "unchanged" rather than against a literal, so the check
+        // cannot quietly turn into a check on which row was recalled last.
+        let before = app.sql_input.clone();
         click_target(&mut app, FULL, Target::FavoriteEntry(0));
         assert!(
             app.history.first().is_some_and(|e| e.favorite),
             "the star did not star"
         );
         assert_eq!(
-            app.sql_input, "SELECT * FROM products",
+            app.sql_input, before,
             "the star also recalled the query, so the row swallowed its own star"
         );
     }
@@ -8633,19 +8731,99 @@ mod tests {
 
     /// One drawing pass: the app it belongs to, the frame it writes into, and
     /// the box it is told to stay inside.
-    type Pass = fn(&DbViewerApp, &mut Frame<Target>, Rect);
+    ///
+    /// A boxed closure rather than a bare `fn` pointer, so that a pass taking
+    /// arguments this signature cannot express -- `draw_object_tree` and
+    /// `draw_filter_builder` are each handed the `DbTab` they draw -- can still
+    /// be listed here and fenced against the box it is actually given.
+    type Pass = Box<dyn Fn(&DbViewerApp, &mut Frame<Target>, Rect)>;
 
+    /// Every pass that is handed a box, including the ones whose box is a
+    /// *part* of their caller's.
+    ///
+    /// The distinction is the whole point. `draw_sidebar` splits its box into a
+    /// tree section and a filter-builder section; holding only `draw_sidebar`
+    /// to the sidebar leaves a tree row that overruns the tree section painting
+    /// on top of the builder, which is still inside the sidebar and so still
+    /// looks correct from out here. A pass held only to its caller's box is not
+    /// held to its own, and the sub-pass is where the guard being tested lives.
     fn passes() -> Vec<(&'static str, Pass)> {
         vec![
-            ("toolbar", DbViewerApp::draw_toolbar),
-            ("database tabs", DbViewerApp::draw_db_tabs),
-            ("sidebar", DbViewerApp::draw_sidebar),
-            ("sql editor", DbViewerApp::draw_sql_editor),
-            ("results", DbViewerApp::draw_results),
-            ("schema", DbViewerApp::draw_schema),
-            ("diagram", DbViewerApp::draw_diagram),
-            ("status bar", DbViewerApp::draw_status_bar),
+            ("toolbar", Box::new(DbViewerApp::draw_toolbar)),
+            ("database tabs", Box::new(DbViewerApp::draw_db_tabs)),
+            ("sidebar", Box::new(DbViewerApp::draw_sidebar)),
+            (
+                "object tree",
+                Box::new(|app: &DbViewerApp, f: &mut Frame<Target>, area: Rect| {
+                    if let Some(tab) = app.active_db_tab() {
+                        app.draw_object_tree(f, area, tab);
+                    }
+                }),
+            ),
+            (
+                "filter builder",
+                Box::new(|app: &DbViewerApp, f: &mut Frame<Target>, area: Rect| {
+                    if let Some(tab) = app.active_db_tab() {
+                        app.draw_filter_builder(f, area, tab);
+                    }
+                }),
+            ),
+            ("sql editor", Box::new(DbViewerApp::draw_sql_editor)),
+            ("results", Box::new(DbViewerApp::draw_results)),
+            ("schema", Box::new(DbViewerApp::draw_schema)),
+            ("diagram", Box::new(DbViewerApp::draw_diagram)),
+            ("status bar", Box::new(DbViewerApp::draw_status_bar)),
         ]
+    }
+
+    #[test]
+    fn a_run_the_clip_cannot_show_is_not_put_in_the_picture() {
+        // `put_text` is the funnel every run in this program goes through, and
+        // this is the one caller that asks it for the impossible on purpose.
+        //
+        // The three geometry sweeps cannot own the check: now that every pass
+        // guards its own bottom edge, no caller in any state they cover ever
+        // asks for text outside the clip in force, so deleting the check
+        // changes no picture they draw. It is kept anyway -- it guards the
+        // passes that do not exist yet, and `Frame::hit` already applies
+        // exactly this rule to hit boxes, so dropping it would leave ink and
+        // hit boxes governed by two rules that can drift apart. Since no sweep
+        // can witness it, it is pinned here instead.
+        let mut f: Frame<Target> = Frame::new(400.0, 400.0);
+        f.clip(Rect::new(0.0, 0.0, 400.0, 100.0));
+        put_text(
+            &mut f,
+            Rect::new(10.0, 300.0, 200.0, 20.0),
+            "three hundred points below the panel",
+            13.0,
+            TEXT,
+            FontWeightHint::Regular,
+        );
+        f.unclip();
+        assert!(
+            text_runs(&f).is_empty(),
+            "a run the clip cannot show was put in the picture: {:?}",
+            text_runs(&f)
+        );
+
+        // The same call inside the clip is emitted, so the claim above is not
+        // passing because `put_text` refuses everything.
+        let mut f: Frame<Target> = Frame::new(400.0, 400.0);
+        f.clip(Rect::new(0.0, 0.0, 400.0, 100.0));
+        put_text(
+            &mut f,
+            Rect::new(10.0, 30.0, 200.0, 20.0),
+            "inside the panel",
+            13.0,
+            TEXT,
+            FontWeightHint::Regular,
+        );
+        f.unclip();
+        assert_eq!(
+            text_runs(&f).len(),
+            1,
+            "a run the clip can show was refused"
+        );
     }
 
     #[test]
@@ -8657,6 +8835,16 @@ mod tests {
         // witness left. (known-issues.md, Lesson 107.)
         for (state, app) in states() {
             for (name, pass) in passes() {
+                // The heights are not all round on purpose. A pass that walks
+                // rows of a fixed stride and stops at `row.y > area.bottom()`
+                // instead of `row.bottom() > area.bottom()` overruns only by
+                // the *remainder* -- so a box whose height happens to be a
+                // whole number of rows never catches it, and 200, 120, 90 and
+                // 400 are all close enough to a multiple of `TREE_ROW_HEIGHT`
+                // (22) or `ROW_HEIGHT` (26) that the last row lands nearly
+                // flush. The odd heights below leave a partial row at the
+                // bottom of every stride this file uses, which is the state
+                // the guard exists for.
                 for (w, h) in [
                     (300.0, 200.0),
                     (220.0, 120.0),
@@ -8664,6 +8852,10 @@ mod tests {
                     (200.0, 400.0),
                     (120.0, 40.0),
                     (60.0, 18.0),
+                    (300.0, 173.0),
+                    (300.0, 251.0),
+                    (240.0, 137.0),
+                    (240.0, 209.0),
                 ] {
                     // The frame is bigger than the box on every side, so an
                     // overrun has somewhere to go and is not quietly clamped.
@@ -8689,6 +8881,42 @@ mod tests {
                             bounded_by(area, filled),
                             "{state}: the {name} pass, given {area:?}, filled \
                              {filled:?}"
+                        );
+                    }
+
+                    // Runs and hit boxes are asked about too, and the reason
+                    // they are a *supplement* to the fills rather than a
+                    // replacement is worth stating. A fill is a complete
+                    // witness: it is pushed exactly as asked whatever clip is
+                    // in force, so its absence out here really does mean the
+                    // pass stayed inside. A run and a hit box are one-way
+                    // witnesses -- `put_text` refuses a run the clip cannot
+                    // show and `Frame::hit` drops a box with nothing visible,
+                    // so finding one outside `area` proves an overrun while
+                    // finding none proves nothing at all.
+                    //
+                    // Which is exactly why they are needed. A tree row fills
+                    // only when it is the selected table; every other row is
+                    // two runs and a hit box, so a tree walking past its own
+                    // bottom edge pushes no fill to catch it with. This test
+                    // gives each pass an unclipped frame, so out here the
+                    // one-way witnesses are not being suppressed by anything
+                    // and can say what the fills cannot.
+                    for (text, x, y, size, max_width) in text_runs(&f) {
+                        // The run's box as `put_text` was told it: the bound it
+                        // was given wide, and one line of its own size tall.
+                        let run = Rect::new(x, y, max_width.unwrap_or(0.0), size);
+                        assert!(
+                            bounded_by(area, run),
+                            "{state}: the {name} pass, given {area:?}, inked \
+                             {text:?} at {run:?}"
+                        );
+                    }
+                    for (target, rect) in f.hits() {
+                        assert!(
+                            bounded_by(area, *rect),
+                            "{state}: the {name} pass, given {area:?}, recorded \
+                             {target:?} at {rect:?}"
                         );
                     }
                 }

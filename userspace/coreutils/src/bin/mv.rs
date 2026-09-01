@@ -141,7 +141,7 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
-use coreutils::getopt::{self, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
@@ -334,143 +334,68 @@ use one of these commands:
 
 // ---------------------------------------------------------------- parsing ---
 
+/// GNU `mv`'s short options, in the string it hands `getopt_long`
+/// (`mv.c:339`), colons included.
+///
+/// The colons are the part that matters here. `t:` is what makes `-t dir`
+/// consume the following word, and it has to be declared even while `-t` is
+/// refused: a parser that does not know `-t` takes a value treats `dir` as an
+/// operand, so `mv -t dir file` would refuse the option *and* — had the refusal
+/// been a warning rather than an error — have moved `file` onto `dir` as a
+/// plain two-operand rename. Declaring the shape and refusing the option are
+/// separate questions, and only the second is about what is implemented.
+const SHORT_OPTIONS: &str = "bfint:uvS:TZ";
+
 /// Parse `mv`'s argv into its operands.
 ///
 /// Options and operands may be interleaved — `mv a -f b` is `mv a b` — which is
-/// `getopt_long`'s default permuting behaviour and what the previous
-/// hand-written parser did too.
+/// `getopt_long`'s default permuting behaviour and what [`getopt::Parser`] does.
+///
+/// This walks the shared parser rather than the hand-written scanner that used
+/// to be here. The scanner could not express an option that takes a value at
+/// all: it split every non-`--` word into bytes and looked each up, so `-t` had
+/// no way to reach for the word after it. That was invisible while `-t` was
+/// refused and would have been a wrong answer the moment it was not.
 ///
 /// # Errors
 ///
-/// An unknown option, a recognised option this implementation does not have, or
-/// a long option given a value it does not take.
+/// An unknown option, a recognised option this implementation does not have, a
+/// long option given a value it does not take, or one denied a value it needs.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
     let mut flags = MvFlags::default();
     let mut paths: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
 
-    for arg in args {
-        if only_operands {
-            paths.push(arg.clone());
-            continue;
-        }
-        let bytes = arg_bytes(arg);
-
-        if bytes == b"--" {
-            only_operands = true;
-        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is a file called `-`. `mv` has no standard-input
-            // operand for it to mean anything else.
-            paths.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(&mut flags, body, &bytes)? {
-                Some(request) => return Ok(request),
-                None => continue,
+    for item in MV.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // A lone `-` arrives here, not as an option: `mv` has no
+            // standard-input operand for it to mean anything else.
+            Opt::Operand(name) => paths.push(name.clone()),
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // One field, three spellings, last one wins — including inside a
+            // single cluster, since the parser hands a bundle over one byte at a
+            // time. `mv -if` does not ask; `mv -fi` does. Assignment and not
+            // `|=` for the same reason: `mv --force --interactive` asks.
+            Opt::Short(b'f', _) | Opt::Long("force", _) => {
+                flags.interactive = Interactive::AlwaysYes;
             }
-        } else {
-            // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating
-            // `char`s would answer `invalid option -- 'é'` — an option nobody
-            // typed, and one that cannot be typed, since options are single
-            // bytes. It also would not survive an argument that is not UTF-8 at
-            // all, which is the whole point of this rewrite.
-            for &b in bytes.get(1..).unwrap_or_default() {
-                apply_short(&mut flags, b)?;
+            Opt::Short(b'i', _) | Opt::Long("interactive", _) => {
+                flags.interactive = Interactive::AskUser;
             }
+            Opt::Short(b'n', _) | Opt::Long("no-clobber", _) => {
+                flags.interactive = Interactive::AlwaysNo;
+            }
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            // GNU `mv`'s remaining options, refused by name. Reaching them
+            // means the parser recognised the option and, for `-t` and `-S`,
+            // has already taken its value out of argv — which is what keeps the
+            // *rest* of the line reading the way GNU reads it.
+            Opt::Short(flag, _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name, _) => return Err(unimplemented_long(name)),
         }
     }
 
     Ok(Request::Run(flags, paths))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately, and
-/// `None` for one that does not.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, a value given to an
-/// option that takes none, or an option this implementation lacks.
-fn parse_long(
-    flags: &mut MvFlags,
-    body: &[u8],
-    whole: &[u8],
-) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| MV.unrecognized_option(whole))?;
-    let (name, takes) = MV.resolve_long(typed, whole, LONG_OPTIONS)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(MV.long_unwanted_argument(name));
-    }
-
-    match name {
-        "help" => Ok(Some(Request::Help)),
-        "version" => Ok(Some(Request::Version)),
-        // Assignment and not `|=`: the three write one field, so the last one
-        // typed is the one in effect. `mv --force --interactive` asks.
-        "force" => {
-            flags.interactive = Interactive::AlwaysYes;
-            Ok(None)
-        }
-        "interactive" => {
-            flags.interactive = Interactive::AskUser;
-            Ok(None)
-        }
-        "no-clobber" => {
-            flags.interactive = Interactive::AlwaysNo;
-            Ok(None)
-        }
-        "verbose" => {
-            flags.verbose = true;
-            Ok(None)
-        }
-        other => Err(unimplemented_long(other)),
-    }
-}
-
-/// Handle one short option byte.
-///
-/// # Errors
-///
-/// A byte that is no option of `mv`'s, or one this implementation lacks.
-fn apply_short(flags: &mut MvFlags, flag: u8) -> Result<(), getopt::Error> {
-    match flag {
-        // One field, three spellings, last one wins — including inside a single
-        // cluster, since `getopt` hands them over one byte at a time. `mv -if`
-        // does not ask; `mv -fi` does.
-        b'f' => {
-            flags.interactive = Interactive::AlwaysYes;
-            Ok(())
-        }
-        b'i' => {
-            flags.interactive = Interactive::AskUser;
-            Ok(())
-        }
-        b'n' => {
-            flags.interactive = Interactive::AlwaysNo;
-            Ok(())
-        }
-        b'v' => {
-            flags.verbose = true;
-            Ok(())
-        }
-        // GNU `mv`'s remaining short options.
-        b'b' | b't' | b'T' | b'u' | b'S' | b'Z' => Err(unimplemented_short(flag)),
-        other => Err(MV.invalid_option(other)),
-    }
 }
 
 /// The diagnostic for an option that GNU `mv` has and this one does not.
@@ -487,17 +412,6 @@ fn unimplemented_short(flag: u8) -> getopt::Error {
 
 fn unimplemented_long(name: &str) -> getopt::Error {
     MV.usage_referring(format!("option '--{name}' is not implemented by this mv"))
-}
-
-#[cfg(unix)]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    a.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    a.to_string_lossy().into_owned().into_bytes()
 }
 
 // ----------------------------------------------------------------- moving ---
@@ -1637,6 +1551,33 @@ mod tests {
                 e.sentence
             );
         }
+    }
+
+    /// An option that takes a value takes it even while the option is refused.
+    ///
+    /// This is the half of [`SHORT_OPTIONS`] that is not about which options
+    /// exist. If `t:`'s colon were missing, `-t` would be refused with `dir`
+    /// left behind as an operand — and `mv -t dir a b` would then be a
+    /// four-operand command in every later reading of the line. Nothing user
+    /// visible depends on it while the refusal is fatal, which is exactly why
+    /// it is pinned now rather than after it starts mattering.
+    #[test]
+    fn a_refused_option_still_consumes_its_value() {
+        for form in [
+            &["-t", "dir", "a"][..],
+            &["-tdir", "a"][..],
+            &["--target-directory=dir", "a"][..],
+            &["--target-directory", "dir", "a"][..],
+            &["-S", ".bak", "a", "b"][..],
+        ] {
+            let e = fail(form);
+            assert!(e.sentence.contains("not implemented"), "{form:?}: {e:?}");
+        }
+        // And a value that is *absent* is the parser's error, not the
+        // refusal's — GNU reports the same, because `getopt` never reaches the
+        // switch arm.
+        let e = fail(&["-t"]);
+        assert!(e.sentence.contains("requires an argument"), "{e:?}");
     }
 
     #[test]

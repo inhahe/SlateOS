@@ -2940,17 +2940,31 @@ pub(crate) fn resolve_dirfd_path(
 // that never came into it.  It also breaks with no attacker at all: rename the
 // directory and the descriptor names a path that no longer exists.
 //
-// `SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663) and
-// `SYS_FS_FCHMODAT_PINNED` (665) resolve the handle instead.  Where the
+// `SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663),
+// `SYS_FS_FCHMODAT_PINNED` (665), `SYS_FS_MKDIRAT_PINNED` (666),
+// `SYS_FS_SYMLINKAT_PINNED` (667), `SYS_FS_LINKAT_PINNED` (668) and
+// `SYS_FS_UTIMENSAT_PINNED` (669) resolve the handle instead.  Where the
 // arguments fit their shape — a real directory fd and a single-component name —
 // they are used, and the join is not reached at all.  Everything else still
 // goes through `resolve_dirfd_path`, because a multi-component name is a walk
 // and the calls deliberately refuse to walk.
 //
-// The three are not equally urgent.  A pinned `fstatat` fooled by a swapped
-// directory reports the wrong size; a pinned `fchmodat` fooled by one puts a
-// mode — possibly setuid — on a file the caller never named.  That is why 665
-// was lane A's next delivery after `unlink` and not, say, `mkdirat`.
+// They are not equally urgent, and the order they landed in follows that.  A
+// pinned `fstatat` fooled by a swapped directory reports the wrong size; a
+// pinned `fchmodat` fooled by one puts a mode — possibly setuid — on a file the
+// caller never named.  That is why 665 was lane A's next delivery after
+// `unlink` and not, say, `mkdirat`.
+//
+// 666–669 are the *destination* side of a recursive copy, and the race there is
+// a different one again.  A `cp -r` creates objects, so redirecting its
+// destination directory partway through the walk is a write primitive rather
+// than a disclosure: every remaining entry in the tree is created somewhere the
+// caller never named.  With those four wired, the destination side is closed.
+// The **source** side is not: the walk still re-derives each source directory by
+// name, because `SYS_FS_GETDENTS_PINNED` (664) has no caller yet.  That is a
+// read-side race — you read the wrong file — rather than a write-side one, which
+// is why it is the remaining half rather than the urgent one.  Tracked in
+// known-issues.md.
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
@@ -3029,6 +3043,28 @@ static PINNED_FSTATAT_ANSWERED: core::sync::atomic::AtomicBool =
 
 /// The same question for syscall 665.
 static PINNED_FCHMODAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 666.
+static PINNED_MKDIRAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 667.
+static PINNED_SYMLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 668.
+static PINNED_LINKAT_ANSWERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The same question for syscall 669.
+///
+/// Gated where the other three are not, because [`utimensat`]'s whole syscall
+/// half already is: the timestamps it forwards come from `wall_clock_ns` and
+/// `utimens_pair_to_kernel`, which exist only on the target and under `test`.
+/// The `test` arm is what keeps the gate below testable on the host.
+#[cfg(any(target_os = "none", test))]
+static PINNED_UTIMENSAT_ANSWERED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
 /// Turn a raw pinned-syscall return into either a final answer or a fallback.
@@ -3257,6 +3293,199 @@ unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i
         pinned_flags,
     );
     pinned_answer(ret, &PINNED_FCHMODAT_ANSWERED)
+}
+
+/// Create a directory `path` under `dirfd` through syscall 666, if that is
+/// possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// `mode` goes through [`apply_umask`], exactly as [`mkdir`] does on the path
+/// route, because the umask lives in this layer and the kernel applies none of
+/// its own. Getting that wrong on one route only would make a process's umask
+/// depend on whether its `dirfd` happened to be pinnable, which no caller could
+/// predict and no test would reliably catch.
+///
+/// 666 masks to **nine** bits where 665 masks to twelve, and the difference is
+/// not an inconsistency to paper over: a directory that is setgid or sticky
+/// from the instant it exists is a policy decision, and `apply_umask` already
+/// narrows to `0o777`, so the two agree here without a second mask.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string.
+unsafe fn try_pinned_mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(path) }?;
+    let base = pinned_base(dirfd)?;
+
+    let ret = syscall5(
+        SYS_FS_MKDIRAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        u64::from(apply_umask(mode)),
+        // `mkdirat(2)` has no flags, and 666 rejects any non-zero word.
+        0,
+    );
+    pinned_answer(ret, &PINNED_MKDIRAT_ANSWERED)
+}
+
+/// Create a symlink named `linkpath` under `newdirfd`, containing `target`,
+/// through syscall 667, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// The two strings are checked by completely different rules, which is the
+/// call's whole shape rather than an accident. The **link name** must be one
+/// component, because the pin's containment is a statement about the name being
+/// created. The **target** is stored verbatim and constrained only in length:
+/// `..`, `/`, absolute and dangling are all legal symlink bodies, they are
+/// resolved only when something later walks the link — under the ordinary
+/// traversal checks, which the pin does not replace — and refusing them would
+/// leave this unable to reproduce the relative links a recursive copy exists to
+/// copy.
+///
+/// An **empty** target declines the fast path rather than being forwarded. 667
+/// rejects a zero-length target as `EINVAL` while the path-based
+/// [`SYS_FS_SYMLINK`] stores it, so forwarding would make an empty target's
+/// fate depend on whether the `dirfd` was pinnable. Falling back keeps the two
+/// routes in agreement and leaves the question of whether an empty body is
+/// legal where it already is.
+///
+/// # Safety
+///
+/// `target` and `linkpath` must each be null or a valid C string.
+unsafe fn try_pinned_symlinkat(
+    target: *const u8,
+    newdirfd: i32,
+    linkpath: *const u8,
+) -> Option<i32> {
+    if target.is_null() {
+        return None;
+    }
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(linkpath) }?;
+    let base = pinned_base(newdirfd)?;
+    // SAFETY: the caller guarantees `target` is a valid C string, checked
+    // non-null above.
+    let target_len = unsafe { crate::string::strlen(target) };
+    if target_len == 0 || target_len > crate::unistd::PATH_MAX {
+        return None;
+    }
+
+    let ret = syscall5(
+        SYS_FS_SYMLINKAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        target as u64,
+        target_len as u64,
+    );
+    pinned_answer(ret, &PINNED_SYMLINKAT_ANSWERED)
+}
+
+/// Hard-link `oldpath` under `olddirfd` to `newpath` under `newdirfd` through
+/// syscall 668, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// Both ends must be pinnable — two real directory handles and two
+/// single-component names — because the call resolves both handles. A caller
+/// linking from an absolute path into a `dirfd`, or vice versa, gets the path
+/// route for both halves; there is no half-pinned form, and inventing one would
+/// mean a guarantee that held for the destination and not the source without
+/// anything in the signature saying so.
+///
+/// **The caller must have already refused `AT_SYMLINK_FOLLOW`.** 668 has no
+/// register left for flags and is always the unfollowed form; following is by
+/// definition leaving the pinned directory, so a followed link belongs on the
+/// path route where the pin was buying nothing anyway. [`linkat`] checks the
+/// flag before calling this, which is where the decision is visible next to the
+/// flag's own validation.
+///
+/// # Safety
+///
+/// `oldpath` and `newpath` must each be null or a valid C string.
+unsafe fn try_pinned_linkat(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let old_name = unsafe { pinnable_name(oldpath) }?;
+    // SAFETY: as above.
+    let new_name = unsafe { pinnable_name(newpath) }?;
+    let old_base = pinned_base(olddirfd)?;
+    let new_base = pinned_base(newdirfd)?;
+
+    let ret = syscall6(
+        SYS_FS_LINKAT_PINNED,
+        old_base,
+        old_name.as_ptr() as u64,
+        old_name.len() as u64,
+        new_base,
+        new_name.as_ptr() as u64,
+        new_name.len() as u64,
+    );
+    pinned_answer(ret, &PINNED_LINKAT_ANSWERED)
+}
+
+/// Stamp `path` under `dirfd` with `(accessed_ns, modified_ns)` through syscall
+/// 669, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// The two nanosecond values are already in the kernel's zero-means-unchanged
+/// form — [`utimens_pair_to_kernel`] has expanded `UTIME_NOW` into a real
+/// timestamp and `UTIME_OMIT` into zero — so this takes them as-is and does not
+/// re-derive them. 669 and the path-based `SYS_FS_SET_TIMES` share that
+/// convention precisely so one expansion serves both.
+///
+/// This is the busiest member of the family. `fchmodat` and `mkdirat` run once
+/// per directory; restoring mtime is the last thing done to *every* file a
+/// `cp -p` or an archive extraction touches, so it is the one whose fallback
+/// cost would be paid per entry.
+///
+/// # Safety
+///
+/// `path` must be null or a valid C string.
+#[cfg(any(target_os = "none", test))]
+unsafe fn try_pinned_utimensat(
+    dirfd: i32,
+    path: *const u8,
+    accessed_ns: u64,
+    modified_ns: u64,
+    no_follow: bool,
+) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let name = unsafe { pinnable_name(path) }?;
+    let base = pinned_base(dirfd)?;
+
+    let pinned_flags = if no_follow {
+        AT_SYMLINK_NOFOLLOW_PINNED
+    } else {
+        0
+    };
+    let ret = syscall6(
+        SYS_FS_UTIMENSAT_PINNED,
+        base,
+        name.as_ptr() as u64,
+        name.len() as u64,
+        accessed_ns,
+        modified_ns,
+        pinned_flags,
+    );
+    pinned_answer(ret, &PINNED_UTIMENSAT_ANSWERED)
 }
 
 /// AT_FDCWD: use the current working directory.
@@ -3516,6 +3745,16 @@ pub extern "C" fn renameat2(
 /// Create a directory relative to a directory fd.
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
+///
+/// For the common shape — a real directory fd and a single-component name —
+/// this goes through [`try_pinned_mkdirat`], which has the kernel resolve the
+/// descriptor rather than the remembered path. See "The pinned `*at` fast path"
+/// above. The pin buys two things here that it does not buy elsewhere in the
+/// family: a directory cannot be created somewhere the caller never named, and
+/// the requested mode is stamped under the same filesystem lock that made the
+/// directory — so a `0o700` directory is never briefly world-*openable* while a
+/// separate chmod is still on its way, which is the window the path route
+/// leaves open on every private directory anything creates.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
     if reject_empty_path(path) {
@@ -3523,6 +3762,11 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
     }
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return mkdir(path, mode);
+    }
+    // SAFETY: `path` is this function's own `*const u8` contract — null or a
+    // valid C string — which is what `try_pinned_mkdirat` requires.
+    if let Some(ret) = unsafe { try_pinned_mkdirat(dirfd, path, mode) } {
+        return ret;
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
@@ -3567,6 +3811,12 @@ pub extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: 
 /// POSIX: if `linkpath` is absolute, `newdirfd` is ignored.
 /// Note: `target` is stored as-is (not resolved), so its absoluteness
 /// doesn't affect whether we need `newdirfd`.
+///
+/// For the common shape — a real directory fd and a single-component link name
+/// — this goes through [`try_pinned_symlinkat`]. Note that only the *link name*
+/// has to be pinnable: the target is unconstrained on both routes, which is the
+/// point, since the links a recursive copy reproduces are overwhelmingly
+/// relative ones like `../lib/libfoo.so`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u8) -> i32 {
     // Only `linkpath` is a path to resolve; `target` is stored verbatim, and an
@@ -3576,6 +3826,12 @@ pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u
     }
     if newdirfd == AT_FDCWD || is_absolute_path(linkpath) {
         return symlink(target, linkpath);
+    }
+    // SAFETY: `target` and `linkpath` are this function's own `*const u8`
+    // contract — null or valid C strings — which is what
+    // `try_pinned_symlinkat` requires.
+    if let Some(ret) = unsafe { try_pinned_symlinkat(target, newdirfd, linkpath) } {
+        return ret;
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(newdirfd, linkpath, &mut full);
@@ -3588,6 +3844,18 @@ pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u
 /// Create a hard link relative to directory fds.
 ///
 /// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
+///
+/// When *both* ends are the common shape — a real directory fd and a
+/// single-component name — and `AT_SYMLINK_FOLLOW` is absent, this goes through
+/// [`try_pinned_linkat`]. There is no half-pinned form: 668 resolves both
+/// handles, and a guarantee that held for the destination but not the source
+/// would be one nothing in the signature announced.
+///
+/// A cross-mount link comes back as `EINVAL` on both routes rather than the
+/// `EXDEV` POSIX describes. That is the path-based `link`'s long-standing
+/// answer here and the pinned route deliberately agrees with it; one operation
+/// with two error contracts depending on which route ran would be the worse
+/// bug.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn linkat(
     olddirfd: i32,
@@ -3611,6 +3879,20 @@ pub extern "C" fn linkat(
     // the flag needs no separate branch.
     if reject_empty_path(oldpath) || reject_empty_path(newpath) {
         return -1;
+    }
+    // The pinned route is the unfollowed form only, and both ends must be
+    // pinnable. `AT_SYMLINK_FOLLOW` is checked *here* rather than inside
+    // `try_pinned_linkat` so the reason sits next to the flag's own validation:
+    // following a trailing symlink is by definition leaving the pinned
+    // directory, so the flag asks 668 to stop providing the guarantee it exists
+    // for, and the honest place to serve it is the path route.
+    if flags & AT_SYMLINK_FOLLOW == 0 {
+        // SAFETY: `oldpath` and `newpath` are this function's own `*const u8`
+        // contract — null or valid C strings — which is what
+        // `try_pinned_linkat` requires.
+        if let Some(ret) = unsafe { try_pinned_linkat(olddirfd, oldpath, newdirfd, newpath) } {
+            return ret;
+        }
     }
     let old_needs_resolve = olddirfd != AT_FDCWD && !is_absolute_path(oldpath);
     let new_needs_resolve = newdirfd != AT_FDCWD && !is_absolute_path(newpath);
@@ -5657,6 +5939,12 @@ pub extern "C" fn utimensat(
         if dirfd == AT_FDCWD || is_absolute_path(path) {
             set_times_path_ex(path, a_ns, m_ns, no_follow)
         } else {
+            // SAFETY: `path` is this function's own `*const u8` contract —
+            // checked non-null above — which is what `try_pinned_utimensat`
+            // requires.
+            if let Some(ret) = unsafe { try_pinned_utimensat(dirfd, path, a_ns, m_ns, no_follow) } {
+                return ret;
+            }
             let mut full = [0u8; crate::unistd::PATH_MAX];
             let len = resolve_dirfd_path(dirfd, path, &mut full);
             if len == 0 {
@@ -14396,7 +14684,9 @@ mod tests {
     mod pinned_at {
         use super::super::{
             AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, Stat, fstatat, is_pinnable_component, pinned_answer,
-            pinned_base, try_pinned_fchmodat, try_pinned_fstatat, try_pinned_unlinkat, unlinkat,
+            pinned_base, try_pinned_fchmodat, try_pinned_fstatat, try_pinned_linkat,
+            try_pinned_mkdirat, try_pinned_symlinkat, try_pinned_unlinkat, try_pinned_utimensat,
+            unlinkat,
         };
         use crate::fdtable::{self, HandleKind};
 
@@ -14679,6 +14969,193 @@ mod tests {
             // Success is passed through unchanged, not folded to 0 by
             // `translate` — 664 will want a byte count here.
             assert_eq!(pinned_answer(7, &latch), Some(7));
+        }
+
+        /// `mkdirat`'s gate, which is the plainest of the family: one name, and
+        /// a flags word that is always zero.
+        #[test]
+        fn every_pinned_mkdirat_attempt_declines_on_the_host() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+
+            // SAFETY: all the names are valid C strings.
+            unsafe {
+                assert_eq!(try_pinned_mkdirat(dir_fd, b"d\0".as_ptr(), 0o755), None);
+                assert_eq!(try_pinned_mkdirat(dir_fd, b"a/b\0".as_ptr(), 0o755), None);
+                assert_eq!(try_pinned_mkdirat(dir_fd, b"..\0".as_ptr(), 0o755), None);
+                assert_eq!(try_pinned_mkdirat(dir_fd, core::ptr::null(), 0o755), None);
+                assert_eq!(try_pinned_mkdirat(4242, b"d\0".as_ptr(), 0o755), None);
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
+        }
+
+        /// The asymmetry that is the whole shape of 667: the **link name** must
+        /// be one component, the **target** must not be constrained.
+        ///
+        /// Worth a test precisely because it reads like an oversight. A target
+        /// forced to be a single component could not express `../lib/libfoo.so`
+        /// — which is most of the symlinks in any real tree, and the reason a
+        /// recursive copy wanted the call. The pin is a claim about where the
+        /// new *entry* lands, not about what text it holds.
+        #[test]
+        fn a_symlink_target_is_never_the_thing_that_declines_the_fast_path() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+
+            // SAFETY: all the strings are valid C strings.
+            unsafe {
+                // Every one of these targets is legal, so each attempt reaches
+                // the syscall and declines only because the host has none.
+                for target in [
+                    &b"t\0"[..],
+                    b"../lib/libfoo.so\0",
+                    b"/absolute/elsewhere\0",
+                    b"..\0",
+                    b"does/not/exist\0",
+                    b"\xff\xfe\0", // a target is bytes, not UTF-8
+                ] {
+                    assert_eq!(
+                        try_pinned_symlinkat(target.as_ptr(), dir_fd, b"l\0".as_ptr()),
+                        None,
+                        "{target:?}"
+                    );
+                }
+
+                // The link name, by contrast, declines on exactly the shapes
+                // the rest of the family declines on.
+                for link in [&b"a/b\0"[..], b".\0", b"..\0"] {
+                    assert_eq!(
+                        try_pinned_symlinkat(b"t\0".as_ptr(), dir_fd, link.as_ptr()),
+                        None,
+                        "{link:?}"
+                    );
+                }
+                assert_eq!(
+                    try_pinned_symlinkat(b"t\0".as_ptr(), dir_fd, core::ptr::null()),
+                    None
+                );
+
+                // An **empty** target declines rather than being forwarded:
+                // 667 calls it EINVAL and the path-based route stores it, so
+                // forwarding would let the pinnability of the `dirfd` decide
+                // what an empty body means.
+                assert_eq!(
+                    try_pinned_symlinkat(b"\0".as_ptr(), dir_fd, b"l\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_symlinkat(core::ptr::null(), dir_fd, b"l\0".as_ptr()),
+                    None
+                );
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
+        }
+
+        /// 668 resolves *both* handles, so both ends must be pinnable — there
+        /// is no half-pinned form.
+        ///
+        /// The asymmetric cases are the point of the test. A version that
+        /// checked only the source would issue the call with a destination
+        /// handle it had never validated, and the guarantee it advertises would
+        /// hold for the half nobody was worried about.
+        #[test]
+        fn a_pinned_link_needs_both_ends_and_declines_when_either_is_wrong() {
+            let a = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+            let b = fdtable::alloc_fd(HandleKind::File, 0x5678).expect("fd table full");
+            let pipe = fdtable::alloc_fd(HandleKind::Pipe, 0x9abc).expect("fd table full");
+
+            // SAFETY: all the names are valid C strings.
+            unsafe {
+                // Both ends well-formed: declines only for want of a kernel.
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), b, b"g\0".as_ptr()),
+                    None
+                );
+                // The same handle on both sides is legal — a link within one
+                // directory is the ordinary case.
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), a, b"g\0".as_ptr()),
+                    None
+                );
+                // A bad name on either side, and a bad fd on either side.
+                assert_eq!(
+                    try_pinned_linkat(a, b"x/f\0".as_ptr(), b, b"g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), b, b"x/g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), b, b"..\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(pipe, b"f\0".as_ptr(), b, b"g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), pipe, b"g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), 4242, b"g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, core::ptr::null(), b, b"g\0".as_ptr()),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_linkat(a, b"f\0".as_ptr(), b, core::ptr::null()),
+                    None
+                );
+            }
+
+            assert!(fdtable::close_fd(pipe).is_some());
+            assert!(fdtable::close_fd(b).is_some());
+            assert!(fdtable::close_fd(a).is_some());
+        }
+
+        /// `utimensat`'s gate. The timestamps are already in the kernel's
+        /// zero-means-unchanged form by this point, so no value of them can
+        /// decline the fast path — including a zero pair, which means "change
+        /// nothing" and is a legitimate call rather than a no-op to elide.
+        #[test]
+        fn every_pinned_utimensat_attempt_declines_on_the_host() {
+            let dir_fd = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+
+            // SAFETY: all the names are valid C strings.
+            unsafe {
+                for (a_ns, m_ns) in [(0, 0), (1, 0), (0, 1), (u64::MAX, u64::MAX)] {
+                    assert_eq!(
+                        try_pinned_utimensat(dir_fd, b"f\0".as_ptr(), a_ns, m_ns, false),
+                        None
+                    );
+                    assert_eq!(
+                        try_pinned_utimensat(dir_fd, b"f\0".as_ptr(), a_ns, m_ns, true),
+                        None
+                    );
+                }
+                assert_eq!(
+                    try_pinned_utimensat(dir_fd, b"a/b\0".as_ptr(), 1, 1, false),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_utimensat(dir_fd, b"..\0".as_ptr(), 1, 1, false),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_utimensat(dir_fd, core::ptr::null(), 1, 1, false),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_utimensat(4242, b"f\0".as_ptr(), 1, 1, false),
+                    None
+                );
+            }
+
+            assert!(fdtable::close_fd(dir_fd).is_some());
         }
     }
 

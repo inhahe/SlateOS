@@ -248,6 +248,9 @@
 use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::fileid::{
+    EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
+};
 use coreutils::fsattr::{self, Link, On, Owner, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::pathname;
@@ -2984,61 +2987,6 @@ fn remove_before_writing<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O,
     true
 }
 
-/// Would copying `src` to `dst` write over `src` itself?
-///
-/// Both are *followed*, so a destination that is a symlink to the source counts
-/// — writing through it truncates the source exactly as surely as naming the
-/// source directly. The one exception is GNU's, and it is the reason `nofollow`
-/// is a parameter: when the source is *not* being followed, two names that are
-/// both symlinks are the same file only when they are the same *link*, because
-/// replacing one link with a copy of another does not touch what either points
-/// at. `cp -P linkA linkB` where both point at one file is therefore allowed,
-/// while `cp -P link file` — where `link` resolves to `file` — is not, and GNU
-/// makes exactly that distinction in `same_file_ok` (`copy.c:1764`), keyed on
-/// `x->dereference == DEREF_NEVER` and not on `-r`.
-///
-/// The caller passes `!flags.follow_operand()`, which under `-r` alone is the
-/// `-P` case — which is why this used to take `recursive` and behaved the same.
-/// It stops behaving the same the moment `-L` or `-H` is given with `-r`.
-///
-/// `false` when either side cannot be stat'd. A source that is a dangling
-/// symlink is not the same file as anything, and a destination that cannot be
-/// reached will produce its own diagnostic a moment later.
-#[cfg(unix)]
-fn is_same_file(src: &Path, dst: &Path, nofollow: bool) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    fn same(a: &fs::Metadata, b: &fs::Metadata) -> bool {
-        a.dev() == b.dev() && a.ino() == b.ino()
-    }
-    if nofollow {
-        let (sl, dl) = (fs::symlink_metadata(src), fs::symlink_metadata(dst));
-        if let (Ok(sl), Ok(dl)) = (&sl, &dl)
-            && sl.file_type().is_symlink()
-            && dl.file_type().is_symlink()
-        {
-            return same(sl, dl);
-        }
-    }
-    match (fs::metadata(src), fs::metadata(dst)) {
-        (Ok(a), Ok(b)) => same(&a, &b),
-        _ => false,
-    }
-}
-
-/// Windows exposes a file's identity only through `windows_by_handle`, which is
-/// unstable, so the development host compares resolved paths instead. That
-/// still catches a repeated operand and a `.` or `..` in the middle of one; it
-/// misses a hard link, which is why the guarantee is stated on the
-/// `#[cfg(unix)]` arm above — the arm the target OS and the certification
-/// harness both use. The unit tests that pin the refusal run on both.
-#[cfg(not(unix))]
-fn is_same_file(src: &Path, dst: &Path, _nofollow: bool) -> bool {
-    match (fs::canonicalize(src), fs::canonicalize(dst)) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
-    }
-}
-
 /// Where one source lands: GNU's `do_copy` (`cp.c:734`), whose four lines are
 /// the entire rule.
 ///
@@ -3089,138 +3037,6 @@ fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> PathBuf {
 /// makes `cp -r a .` (target `./a`) and `cp -r a a` (target `a/a`) both
 /// recognisable as the same directory reached by a different spelling, which a
 /// textual comparison would miss.
-/// What tells one file from another, for [`Seen`]'s three questions.
-///
-/// The `(device, inode)` pair, which is the only answer that survives the file
-/// being reached by a different name — and reaching it by a different name is
-/// exactly what the three questions are about.
-#[cfg(unix)]
-type FileId = (u64, u64);
-
-/// The portable stand-in: a host with no inode numbers has no cheaper answer
-/// than the resolved path. It agrees with the pair above on every question
-/// except hard links, which such a host does not have either.
-#[cfg(not(unix))]
-type FileId = PathBuf;
-
-#[cfg(unix)]
-fn file_id(_path: &Path, meta: &fs::Metadata) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt;
-    Some((meta.dev(), meta.ino()))
-}
-
-#[cfg(not(unix))]
-fn file_id(path: &Path, _meta: &fs::Metadata) -> Option<FileId> {
-    fs::canonicalize(path).ok()
-}
-
-/// What tells one *directory entry* from another: which directory it is in,
-/// and the final component of the name.
-///
-/// Distinct from [`FileId`], and both are needed. Two hard links to one file
-/// share a `FileId` and have different `EntryId`s, and `cp a hard-a d` is a
-/// request for two copies rather than a repeat — GNU's `same_nameat` draws the
-/// line in the same place. Conversely `a` and `./a` are two spellings of one
-/// entry, and `cp a ./a d` is a repeat.
-type EntryId = (FileId, OsString);
-
-/// The entry `path` names, or `None` if the directory holding it cannot be
-/// identified. `None` means "cannot answer", and every caller treats that as
-/// "not the same entry" — the same conclusion GNU reaches when its `stat` of
-/// the parent fails.
-fn entry_id(path: &Path) -> Option<EntryId> {
-    let (dir, name) = split_entry(path);
-    let meta = fs::metadata(&dir).ok()?;
-    Some((file_id(&dir, &meta)?, name))
-}
-
-/// Do two paths name the same directory entry? GNU's `same_nameat`.
-///
-/// `false` when either side cannot be identified, which is GNU's answer too —
-/// its `same_nameat` compares two `fstatat` results and reports "not the same"
-/// if either call fails. The callers all treat "cannot answer" as "assume they
-/// are different", which is the safe direction: it costs a refusal rather than
-/// a silent overwrite.
-fn same_entry(a: &Path, b: &Path) -> bool {
-    match (entry_id(a), entry_id(b)) {
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
-}
-
-/// A path's directory and final component, GNU's `dir_name`/`base_name` pair.
-///
-/// Trailing slashes belong to neither — `tree/` names the entry `tree` — and a
-/// path with no slash at all names an entry in the current directory. Done on
-/// the bytes rather than through `Path::file_name`, which answers `None` for a
-/// name ending in `.` or `..` and so would make `cp -r a/. b/.. d` look like
-/// one entry named twice.
-#[cfg(unix)]
-fn split_entry(path: &Path) -> (PathBuf, OsString) {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-
-    let bytes = path.as_os_str().as_bytes();
-    // Everything after the last byte that is not a separator is decoration.
-    let end = bytes
-        .iter()
-        .rposition(|&b| b != b'/')
-        .map_or(bytes.len(), |i| i + 1);
-    let head = bytes.get(..end).unwrap_or(bytes);
-    match head.iter().rposition(|&b| b == b'/') {
-        Some(cut) => {
-            // An empty directory half means the name was rooted: `/etc` is the
-            // entry `etc` in `/`, not in the current directory.
-            let dir = head.get(..cut).filter(|d| !d.is_empty()).unwrap_or(b"/");
-            let name = head.get(cut.saturating_add(1)..).unwrap_or_default();
-            (
-                PathBuf::from(OsStr::from_bytes(dir)),
-                OsStr::from_bytes(name).to_os_string(),
-            )
-        }
-        None => (PathBuf::from("."), OsStr::from_bytes(head).to_os_string()),
-    }
-}
-
-/// The same split for the only non-POSIX host this builds on, Windows, where
-/// it exists so that `cargo test` on the development machine exercises the
-/// same code shape rather than a weaker stand-in. `OsStr` is not bytes there,
-/// so the units are UTF-16 and both separators count.
-#[cfg(not(unix))]
-fn split_entry(path: &Path) -> (PathBuf, OsString) {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
-    // `b'/' as u16` in a pattern position is not const-evaluable, and the two
-    // code units are fixed by ASCII, so they are written out.
-    const SLASH: u16 = 0x2F;
-    const BACKSLASH: u16 = 0x5C;
-    let sep = |c: u16| c == SLASH || c == BACKSLASH;
-
-    let wide: Vec<u16> = path.as_os_str().encode_wide().collect();
-    let end = wide
-        .iter()
-        .rposition(|&c| !sep(c))
-        .map_or(wide.len(), |i| i + 1);
-    let head = wide.get(..end).unwrap_or(&wide);
-    match head.iter().rposition(|&c| sep(c)) {
-        Some(cut) => {
-            // An empty directory half means the name was rooted, and the
-            // separator itself is then the directory.
-            let dir = if cut == 0 {
-                head.get(..1)
-            } else {
-                head.get(..cut)
-            };
-            let name = head.get(cut.saturating_add(1)..).unwrap_or_default();
-            (
-                PathBuf::from(OsString::from_wide(dir.unwrap_or_default())),
-                OsString::from_wide(name),
-            )
-        }
-        None => (PathBuf::from("."), OsString::from_wide(head)),
-    }
-}
-
 fn is_inside(target: &Path, root: &Path) -> bool {
     match (
         resolve_as_far_as_exists(root),

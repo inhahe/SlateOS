@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are nineteen so far. Three are about the interface these programs share
+//! There are twenty-one so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -321,6 +321,24 @@
 //!   both chose `.~4~` would otherwise have one of them destroy the other's
 //!   backup.
 //!
+//! The twenty-first is what [`backup`] is protecting the file *from*. `-b` is
+//! the answer to "the destination already held something"; this is the answer to
+//! the question underneath it, "is the destination the source":
+//!
+//! - [`fileid`] — whether two names reach one file, and whether two names are
+//!   one directory entry. Two different questions, and both are needed: `cp` and
+//!   `mv` refuse `a d/../a` on the first and notice a repeated operand on the
+//!   second, and a hard link answers them oppositely. The reason it cannot be
+//!   done textually is the reason it belongs here at all — `a`, `./a`, `d/../a`
+//!   and a symlink to `a` are four spellings of one file, and a utility that
+//!   compares the strings finds four files and destroys one of them. `mv` had
+//!   precisely that bug, measured: `mv link file` where `link` pointed at `file`
+//!   deleted the file and left a dangling self-reference. The split into
+//!   directory-and-final-component is on the *bytes* for a reason no second copy
+//!   would rediscover: `Path::file_name` answers `None` for a name ending in `.`
+//!   or `..`, which is what makes `cp -r a/. dst` copy a directory's contents,
+//!   and what makes `mv a/.. dst` a request GNU refuses rather than performs.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -332,6 +350,7 @@ pub mod cfmt;
 pub mod digest;
 pub mod errmsg;
 pub mod extfloat;
+pub mod fileid;
 pub mod filekind;
 pub mod fnmatch;
 pub mod fsattr;

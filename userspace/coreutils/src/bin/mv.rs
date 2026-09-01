@@ -108,6 +108,18 @@
 //!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
 //!   directory had been asked to become a subdirectory of itself.
 //!
+//! An eighteenth arrived long afterwards, from a case written while measuring a
+//! different option: `mv f d/`, with `d` a regular file, said `cannot move 'f'
+//! to 'd/': Not a directory` where GNU says `cannot stat 'd/': Not a
+//! directory`. The destination's own `lstat` had its error discarded with
+//! `.ok()`, so what got printed was the errno left over from the *speculative*
+//! rename — a sentence claiming a rename was attempted and refused, when none
+//! had been attempted and the failure belonged to a lookup. It is the same
+//! structural mistake as the rest of the list, arriving through the one path
+//! nobody had aimed a case at, and it is the argument for the paragraph below:
+//! the harness finds these, reading does not. Pinned by §9's four
+//! destination-cannot-be-stat'd cases; see [`move_one`]'s destination stat.
+//!
 //! The harness is the artifact to keep, not the fix list: it is 300 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
 //! Eleven of its cases are marked as differing on purpose: four are `--help`
@@ -1060,7 +1072,30 @@ fn move_one<O: Write, E: Write>(
     // "something is in the way" case (`copy.c:2322`) — so `mv a/. d`, which
     // fails `EBUSY`, is examined as an overwrite and only *then* fails `EBUSY`
     // for real.
-    let dst_meta = fs::symlink_metadata(target).ok();
+    //
+    // A stat that fails for a reason *other* than "not there" ends the move
+    // right here, naming the destination and nothing else (`copy.c:2330`):
+    // `mv f d/`, where `d` is a regular file, says `cannot stat 'd/': Not a
+    // directory` rather than `cannot move 'f' to 'd/': Not a directory`. The
+    // difference is not cosmetic. `cannot move A to B` says a rename was tried
+    // and refused; here none was — the errno in `failure` came from the
+    // speculative rename in [`move_all`], and the thing that actually just went
+    // wrong is this stat. Discarding its error with `.ok()` reported the older,
+    // less relevant one and attributed it to an operation that never happened.
+    //
+    // Every errno but `ENOENT` lands here for this utility. Upstream lets
+    // `ELOOP` through when `unlink_dest_after_failed_open` is set, so that the
+    // destination can be unlinked later — and `mv` sets it false (`mv.c:128`),
+    // which leaves `ENOENT` as the only way past.
+    let dst_meta = match fs::symlink_metadata(target) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(job.err, "mv: cannot stat {}: {why}", quoteaf_os(target));
+            return false;
+        }
+    };
     if dst_meta.is_some() {
         failure = io::Error::from(io::ErrorKind::AlreadyExists);
     }

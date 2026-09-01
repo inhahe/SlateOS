@@ -644,6 +644,28 @@ run_case file.txt ro/dst
 TREE='mktree; chmod 0000 tree/sub'
 run_case tree moved
 
+# A destination that cannot be stat'd at all, which is a different diagnostic
+# from a destination that can be stat'd and refused. `mv` looks the destination
+# up *after* the rename has already failed, and reports what that lookup said —
+# naming the destination alone, because nothing was moved and the source is not
+# implicated. `cannot move A to B` here would be a false claim that a rename was
+# attempted, carrying an errno left over from the speculative one.
+#
+# The three ways to fail it: a trailing slash on a name that is not a directory,
+# a path *through* a regular file, and a symlink loop in the path. The loop is
+# the one upstream nearly excuses — `copy.c:2326` lets `ELOOP` past when
+# `unlink_dest_after_failed_open` is set, and `mv` sets it false (`mv.c:128`),
+# so it does not.
+run_case file.txt tree/a.txt/
+run_case file.txt file.txt/x
+TREE='mktree; ln -s loop loop'
+run_case file.txt loop/x
+# And the loop as the destination *itself* rather than a component of it, which
+# does not fail: `lstat` does not follow, so the dangling symlink is an ordinary
+# thing in the way and is replaced.
+TREE='mktree; ln -s loop loop'
+run_case file.txt loop
+
 # =============================================================================
 # 10. Names that are hard to hold
 # =============================================================================

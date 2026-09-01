@@ -57601,6 +57601,38 @@ so the register is now written explicitly at every call. That commit was
 verified present on `origin/main` before this one was written; the kernel half
 must not be merged ahead of it.
 
+### CORRECTION 2026-08-31 — "already safe" was checked one layer too high
+
+The paragraph above establishes that the *source* of the caller was fixed
+before the kernel started reading `arg4`. That is necessary. It is not
+sufficient, and the reason is a layer the paragraph never mentions: **between
+lane B's source and the instruction that actually issues the syscall sits a
+prebuilt artifact.** The boot-test fixtures do not compile `posix` — they link
+`toolchain/sysroot/lib/libc.a`, and fastpy resolves that sysroot to a *sibling*
+`os` checkout rather than to the worktree being tested
+(`fastpy/compiler/toolchain.py:160-186`). All three lanes were linking an
+11-day-old `libc.a` for exactly this reason.
+
+So the check that was run — "is `e8fec2292` on `origin/main`?" — answers a
+question about a file. The question that matters is whether the `libc.a` the
+test binary links was *built from* that file. A `libc.a` predating `e8fec2292`
+still issues `syscall4`, and the register hazard is live in the running system
+while the source ordering looks impeccable.
+
+Nothing here was actually broken: `libc.a` is rebuilt often enough, and the
+observed staleness window did not straddle `e8fec2292`. But the argument was
+unsound, and an unsound argument that happens to reach a true conclusion is the
+kind that gets reused on a case where it does not. The general form:
+
+> Ordering a source change before a consumer change proves nothing about
+> execution order when a *build artifact* sits between them. Verify the
+> artifact, not the commit.
+
+The concrete follow-up is a boot-test gate that mirrors fastpy's sysroot
+resolution, hashes the resolved `libc.a`, and fails when its contents differ
+from `toolchain/sysroot/lib/libc.a` in the worktree under test — so "the tree I
+tested is the tree I built" stops being an assumption.
+
 ### Testing
 
 `fs::handle` gains a mode test that pins what the probe got *wrong* rather than

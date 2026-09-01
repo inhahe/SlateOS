@@ -44,13 +44,10 @@
 //! not a plain one. Two `cp -b --backup=numbered` runs against one directory
 //! both scan, both decide on `.~4~`, and a plain rename would let the second
 //! destroy the first's backup — the file the whole option exists to preserve.
-//! With the flag the loser gets `EEXIST`, rescans, and takes `.~5~`. Our
-//! kernel does not implement the flag yet (`posix::file::renameat2` answers
-//! `EINVAL` for any non-zero flags), so this falls back to gnulib's own
-//! non-atomic emulation — an `lstat` and then a rename, with the race back.
-//! That is what GNU does on a pre-3.15 Linux and is not a reason to skip the
-//! flag: the call is already written for the day the kernel grows it. Logged
-//! as `B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE` in `known-issues.md`.
+//! With the flag the loser gets `EEXIST`, rescans, and takes `.~5~`. The
+//! kernel honours the flag as of `6ea052654`, so that is what happens; see
+//! [`crate::rename`], which holds the call and the fallback for the host that
+//! has no such flag, and which `mv` shares.
 //!
 //! The second is the length check ([`check_extension`]). Appending `.~1~` to a
 //! name that is already near the filesystem's per-component limit produces a
@@ -618,7 +615,7 @@ fn name_max(dir: &Path) -> usize {
         fn __errno_location() -> *mut i32;
     }
 
-    let Ok(path) = c_path(dir) else {
+    let Ok(path) = crate::pathname::c_path(dir) else {
         return usize::MAX;
     };
     // SAFETY: `__errno_location` is defined to return a valid pointer to this
@@ -656,24 +653,6 @@ fn name_max(_dir: &Path) -> usize {
     LONG_FILE_NAME_MAX.saturating_sub(1)
 }
 
-/// A path as a NUL-terminated byte string.
-///
-/// Fails for a name containing a NUL, which the filesystem forbids and which a
-/// caller can nonetheless construct; letting it through would silently truncate
-/// the name and act on a different file.
-#[cfg(unix)]
-fn c_path(path: &Path) -> io::Result<Vec<u8>> {
-    let mut bytes = os_bytes(path.as_os_str()).into_owned();
-    if bytes.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains a NUL byte",
-        ));
-    }
-    bytes.push(0);
-    Ok(bytes)
-}
-
 /// Whether a rename may destroy an existing destination.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Replace {
@@ -683,61 +662,14 @@ enum Replace {
 
 /// gnulib's `renameatu` narrowed to the two cases this module needs.
 ///
-/// [`Replace::No`] asks for `RENAME_NOREPLACE` and falls back to an `lstat`
-/// when the kernel has no such flag — which ours does not yet, so this is
-/// currently always the racy path on the target. The fallback is upstream's,
-/// including its treatment of `EOVERFLOW` as "it is there": a destination whose
-/// metadata does not fit in a `stat` is still a destination.
+/// [`Replace::No`] is [`crate::rename::noreplace`], which asks the kernel for
+/// `RENAME_NOREPLACE` and emulates it where the kernel has no such flag. `mv`
+/// needs the same primitive for its speculative rename, which is why it lives
+/// there and not here.
 fn rename_maybe_noreplace(from: &Path, to: &Path, replace: Replace) -> io::Result<()> {
-    if replace == Replace::Yes {
-        return fs::rename(from, to);
-    }
-    #[cfg(unix)]
-    {
-        /// `AT_FDCWD`. Names relative to it are resolved from the working
-        /// directory, which is where this module's callers' names already are.
-        const AT_FDCWD: i32 = -100;
-        /// `RENAME_NOREPLACE`.
-        const NOREPLACE: u32 = 1;
-
-        unsafe extern "C" {
-            fn renameat2(
-                olddirfd: i32,
-                oldpath: *const u8,
-                newdirfd: i32,
-                newpath: *const u8,
-                flags: u32,
-            ) -> i32;
-        }
-
-        if let (Ok(old), Ok(new)) = (c_path(from), c_path(to)) {
-            // SAFETY: both are NUL-terminated byte strings that outlive the
-            // call, and `renameat2` does not retain either.
-            let rc =
-                unsafe { renameat2(AT_FDCWD, old.as_ptr(), AT_FDCWD, new.as_ptr(), NOREPLACE) };
-            if rc == 0 {
-                return Ok(());
-            }
-            let err = io::Error::last_os_error();
-            // Upstream's three "the flag is not supported here" codes. Anything
-            // else is the rename's real answer and is returned as it stands.
-            const EINVAL: i32 = 22;
-            const ENOSYS: i32 = 38;
-            const ENOTSUP: i32 = 95;
-            if !matches!(err.raw_os_error(), Some(EINVAL | ENOSYS | ENOTSUP)) {
-                return Err(err);
-            }
-        }
-    }
-    // The emulation, with the race upstream also has: something can create `to`
-    // between this test and the rename below.
-    match fs::symlink_metadata(to) {
-        Ok(_) => Err(io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "backup file already exists",
-        )),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::rename(from, to),
-        Err(e) => Err(e),
+    match replace {
+        Replace::Yes => fs::rename(from, to),
+        Replace::No => crate::rename::noreplace(from, to),
     }
 }
 

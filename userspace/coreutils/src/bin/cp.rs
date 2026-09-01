@@ -253,10 +253,11 @@ use coreutils::fileid::{
 };
 use coreutils::fsattr::{self, Link, On, Owner, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
-use coreutils::yesno::{Answers, StdinAnswers, yesno};
+use coreutils::yesno::{Answers, StdinAnswers};
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
@@ -360,34 +361,6 @@ enum Deref {
     CommandLine,
     /// `-L` / `--dereference`: follow every link, wherever it was found.
     Always,
-}
-
-/// What to do about a destination that is already there.
-///
-/// GNU's `enum Interactive` (`copy.h:75`), which has four members. Three of
-/// them are here; the fourth is `I_ALWAYS_SKIP`, reached only through
-/// `--update=none`, which this `cp` does not have yet and which differs from
-/// `AlwaysNo` in exactly the two ways `copy.h`'s comments give: "Skip and fail"
-/// against "Skip and ignore".
-///
-/// An enum and not a `no_clobber: bool` because these are alternatives rather
-/// than independent switches: GNU stores one value and lets the last option
-/// given overwrite it, which is why `cp -in` is `-n` and `cp -ni` is `-i`. Two
-/// booleans could hold both at once, which is a state the command line cannot
-/// express.
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-#[cfg_attr(test, derive(Debug))]
-enum Interactive {
-    /// None of `-n`, `-i`, `-u` given. GNU's `I_UNSPECIFIED`.
-    #[default]
-    Unspecified,
-    /// `-n` / `--no-clobber`: leave an existing destination alone, and *fail*.
-    /// GNU's `I_ALWAYS_NO`, whose comment is "Skip and fail".
-    AlwaysNo,
-    /// `-i` / `--interactive`: ask, and take silence for no. GNU's
-    /// `I_ASK_USER`. See [`overwrite_ok`] for what is asked and
-    /// [`writable_destination`] for why there are three wordings of it.
-    AskUser,
 }
 
 /// One word of a `--preserve=` or `--no-preserve=` list.
@@ -1729,152 +1702,43 @@ fn refuse_no_clobber<O: Write, E: Write>(target: &Path, job: &mut Job<'_, O, E>)
     let _ = writeln!(job.err, "cp: not replacing {}", quoteaf_os(target));
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    /// `euidaccess(path, mode)`, where mode 2 is `W_OK`. GNU asks this as
-    /// `faccessat (dst_dirfd, dst_relname, W_OK, AT_EACCESS)`, and `AT_EACCESS`
-    /// is the whole reason it is not plain `access(2)`: `access` answers about
-    /// the *real* uid, which for a setuid `cp` is a question nobody asked.
-    fn euidaccess(path: *const u8, mode: i32) -> i32;
-    fn geteuid() -> u32;
-}
-
-/// GNU's `can_write_any_file` (`lib/write-any-file.c`): whether the permission
-/// bits can be ignored, because in traditional Unix root's writes are never
-/// refused for want of a `w`.
+/// The three helpers this used to define privately — `can_write_any_file`,
+/// `writable_destination` and `dest_mode`, plus the `euidaccess`/`geteuid`
+/// binding under them — now live in [`coreutils::overwrite`], because `mv`
+/// needs the identical three and a second copy of a decision about whether to
+/// destroy a file is the kind of duplicate that is only noticed after the data
+/// is gone. Upstream shares them by construction: `cp` and `mv` are two front
+/// ends over one `copy.c`.
+/// `-i`'s question — [`coreutils::overwrite::overwrite_ok`] with this program's
+/// name and this program's answer to `clears_destination`.
 ///
-/// Not cached, where upstream caches it in a `static`. The call happens once
-/// per `-i` prompt — that is, once per question put to a human — so a cache
-/// would be saving a syscall per keystroke, and glibc already answers `geteuid`
-/// from a cached value in any case.
-#[cfg(unix)]
-fn can_write_any_file() -> bool {
-    // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
-    // fail — POSIX gives it no error return.
-    unsafe { geteuid() == 0 }
-}
-
-/// GNU's `writable_destination` (`copy.c:1979`): whether `-i` asks the plain
-/// question or one of the two that quote the mode.
-///
-/// Three parts, in upstream's order and short-circuiting as upstream does:
-///
-/// * **A symlink destination is always "writable".** Its own mode is `0777` on
-///   every system that has modes at all, so testing it would say nothing; the
-///   permission that matters belongs to whatever it points at, which the
-///   `access` below is about to ask about anyway.
-/// * **Root can write anything.** See [`can_write_any_file`].
-/// * **Otherwise, `access(W_OK)` with the effective ids.** Not "does the mode
-///   have a `w` for me" computed from the bits: that reading gets ACLs,
-///   read-only mounts and immutable files all wrong, and each of those is a
-///   case where the prompt would promise a write that then fails.
-///
-/// Note what this is *not* used for: it changes only the wording of the
-/// question. Answering `y` to `unwritable … try anyway?` goes on to attempt the
-/// copy and — with no `-f` — to fail it with `Permission denied`, which is
-/// measured and is upstream's behaviour too. The prompt is a warning, not a
-/// gate.
-#[cfg(unix)]
-fn writable_destination(target: &Path, dest_meta: &fs::Metadata) -> bool {
-    if dest_meta.file_type().is_symlink() || can_write_any_file() {
-        return true;
-    }
-    let mut c_path = os_bytes(target.as_os_str()).into_owned();
-    if c_path.contains(&0) {
-        // A path with an interior NUL cannot be handed to a C function. It also
-        // cannot name a file, so the copy is about to fail anyway; say
-        // "writable" so the question asked is the plain one rather than one
-        // quoting a mode that was never read.
-        return true;
-    }
-    c_path.push(0);
-    // SAFETY: `c_path` is NUL-terminated, has no interior NUL, and outlives the
-    // call. `euidaccess` reads it and does not retain it.
-    unsafe { euidaccess(c_path.as_ptr(), 2) == 0 }
-}
-
-/// Off unix there are no modes to quote and no `euidaccess` to ask, so `-i`
-/// always puts the plain question. The host build is a test vehicle, not a
-/// shipping one.
-#[cfg(not(unix))]
-fn writable_destination(_target: &Path, _dest_meta: &fs::Metadata) -> bool {
-    true
-}
-
-/// The destination's `st_mode`. Only the permission bits are ever printed, but
-/// the whole word is what [`writable_destination`]'s symlink test needs and
-/// what GNU passes around.
-#[cfg(unix)]
-fn dest_mode(dest_meta: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    dest_meta.mode()
-}
-
-#[cfg(not(unix))]
-fn dest_mode(_dest_meta: &fs::Metadata) -> u32 {
-    0
-}
-
-/// GNU's `overwrite_ok` (`copy.c:1988`): `-i`'s question, and the answer.
-///
-/// Three wordings, all measured against 9.4:
+/// That last is the whole of `cp`'s share of the decision. Upstream computes it
+/// as `x->move_mode || x->unlink_dest_before_opening ||
+/// x->unlink_dest_after_failed_open`; the first disjunct is `mv` and the other
+/// two are exactly `--remove-destination` and `-f`. It picks between
 ///
 /// ```text
-/// cp: overwrite 'b'?
 /// cp: unwritable 'b' (mode 0444, r--r--r--); try anyway?
 /// cp: replace 'b', overriding mode 0444 (r--r--r--)?
 /// ```
 ///
-/// The second and third are the same condition — [`writable_destination`] said
-/// no — split by whether the destination is going to be *removed* rather than
-/// written through, which is `-f` or `--remove-destination` (upstream also
-/// counts `move_mode`, which is `mv`, not this program). That split is the
-/// difference between a warning that the copy will probably fail and a warning
-/// that it will probably succeed by destroying something the mode was
-/// protecting.
-///
-/// Four details that the obvious implementation gets wrong:
-///
-/// * **No trailing newline.** The cursor stays after the `? `, on the question's
-///   line, as upstream. Which is why the flush below is not optional: `Stream`
-///   buffers by line to a terminal, so an unflushed prompt would leave the user
-///   looking at nothing while `cp` waits for a keypress.
-/// * **It is on stderr**, not stdout — so `cp -i a b 2>/dev/null` asks
-///   invisibly and `cp -iv a b > log` puts the question and the `'a' -> 'b'`
-///   line in different places. Both measured.
-/// * **The mode is four octal digits including the setuid bits** (`%04lo` of
-///   `st_mode & CHMOD_MODE_BITS`, which is `07777`), and the `r--r--r--` beside
-///   it is `strmode` with its type letter dropped — GNU writes `&perms[1]`.
-/// * **Declining is failure, and is silent.** The caller returns `false`, which
-///   is exit 1, and prints nothing: upstream's `skip:` label prints `not
-///   replacing` only for `I_ALWAYS_NO`, and `skipped 'b'` only under `--debug`.
+/// which is the difference between a warning that the copy will probably fail
+/// and a warning that it will probably succeed by destroying something the mode
+/// was protecting.
 fn overwrite_ok<O: Write, E: Write>(
     target: &Path,
     dest_meta: Option<&fs::Metadata>,
     job: &mut Job<'_, O, E>,
 ) -> bool {
-    let name = quoteaf_os(target);
-    // `None` is [`Dest::Opaque`]: something is there that could not be `stat`'d,
-    // so there is no mode to quote and the plain question is the only one that
-    // can be asked. GNU reaches this case with an *uninitialised* `dst_sb`
-    // (`copy.c:2209` declares it and the `ELOOP` arm at 2326 leaves it alone),
-    // and would print whatever was on its stack. That is not a behaviour worth
-    // reproducing.
-    let sentence = match dest_meta {
-        Some(m) if !writable_destination(target, m) => {
-            let mode = dest_mode(m) & 0o7777;
-            let perms = modechange::permission_string(mode);
-            if job.flags.force || job.flags.remove_destination {
-                format!("cp: replace {name}, overriding mode {mode:04o} ({perms})? ")
-            } else {
-                format!("cp: unwritable {name} (mode {mode:04o}, {perms}); try anyway? ")
-            }
-        }
-        _ => format!("cp: overwrite {name}? "),
-    };
-    let _ = job.err.write_all(sentence.as_bytes());
-    let _ = job.err.flush();
-    yesno(job.answers)
+    let clears_destination = job.flags.force || job.flags.remove_destination;
+    overwrite::overwrite_ok(
+        job.err,
+        "cp",
+        target,
+        dest_meta,
+        clears_destination,
+        job.answers,
+    )
 }
 
 /// The whole of the "is this destination to be left alone" decision — GNU's
@@ -1902,7 +1766,12 @@ fn overwrite_allowed<O: Write, E: Write>(
         return true;
     }
     match job.flags.interactive {
-        Interactive::Unspecified => true,
+        // `AlwaysYes` is `mv -f`, and this program's parser never produces it —
+        // `cp -f` is `unlink_dest_after_failed_open`, a different field. It is
+        // in the shared enum because it is in `copy.h`'s, and the arm is here
+        // rather than under a catch-all so that adding an option which *does*
+        // set it is a compile error rather than a silent fall-through.
+        Interactive::Unspecified | Interactive::AlwaysYes => true,
         Interactive::AlwaysNo => {
             refuse_no_clobber(target, job);
             false
@@ -4137,8 +4006,19 @@ fn is_denied_ownership(e: &io::Error) -> bool {
 /// It decides whether a refused `chown` is reported. As root it is a real
 /// failure — root's `chown` does not fail for want of permission — and for
 /// everyone else it is the ordinary state of affairs.
+///
+/// Its own `geteuid` binding, rather than a call to
+/// [`coreutils::overwrite::can_write_any_file`], because upstream keeps them
+/// apart too — this is `copy.c:3018` and that is `lib/write-any-file.c`, each
+/// with its own `geteuid () == ROOT_UID`. The expressions coincide; the
+/// questions do not, and folding them would make a future divergence in either
+/// one silently change the other.
 #[cfg(unix)]
 fn chown_privileges() -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
     // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
     // fail — POSIX gives it no error return.
     unsafe { geteuid() == 0 }

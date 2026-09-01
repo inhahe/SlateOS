@@ -14,10 +14,12 @@
 //! final path component without following it — memfs/ext4 back this via their
 //! `*_no_follow` VFS methods).
 //!
-//! LIMITATIONS (tracked in todo.txt):
-//!   * The kernel collapses "file not found" and "attribute not found" into
-//!     one error, so a missing attribute reports ENOENT rather than the
-//!     Linux-conventional ENODATA on `getxattr`/`removexattr`.
+//! A missing *attribute* and a missing *file* are two different errors —
+//! `ENODATA` and `ENOENT` — as they are on Linux.  They were one error here
+//! until lane A's `32f35d46b` gave the kernel a `NoAttribute` code; the
+//! conflation mattered because `cp --preserve=all` cannot otherwise tell "this
+//! file has no `user.foo`", which is the ordinary case and must be silent, from
+//! "this file is gone", which is a diagnostic.
 
 use crate::errno;
 use crate::types::SsizeT;
@@ -48,6 +50,10 @@ pub const XATTR_REPLACE: i32 = 2;
 /// usurped a judgement only the filesystem can make.  Our own kernel already
 /// agrees with Linux — `xattr_validate_size_flags`
 /// (kernel/src/syscall/linux.rs) masks with `0x3` and has no both-flags test.
+///
+/// The *native* `SYS_FS_SET_XATTR` path does read the pair as `EINVAL`, so
+/// [`do_setxattr`] resolves the both-flags case itself rather than sending it;
+/// see the comment there for why that is safe where the old probe was not.
 fn setxattr_flags_valid(flags: i32) -> bool {
     if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
         errno::set_errno(errno::EINVAL);
@@ -166,9 +172,22 @@ fn do_listxattr(
     ret as SsizeT
 }
 
-/// Issue `SYS_FS_SET_XATTR` for an already-resolved path, honouring the
-/// `XATTR_CREATE` / `XATTR_REPLACE` flags via a pre-existence check (the
-/// kernel syscall carries no flags).
+/// Issue `SYS_FS_SET_XATTR` for an already-resolved path, handing the
+/// `XATTR_CREATE` / `XATTR_REPLACE` decision to the kernel.
+///
+/// The kernel makes that decision under the same `fs.lock()` hold as the write
+/// (lane A's `0593342d9`/`8c8ba6acb`, answering
+/// `requests/b-a-a-missing-xattr-and-a-missing-file-are-the-same-error.md`).
+/// This used to probe with a size query first and then write, which is the same
+/// check-then-act race `rename` had: `XATTR_CREATE` would say "it is not there"
+/// and then overwrite the value another process had just created, reporting
+/// success to a caller whose whole request was *not* to do that.
+///
+/// `arg5`'s layout, from `requests/a-b-xattr-noattribute-and-byte-names-…`:
+/// bit 0 `NO_FOLLOW`, bit 1 `XATTR_CREATE`, bit 2 `XATTR_REPLACE`. Since
+/// `XATTR_CREATE` is 1 and `XATTR_REPLACE` is 2, and [`setxattr_flags_valid`]
+/// has already refused every other bit, shifting `flags` up by one *is* the
+/// encoding.
 #[cfg(target_os = "none")]
 fn do_setxattr(
     path_ptr: *const u8,
@@ -179,10 +198,18 @@ fn do_setxattr(
     flags: i32,
     no_follow: bool,
 ) -> i32 {
-    if flags & (XATTR_CREATE | XATTR_REPLACE) != 0 {
-        // Probe for existence with a size query (val_cap = 0).  The probe must
-        // use the same follow mode as the set so CREATE/REPLACE reason about
-        // the same inode (the link itself for lsetxattr).
+    // Both flags at once cannot succeed: whatever the attribute's state, one of
+    // the two loses.  Linux does not treat that as a bad argument — it lets the
+    // filesystem answer `EEXIST` or `ENODATA` from the actual state (see
+    // [`setxattr_flags_valid`]) — but our kernel reads the pair as `EINVAL`, so
+    // sending it on would report an errno Linux never returns here.  Answering
+    // it in userspace is safe in a way the old probe was not, because this path
+    // *never writes*: the probe below decides only which of the two failures to
+    // report, and a race can therefore cost a wrong errno on a doomed call and
+    // nothing else.
+    if flags & XATTR_CREATE != 0 && flags & XATTR_REPLACE != 0 {
+        // A size query (val_cap = 0), in the same follow mode as the set would
+        // have used, so it asks about the same inode.
         let exists = crate::syscall::syscall6(
             crate::syscall::SYS_FS_GET_XATTR,
             path_ptr as u64,
@@ -192,16 +219,14 @@ fn do_setxattr(
             0,
             u64::from(no_follow),
         ) >= 0;
-        if (flags & XATTR_CREATE != 0) && exists {
-            errno::set_errno(errno::EEXIST);
-            return -1;
-        }
-        if (flags & XATTR_REPLACE != 0) && !exists {
-            errno::set_errno(errno::ENODATA);
-            return -1;
-        }
+        errno::set_errno(if exists {
+            errno::EEXIST
+        } else {
+            errno::ENODATA
+        });
+        return -1;
     }
-    // arg5 bit 0 = NO_FOLLOW (lsetxattr → write the link inode's own xattrs).
+    let mode_bits = (flags as u64) << 1;
     let ret = crate::syscall::syscall6(
         crate::syscall::SYS_FS_SET_XATTR,
         path_ptr as u64,
@@ -209,7 +234,7 @@ fn do_setxattr(
         name as u64,
         value as u64,
         size as u64,
-        u64::from(no_follow),
+        u64::from(no_follow) | mode_bits,
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -729,8 +754,11 @@ mod tests {
     /// `setxattr_copy` (fs/xattr.c:598), which both bits pass.  The filesystem
     /// then answers from the attribute's state — `EEXIST` if it exists,
     /// `ENODATA` if it does not (ext4's `ext4_xattr_set_handle`,
-    /// fs/ext4/xattr.c:2412-2423).  That is not a decision libc can make, so we
-    /// forward and let the call succeed here on the host build.
+    /// fs/ext4/xattr.c:2412-2423).  So it is not an `EINVAL` here, and on the
+    /// host build — where there is no filesystem to ask — the call succeeds.
+    /// On the target it becomes `EEXIST` or `ENODATA` in `do_setxattr`, which
+    /// is the same answer Linux's filesystem gives; what is refused is only the
+    /// idea that libc should call it a bad argument.
     #[test]
     fn test_setxattr_both_flags_is_not_a_libc_error() {
         errno::set_errno(0);

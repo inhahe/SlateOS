@@ -2047,16 +2047,31 @@ pub extern "C" fn unlink(path: *const u8) -> i32 {
 /// Our kernel's `SYS_FS_RENAME` takes
 /// (old_path, old_len, new_path, new_len, flags).
 ///
-/// The flags word is passed explicitly as zero even though today's kernel
-/// ignores it, because the register it travels in is not zeroed by anyone
-/// else. `syscall4` leaves `r8` holding whatever the last call left there, so
-/// the day the kernel starts reading `arg4` — which
-/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md` asks
-/// it to, so that `RENAME_NOREPLACE` becomes reachable — a `syscall4` here
-/// would begin handing it garbage. Sending the zero now makes that landing
-/// safe in either order, and costs one register write.
+/// Plain `rename(2)` has no flags to send, so it sends [`NO_RENAME_FLAGS`].
+/// That word used to be passed for a different reason: the kernel ignored
+/// `arg4`, and this call sent an explicit zero so that the day it *started*
+/// reading it, `r8` would not be holding whatever the previous syscall had left
+/// there. That day has come — `6ea052654` answered
+/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md` — and
+/// the register now carries a value the kernel acts on. See [`renameat2`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
+    rename_ex(oldpath, newpath, NO_RENAME_FLAGS)
+}
+
+/// Shared `rename`/`renameat2` back-end: resolve both names, then send the pair
+/// with a flags word.
+///
+/// `flags` is `renameat2(2)`'s bit-space, forwarded whole and deliberately
+/// **not** masked. The kernel refuses a bit it does not recognise rather than
+/// ignoring it, and that refusal is the point: a layer that quietly dropped an
+/// unrecognised flag would hand a caller who asked for `RENAME_NOREPLACE`
+/// exactly the overwrite it asked to be protected from, and report success. So
+/// a flag Linux defines and this kernel does not — `RENAME_WHITEOUT` is the
+/// live example — comes back `EINVAL`, which is loud and recoverable. Adding
+/// one is a line in the kernel's `RenameMode::from_flags` and a request from
+/// here, not a mask here.
+fn rename_ex(oldpath: *const u8, newpath: *const u8, flags: u64) -> i32 {
     if oldpath.is_null() || newpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2077,7 +2092,7 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
         old_len as u64,
         new_resolved.as_ptr() as u64,
         new_len as u64,
-        NO_RENAME_FLAGS,
+        flags,
     );
     errno::translate(ret) as i32
 }
@@ -2085,8 +2100,7 @@ pub extern "C" fn rename(oldpath: *const u8, newpath: *const u8) -> i32 {
 /// The flags word `rename(2)` sends: none of them.
 ///
 /// Named rather than written as a bare trailing `0` because that is the one
-/// argument of the five whose value is not obvious from the call site, and
-/// because it is the argument that will stop being zero — see [`renameat2`].
+/// argument of the five whose value is not obvious from the call site.
 const NO_RENAME_FLAGS: u64 = 0;
 
 /// Create a hard link.
@@ -3633,6 +3647,23 @@ pub extern "C" fn renameat(
     newdirfd: i32,
     newpath: *const u8,
 ) -> i32 {
+    renameat_ex(olddirfd, oldpath, newdirfd, newpath, NO_RENAME_FLAGS)
+}
+
+/// Shared `renameat`/`renameat2` back-end: resolve each name against its own
+/// `dirfd`, then hand the pair to [`rename_ex`] with a flags word.
+///
+/// The resolution happens *before* the flags are looked at, and that ordering
+/// is observable: `renameat2(fd, "", …, RENAME_NOREPLACE)` is `ENOENT` for the
+/// empty name rather than anything to do with the flag, which is Linux's order
+/// too.
+fn renameat_ex(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+    flags: u64,
+) -> i32 {
     // Either name being empty is ENOENT, and the old name is examined first.
     if reject_empty_path(oldpath) || reject_empty_path(newpath) {
         return -1;
@@ -3664,28 +3695,33 @@ pub extern "C" fn renameat(
         newpath
     };
 
-    rename(old_ptr, new_ptr)
+    rename_ex(old_ptr, new_ptr, flags)
 }
 
 /// Rename a file with flags (Linux extension).
 ///
-/// `flags` can include `RENAME_NOREPLACE` (1), `RENAME_EXCHANGE` (2).
-/// Non-zero flags return `EINVAL`; zero delegates to `renameat`.
+/// `flags` is `RENAME_NOREPLACE` (1), `RENAME_EXCHANGE` (2), or zero. The word
+/// is forwarded to the kernel whole; the kernel decodes it and answers
+/// `EINVAL` for anything it does not know, including the two set at once — a
+/// combination Linux also refuses, because "must not replace" and "swap the
+/// two" cannot both be honoured.
 ///
-/// The refusal is a *syscall* gap, not a kernel one, and the distinction is
-/// worth keeping straight because it decides how much work closing it is. The
-/// kernel implements both operations already — `Vfs::rename_noreplace` and
-/// `Vfs::rename_exchange` — and the first of them performs its
-/// destination-existence check under the same lock as the rename, which is the
-/// hard part and the whole point. What is missing is a way to *ask* for them:
-/// `sys_fs_rename` reads four arguments and always calls `Vfs::rename`. See
-/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md`.
+/// This used to refuse every non-zero `flags` itself. That was a *syscall* gap
+/// rather than a kernel one: `Vfs::rename_noreplace` and `Vfs::rename_exchange`
+/// both existed, and the first already did its destination-existence check
+/// under the same lock as the rename — which is the hard part and the whole
+/// point — but `sys_fs_rename` read four arguments and always called
+/// `Vfs::rename`, so there was no way to ask. It reads `arg4` as of
+/// `6ea052654`, answering
+/// `requests/b-a-rename-cannot-be-told-to-refuse-an-existing-target.md`, and
+/// the refusal here is gone with it.
 ///
-/// Until that lands, refusing is the only honest answer. Quietly performing a
-/// replacing rename for a caller that asked for `RENAME_NOREPLACE` would turn
-/// a request not to destroy a file into destroying it — `EINVAL` at least lets
-/// the caller fall back to a check-then-rename and know it is racy, which is
-/// what `coreutils`'s `backup` module does.
+/// What that closes is a race rather than a missing feature. Every caller of
+/// `RENAME_NOREPLACE` is really saying "I checked that this name was free";
+/// without the flag the check and the rename are two operations with a window
+/// between them, and a name taken inside that window is silently overwritten.
+/// The one caller in this tree is `coreutils`'s `backup` module, picking the
+/// next `file.~N~`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn renameat2(
     olddirfd: i32,
@@ -3694,12 +3730,7 @@ pub extern "C" fn renameat2(
     newpath: *const u8,
     flags: u32,
 ) -> i32 {
-    if flags != 0 {
-        // RENAME_NOREPLACE and RENAME_EXCHANGE require kernel support.
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    renameat(olddirfd, oldpath, newdirfd, newpath)
+    renameat_ex(olddirfd, oldpath, newdirfd, newpath, u64::from(flags))
 }
 
 /// Create a directory relative to a directory fd.
@@ -8401,11 +8432,69 @@ mod tests {
     // -- renameat2 with flags --
 
     #[test]
-    fn test_renameat2_nonzero_flags() {
-        // Non-zero flags should return EINVAL (not supported).
-        let result = renameat2(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, b"/b\0".as_ptr(), 1);
-        assert_eq!(result, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    fn test_renameat2_does_not_refuse_flags_itself() {
+        // This used to assert EINVAL for every non-zero `flags`, back when the
+        // kernel's `sys_fs_rename` read four arguments and this layer had no
+        // way to ask for anything but a plain rename.  It reads `arg4` now, so
+        // the word is forwarded and the *kernel* is what decides — which is the
+        // whole point: a layer that answered EINVAL on its own would keep
+        // refusing a flag long after the kernel had learned it.
+        //
+        // Off-target there is no kernel to forward to, so `syscall5` answers
+        // with its `HOST_ENOSYS` sentinel, which is a *native* code rather than
+        // an errno and falls through `errno_for`'s catch-all to `EIO`.  So the
+        // errno here is an artefact of the stub and not worth naming; what is
+        // worth pinning is that the call got far enough to reach the stub at
+        // all — i.e. that the answer is no longer this function's own `EINVAL`.
+        // The flags actually reaching the kernel is what the kernel's
+        // `RenameMode::from_flags` and the `mv`/`backup` callers cover.
+        for flags in [
+            crate::linux_at_flags_user_types::RENAME_NOREPLACE,
+            crate::linux_at_flags_user_types::RENAME_EXCHANGE,
+            // Linux defines this one; this kernel does not, and refuses it
+            // rather than dropping it.  Either way the refusal is not ours.
+            crate::linux_at_flags_user_types::RENAME_WHITEOUT,
+        ] {
+            crate::errno::set_errno(0);
+            let result = renameat2(
+                AT_FDCWD,
+                b"/a\0".as_ptr(),
+                AT_FDCWD,
+                b"/b\0".as_ptr(),
+                flags,
+            );
+            assert_eq!(result, -1, "host stub cannot rename, flags {flags:#x}");
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "flags {flags:#x} should have reached the syscall layer, \
+                 not been refused here"
+            );
+        }
+    }
+
+    #[test]
+    fn test_renameat2_empty_path_outranks_the_flags_word() {
+        // The names are resolved before the flags word is looked at, so an
+        // empty name is ENOENT for being empty rather than anything to do with
+        // the flag that came with it.  Linux orders it the same way.  Both
+        // sides are checked because the old name is examined first and a
+        // regression there would hide behind the new one.
+        for (old, new) in [
+            (b"\0".as_ptr(), b"/b\0".as_ptr()),
+            (b"/a\0".as_ptr(), b"\0".as_ptr()),
+        ] {
+            crate::errno::set_errno(0);
+            let result = renameat2(
+                AT_FDCWD,
+                old,
+                AT_FDCWD,
+                new,
+                crate::linux_at_flags_user_types::RENAME_NOREPLACE,
+            );
+            assert_eq!(result, -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+        }
     }
 
     // -- lockf constants --

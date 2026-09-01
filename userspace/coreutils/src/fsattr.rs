@@ -70,7 +70,7 @@ use std::path::Path;
 use std::time::SystemTime;
 
 #[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
+use crate::pathname::c_path;
 
 /// Whether a metadata write passes *through* a symbolic link at the end of the
 /// path, or lands on the link itself.
@@ -838,11 +838,6 @@ const ERANGE: i32 = 34;
 #[cfg(unix)]
 const ENODATA: i32 = 61;
 
-/// `ENOENT` — "no such file". Named here only because this OS's kernel answers
-/// a missing *attribute* with it too; see [`remove_xattr`].
-#[cfg(unix)]
-const ENOENT: i32 = 2;
-
 /// Whether a failure means "this filesystem simply has no extended attributes",
 /// as opposed to "the attributes exist and something went wrong".
 ///
@@ -1108,18 +1103,18 @@ pub fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
 /// `cp -p` onto an ordinary file print a diagnostic about an attribute nobody
 /// asked for.
 ///
-/// `ENODATA` is Linux's answer for that case, and `ENOENT` is this OS's for now:
-/// the kernel has one error for "no such file" and "no such attribute"
-/// (`known-issues.md` → `B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS`,
-/// filed to lane A). Accepting both means a genuinely missing *path* is also
-/// swallowed here — which costs nothing, because every caller has just operated
-/// on that path and would have failed earlier if it were gone. When the kernel
-/// grows a distinct code, drop the `ENOENT`.
+/// `ENODATA` is the answer, on Linux and now here too. It used to accept
+/// `ENOENT` as well, because the kernel had one error for "no such file" and
+/// "no such attribute" and there was no way to fold in the second without also
+/// folding in the first — swallowing a genuinely missing *path*. Lane A's
+/// `32f35d46b` split them (`NoAttribute`, mapped to `ENODATA` in
+/// `posix::errno`), so the `ENOENT` is gone and a vanished path is reported
+/// again.
 ///
 /// # Errors
 ///
-/// Whatever `removexattr`/`lremovexattr`/`fremovexattr` said, except the two
-/// codes above, or [`io::ErrorKind::InvalidInput`] for a name containing a NUL.
+/// Whatever `removexattr`/`lremovexattr`/`fremovexattr` said, except `ENODATA`,
+/// or [`io::ErrorKind::InvalidInput`] for a name containing a NUL.
 #[cfg(unix)]
 pub fn remove_xattr(on: On<'_>, name: &[u8]) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -1153,7 +1148,7 @@ pub fn remove_xattr(on: On<'_>, name: &[u8]) -> io::Result<()> {
         return Ok(());
     }
     let err = io::Error::last_os_error();
-    if matches!(err.raw_os_error(), Some(ENODATA | ENOENT)) {
+    if err.raw_os_error() == Some(ENODATA) {
         return Ok(());
     }
     Err(err)
@@ -1169,9 +1164,9 @@ pub fn remove_xattr(_on: On<'_>, _name: &[u8]) -> io::Result<()> {
     Err(no_xattrs_here())
 }
 
-/// An attribute name as C wants it. The same NUL rule as [`c_path`], and for the
-/// same reason: a name truncated at an embedded NUL would silently address a
-/// *different* attribute.
+/// An attribute name as C wants it. The same NUL rule as
+/// [`c_path`](crate::pathname::c_path), and for the same reason: a name
+/// truncated at an embedded NUL would silently address a *different* attribute.
 #[cfg(unix)]
 fn c_name(name: &[u8]) -> io::Result<Vec<u8>> {
     if name.contains(&0) {
@@ -1202,32 +1197,6 @@ fn nofollow_flag(link: Link) -> i32 {
         Link::Follow => 0,
         Link::NoFollow => AT_SYMLINK_NOFOLLOW,
     }
-}
-
-/// A path as C wants it: the bytes, then a NUL.
-///
-/// This deliberately does not go through `str`. A path here is bytes, and the
-/// point of the whole argv conversion is that it stays bytes down to the
-/// syscall; `CString::new(path.to_str()?)` would reintroduce precisely the
-/// UTF-8 assumption being removed.
-///
-/// # Errors
-///
-/// [`io::ErrorKind::InvalidInput`] if the path already contains a NUL — see
-/// [`set_times`] for why that is refused rather than truncated.
-#[cfg(unix)]
-fn c_path(path: &Path) -> io::Result<Vec<u8>> {
-    let bytes = path.as_os_str().as_bytes();
-    if bytes.contains(&0) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "path contains a NUL byte",
-        ));
-    }
-    let mut buf = Vec::with_capacity(bytes.len().saturating_add(1));
-    buf.extend_from_slice(bytes);
-    buf.push(0);
-    Ok(buf)
 }
 
 /// `struct timespec`, in the layout `posix/src/stat.rs` declares.
@@ -1513,32 +1482,6 @@ mod tests {
         assert_eq!(ts[0], ts[1]);
         assert_eq!(ts[0].tv_sec, 7);
         assert_eq!(ts[0].tv_nsec, 800);
-    }
-
-    /// A path with a NUL in it is refused rather than truncated. C has no way
-    /// to express one, so `utimensat` would stamp the prefix and report
-    /// success — `touch "a\0b"` would silently stamp `a`.
-    #[test]
-    #[cfg(unix)]
-    fn a_path_with_a_nul_is_refused_not_truncated() {
-        use super::c_path;
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-        use std::path::Path;
-
-        assert_eq!(c_path(Path::new("ab")).unwrap(), vec![b'a', b'b', 0]);
-        assert_eq!(
-            c_path(Path::new(OsStr::from_bytes(b"a\0b")))
-                .unwrap_err()
-                .kind(),
-            std::io::ErrorKind::InvalidInput
-        );
-        // And a non-UTF-8 path survives the trip, which `CString::new(to_str())`
-        // would not.
-        assert_eq!(
-            c_path(Path::new(OsStr::from_bytes(b"a\xffb"))).unwrap(),
-            vec![b'a', 0xff, b'b', 0]
-        );
     }
 
     // ------------------------------------------------ extended attributes --

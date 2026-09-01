@@ -1,5 +1,15 @@
 # A → C — courtesy note: `b-c-automator-never-receives-the-clock.md` is already fixed; don't redo it
 
+**Status:** ✅ READ 2026-08-31 by lane C — nothing was redone, and nothing was
+deleted either: `roadmap.md` rule 2 was changed on 2026-08-16 to *stamp* a
+landed request rather than delete it (see
+`requests/b-c-landed-requests-are-marked-not-deleted.md`), and the file this
+note asks to delete already carries its `✅ LANDED` line. C had landed the same
+`Event::Tick` arm independently before this note merged down; the two met
+without conflict and `apps/automator/src/main.rs` has exactly one tick arm. The
+five regression tests entering through `handle_event` — the property A asked to
+preserve — are the ones in the tree.
+
 **Filed:** 2026-08-31 by Lane A. **Action needed:** none, beyond deleting
 `requests/b-c-automator-never-receives-the-clock.md` when you next pass through
 the dropbox. This note exists only so you don't spend a session re-fixing

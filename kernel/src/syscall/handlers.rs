@@ -9945,7 +9945,61 @@ pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// Which rename a `SYS_FS_RENAME` flags word asks for.
+///
+/// Split out of [`sys_fs_rename`] so the mapping can be tested: the rest
+/// of the handler reads user pointers and so cannot run from kernel
+/// space, but the flag decode is where a mistake would be silent — an
+/// unknown bit quietly ignored gives the caller a plain rename when it
+/// asked to be refused, which is the exact failure `RENAME_NOREPLACE`
+/// exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameMode {
+    /// Replace the destination if it exists.
+    Replace,
+    /// `RENAME_NOREPLACE` — refuse if the destination exists.
+    NoReplace,
+    /// `RENAME_EXCHANGE` — swap the two paths atomically.
+    Exchange,
+}
+
+impl RenameMode {
+    /// Decode a `SYS_FS_RENAME` flags word.  Bit values are Linux's.
+    ///
+    /// Bits 0 and 1 together are `InvalidArgument` (Linux agrees: the two
+    /// requests contradict), and so is any other bit, so that a flag added
+    /// later is refused by an older kernel rather than dropped.
+    pub fn from_flags(flags: u64) -> KernelResult<Self> {
+        match flags {
+            0 => Ok(Self::Replace),
+            1 => Ok(Self::NoReplace),
+            2 => Ok(Self::Exchange),
+            _ => Err(KernelError::InvalidArgument),
+        }
+    }
+}
+
 /// `SYS_FS_RENAME` — rename or move a file or directory.
+///
+/// `arg0`/`arg1`: source path pointer and length.
+/// `arg2`/`arg3`: destination path pointer and length.
+/// `arg4`: flags, using Linux's `renameat2` bit values so that libc's
+/// constants pass straight through:
+///
+/// | bits | meaning |
+/// |------|---------|
+/// | `0` | plain rename — the destination is replaced if it exists |
+/// | `1` | `RENAME_NOREPLACE` — `AlreadyExists` if the destination is taken |
+/// | `2` | `RENAME_EXCHANGE` — atomically swap the two paths |
+/// | `3` | both at once: `InvalidArgument`, as on Linux |
+/// | any other bit | `InvalidArgument` |
+///
+/// Unknown bits are rejected rather than ignored so that a flag added
+/// later cannot be silently dropped by an older kernel, which would leave
+/// the caller believing it got a guarantee it did not get.  Note that
+/// `arg4` travels in `r8`, which nobody zeroes: this handler may only read
+/// it because libc already passes an explicit `0` there (lane B's
+/// `posix: pass an explicit flags word to SYS_FS_RENAME`).
 pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -9968,7 +10022,13 @@ pub fn sys_fs_rename(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    match crate::fs::Vfs::rename(&from_path, &to_path) {
+    let res = match RenameMode::from_flags(args.arg4) {
+        Ok(RenameMode::Replace) => crate::fs::Vfs::rename(&from_path, &to_path),
+        Ok(RenameMode::NoReplace) => crate::fs::Vfs::rename_noreplace(&from_path, &to_path),
+        Ok(RenameMode::Exchange) => crate::fs::Vfs::rename_exchange(&from_path, &to_path),
+        Err(e) => return SyscallResult::err(e),
+    };
+    match res {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

@@ -48,29 +48,60 @@ pub use crate::linux_dirent_types::{
 /// Kernel directory-entry / stat type codes.
 ///
 /// `SYS_FS_LIST_DIR` writes one of these at byte offset 260 of each
-/// 264-byte entry, and `SYS_FS_STAT` uses the same encoding in its
-/// `entry_type` field: 0=file, 1=directory, 2=volume label, 3=symlink.
-/// These are an internal kernel ABI and are deliberately NOT the same as
-/// the Linux `DT_*` values above — every consumer that reads the raw
-/// kernel byte must translate via [`kernel_type_to_dt`] before exposing
-/// it as a `d_type`.
+/// 264-byte entry; `SYS_FS_READDIR_AT` (647) and `SYS_FS_GETDENTS_PINNED`
+/// (664) write the same code as the first byte of their packed records; and
+/// `SYS_FS_STAT` uses the same encoding in its `entry_type` field.  These
+/// are an internal kernel ABI and are deliberately NOT the same as the Linux
+/// `DT_*` values above — every consumer that reads the raw kernel byte must
+/// translate via [`kernel_type_to_dt`] before exposing it as a `d_type`.
+///
+/// **Read the serializers, not the comments, when checking these.**  647's
+/// own ABI note in `kernel/src/syscall/number.rs` documents the table as
+/// `2=symlink, 3=volume_label`, which is the reverse of what all three
+/// handlers emit; reported as
+/// `requests/b-a-the-647-664-entry-type-table-has-symlink-and-volume-label-swapped.md`.
+/// The values below are taken from the emitters
+/// (`kernel/src/syscall/handlers.rs:8752` for 603, `:9754` for 664,
+/// `:11672` for 647), which agree with each other and with
+/// `SYS_FS_STAT`.
 pub(crate) const KERNEL_TYPE_FILE: u8 = 0;
 pub(crate) const KERNEL_TYPE_DIR: u8 = 1;
 pub(crate) const KERNEL_TYPE_VOLLABEL: u8 = 2;
 pub(crate) const KERNEL_TYPE_SYMLINK: u8 = 3;
+pub(crate) const KERNEL_TYPE_CHARDEV: u8 = 4;
+pub(crate) const KERNEL_TYPE_BLOCKDEV: u8 = 5;
 
 /// Translate a kernel directory-entry type byte into a POSIX `DT_*` value.
 ///
-/// `SYS_FS_LIST_DIR` only ever emits file/dir/symlink (volume labels are
-/// filtered out kernel-side), so any other code maps to `DT_UNKNOWN`.
+/// Every code the kernel defines is translated; only a code it does not
+/// define reaches `DT_UNKNOWN`.  That matters more than it looks, because
+/// `DT_UNKNOWN` is not a neutral answer — it tells the caller "stat this
+/// entry to find out", so a wrongly-unknown entry costs a syscall per
+/// listing at best and a wrong decision at worst.
+///
+/// This function used to carry the comment "`SYS_FS_LIST_DIR` only ever
+/// emits file/dir/symlink (volume labels are filtered out kernel-side)" and
+/// had no arms for `CharDevice` or `BlockDevice` — with `DT_CHR` and
+/// `DT_BLK` imported a dozen lines above.  The first half of that sentence
+/// was false when it was written: 603 has emitted 4 and 5 since it gained
+/// device support, `devfs` produces both, and so every device node in
+/// `readdir("/dev")` came back `DT_UNKNOWN`.  (The parenthesis is true, and
+/// only of 603 — 647 and 664 pass volume labels through as type 2.)  The
+/// arms below are exhaustive over the kernel's codes precisely so that the
+/// next code the kernel adds shows up as a compile-time gap here rather than
+/// as another silent `DT_UNKNOWN`.
 pub(crate) fn kernel_type_to_dt(kernel_type: u8) -> u8 {
     match kernel_type {
         KERNEL_TYPE_DIR => DT_DIR,
         KERNEL_TYPE_SYMLINK => DT_LNK,
         KERNEL_TYPE_FILE => DT_REG,
-        // Volume labels are filtered out by the kernel before they ever
-        // reach a directory listing; treat them (and any unexpected code)
-        // as unknown rather than guessing.
+        KERNEL_TYPE_CHARDEV => DT_CHR,
+        KERNEL_TYPE_BLOCKDEV => DT_BLK,
+        // A volume label genuinely has no `DT_*`: it is not a file, has no
+        // inode, and cannot be opened or statted.  `DT_UNKNOWN` is the
+        // honest answer even though the follow-up stat it invites will
+        // fail.  603 filters these out before they reach us; 647 and 664
+        // do not, which is raised in the request cited above.
         KERNEL_TYPE_VOLLABEL => DT_UNKNOWN,
         _ => DT_UNKNOWN,
     }
@@ -209,8 +240,9 @@ pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
     }
 
     // Type byte is at offset 260 within the entry.  The kernel writes its
-    // compact type code (0=file, 1=dir, 3=symlink); translate it to the
-    // POSIX DT_* value callers expect.
+    // compact type code (0=file, 1=dir, 2=volume label, 3=symlink,
+    // 4=char device, 5=block device); translate it to the POSIX DT_* value
+    // callers expect.
     let raw_type = dir.buf.get(offset.wrapping_add(260)).copied().unwrap_or(0);
     dir.current.d_type = kernel_type_to_dt(raw_type);
 
@@ -1026,8 +1058,9 @@ fn emit_linux_dirent64(
 /// Parse a single 264-byte kernel directory entry into `(name, dtype)`.
 ///
 /// The returned `dtype` is already translated from the kernel's compact
-/// type code (0=file, 1=dir, 3=symlink) into a POSIX `DT_*` value, so the
-/// caller can emit it directly.
+/// type code (see [`kernel_type_to_dt`], which is exhaustive over the codes
+/// the kernel defines — including the device types this comment used to
+/// omit) into a POSIX `DT_*` value, so the caller can emit it directly.
 ///
 /// Returns `None` if the entry has no name (empty NUL-terminated string).
 // Loop guard `name_len < 256` and `entry: &[u8; DIR_ENTRY_SIZE]`
@@ -1335,6 +1368,56 @@ mod tests {
         // Volume labels and any unexpected code → unknown.
         assert_eq!(kernel_type_to_dt(KERNEL_TYPE_VOLLABEL), DT_UNKNOWN);
         assert_eq!(kernel_type_to_dt(99), DT_UNKNOWN);
+    }
+
+    #[test]
+    fn device_nodes_get_a_device_dtype_not_unknown() {
+        // Regression: these two arms were missing, so `readdir("/dev")`
+        // reported DT_UNKNOWN for every device node that devfs produces.
+        // DT_UNKNOWN is not a neutral answer — it tells the caller to stat
+        // the entry, which costs a syscall per entry in the one directory
+        // where the type is most often the thing being looked for.
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_CHARDEV), DT_CHR);
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_BLOCKDEV), DT_BLK);
+    }
+
+    #[test]
+    fn the_kernel_type_codes_match_the_serializers() {
+        // These five constants are the wire values three kernel handlers
+        // emit (`SYS_FS_LIST_DIR` 603, `SYS_FS_READDIR_AT` 647,
+        // `SYS_FS_GETDENTS_PINNED` 664) and the one `SYS_FS_STAT` writes at
+        // byte 8 of its record.  Pinned literally, not derived, because the
+        // kernel's *documentation* of this table has 2 and 3 transposed
+        // (see the note on KERNEL_TYPE_FILE) — so a future reader who
+        // "corrects" these against that comment breaks every listing, and
+        // this test is what stops them.
+        assert_eq!(KERNEL_TYPE_FILE, 0);
+        assert_eq!(KERNEL_TYPE_DIR, 1);
+        assert_eq!(KERNEL_TYPE_VOLLABEL, 2);
+        assert_eq!(KERNEL_TYPE_SYMLINK, 3);
+        assert_eq!(KERNEL_TYPE_CHARDEV, 4);
+        assert_eq!(KERNEL_TYPE_BLOCKDEV, 5);
+    }
+
+    #[test]
+    fn every_kernel_type_except_the_volume_label_has_a_real_dtype() {
+        // The property that matters is not any single mapping but that
+        // DT_UNKNOWN is reached only where the kernel has nothing to say.
+        // A volume label is the sole defined code with no POSIX analogue.
+        for code in [
+            KERNEL_TYPE_FILE,
+            KERNEL_TYPE_DIR,
+            KERNEL_TYPE_SYMLINK,
+            KERNEL_TYPE_CHARDEV,
+            KERNEL_TYPE_BLOCKDEV,
+        ] {
+            assert_ne!(
+                kernel_type_to_dt(code),
+                DT_UNKNOWN,
+                "kernel type {code} translated to DT_UNKNOWN"
+            );
+        }
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_VOLLABEL), DT_UNKNOWN);
     }
 
     #[test]

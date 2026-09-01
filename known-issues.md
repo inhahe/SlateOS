@@ -105325,6 +105325,283 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ---
 
+## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
+
+**Status:** open, **now localised** — see the MEASURED section appended at the
+end of this entry (2026-09-01). The cause is being the parent of mount points,
+and it is *far* larger than the estimate below; being a filesystem's own root is
+ruled out. Not a regression — it has presumably always been true — and not a
+gate: the series that exposes it (`vfs_readdir_root`) is tracked, not scored.
+
+**In short:** listing the root directory is about four times more expensive per
+entry than listing an ordinary directory, even though on the boot-test both are
+the *same* in-memory filesystem running the *same* code. Something about being
+the root, rather than about the entries in it, is costing roughly 29
+microseconds a call. About 10 of those 29 are accounted for; the rest is not.
+
+**Where it came from.** While refuting the two proposed causes of the
+`vfs_readdir` movement (see
+A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER above),
+`bench_vfs_readdir_breakdown` produced a cost model for a memfs listing, and the
+scored root listing does not fit it. From the same boot:
+
+| measurement | value |
+|---|---|
+| `vfs_readdir_n0` (empty memfs dir) | 9302 ns |
+| `vfs_readdir_n8` (8 entries) | 13944 ns |
+| `vfs_readdir_n64` (64 entries) | 37521 ns |
+| implied slope | ~441 ns/entry |
+| `vfs_readdir` — `/`, 21 entries | 47998 ns |
+| implied slope for `/`, against the same fixed cost | **~1843 ns/entry** |
+
+The model predicts `9302 + 21x441 = 18563 ns`. The measurement is 47998 ns, so
+**29435 ns is unexplained by entry count**.
+
+**This is not a filesystem-type difference.** The obvious explanation would be
+that `/` is FAT and `/tmp` is memfs, and it is wrong: `main.rs:1418` mounts FAT
+from `vda` and *falls back to memfs* when there is no FAT volume, and the
+boot-test's `vda` is a raw swap disk with no filesystem on it. So on the machine
+these numbers come from, `/` and `/tmp` are both `fs/memfs.rs`. The comparison
+is like-for-like, which is what makes the gap interesting.
+
+**What is attributed (about a third).** `Vfs::finish_listing`
+(`kernel/src/fs/vfs.rs:2333`) injects mount points that the backing filesystem
+does not know about, and for each one it calls `submount_root_ino`
+(`vfs.rs:3454`), which is:
+
+```rust
+Self::metadata_resolved(dir_path.join(name)).map_or(0, |m| m.ino)
+```
+
+That is a **full stat per mount point** — a `PathBuf` allocation for the join,
+then `resolve_mount` (VFS lock, longest-prefix scan) and a filesystem
+`metadata()` call. `/` has five submounts (`tmp`, `proc`, `dev`, `sys`, `mnt`),
+and the suite already prices exactly this operation: `vfs_stat_breakdown_resolved`
+= 1928 ns. Five of those is **9640 ns**, or 33% of the gap. It also explains the
+shape — the cost attaches to the *directory* (how many things are mounted under
+it), not to how many entries it holds, which is precisely the anomaly.
+
+The `!entries.iter().any(...)` de-duplication in the same loop is **not** a
+suspect: 5 mounts x 21 entries is ~105 `PathBuf` comparisons, nowhere near
+microseconds.
+
+**What is not attributed.** ~20 us. Candidates, in the order worth testing:
+`resolve_follow` + `check_path_access` on the root path itself; `submount_children`
+taking the `VFS` lock a second time (`finish_listing` takes it, then each
+`submount_root_ino` takes it again through `resolve_mount`); and memfs's own
+root-directory lookup, which may not be structured like a child directory's.
+
+**The proper fix (once it is measured, not before).** `finish_listing` already
+holds the mount table when it computes `submount_children`; the mounted
+filesystem's root inode is available from that same table without re-resolving a
+path that was just constructed from data the table already had. Reading it there
+would remove five stats, five joins and five lock acquisitions per root listing.
+But that is the fix for the attributed third — the remaining two thirds must be
+measured first, because this whole entry exists downstream of an investigation
+that lost two days to acting on an unmeasured hypothesis.
+
+**How to measure it.** The same way the last one was settled: a 2x2 in
+`bench_vfs_readdir_breakdown` — the same directory listed as a mount parent and
+as a plain child — rather than reasoning about the code. `bench_vfs_readdir`
+now logs the entry count of `/` and names every boot, so the workload side of the
+comparison is finally pinned.
+
+### MEASURED 2026-09-01 — it is the mount parenthood, and it is 8x the estimate
+
+`bench_vfs_readdir_root_cost` (`kernel/src/bench.rs`) ran the 2x2. It lists one
+8-entry memfs directory four times, varying only what is mounted and where:
+
+| arm | mount table | listed dir is their parent? | min |
+|---|---|---|---|
+| `vfs_readdir_mp_base` | baseline | — | 20990 ns |
+| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns |
+| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** |
+| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns |
+
+**Read the percentages, not the nanoseconds.** The harness flagged this boot as
+an outlier run — everything measured ~38% slower than usual, against a baseline
+that was itself an outlier (x1.307) — and printed the standing instruction not
+to quote its absolute numbers as the cost of anything. The design survives that:
+all four arms ran inside the same window, so a uniform inflation cancels in every
+comparison below. The ratios are the finding; the raw figures are ~1.4x high.
+
+Three results, in decreasing order of how much they change the picture:
+
+1. **Being a mount parent costs +81429 ns, +292%** — and that is against
+   `elsewhere`, so the mount-table growth is already subtracted out. This is not
+   merely "the missing ~20 us": it is the entire 29.4 us gap and roughly 2.5x
+   more, on a directory with a quarter of root's entries. Root's anomaly is
+   here, in `finish_listing`'s per-submount work, and nowhere else.
+
+2. **But it is not the stat.** Per submount that is ~16285 ns, against a measured
+   `vfs_stat_breakdown_resolved` of ~2000 ns — **8x a full stat, per mount
+   point.** The estimate above ("five full stats = 9640 ns, 33% of the gap") had
+   the mechanism's *location* right and its *magnitude* wrong by an order of
+   magnitude. So the fix proposed above is still worth making, and it will not
+   recover most of this: something in the per-submount path costs several stats'
+   worth beyond the stat, and has not been identified yet.
+
+3. **Being a filesystem's own root is free.** `fsroot` is +1636 ns over `base`,
+   which is +273 ns once this boot's own per-mount table cost is subtracted —
+   under 2%. That eliminates the third candidate listed above ("memfs's own
+   root-directory lookup, which may not be structured like a child directory's").
+   It is structured like a child directory's, and it costs the same.
+
+A fourth number falls out that was not the question but is worth recording:
+**each registered mount adds ~1363 ns to every `readdir` in the system**,
+whatever it lists (`base` -> `elsewhere` is +6817 ns for five mounts, on a
+directory none of them are under). That is `resolve_mount`'s longest-prefix scan,
+and it is the reason this benchmark mounts its five filesystems twice in two
+different places rather than measuring a naive before/after — charged to
+`finish_listing`, it would have inflated result 1 by 8%.
+
+**What is still unknown.** Why one submount costs 8 stats. The two candidates
+from the original list that survive are `submount_children` taking the `VFS` lock
+a second time (`finish_listing` holds it, then each `submount_root_ino`
+re-acquires it through `resolve_mount`) and the `PathBuf` join per mount point.
+Neither obviously costs 16 us, so the next step is the same as this one was: a
+breakdown benchmark inside the per-submount path, not an argument from reading
+the code. The same discipline applies — the entry above this one exists because
+two days went into acting on an unmeasured hypothesis.
+
+
+---
+
+## A host out-of-memory during QEMU is recorded as a kernel PANIC, and zeroes the clean streak
+
+**Status:** FIXED 2026-09-01 (see the closing section at the end of this entry).
+Observed once, 2026-09-01, on a `--bench` boot in the lane-A worktree. Nothing
+in the tree was wrong; the boot history said otherwise. The misdiagnosis is
+fixed; the host-side memory spike that caused it is not, and cannot be from
+here.
+
+**In short:** the machine running QEMU briefly ran out of mappable memory. QEMU
+could not give the emulated GPU the memory it asked for, the kernel correctly
+reported that as an I/O error, a self-test correctly called it fatal — and the
+boot history wrote it down as "kernel died", which reset the consecutive
+clean-boot streak from 9 to 0 and added a failure to the project's headline
+health counts. Every step behaved correctly and the recorded conclusion is still
+false.
+
+**What actually happened, in order.** QEMU printed, on its own stderr:
+
+```
+C:\program files\qemu\qemu-system-x86_64.exe: warning: Failed to CreateFileMapping:
+The paging file is too small for this operation to complete.
+```
+
+and a shell helper in the same harness died of the same pressure:
+
+```
+0 [main] date (85728) child_copy: cygheap read copy failed, 0x0..0x80000CD40,
+done 0, windows pid 85728, Win32 error 299
+```
+
+(`299` is `ERROR_PARTIAL_COPY`.) The guest then saw its GPU refuse an
+allocation:
+
+```
+[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the bound was
+             rejected: I/O error (-600)
+FATAL: virtio-gpu render-resource self-test failed: internal kernel error (-1)
+```
+
+and `boot-history.py` classified the run:
+
+```
+[boot-history] PANIC -- kernel died (PANIC / FATAL in the serial log)
+[boot-history] current consecutive clean streak: 0
+```
+
+**Why the message is especially misleading.** The self-test that failed is a
+*boundary* test — "a resource exactly at the bound was rejected". A host OOM
+landing on that allocation produces a log line that reads exactly like a
+genuine off-by-one in the bound check. Anyone reading the history later would
+have every reason to bisect for a virtio-gpu regression and would find no
+guilty commit, which is the same shape as the `http_build_response_1KiB`
+mode-split that `bench-history.py:mode_structure` was written to prevent.
+
+**It was not the tree, and it was not a leak.** Inspected minutes afterwards:
+no `qemu-system-x86_64` processes were alive, 28.85 GiB of 63.95 GiB physical
+was free, and the pagefile was 191191 MiB allocated against 20632 MiB in use
+with a 22649 MiB peak — nowhere near exhausted. Windows grows the pagefile
+lazily, so a fast allocation spike can outrun that growth and produce this exact
+message on a machine with tens of gigabytes free. The likely source of the spike
+is a concurrent `cargo build` in another lane's worktree: the boot lock
+serialises QEMU across the three lanes, but nothing serialises their builds.
+
+**The proper fix.** `boot-history.py` already has the right concept — a boot
+whose outcome "is evidence about the probe, not about the tree" is tagged
+`experiment` and kept out of every statistic (`is_experiment`, line 671). A
+host-resource failure is the same category and needs the same treatment, but it
+must not reuse the `experiment` flag: that flag means "invoked deliberately
+under non-default conditions", and silently widening it to mean "or the host
+hiccupped" would let a real failure be waved away by an unrelated predicate.
+
+So: a distinct verdict — `HOST_FAIL` — set when the harness sees an
+unambiguous host-side signature in QEMU's own output, excluded from the streak
+and from the clean/total counts exactly as `experiment` rows are, and printed
+with a reason so the row still says what happened. Candidate signatures, all
+emitted by QEMU or Cygwin rather than by the guest, so a kernel bug cannot
+forge them:
+
+| signature | source |
+|---|---|
+| `Failed to CreateFileMapping` | QEMU, Windows memory backend |
+| `The paging file is too small` | QEMU, quoting Windows |
+| `cannot set up guest memory` | QEMU, generic allocation failure |
+| `cygheap read copy failed` | Cygwin fork failure under pressure |
+
+Two things to get right when implementing it. The detection must read QEMU's
+**stderr**, not the guest's serial log — a guest that printed
+`Failed to CreateFileMapping` must not be able to excuse itself. And the
+existing `PANIC` classification must stay the default: `HOST_FAIL` is only
+reachable on a positive match, because the direction that fails safely here is
+the one that over-reports failures, exactly as `is_experiment`'s doc argues for
+its own absent-means-no default.
+
+**Until it is fixed,** a boot that dies this way has to be spotted by eye and
+re-run, and the streak counter should be read as a lower bound. This run was
+re-run and the entry will be updated if it recurs — one occurrence is not yet
+evidence about frequency.
+
+### FIXED 2026-09-01 — `HOST_FAIL` is implemented as specified above
+
+`boot-test.sh` now redirects QEMU's stderr to `build/qemu-stderr.txt` (and still
+echoes it to the console on the way out, so the redirect costs the operator
+nothing it used to show them), passes it to the recorder as `--qemu-stderr`, and
+deletes it alongside the serial log so a leftover can never excuse the *next*
+boot. `boot-history.py` grew `HOST_FAIL_SIGNATURES` — the four literal
+substrings tabulated above — plus `host_failure()`, `read_qemu_stderr()`, and a
+`describes_tree()` predicate that is now the single filter behind the streak,
+the clean/total counts, and both sets of medians.
+
+Both constraints this entry named are met, and both are covered by tests.
+Detection reads QEMU's stderr only: `test_a_kernel_cannot_forge_a_host_failure`
+puts the signature in the *guest's* log and asserts the verdict stays `PANIC`.
+And the default is unchanged:
+`test_a_host_signature_overrides_a_verdict_that_blames_the_tree` classifies this
+run's real serial log both ways — `PANIC` without the host's words, `HOST_FAIL`
+with them — so the override is doing the work, rather than the sample having
+been chosen to classify harmlessly.
+
+Two things went beyond the specification, both in the safe direction. The
+override runs *downward only*: a host signature never rewrites a verdict that
+clears the tree, because destroying a real clean boot would be worse than the
+bug being fixed. And `fingerprints_for` skips `HOST_FAIL` entirely — the
+matchers key on the shape of the exception without consulting the verdict, and a
+host OOM lands on whatever allocation the kernel happened to be making, so a
+host-killed boot could otherwise be filed as a recurrence of a known issue that
+did not recur.
+
+Reasoning in full, including the four rejected alternatives, in
+`design-decisions.md` §669. The underlying *cause* is not fixed and is not ours
+to fix — the boot lock serialises the three lanes' QEMU runs, but nothing
+serialises their `cargo` builds — so a recurrence remains possible. What changes
+is that it will be labelled rather than blamed on the kernel.
+
+---
+
 ## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix)
 
 **Status:** OPEN — filed 2026-09-01, `requests/b-c-gui-toolkit-tree-module-is-orphaned-and-blocks-every-lanes-boot-test.md`

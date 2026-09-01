@@ -806,7 +806,10 @@ BENCH_COVERAGE=(
     # no instruction from that file is inside the measured window.
 
     # -- fs: 3 of 467 files ------------------------------------------------
-    "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
+    # `vfs_readdir` was renamed to `vfs_readdir_32` and split from the unscored
+    # `vfs_readdir_root`; both are listed because both are recorded and both
+    # time Vfs::readdir.  See bench/baselines.toml [vfs_readdir_32].
+    "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir_32 vfs_readdir_root vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
     "kernel/src/fs/path.rs|vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve"
     "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB http_build_response_gzip_1KiB"
     # fs/ext4, fs/zfs, fs/btrfs, fs/f2fs, fs/ntfs and the other ~460 files have
@@ -1243,6 +1246,23 @@ ESP_DIR="$PROJECT_ROOT/build/esp"
 # QEMU's virtual FAT.  See the --usb-image case in the arg parser.
 USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
+# QEMU's own stderr, which until now was captured nowhere -- it went to the
+# harness console and died with it.
+#
+# It is the only place a *host* failure announces itself.  On 2026-09-01 a boot
+# died because Windows could not grow its paging file fast enough for QEMU's
+# memory backend; QEMU printed "Failed to CreateFileMapping", the guest saw its
+# GPU refuse an allocation, a boundary self-test correctly called that fatal,
+# and boot-history wrote the run down as "kernel died" and zeroed a nine-boot
+# clean streak.  Every layer behaved correctly and the recorded conclusion was
+# false (known-issues.md -> "A host out-of-memory during QEMU is recorded as a
+# kernel PANIC").
+#
+# It must be a FILE, and it must be qemu's stderr rather than the serial log:
+# the guest writes the serial log, so a kernel that printed the same words could
+# otherwise excuse itself.  This stream is written by the emulator and by MSYS,
+# below the guest, where nothing in the tree can reach it.
+QEMU_STDERR="$PROJECT_ROOT/build/qemu-stderr.txt"
 # The serial line each conditionally-called self-test declares it prints, from
 # `check-self-tests-wired.py --emit-markers` in the pre-build gates; read by
 # boot-history.py at the end of the run.  Gitignored build output, not a
@@ -1297,6 +1317,29 @@ kill_qemu() {
     # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
     [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
+}
+
+# Replay whatever QEMU wrote to stderr, once, on the way out.
+#
+# Redirecting qemu's stderr to a file (see QEMU_STDERR) is what lets
+# boot-history.py tell a host failure from a kernel one, but the redirect would
+# otherwise COST the operator something they had before: those lines used to
+# land in the harness console live.  "Failed to CreateFileMapping" is the whole
+# explanation for a run that is about to look like an unexplained hang, and
+# silently filing it in build/ where nobody looks would trade one blindness for
+# another.  So the file is the record and this is the echo; both, not either.
+#
+# Printed to stderr, under a banner, so it cannot be mistaken for guest output
+# in a scrollback -- and only when non-empty, since qemu is silent on a healthy
+# run and an empty banner every boot is noise that trains the reader to skip it.
+echo_qemu_stderr() {
+    [ -s "$QEMU_STDERR" ] || return 0
+    {
+        echo "--- qemu stderr (build/qemu-stderr.txt) ---"
+        cat "$QEMU_STDERR"
+        echo "--- end qemu stderr ---"
+    } >&2 || true
+    return 0
 }
 # Default boot timeout.  The boot path runs the full self-test suite before
 # printing BOOT_OK, including the Path-Z ring-3 toolchain tests (each spawns a
@@ -2258,6 +2301,15 @@ record_boot_outcome() {
     local args=(--serial "$SERIAL_FILE" --exit-code "$rc"
                 --marker "$WAIT_MARKER" --profile "${BENCH_PROFILE:-debug}"
                 --commit "${BT_HEAD:-unknown}" --branch "${BT_BRANCH:-unknown}")
+    # Passed only when the file exists, so a --no-boot run (or one that died
+    # before QEMU launched) hands the recorder nothing rather than a leftover
+    # from the previous boot -- the same rule as --gated-markers above, and for
+    # the same reason: a stale host-failure signature would excuse a boot that
+    # the host had nothing to do with, which is the one direction this feature
+    # must not fail in.
+    if [ -f "$QEMU_STDERR" ]; then
+        args+=(--qemu-stderr "$QEMU_STDERR")
+    fi
     if [ -n "${BT_SRC_DIGEST:-}" ]; then
         args+=(--src-digest "$BT_SRC_DIGEST")
     fi
@@ -2360,6 +2412,7 @@ on_boot_exit() {
     fi
     _BOOT_EXIT_DONE=1
     kill_qemu "$QEMU_PID"
+    echo_qemu_stderr
     if [ "$reason" = "exit" ]; then
         record_boot_outcome "$rc"
     fi
@@ -5037,6 +5090,12 @@ fi
 # Step 4: Boot QEMU
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU) ==="
 rm -f "$SERIAL_FILE"
+# Removed together with the serial log, and for the identical reason: both are
+# evidence about *this* boot, and a leftover from the previous one is worse
+# than nothing because it looks like evidence.  record_boot_outcome only passes
+# the file when it exists, so a run that dies before QEMU starts records no
+# host-failure claim at all rather than the last run's.
+rm -f "$QEMU_STDERR"
 
 OVMF_WIN="$(to_win_path "$OVMF")"
 rm -f "$PIDFILE"
@@ -5207,7 +5266,7 @@ QEMU_START_EPOCH=$(date +%s)
     -m 3072M \
     -cpu "$QEMU_CPU" \
     "${QEMU_EXTRA_ARGS[@]}" \
-    -machine q35 &
+    -machine q35 2> "$QEMU_STDERR" &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)
 # or exits early — a surviving qemu keeps the serial file locked and breaks

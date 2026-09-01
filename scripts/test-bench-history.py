@@ -1251,7 +1251,25 @@ def test_history_still_loads(bh):
     # dangerous direction, because the loss is silent: the benchmark stops being
     # measured, its regression coverage disappears with it, and its accumulated
     # history is orphaned with nothing left to diff against.
-    check("no benchmark vanished between consecutive records", removed, [])
+    #
+    # A *declared* rename is the one case where a vanished name is not a loss,
+    # and `bench/renamed-series.txt` is where it is declared. The excuse is
+    # conditional on the successor being present in this very record -- the
+    # ledger says "the series continues under that name", so if the successor
+    # is not being measured either, the coverage is gone whatever the ledger
+    # says and this still fails, naming the successor that is missing. An
+    # *undeclared* disappearance is untouched by any of this and still fails.
+    renames = bh.load_renames()
+    undeclared, misdeclared = bh.unexplained_removals(removed, current,
+                                                      renames)
+    check("no undeclared benchmark vanished between consecutive records",
+          undeclared, [])
+    check("every declared rename lands on a series still being measured",
+          misdeclared, [])
+    for name in removed:
+        if name not in undeclared:
+            print("      note: %s was renamed to %s (bench/renamed-series.txt)"
+                  % (name, bh.resolve_rename(name, renames)))
     # An addition is the opposite: coverage went up. It is the intended outcome
     # of wiring a print-only measurement onto the scorecard, and there are ~20
     # such measurements still to wire up, so asserting `added == []` would fail
@@ -1262,7 +1280,8 @@ def test_history_still_loads(bh):
     #
     # A *rename* is the case that looks like an addition but is really a loss;
     # it is still caught, because it also empties the old name and therefore
-    # shows up in `removed`.
+    # shows up in `removed` -- where it fails unless the ledger above says
+    # where the series went.
     if added:
         print("      note: %d benchmark(s) newly recorded: %s"
               % (len(added), ", ".join(sorted(n for n, _ in added))))
@@ -1272,6 +1291,115 @@ def test_history_still_loads(bh):
     names = [e[0] for e in regressed] + [e[0] for e in improved]
     check("no benchmark is both regressed and improved",
           len(names), len(set(names)))
+
+
+def test_rename_ledger_parses(bh, tmpdir):
+    """`bench/renamed-series.txt`: comments, chains, and the refusals."""
+    path = write(tmpdir, "renames.txt",
+                 "# a comment\n"
+                 "\n"
+                 "old -> new   # trailing comment\n"
+                 "  spaced   ->   out  \n")
+    check("declared renames parse", bh.load_renames(path),
+          {"old": "new", "spaced": "out"})
+    check("an absent ledger is an empty one",
+          bh.load_renames(os.path.join(tmpdir, "nope.txt")), {})
+    check("a comment-only ledger is an empty one",
+          bh.load_renames(write(tmpdir, "empty.txt", "# nothing\n")), {})
+
+    # Every refusal is a ValueError rather than a skipped line. A dropped line
+    # leaves a rename looking declared when it is not -- which is the one
+    # outcome this file must never produce, because the guard it feeds would
+    # then pass for a reason nobody wrote down.
+    bad = {
+        "no arrow": "old new\n",
+        "two arrows": "a -> b -> c\n",
+        "empty left side": " -> b\n",
+        "empty right side": "a ->\n",
+        "renamed to itself": "a -> a\n",
+        "one name renamed twice": "a -> b\na -> c\n",
+    }
+    for label, text in bad.items():
+        try:
+            bh.load_renames(write(tmpdir, "bad.txt", text))
+        except ValueError:
+            print(f"PASS  ledger rejects: {label}")
+        else:
+            check(f"ledger rejects: {label}", "accepted", "ValueError")
+
+
+def test_rename_chains_resolve(bh):
+    """`resolve_rename` answers "is the series still measured, and as what?"."""
+    chain = {"a": "b", "b": "c"}
+    check("a chain resolves to its end", bh.resolve_rename("a", chain), "c")
+    check("one hop resolves", bh.resolve_rename("b", chain), "c")
+    check("an unrenamed name resolves to itself",
+          bh.resolve_rename("z", chain), "z")
+    # A loop is a broken ledger. Returning any member of it would excuse a
+    # removal on the strength of a declaration that does not say where the
+    # series went, so it resolves to nothing and the caller fails.
+    check("a two-name loop resolves to nothing",
+          bh.resolve_rename("a", {"a": "b", "b": "a"}), None)
+    check("a self-loop resolves to nothing",
+          bh.resolve_rename("a", {"a": "a"}), None)
+
+
+def test_removals_are_excused_only_on_evidence(bh):
+    """The guard must still fire -- a ledger that excuses everything is no gate.
+
+    `test_history_still_loads` runs against the real history, which is (and had
+    better stay) clean, so on its own it cannot demonstrate that the check can
+    fail at all. These are the synthetic cases it cannot reach.
+    """
+    renames = {"old": "new", "a": "b", "b": "c"}
+    current = {"new": 1, "c": 1, "kept": 1}
+
+    check("an undeclared disappearance is still a failure",
+          bh.unexplained_removals(["zeta", "gone"], current, renames),
+          (["gone", "zeta"], []))
+    check("a declared rename whose successor is measured is excused",
+          bh.unexplained_removals(["old"], current, renames), ([], []))
+    check("...including through a chain",
+          bh.unexplained_removals(["a"], current, renames), ([], []))
+    # The conditional half. The ledger says the series continues as `new`; if
+    # `new` is not in the record either, the coverage is gone whatever the
+    # ledger says, and the report names the successor rather than the old name
+    # -- the missing thing is what the reader has to go and look for.
+    check("a declared rename to an unmeasured successor still fails",
+          bh.unexplained_removals(["old"], {"kept": 1}, renames),
+          ([], [("old", "new")]))
+    check("a rename into a loop fails without claiming a successor",
+          bh.unexplained_removals(["x"], current, {"x": "y", "y": "x"}),
+          ([], [("x", None)]))
+    check("an empty ledger excuses nothing",
+          bh.unexplained_removals(["old"], current, {}), (["old"], []))
+
+
+def test_committed_rename_ledger(bh):
+    """The real ledger parses, and every entry is still true of the history."""
+    try:
+        renames = bh.load_renames()
+    except ValueError as exc:
+        check("committed rename ledger parses", str(exc), "no error")
+        return
+    print(f"PASS  committed rename ledger parses ({len(renames)} entries)")
+
+    records = bh.load_history(HISTORY)
+    if not records:
+        print("SKIP  ledger entries against committed history (no records)")
+        return
+    latest = dict(records[-1].get("entries", {}))
+    check("no declared rename loops",
+          sorted(n for n in renames if bh.resolve_rename(n, renames) is None),
+          [])
+    # A retired name that is being scored again is the failure the ledger
+    # cannot survive: the new numbers would be grafted onto the orphaned
+    # history of a benchmark that measured something else, under a name this
+    # file has already certified as gone. It is also the only way a stale entry
+    # could excuse a genuine removal years later, so it is refused here rather
+    # than left to be noticed.
+    check("no retired series name is being scored again",
+          sorted(n for n in renames if n in latest), [])
 
 
 def test_drift_is_subtracted(bh):

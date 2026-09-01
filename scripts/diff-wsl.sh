@@ -1298,3 +1298,88 @@ diff_setfacl() {
   "$DIFF_SETFACL" -m "$2" "$1" >/dev/null 2>&1
   return 0
 }
+
+# --- an ownership failure the harness can actually reach ----------------------
+#
+# `failed to preserve ownership for %s` is the one diagnostic in the copy family
+# that no case here could provoke, and a divergence lived in it undetected for
+# that reason: GNU quotes the name for a file and leaves it *bare* for a symlink
+# (`copy.c:961` against `copy.c:3186`) and ours quoted all three.
+#
+# It is unreachable by the obvious route because `chown_failure_ok` swallows it.
+# An unprivileged `cp -p` of a root-owned file fails its chown with EPERM, and
+# EPERM and EINVAL are forgiven outright unless the caller *has* chown
+# privileges — so the ordinary way to make a chown fail is also the way to make
+# the program say nothing about it. Both sides exit 0 in silence.
+#
+# The arrangement that does reach it is a user namespace. Inside `unshare -Ur`
+# the euid is 0, so `chown_failure_ok` no longer forgives; and only one uid is
+# mapped, so a file belonging to anyone else has an *unmapped* owner and a chown
+# to it fails EINVAL rather than EPERM. Both halves are needed and neither works
+# alone.
+#
+# Two facts to discover, kept apart because they fail for different reasons and
+# a reader of the header should be told which:
+#
+#   DIFF_USERNS       the wrapper, when unprivileged user namespaces are enabled
+#                     (a kernel can refuse them outright, and some distributions
+#                     do)
+#   DIFF_FOREIGN_LINK a symlink owned by somebody other than us, which is what
+#                     supplies the unmapped uid. Discovered rather than built:
+#                     creating one needs the privilege whose absence is the
+#                     whole point.
+DIFF_USERNS=
+DIFF_FOREIGN_LINK=
+
+# Running as root would defeat the second half — every uid is mapped in a
+# namespace entered by root, so the chown would succeed and the case would pass
+# while asserting nothing. Skip rather than pretend.
+if [ "$(id -u)" -ne 0 ] && command -v unshare >/dev/null 2>&1; then
+  for diff_fl in /usr/bin /bin /usr/sbin /etc/alternatives /usr/lib; do
+    [ -d "$diff_fl" ] || continue
+    diff_fl_found=$(find "$diff_fl" -maxdepth 1 -type l ! -uid "$(id -u)" \
+                      2>/dev/null | LC_ALL=C sort | head -1)
+    [ -n "$diff_fl_found" ] && { DIFF_FOREIGN_LINK=$diff_fl_found; break; }
+  done
+fi
+
+# Present is not working, the same bargain as `setfacl` above: probe by doing
+# the thing. A kernel with `kernel.unprivileged_userns_clone=0` has the binary
+# and refuses the call, and a `find` that matched a link on a filesystem which
+# reports a fake uid would give an id that maps after all. So enter the
+# namespace and confirm the lchown fails *with EINVAL specifically* — an EPERM
+# here would mean the arrangement is the ordinary unreachable one and the case
+# would assert silence against silence.
+#
+# Its own interpreter rather than `DIFF_XATTR`. That one is chosen for being
+# able to *set an attribute*, which this has nothing to do with; borrowing it
+# would make a host with no working `setxattr` skip an ownership case for a
+# reason that has nothing to do with ownership.
+diff_userns_py=
+for diff_up in python3 python; do
+  command -v "$diff_up" >/dev/null 2>&1 && { diff_userns_py=$diff_up; break; }
+done
+if [ -n "$DIFF_FOREIGN_LINK" ] && [ -n "$diff_userns_py" ] \
+   && unshare -Ur "$diff_userns_py" - "$DIFF_FOREIGN_LINK" >/dev/null 2>&1 <<'PY'
+import errno, os, shutil, sys, tempfile
+st = os.lstat(sys.argv[1])
+d = tempfile.mkdtemp()
+try:
+    link = os.path.join(d, "l")
+    os.symlink("t", link)
+    try:
+        os.lchown(link, st.st_uid, st.st_gid)
+    except OSError as e:
+        sys.exit(0 if e.errno == errno.EINVAL else 1)
+    sys.exit(1)
+finally:
+    shutil.rmtree(d, ignore_errors=True)
+PY
+then
+  # Read only by the case scripts, which the checker cannot see from here —
+  # the same cross-file blindness `DIFF_XATTR_REF` is annotated for above.
+  # shellcheck disable=SC2034
+  DIFF_USERNS='unshare -Ur'
+else
+  DIFF_FOREIGN_LINK=
+fi

@@ -1,5 +1,47 @@
 # B → C — `main` is red: the automator keeps time and never receives the clock
 
+**Status:** ✅ LANDED 2026-08-31 by lane C — the arm is in, and both of the two
+things you flagged "while you are in there" were real. `scripts/check-tick-wiring.py`
+now reports `0 timekeeping function(s) left unwired`.
+
+Five regression tests, four of them entering through `handle_event` and none of
+them touching `tick` directly:
+
+- `the_clock_reaches_the_playback_through_the_door_the_window_knocks_on` —
+  start a playback, feed `Event::Tick { elapsed_ms }` at `handle_event`, assert
+  it advanced. Exactly the shape you asked for.
+- `a_tick_delivered_as_an_event_is_consumed_only_while_something_is_moving` —
+  idle ⇒ `Ignored`, playing and recording ⇒ `Consumed`.
+- `the_elapsed_clock_advances_on_ticks_that_arrive_as_events` — ten ticks
+  through the door sum to `TICK_MS * 10`, not a plausible zero.
+- `a_new_macro_is_stamped_with_the_date_not_the_age_of_the_window` and
+  `the_date_is_read_again_on_the_clock_not_once_when_the_window_opened` — your
+  second note. `created_at_ms`/`modified_at_ms` *were* being fed from
+  `self.elapsed_ms`, so every macro would have claimed a 1970 creation date the
+  moment the arm landed. There is a `wall_ms` field now, seeded from a new
+  `now_ms()` (`SystemTime` since the epoch, the same shape `apps/pomodoro` uses)
+  and re-read on each tick, and the nine stamp sites read that. The
+  `recording_last_event_ms` sites are left on `elapsed_ms` deliberately — those
+  measure an interval between two recorded events, which is what uptime is for.
+
+Your diagnosis of *why* it shipped green is worth recording where the next lane
+will trip over it, so it is in `apps/automator/mutate.py` as a postscript: the
+table already held four rows that break `tick`, and **all four were caught** —
+by tests that call `tick` directly, against a program in which nothing ever
+called `tick`. The new row breaks the *door* (`Event::Tick` arm deleted, so the
+match falls to `_ => Ignored`) and is caught by four tests, none of them the two
+that guarded `tick` before. That is `known-issues.md` lesson 102 in its purest
+form. All five new rows sweep `[ok]`; the table is 67 rows.
+
+One note on provenance, since the history will look odd: lane A landed the same
+arm directly on `main` as `f64ad6259` about nineteen minutes before I finished
+this, under the red-trunk exception, and filed
+`requests/a-c-automator-asked-for-a-clock-and-threw-it-away-i-fixed-it-on-main.md`.
+We wrote it independently and the merge conflicted. I resolved in favour of this
+branch's version — which is A's test split into three named tests plus two more,
+with the mutation rows to own them — and replied in §6 of A's file. Nothing of
+A's was dropped except the name.
+
 **Filed:** 2026-08-31 by Lane B. **Action needed:** one match arm in
 `apps/automator/src/main.rs`, and a regression test written *through*
 `handle_event`. This is your own gate reporting your own tree, so there is

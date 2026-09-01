@@ -35,8 +35,12 @@
 //!    **parent directory** to `dst`. If `dst` was an empty directory that
 //!    succeeds: the user asks to move something into `dst` and instead the
 //!    directory they were standing in is moved *onto* `dst`. Reachable from an
-//!    ordinary glob (`mv */.. dst`). A source with no file-name component is now
-//!    refused with a diagnostic.
+//!    ordinary glob (`mv */.. dst`).
+//!
+//!    The target name is now built by [`target_in_directory`], which appends the
+//!    last component's *bytes* — `.` and `..` included — and so has no empty
+//!    name to collapse. See [`coreutils::fileid`] for why the split is done on
+//!    bytes rather than through `Path::file_name`.
 //!
 //! 4. **The cross-filesystem fallback silently turned a symlink into a copy of
 //!    its target.** When `rename` fails with `EXDEV`, `mv` must copy and then
@@ -53,6 +57,56 @@
 //!    for a genuine cross-device one. Previously a `mv nonexistent dst` failed
 //!    `rename`, fell through to `fs::copy`, and reported the *copy's* error,
 //!    which happened to read the same but need not have.
+//!
+//! # And seventeen more, found by measurement rather than by reading
+//!
+//! The four above were found by reading the code. That method had reached its
+//! limit — the remaining bugs were all in behaviour that *looked* right. So
+//! `scripts/mv-diff.sh` runs this `mv` and GNU coreutils 9.4 over the same 178
+//! fixtures and compares exit status, both streams, and the resulting tree
+//! byte-for-byte. It found **seventeen** differences on its first run, none of
+//! which had been suspected.
+//!
+//! Nearly all of them came from one structural mistake: the old code decided
+//! *first* whether the destination was a directory, then computed a target, then
+//! renamed. GNU inverts this. It renames **speculatively** first
+//! (`mv.c:466`) — `RENAME_NOREPLACE`, so it cannot clobber — and only asks any
+//! further question if that fails. The order is not an optimisation; it is what
+//! makes the answers come out right, because a rename that succeeded proves the
+//! destination was free and every "is the destination …" check is then moot. The
+//! tri-state that carries this is [`Renamed`], GNU's `x.rename_errno`.
+//!
+//! The differences it exposed, grouped:
+//!
+//! - **Refusals that were not made at all.** Moving a file onto itself
+//!   (`mv a a`), onto a hard link to itself, or through a symlink to itself
+//!   destroyed the file and left nothing — `mv link file`, where `link` points
+//!   at `file`, deleted `file`. [`same_file_ok`] is GNU's check, reduced to this
+//!   `mv`'s option set and then measured case by case against GNU, including the
+//!   pair upstream documents at `copy.c:1907`: with `l` a hard link to `f` and
+//!   `s` a symlink to `f`, `mv s f` must fail and `mv s l` must succeed.
+//! - **Two sources with the same basename silently ate each other.**
+//!   `mv one/same two/same dir` moved both to `dir/same` and reported success:
+//!   two files in, one file out, no message. GNU keeps a set of
+//!   already-written destinations ([`DestInfo`]) and refuses the second with
+//!   `will not overwrite just-created`.
+//! - **Directory-vs-non-directory collisions.** Overwriting a directory with a
+//!   file, or a file with a directory, produced the kernel's bare `Is a
+//!   directory` rather than the sentence naming both operands.
+//! - **The wrong operand was named.** A failure caused by the *destination* —
+//!   it is a non-empty directory, it is a running binary, the disk is full —
+//!   named the source too, which `copy.c:2851` says "is more likely to confuse
+//!   the user than be helpful". See [`blames_the_destination`].
+//! - **Diagnostics that were this file's own sentences** rather than the ones
+//!   scripts and tests actually match on: `target 'c' is not a directory` for
+//!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
+//!   directory had been asked to become a subdirectory of itself.
+//!
+//! The harness is the artifact to keep, not the fix list: it is 178 cases, it
+//! runs in about a minute, and it is how the next seventeen get found. Sixty-one
+//! of its cases are marked as differing on purpose — every one is an option this
+//! file does not implement yet, so implementing one is expected to *promote* a
+//! case rather than to add one.
 //!
 //! # Options this implementation does not have
 //!
@@ -76,8 +130,9 @@
 
 use coreutils::diag;
 use coreutils::errmsg::strerror;
+use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
 use coreutils::getopt::{self, Program, Takes};
-use coreutils::quote::quoteaf_os;
+use coreutils::quote::{quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use std::ffi::OsString;
 use std::fs;
@@ -336,6 +391,118 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 
 // ----------------------------------------------------------------- moving ---
 
+/// What the speculative rename left behind — GNU's `x.rename_errno`
+/// (`copy.h:277`), whose three states drive everything below.
+///
+/// The tri-state is not an implementation detail that could be flattened into a
+/// `Result`: which of the three it is decides *what is even checked*. `Done`
+/// means the move already happened and nothing may be looked at again;
+/// `Failed(EEXIST)` means something is in the way, which is where every refusal
+/// lives; any other `Failed` is reported without ever consulting the
+/// destination.
+enum Renamed {
+    /// GNU's `-1`. No attempt yet, so [`move_one`] makes it.
+    NotTried,
+    /// GNU's `0`. The source is at the destination already; there was nothing
+    /// there to overwrite, so no question of overwriting arose.
+    Done,
+    /// A failed attempt, carrying the reason.
+    Failed(io::Error),
+}
+
+/// Try to rename, but only onto a name that does not exist: GNU's
+/// `renameatu (…, RENAME_NOREPLACE)` (`mv.c:466`).
+///
+/// The point of doing this *first*, before `mv` has decided whether the last
+/// operand is a directory, is that the overwhelmingly common case — a rename
+/// onto a free name — then costs one syscall and skips every check, and the
+/// checks are only reached when there is something to check.
+///
+/// `RENAME_NOREPLACE` is a `renameat2` flag that `std` does not expose, so this
+/// is gnulib's own fallback for a host that lacks the syscall
+/// (`lib/renameatu.c:134`): look first, then rename. That has a race, and
+/// gnulib's comment says so — between the look and the rename someone else may
+/// create the destination, and it is then overwritten. Upstream accepts the
+/// race on such hosts, and the alternative here would be to guess at a raw
+/// syscall number.
+fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<()> {
+    // `symlink_metadata`: a *dangling* symlink at the destination still occupies
+    // the name, so it is "exists" for this question.
+    match fs::symlink_metadata(dst) {
+        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        Err(_) => {}
+    }
+    fs::rename(src, dst)
+}
+
+/// Is this the errno that means "the destination is already there"?
+///
+/// Compared as a *kind* rather than as a number because [`rename_noreplace`]
+/// synthesises it rather than receiving it from the kernel, and the two must
+/// answer alike.
+fn is_exists(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::AlreadyExists
+}
+
+/// Can this operand be used as a directory to move things into? gnulib's
+/// `target_directory_operand` (`lib/targetdir.c`).
+///
+/// Upstream opens it `O_PATH | O_DIRECTORY` and keeps the descriptor for the
+/// `*at` calls that follow; we have no such calls, so the question reduces to
+/// the one the open answers. It *follows* symlinks, which is why
+/// `mv a link-to-dir` puts `a` inside the directory.
+///
+/// # Errors
+///
+/// The failure the caller reports as `target 'x': …` — `ENOENT` when the operand
+/// is absent (including a dangling symlink, since this follows), `ENOTDIR` when
+/// it exists and is not a directory.
+///
+/// The `ENOTDIR` case is synthesised rather than observed: upstream gets it from
+/// the `O_DIRECTORY` open, whereas the `metadata` call here *succeeds* and the
+/// `is_dir` test is what fails. It is built from the [`io::ErrorKind`] and not
+/// from the number 20, because that number is `ENOTDIR` only on a host where it
+/// is an errno at all — on the Windows development host `from_raw_os_error(20)`
+/// is a Win32 code and prints `The system cannot find the device specified.`
+/// The kind is what [`strerror`] reads, and it yields `Not a directory` on both.
+fn target_directory_operand(path: &Path) -> io::Result<()> {
+    let meta = fs::metadata(path)?;
+    if meta.is_dir() {
+        Ok(())
+    } else {
+        Err(io::Error::from(io::ErrorKind::NotADirectory))
+    }
+}
+
+/// The destinations already written by *this* command, as GNU's `dest_info`
+/// (`copy.h:289`) — a set of `(name, file)` pairs, not just names.
+///
+/// It has to be pairs. The question it answers is not "did two operands share a
+/// basename" but "is the thing sitting at that name the thing I just put
+/// there": if the name held something else all along, overwriting it is an
+/// ordinary overwrite and GNU performs it silently.
+type DestInfo = std::collections::HashSet<(OsString, FileId)>;
+
+/// Where `src` lands inside directory `dir`, and under what name.
+///
+/// GNU's `mv.c:540`: `file_name_concat (target_directory, last_component
+/// (source), &dst_relname)`, followed by `strip_trailing_slashes (dst_relname)`.
+/// [`split_entry`] already does the stripping, so the two halves of its answer
+/// are the two halves of this one.
+///
+/// **The last component is appended verbatim, `.` and `..` included.** This is
+/// the one place `mv` and `cp` genuinely differ: `cp` has an
+/// `arg_base += STREQ (arg_base, "..")` bump (`cp.c:678`) and `mv` has no such
+/// line, so `cp a/.. d` targets `d/a` while `mv a/.. d` targets `d/..`. Reading
+/// that as "`mv` forgot" and adding the bump here would be wrong twice over: it
+/// would move the wrong file, and it would do so silently, where the verbatim
+/// name reliably fails `EEXIST` or `EBUSY` and says so.
+fn target_in_directory(dir: &Path, src: &Path) -> (PathBuf, OsString) {
+    let (_, base) = split_entry(src);
+    (dir.join(&base), base)
+}
+
 /// Move every source onto the destination, reporting failures to `err`.
 ///
 /// Returns `true` if every source was moved. Takes the error sink as a parameter
@@ -346,6 +513,9 @@ fn arg_bytes(a: &OsString) -> Vec<u8> {
 ///
 /// A failure on one source does not stop the others: `mv a b c dir/` with `b`
 /// unmovable still moves `a` and `c`, and exits 1.
+///
+/// The shape follows GNU's `main` (`mv.c:440-550`), and the order is
+/// load-bearing rather than stylistic — see [`Renamed`].
 fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
     // Zero and one operand are distinct diagnostics, as in GNU. "missing
     // operand" alone left the user to work out *which*.
@@ -369,34 +539,114 @@ fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
         return false;
     }
 
-    let dest_path = Path::new(dest);
-    // `is_dir` follows symlinks, and that is correct here: `mv a link-to-dir/`
-    // puts `a` inside the directory, which is what GNU does without `-T`.
-    let dest_is_dir = dest_path.is_dir();
+    let last = Path::new(dest);
+    let mut state = if sources.len() == 1 {
+        match rename_noreplace(Path::new(&sources[0]), last) {
+            Ok(()) => Renamed::Done,
+            Err(e) => Renamed::Failed(e),
+        }
+    } else {
+        Renamed::NotTried
+    };
 
-    if sources.len() > 1 && !dest_is_dir {
-        let _ = writeln!(err, "mv: target {} is not a directory", quoteaf_os(dest));
-        return false;
+    // Only now — and only if that did not already settle it — is the last
+    // operand asked whether it is a directory.
+    let mut into: Option<&Path> = None;
+    if !matches!(state, Renamed::Done) {
+        match target_directory_operand(last) {
+            Ok(()) => {
+                state = Renamed::NotTried;
+                into = Some(last);
+            }
+            Err(e) => {
+                // With two operands the last one is simply the new name, and
+                // not being a directory is unremarkable. With three or more it
+                // *had* to be a directory, and this is fatal for the whole
+                // command rather than for one source: GNU's
+                // `error (EXIT_FAILURE, …)` at `mv.c:495`.
+                if sources.len() > 1 {
+                    let why = strerror(&e);
+                    let _ = writeln!(err, "mv: target {}: {why}", quoteaf_os(dest));
+                    return false;
+                }
+            }
+        }
     }
 
+    let Some(dir) = into else {
+        // Two operands, last operand not a directory: one move, to that name.
+        return move_one(
+            Path::new(&sources[0]),
+            last,
+            dest,
+            state,
+            true,
+            &mut None,
+            err,
+        );
+    };
+
+    // The set is built only when it can matter — GNU's comment at `mv.c:526`:
+    // "the problem it is used to detect can arise only if there are two or more
+    // files to move."
+    let mut seen: Option<DestInfo> = (sources.len() >= 2).then(DestInfo::default);
+
     let mut ok = true;
-    for src in sources {
-        if !move_one(src, dest_path, dest_is_dir, err) {
+    for (i, src) in sources.iter().enumerate() {
+        let src_path = Path::new(src);
+        let (target, base) = target_in_directory(dir, src_path);
+        // The last operand is exempt from being recorded, because nothing that
+        // follows could collide with it (`copy.c:2779`).
+        let last_file = i.saturating_add(1) == sources.len();
+        if !move_one(
+            src_path,
+            &target,
+            &base,
+            Renamed::NotTried,
+            last_file,
+            &mut seen,
+            err,
+        ) {
             ok = false;
         }
     }
     ok
 }
 
-/// Move one source. Returns `false` if it should count against the exit status.
-fn move_one<W: Write>(src: &OsString, dest: &Path, dest_is_dir: bool, err: &mut W) -> bool {
-    let src_path = Path::new(src);
+/// Move one source to one already-computed target: GNU's `copy_internal`
+/// reduced to the options this `mv` has.
+///
+/// `relname` is the target's name *within the destination directory*, which is
+/// the key [`DestInfo`] is built on; with two operands it is the whole
+/// destination operand, and is then never consulted because `seen` is `None`.
+///
+/// Returns `false` if this source should count against the exit status.
+#[allow(clippy::too_many_lines)]
+fn move_one<W: Write>(
+    src: &Path,
+    target: &Path,
+    relname: &OsString,
+    state: Renamed,
+    last_file: bool,
+    seen: &mut Option<DestInfo>,
+    err: &mut W,
+) -> bool {
+    let mut failure = match state {
+        // Already moved, and with `last_file` the recording is skipped too, so
+        // there is nothing left to do. This is the common case.
+        Renamed::Done => return record_move(target, relname, last_file, seen),
+        Renamed::NotTried => match rename_noreplace(src, target) {
+            Ok(()) => return record_move(target, relname, last_file, seen),
+            Err(e) => e,
+        },
+        Renamed::Failed(e) => e,
+    };
 
-    // `symlink_metadata`, not `exists`/`is_dir`: both follow symlinks, and `mv`
-    // moves a symlink as itself, whatever it points at — including nothing.
-    // Statting first also means a missing source is reported here, by name,
-    // instead of surfacing later as whatever the fallback copy happened to say.
-    let metadata = match fs::symlink_metadata(src_path) {
+    // The source is stat'd only now, which is why a missing source is reported
+    // as `cannot stat` rather than as a rename failure. `symlink_metadata`, not
+    // `exists`/`is_dir`: `mv` moves a symlink as itself, whatever it points at
+    // — including nothing.
+    let src_meta = match fs::symlink_metadata(src) {
         Ok(m) => m,
         Err(e) => {
             // `strerror`, not `{e}`: why it failed has to read the same wherever
@@ -410,62 +660,293 @@ fn move_one<W: Write>(src: &OsString, dest: &Path, dest_is_dir: bool, err: &mut 
         }
     };
 
-    let target = match compute_target(src_path, dest, dest_is_dir) {
-        Ok(t) => t,
-        Err(reason) => {
-            let _ = writeln!(
-                err,
-                "mv: cannot move {} into {}: {reason}",
-                quoteaf_os(src),
-                quoteaf_os(dest)
-            );
-            return false;
-        }
-    };
+    // Whatever the rename said, a destination that exists makes this the
+    // "something is in the way" case (`copy.c:2322`) — so `mv a/. d`, which
+    // fails `EBUSY`, is examined as an overwrite and only *then* fails `EBUSY`
+    // for real.
+    let dst_meta = fs::symlink_metadata(target).ok();
+    if dst_meta.is_some() {
+        failure = io::Error::from(io::ErrorKind::AlreadyExists);
+    }
 
-    match fs::rename(src_path, &target) {
-        Ok(()) => return true,
-        Err(e) if is_cross_device(&e) => {}
-        Err(e) => {
-            let why = strerror(&e);
+    // The refusals are asked only of a destination that is actually there —
+    // there is nothing to refuse to overwrite otherwise.
+    if let Some(dst_meta) = &dst_meta
+        && !refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, err)
+    {
+        return false;
+    }
+
+    // Now the real rename, the one allowed to replace what is there. Keyed on
+    // the errno rather than on `dst_meta`, which is `copy.c:2757` exactly and
+    // is not the same condition: between the speculative rename above and the
+    // stat, something else can *remove* the destination. GNU retries and
+    // succeeds; reporting `File exists` for a name that is now free would be
+    // wrong. (When `dst_meta` is `Some` the assignment above has already made
+    // this true, so the ordinary overwrite still passes through here.)
+    if is_exists(&failure) {
+        match fs::rename(src, target) {
+            Ok(()) => return record_move(target, relname, last_file, seen),
+            Err(e) => failure = e,
+        }
+    }
+
+    // A directory asked to become a subdirectory of itself. GNU keys on this
+    // one errno and says so is fragile (`copy.c:2798`); there is no better
+    // signal, and the alternative is the unhelpfully bare `Invalid argument`.
+    if is_subdirectory_of_itself(&failure) {
+        let _ = writeln!(
+            err,
+            "mv: cannot move {} to a subdirectory of itself, {}",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+        return false;
+    }
+
+    if !is_cross_device(&failure) {
+        let why = strerror(&failure);
+        // When the destination is what went wrong, naming the source as well
+        // "is more likely to confuse the user than be helpful"
+        // (`copy.c:2851`).
+        if blames_the_destination(&failure) {
+            let _ = writeln!(err, "mv: cannot overwrite {}: {why}", quoteaf_os(target));
+        } else {
             let _ = writeln!(
                 err,
                 "mv: cannot move {} to {}: {why}",
                 quoteaf_os(src),
-                quoteaf_os(&target)
+                quoteaf_os(target)
             );
-            return false;
         }
+        return false;
     }
 
-    if let Err(e) = copy_across_devices(src_path, &target, &metadata) {
+    if let Err(e) = copy_across_devices(src, target, &src_meta) {
         let why = strerror(&e);
         let _ = writeln!(
             err,
             "mv: cannot move {} to {}: {why}",
             quoteaf_os(src),
-            quoteaf_os(&target)
+            quoteaf_os(target)
         );
         return false;
+    }
+    record_move(target, relname, last_file, seen)
+}
+
+/// Note that the file just moved now sits at `relname`, so a later source that
+/// lands on the same name can be told apart from an ordinary overwrite.
+///
+/// # Why this stats the destination and not the source
+///
+/// The source is *gone*: the rename that this is recording the success of has
+/// just moved it away, so there is nothing left at that name to stat. GNU stats
+/// the destination for exactly this reason — `copy.c:2246` picks the name to
+/// stat with `rename_errno == 0 ? dst_name : src_name`, and the variable it
+/// fills is called `src_sb` only because the *other* branch fills it from the
+/// source. A rename does not change a file's device or inode, so the two are the
+/// same identity, and only one of them is still readable.
+///
+/// Getting this backwards is silent rather than loud, which is what makes it
+/// worth a comment: the stat simply fails, the set stays empty, and the
+/// just-created check it exists to feed never fires. `mv one/same two/same dir`
+/// then overwrites `dir/same` and reports success — two files in, one file out.
+///
+/// Always returns `true`: it is called only on success paths, and a set that
+/// could not be updated costs the next source its refusal but never invents one.
+fn record_move(
+    target: &Path,
+    relname: &OsString,
+    last_file: bool,
+    seen: &mut Option<DestInfo>,
+) -> bool {
+    // The last source is exempt: nothing follows it that could collide
+    // (`copy.c:2779`), and GNU does not even take the stat.
+    if last_file {
+        return true;
+    }
+    if let Some(set) = seen {
+        // `symlink_metadata`: `mv` is `DEREF_NEVER`, so a moved symlink is
+        // recorded as itself rather than as whatever it points at.
+        if let Ok(meta) = fs::symlink_metadata(target)
+            && let Some(id) = file_id(target, &meta)
+        {
+            set.insert((relname.clone(), id));
+        }
     }
     true
 }
 
-/// Where one source lands.
+/// The refusals that stand between "something is at the destination" and the
+/// rename that would replace it. Returns `false` once one has been reported.
 ///
-/// # Errors
+/// The order is GNU's, and it is observable: a request that trips two of these
+/// gets the first one's wording.
+fn refuse_overwrite_checks<W: Write>(
+    src: &Path,
+    src_meta: &fs::Metadata,
+    target: &Path,
+    dst_meta: &fs::Metadata,
+    relname: &OsString,
+    seen: &Option<DestInfo>,
+    err: &mut W,
+) -> bool {
+    // 1. Is the destination the source? (`copy.c:2345`)
+    if !same_file_ok(src, src_meta, target, dst_meta) {
+        let _ = writeln!(
+            err,
+            "mv: {} and {} are the same file",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+        return false;
+    }
+
+    let (src_dir, dst_dir) = (src_meta.is_dir(), dst_meta.is_dir());
+
+    // 2. A directory onto a non-directory (`copy.c:2455`). The destination is
+    //    named first, which reads oddly until you notice the sentence is about
+    //    what is being destroyed.
+    if !dst_dir && src_dir {
+        let _ = writeln!(
+            err,
+            "mv: cannot overwrite non-directory {} with directory {}",
+            quoteaf_os(target),
+            quoteaf_os(src)
+        );
+        return false;
+    }
+
+    // 3. A destination this same command line just created (`copy.c:2473`).
+    //    GNU's comment: "Don't let the user destroy their data, even if they
+    //    try hard: this mv command must fail: mv a/f b/f c".
+    if !dst_dir
+        && let Some(set) = seen
+        && let Some(id) = file_id(target, dst_meta)
+        && set.contains(&(relname.clone(), id))
+    {
+        let _ = writeln!(
+            err,
+            "mv: will not overwrite just-created {} with {}",
+            quoteaf_os(target),
+            quoteaf_os(src)
+        );
+        return false;
+    }
+
+    // 4. A non-directory onto a directory (`copy.c:2485`), which unlike 2 does
+    //    not name the source at all.
+    if !src_dir && dst_dir {
+        let _ = writeln!(
+            err,
+            "mv: cannot overwrite directory {} with non-directory",
+            quoteaf_os(target)
+        );
+        return false;
+    }
+
+    // 5. `copy.c:2504`. Unreachable while 2 stands above it — it is GNU's
+    //    belt-and-braces for the `--backup` path that lets 2 through — and kept
+    //    so that adding `-b` does not silently lose the guard.
+    if src_dir && !dst_dir {
+        let _ = writeln!(
+            err,
+            "mv: cannot move directory onto non-directory: {} -> {}",
+            quotef_os(src),
+            quotef_os(target)
+        );
+        return false;
+    }
+
+    true
+}
+
+/// Would moving `src` onto `target` destroy the very thing being moved? GNU's
+/// `same_file_ok` (`copy.c:1739`), reduced to `mv`'s option set — `move_mode`,
+/// `DEREF_NEVER`, no backups, no hard/symbolic linking.
 ///
-/// The source having no file-name component while the destination is a
-/// directory — `mv a/.. dst`. See module docs, bug 3: the previous code turned
-/// this into a request to move `a`'s parent onto `dst`.
-fn compute_target(src: &Path, dest: &Path, dest_is_dir: bool) -> Result<PathBuf, &'static str> {
-    if !dest_is_dir {
-        return Ok(dest.to_path_buf());
+/// `true` means "go ahead". The reduction drops three whole branches
+/// (`x->hard_link`, the `dereference != DEREF_NEVER` arm, and the backup block),
+/// and what is left is genuinely subtle, so each surviving step says which
+/// question it answers.
+///
+/// The case that makes this worth its length is the one GNU spells out in its
+/// own comment (`copy.c:1907`):
+///
+/// ```text
+/// touch f && ln f l && ln -s f s
+/// mv s f   must fail — `f` is the only thing `s` names, and moving the link
+///          onto it leaves a link pointing at itself
+/// mv s l   must succeed — `f` survives as the other name for the data
+/// ```
+///
+/// Measured against GNU 9.4 both ways; this `mv` previously performed the first
+/// one and destroyed the file.
+fn same_file_ok(src: &Path, src_meta: &fs::Metadata, dst: &Path, dst_meta: &fs::Metadata) -> bool {
+    let same = same_inode((src, src_meta), (dst, dst_meta));
+    let (src_link, dst_link) = (
+        src_meta.file_type().is_symlink(),
+        dst_meta.file_type().is_symlink(),
+    );
+
+    // Two symlinks: what matters is whether they are the same *link*, because
+    // replacing one link with another touches nothing either points at.
+    if src_link && dst_link {
+        let same_name = same_entry(src, dst);
+        // Unless they are two hard links to one symlink, where the rename would
+        // do nothing at all and silently report success.
+        if !same_name && same {
+            return false;
+        }
+        return !same_name;
     }
-    match src.file_name() {
-        Some(name) => Ok(dest.join(name)),
-        None => Err("the source path ends in '.' or '..', so it names nothing to create there"),
+
+    // Moving onto a symlink is fine: the rename replaces the link itself, so
+    // whatever it pointed at is untouched.
+    if dst_link {
+        return true;
     }
+
+    // Two hard links to one file, reached by different names. The rename would
+    // remove one of them, and which one is a race.
+    if same && nlink(dst_meta) > 1 && !same_entry(src, dst) {
+        return false;
+    }
+
+    // Neither is a symlink, so the only way to be the same file is to be it.
+    if !src_link && !same {
+        return true;
+    }
+
+    // A symlink onto a file that has another name: the data survives under that
+    // other name, so this is allowed. `canonicalize`, because the question is
+    // where the link *ends up*, not what one hop of it says.
+    if src_link
+        && nlink(dst_meta) > 1
+        && let Ok(resolved) = fs::canonicalize(src)
+    {
+        return !same_entry(&resolved, dst);
+    }
+
+    // Last: follow both sides all the way and compare. This is what catches
+    // `mv link file` where `link` resolves to `file` — the two are different
+    // *entries* and different *links*, and the same file.
+    let followed = |path: &Path, meta: &fs::Metadata, is_link: bool| {
+        if is_link {
+            fs::metadata(path).ok()
+        } else {
+            Some(meta.clone())
+        }
+    };
+    let (Some(s), Some(d)) = (
+        followed(src, src_meta, src_link),
+        followed(dst, dst_meta, dst_link),
+    ) else {
+        // A dangling link is not the same file as anything.
+        return true;
+    };
+    !same_inode((src, &s), (dst, &d))
 }
 
 /// `EXDEV` — the kernel refusing to rename across a filesystem boundary, which
@@ -476,6 +957,73 @@ const CROSS_DEVICE_ERRNO: i32 = 18;
 /// `ERROR_NOT_SAME_DEVICE`, the same condition on the development host.
 #[cfg(windows)]
 const CROSS_DEVICE_ERRNO: i32 = 17;
+
+/// `EINVAL`, which `rename` reports for "the destination is inside the source".
+///
+/// `mv` gives this its own diagnostic (`copy.c:2798`) rather than the generic
+/// one, because "Invalid argument" tells the user nothing about which of the two
+/// paths was the problem.
+#[cfg(unix)]
+const SUBDIRECTORY_OF_ITSELF_ERRNO: i32 = 22;
+
+/// Is this the `rename` failure that means "you asked me to put a directory
+/// inside itself"?
+///
+/// Only asked of a number, and only on a host where that number is an errno.
+/// `ErrorKind` has no variant for this, and the kind std *does* map `EINVAL` to
+/// — `InvalidInput` — is far too broad to key a specific diagnostic on: on the
+/// development host it would claim every rejected rename was this case. GNU
+/// itself notes at `copy.c:2798` that keying on the errno is fragile; keying on
+/// a coarser classification would be worse.
+#[cfg(unix)]
+fn is_subdirectory_of_itself(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(SUBDIRECTORY_OF_ITSELF_ERRNO)
+}
+
+/// On a host where that number is not an errno there is nothing to key on, so
+/// the request falls through to the generic `cannot move` diagnostic.
+#[cfg(not(unix))]
+fn is_subdirectory_of_itself(_e: &io::Error) -> bool {
+    false
+}
+
+/// Does this `rename` failure blame the destination rather than the move?
+///
+/// `copy.c:2848` — the switch that picks between `cannot overwrite %s`, naming
+/// only the destination, and `cannot move %s to %s`, naming both. Every code
+/// here is one the kernel can only be reporting *about* the existing
+/// destination: it is a directory, it is not empty, it is a running binary, it
+/// is out of space or quota, it already has the maximum link count. Naming the
+/// source in those cases would point at the wrong file.
+///
+/// The values are Linux's. This runs on the development host too, where the
+/// numbers differ and nothing here matches — the fallback diagnostic is the
+/// less specific one, which is safe; the target is where it must be right.
+fn blames_the_destination(e: &io::Error) -> bool {
+    /// `EEXIST`, `EISDIR`, `ENOTEMPTY`, `ETXTBSY`, `EDQUOT`, `EMLINK`,
+    /// `ENOSPC` — in the order `copy.c` lists them.
+    const DESTINATION_CODES: &[i32] = &[
+        122, // EDQUOT
+        17,  // EEXIST
+        21,  // EISDIR
+        31,  // EMLINK
+        28,  // ENOSPC
+        26,  // ETXTBSY
+        39,  // ENOTEMPTY
+    ];
+    if cfg!(unix)
+        && e.raw_os_error()
+            .is_some_and(|n| DESTINATION_CODES.contains(&n))
+    {
+        return true;
+    }
+    // The two the standard library classifies for us, so that the development
+    // host reaches the same branch for the cases it can actually produce.
+    matches!(
+        e.kind(),
+        io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+    )
+}
 
 fn is_cross_device(e: &io::Error) -> bool {
     #[cfg(any(unix, windows))]
@@ -546,6 +1094,7 @@ fn symlink(_points_at: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    use scratchdir::ScratchDir;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -796,62 +1345,75 @@ mod tests {
         );
     }
 
-    // ----------------------------------------------------- compute_target --
-
-    #[test]
-    fn target_file_to_file() {
-        let t = compute_target(Path::new("a.txt"), Path::new("b.txt"), false).unwrap();
-        assert_eq!(t, PathBuf::from("b.txt"));
-    }
+    // ------------------------------------------------ target_in_directory --
 
     #[test]
     fn target_file_into_dir() {
-        let t = compute_target(Path::new("src/a.txt"), Path::new("dst"), true).unwrap();
+        let (t, rel) = target_in_directory(Path::new("dst"), Path::new("src/a.txt"));
         assert_eq!(t, PathBuf::from("dst").join("a.txt"));
-    }
-
-    #[test]
-    fn target_rename_within_dir() {
-        let t = compute_target(Path::new("./old"), Path::new("new"), false).unwrap();
-        assert_eq!(t, PathBuf::from("new"));
+        assert_eq!(rel, OsString::from("a.txt"));
     }
 
     #[test]
     fn target_nested_source_into_dir() {
-        let t = compute_target(Path::new("a/b/c.txt"), Path::new("/tmp"), true).unwrap();
+        let (t, rel) = target_in_directory(Path::new("/tmp"), Path::new("a/b/c.txt"));
         assert_eq!(t, PathBuf::from("/tmp").join("c.txt"));
+        assert_eq!(rel, OsString::from("c.txt"));
     }
 
-    /// Bug 3 in the module docs. `Path::file_name` is `None` here, and the old
-    /// `unwrap_or_default()` turned that into `dst.join("")` == `dst`, i.e. a
-    /// request to rename `a`'s **parent** onto `dst`.
+    /// Trailing slashes are decoration on the source, and GNU strips them from
+    /// the relname (`strip_trailing_slashes`, `mv.c:541`) so that the set of
+    /// already-written destinations is keyed on the name and not on how the
+    /// operand was typed. `mv d/ x` and `mv d x` must collide with each other.
     #[test]
-    fn a_source_ending_in_dotdot_is_refused_not_collapsed() {
-        let e = compute_target(Path::new("a/.."), Path::new("dst"), true).unwrap_err();
-        assert!(e.contains("names nothing"), "{e}");
-        let e = compute_target(Path::new(".."), Path::new("dst"), true).unwrap_err();
-        assert!(e.contains("names nothing"), "{e}");
+    fn a_trailing_slash_on_the_source_is_not_part_of_the_name() {
+        let (t, rel) = target_in_directory(Path::new("dst"), Path::new("a/b///"));
+        assert_eq!(t, PathBuf::from("dst").join("b"));
+        assert_eq!(rel, OsString::from("b"));
     }
 
-    /// Same source, but the destination is not a directory: there is no name to
-    /// append, so nothing collapses and the rename is the user's to make.
+    /// Bug 3 in the module docs, now fixed the way GNU fixes it — which is by
+    /// *not* special-casing it at all.
+    ///
+    /// The old code called `Path::file_name`, which answers `None` for a name
+    /// ending in `..`, and `unwrap_or_default()` turned that into
+    /// `dst.join("")` == `dst`: a silent request to rename `a`'s **parent**
+    /// onto `dst`. The fix that followed refused the operand outright, which
+    /// was safe but still not GNU: GNU appends the component verbatim, so the
+    /// target is the literal `dst/..`. That name then fails on its own merits —
+    /// `EEXIST`, and with `-T` `EBUSY` — with a diagnostic naming a path the
+    /// user can recognise.
     #[test]
-    fn a_source_ending_in_dotdot_is_fine_when_dest_is_not_a_dir() {
-        let t = compute_target(Path::new("a/.."), Path::new("dst"), false).unwrap();
-        assert_eq!(t, PathBuf::from("dst"));
+    fn a_source_ending_in_dotdot_appends_dotdot_verbatim() {
+        let (t, rel) = target_in_directory(Path::new("dst"), Path::new("a/.."));
+        assert_eq!(t, PathBuf::from("dst").join(".."));
+        assert_eq!(rel, OsString::from(".."));
+
+        let (t, rel) = target_in_directory(Path::new("dst"), Path::new(".."));
+        assert_eq!(t, PathBuf::from("dst").join(".."));
+        assert_eq!(rel, OsString::from(".."));
+    }
+
+    /// And the same for `.`, which `Path::file_name` also answers `None` for.
+    #[test]
+    fn a_source_ending_in_dot_appends_dot_verbatim() {
+        let (t, rel) = target_in_directory(Path::new("dst"), Path::new("a/."));
+        assert_eq!(t, PathBuf::from("dst").join("."));
+        assert_eq!(rel, OsString::from("."));
     }
 
     // ------------------------------------------------------------ moving --
 
-    fn scratch(stem: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("mv_test_{stem}_{pid}_{n}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A private directory for one test, removed when the binding drops.
+    ///
+    /// Delegated to `scratchdir` rather than hand-rolled, for the reason spelled
+    /// out at `cp.rs`'s copy of this helper: the hand-rolled version built child
+    /// paths with `Path::join`, which uses the host's `\` on this development
+    /// box, and this file's own [`split_entry`] — like every path function in
+    /// the tree — treats `/` as the only separator and `\` as an ordinary byte
+    /// in a filename.
+    fn scratch(stem: &str) -> ScratchDir {
+        ScratchDir::new(&format!("mv_test_{stem}"))
     }
 
     /// `move_all` plus whatever it wrote to its error sink.
@@ -865,28 +1427,26 @@ mod tests {
     #[test]
     fn renames_a_file() {
         let dir = scratch("rename");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"hello").unwrap();
         let (ok, err) = mv(&[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"hello");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn moves_a_file_into_a_directory() {
         let dir = scratch("into_dir");
-        let a = dir.join("a");
-        let sub = dir.join("sub");
+        let a = dir.path("a");
+        let sub = dir.path("sub");
         fs::write(&a, b"x").unwrap();
         fs::create_dir(&sub).unwrap();
         let (ok, err) = mv(&[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -907,21 +1467,25 @@ mod tests {
         assert!(err.contains("solo"), "{err}");
     }
 
+    /// The wording is GNU's `error (EXIT_FAILURE, err, _("target %s"), …)`
+    /// (`mv.c:495`) — `target 'c': Not a directory`, the operand named and the
+    /// reason appended by the same `errno`-printing path every other diagnostic
+    /// uses. This file used to compose its own sentence, `target 'c' is not a
+    /// directory`, which reads better and is not what anything greps for.
     #[test]
     fn several_sources_need_a_directory() {
         let dir = scratch("not_a_dir");
-        let a = dir.join("a");
-        let b = dir.join("b");
-        let c = dir.join("c");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        let c = dir.path("c");
         fs::write(&a, b"x").unwrap();
         fs::write(&b, b"y").unwrap();
         fs::write(&c, b"z").unwrap();
         let (ok, err) = mv(&[&a, &b, &c]);
         assert!(!ok);
-        assert!(err.contains("is not a directory"), "{err}");
+        assert!(err.contains("Not a directory"), "{err}");
         // Nothing was touched.
         assert!(a.is_file() && b.is_file() && c.is_file());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 2 in the module docs: with `-f` the old code printed nothing here and
@@ -930,23 +1494,22 @@ mod tests {
     #[test]
     fn a_missing_source_is_reported() {
         let dir = scratch("missing_src");
-        let (ok, err) = mv(&[&dir.join("nope"), &dir.join("dst")]);
+        let (ok, err) = mv(&[&dir.path("nope"), &dir.path("dst")]);
         assert!(!ok);
         assert!(err.contains("cannot stat"), "{err}");
         assert!(err.contains("nope"), "{err}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_failure_does_not_abort_the_rest() {
         let dir = scratch("partial");
-        let sub = dir.join("sub");
+        let sub = dir.path("sub");
         fs::create_dir(&sub).unwrap();
-        let a = dir.join("a");
-        let c = dir.join("c");
+        let a = dir.path("a");
+        let c = dir.path("c");
         fs::write(&a, b"a").unwrap();
         fs::write(&c, b"c").unwrap();
-        let (ok, err) = mv(&[&a, &dir.join("gone"), &c, &sub]);
+        let (ok, err) = mv(&[&a, &dir.path("gone"), &c, &sub]);
         assert!(!ok, "the missing source must count against the status");
         assert!(err.contains("gone"), "{err}");
         assert!(sub.join("a").is_file(), "the first source must still move");
@@ -954,24 +1517,30 @@ mod tests {
             sub.join("c").is_file(),
             "and so must the one after the error"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 3, end to end. Before the fix this asked the kernel to rename the
     /// scratch directory itself onto `sub`.
+    ///
+    /// The wording is GNU's, and it is worth saying why it is *this* wording
+    /// rather than a refusal of the operand. `inner/..` and `sub/..` are both
+    /// the scratch directory, so the two operands name one file, and "are the
+    /// same file" is both true and the most informative thing available. It is
+    /// also not a special case anywhere in the code: the target is built by
+    /// appending `..` verbatim, and the ordinary same-file check then catches
+    /// it. Measured against GNU coreutils 9.4, which prints exactly this.
     #[test]
     fn a_dotdot_source_does_not_move_the_parent() {
         let dir = scratch("dotdot");
-        let inner = dir.join("inner");
-        let sub = dir.join("sub");
+        let inner = dir.path("inner");
+        let sub = dir.path("sub");
         fs::create_dir(&inner).unwrap();
         fs::create_dir(&sub).unwrap();
         let (ok, err) = mv(&[&inner.join(".."), &sub]);
         assert!(!ok);
-        assert!(err.contains("names nothing"), "{err}");
-        assert!(dir.is_dir(), "the parent must still be where it was");
+        assert!(err.contains("are the same file"), "{err}");
+        assert!(dir.dir().is_dir(), "the parent must still be where it was");
         assert!(inner.is_dir());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A dangling symlink is a thing that exists and can be renamed. The old
@@ -981,9 +1550,9 @@ mod tests {
     #[cfg(unix)]
     fn moves_a_dangling_symlink() {
         let dir = scratch("dangling");
-        let link = dir.join("link");
-        std::os::unix::fs::symlink(dir.join("nowhere"), &link).unwrap();
-        let moved = dir.join("moved");
+        let link = dir.path("link");
+        std::os::unix::fs::symlink(dir.path("nowhere"), &link).unwrap();
+        let moved = dir.path("moved");
         let (ok, err) = mv(&[&link, &moved]);
         assert!(ok, "{err}");
         assert!(
@@ -993,7 +1562,6 @@ mod tests {
                 .is_symlink()
         );
         assert!(fs::symlink_metadata(&link).is_err());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 4's unit: the cross-device fallback must reproduce a symlink *as* a
@@ -1004,11 +1572,11 @@ mod tests {
     #[cfg(unix)]
     fn the_cross_device_fallback_relinks_rather_than_copying_the_target() {
         let dir = scratch("xdev_symlink");
-        let real = dir.join("real");
+        let real = dir.path("real");
         fs::write(&real, b"contents").unwrap();
-        let link = dir.join("link");
+        let link = dir.path("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
-        let moved = dir.join("moved");
+        let moved = dir.path("moved");
 
         let meta = fs::symlink_metadata(&link).unwrap();
         copy_across_devices(&link, &moved, &meta).unwrap();
@@ -1021,34 +1589,31 @@ mod tests {
         assert_eq!(fs::read_link(&moved).unwrap(), real);
         assert!(fs::symlink_metadata(&link).is_err(), "source must be gone");
         assert_eq!(fs::read(&real).unwrap(), b"contents", "target untouched");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_cross_device_fallback_moves_a_plain_file() {
         let dir = scratch("xdev_file");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
         copy_across_devices(&a, &b, &meta).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Not implemented, and it says so rather than moving part of the tree.
     #[test]
     fn the_cross_device_fallback_refuses_a_directory() {
         let dir = scratch("xdev_dir");
-        let sub = dir.join("sub");
+        let sub = dir.path("sub");
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
         let meta = fs::symlink_metadata(&sub).unwrap();
-        let e = copy_across_devices(&sub, &dir.join("elsewhere"), &meta).unwrap_err();
+        let e = copy_across_devices(&sub, &dir.path("elsewhere"), &meta).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Unsupported);
         assert!(sub.join("inside").is_file(), "nothing may be moved");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A file whose name is not valid UTF-8 — the case the whole rewrite is
@@ -1058,16 +1623,15 @@ mod tests {
     fn moves_a_file_whose_name_is_not_utf8() {
         use std::os::unix::ffi::OsStringExt;
         let dir = scratch("nonutf8");
-        let mut name = dir.clone().into_os_string().into_vec();
+        let mut name = dir.dir().to_path_buf().into_os_string().into_vec();
         name.extend_from_slice(b"/\x80bad");
         let src = PathBuf::from(OsString::from_vec(name));
         fs::write(&src, b"x").unwrap();
-        let dst = dir.join("ok");
+        let dst = dir.path("ok");
         let (ok, err) = mv(&[&src, &dst]);
         assert!(ok, "{err}");
         assert!(!src.exists());
         assert_eq!(fs::read(&dst).unwrap(), b"x");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

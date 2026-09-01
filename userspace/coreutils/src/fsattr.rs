@@ -1499,12 +1499,20 @@ mod tests {
 
     /// [`Times::both`] sets the two to one instant, which is what a preserving
     /// copy wants and is easy to get half-right.
+    ///
+    /// The nanoseconds are a multiple of 100 because a `SystemTime` is only as
+    /// fine as the host clock underneath it, and on Windows that is a FILETIME
+    /// — 100ns ticks. `UNIX_EPOCH + Duration::new(7, 8)` is not a representable
+    /// instant there: it rounds to a flat 7s, and the test then read the host's
+    /// dropped nanosecond field as a bug in the subject. The subject carries
+    /// `u32` nanoseconds through unexamined and does not care which multiple
+    /// this is, so a representable one tests the same thing on both hosts.
     #[test]
     fn both_sets_the_two_to_one_instant() {
-        let ts = to_timespecs(Times::both(at_epoch_plus(7, 8)));
+        let ts = to_timespecs(Times::both(at_epoch_plus(7, 800)));
         assert_eq!(ts[0], ts[1]);
         assert_eq!(ts[0].tv_sec, 7);
-        assert_eq!(ts[0].tv_nsec, 8);
+        assert_eq!(ts[0].tv_nsec, 800);
     }
 
     /// A path with a NUL in it is refused rather than truncated. C has no way

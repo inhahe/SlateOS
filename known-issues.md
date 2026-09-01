@@ -106245,8 +106245,16 @@ on the magnitude, only on the direction, and the direction is unchanged.
 ## A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT
 
 **Found:** 2026-09-01, by `fs::conformance` on its first live boots.
-**Status:** ROOT-CAUSED and fixed in `e24ce4ad6`; awaiting the confirming green
-boot. **It was not a double-free at all** — it was a false positive in the
+**Status:** **CLOSED** 2026-09-01 by `e24ce4ad6`, confirmed by boot
+`bv39hyr6h`: `[syshealth] Tests complete: 24 passed, 0 failed`, and the only
+`DOUBLE-FREE detected!` line left in the serial log is the deliberate one from
+`poison_self_test` Test 3. The new Test 5 — the regression for this exact shape
+— prints `Magic constant in live data: OK (not a double-free)`. That satisfies
+the closing criterion at the foot of this entry in full, including its stricter
+half: no diagnostic instrumentation is compiled in, because the free-trace was
+deleted along with the fix rather than left in place.
+
+**It was not a double-free at all** — it was a false positive in the
 allocator's own detector. Everything below the "What it actually was" section is
 the diagnosis as it stood *before* the cause was found, kept because the wrong
 turns are the useful part; where it contradicts that section, that section wins.

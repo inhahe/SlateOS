@@ -58979,6 +58979,7 @@ themselves.
 ## §669 — a host failure gets its own verdict, not a widening of `experiment`
 
 **Date:** 2026-09-01
+**Lane:** A
 **Decided by:** Claude (autonomous)
 
 **In short:** on 2026-09-01 the Windows machine running the emulator briefly

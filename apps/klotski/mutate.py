@@ -187,13 +187,16 @@ MUTATIONS = [
         # The version this replaced drew both header numbers at
         # `total_width - PADDING - 100.0` — a guess at how wide "Moves: 1234"
         # would turn out to be.
+        # Not `the_move_counter_moves_left_as_the_number_grows`, though it
+        # looks like the test for exactly this: `room` is `right - split` and
+        # `split` is itself measured from the counters, so a counter given a
+        # constant width is still clamped to a `room` that moved with the
+        # number.  It slides left for the wrong reason and that test cannot
+        # tell.  The right-hand edge can.
         "the right-aligned text guesses its own width",
         "    let w = text::measure(l.text, l.size, l.weight).min(room);",
         "    let w = 100.0_f32.min(room);",
-        [
-            "the_move_counter_is_right_aligned_from_its_own_width",
-            "the_move_counter_moves_left_as_the_number_grows",
-        ],
+        ["the_move_counter_is_right_aligned_from_its_own_width"],
     ),
     (
         "the header numbers are flush with the window edge",
@@ -212,22 +215,33 @@ MUTATIONS = [
         ["a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box"],
     ),
     (
+        # Not `the_block_label_stays_inside_the_block`: starting at the box's
+        # right-hand edge leaves `r.right() - x == 0`, `push_text` refuses, and
+        # a label that was never drawn is inside every box there is.  What dies
+        # is the centring's own test and the pass-draws-something converse.
         "a centred label starts at the right-hand edge of its box",
         "    let x = r.x + (r.w - w) / 2.0;",
         "    let x = r.x + r.w;",
-        ["the_block_label_stays_inside_the_block"],
+        [
+            "a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box",
+            "a_pass_with_room_paints_and_a_pass_with_none_paints_nothing",
+        ],
     ),
     (
+        # Not the containment test.  A footer told to stack two lines in a
+        # band with room for one does not spill: `centre_line` refuses the
+        # taller stack and the footer draws nothing at all, which every
+        # containment test in the file is happy with.
         "the footer draws both lines however short it is",
         "        let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };",
         "        let shown = 2;",
-        ["the_footer_text_stays_inside_the_footer"],
+        ["a_band_tall_enough_for_a_line_draws_one"],
     ),
     (
         "the header draws two lines however short it is",
         "        let two_lines = title_h + sub_h <= l.header.h;",
         "        let two_lines = true;",
-        ["no_text_starts_outside_the_window"],
+        ["a_band_tall_enough_for_a_line_draws_one"],
     ),
     # ── Identity ────────────────────────────────────────────────────
     (
@@ -554,10 +568,14 @@ MUTATIONS = [
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
+        # A run right-aligned from an unclamped width starts at
+        # `right - measured`, which on a band narrower than the string is left
+        # of the band's own edge -- so this escapes the header outright rather
+        # than merely crossing the split.
         "a right-aligned label has no left bound",
         "    let w = text::measure(l.text, l.size, l.weight).min(room);",
         "    let w = text::measure(l.text, l.size, l.weight);",
-        ["the_headers_title_stops_where_its_counters_begin"],
+        ["no_pass_paints_outside_the_region_it_owns"],
     ),
     (
         "a centred label centres without asking",
@@ -596,10 +614,19 @@ MUTATIONS = [
     (
         # Two columns in one band: each staying inside the band is not the two
         # of them staying off each other.
+        # The column test cannot catch this one, and the reason is the fix:
+        # `split` is the title's right bound *and* the counters' left bound, so
+        # a split at the band's far edge leaves the counters nought points of
+        # room, `push_text` refuses them, and two columns of which one is not
+        # drawn do not overlap.  What dies is every test that expects a counter.
         "the header title runs to the far edge of the band",
         "        let split = (right - counters - l.pad).max(left);",
         "        let split = right;",
-        ["the_headers_title_stops_where_its_counters_begin"],
+        [
+            "a_pass_with_room_paints_and_a_pass_with_none_paints_nothing",
+            "the_move_counter_is_right_aligned_from_its_own_width",
+            "the_move_counter_moves_left_as_the_number_grows",
+        ],
     ),
     (
         "the header title is given no column at all",
@@ -608,10 +635,14 @@ MUTATIONS = [
         ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
     (
+        # Splitting on the *narrower* counter puts the split too far right,
+        # and the wider counter is then clamped to the room left over instead
+        # of spilling across the title -- so it stops short of the margin, and
+        # the right-edge test is the one that says so.
         "the split is measured from the narrower counter",
         "        let counters = text::measure(&moves, l.font, FontWeightHint::Regular).max(if two_lines {",
         "        let counters = text::measure(&moves, l.font, FontWeightHint::Regular).min(if two_lines {",
-        ["the_headers_title_stops_where_its_counters_begin"],
+        ["the_move_counter_is_right_aligned_from_its_own_width"],
     ),
     (
         "the footer centres its stack as though it were one line",
@@ -644,22 +675,29 @@ MUTATIONS = [
         # mat around it is how the mat ends up outside the band -- and on any
         # window wider than it is tall the vertical shortfall is nought, so
         # there is nowhere for the extra gap to go.
+        # Not `no_pass_paints_outside_the_region_it_owns`, and the reason is
+        # worth the paragraph: `board_frame` is *derived from the solve*, so a
+        # solve that oversizes the mat oversizes the region the pass is checked
+        # against by exactly as much.  The pass stays inside its own region no
+        # matter how wrong that region is.  What the mutation moves is the mat
+        # relative to the *band*, and the tests that hold a band are the ones
+        # that can see it.
         "the solve does not reserve the mats ring above and below",
         "            + GAP_PER_CELL * 2.0",
         "            + GAP_PER_CELL",
-        ["no_pass_paints_outside_the_region_it_owns"],
+        ["the_board_never_overlaps_the_chrome"],
     ),
     (
         "the solve does not reserve the mats ring left and right",
         "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 + 1.0) * GAP_PER_CELL;",
         "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 - 1.0) * GAP_PER_CELL;",
-        ["no_pass_paints_outside_the_region_it_owns"],
+        ["every_band_stays_inside_the_window"],
     ),
     (
         "the grid is centred and the mat is drawn around it",
         "            let fy = band.y + (band.h - frame_h) / 2.0;",
         "            let fy = band.y + (band.h - stack_h) / 2.0;",
-        ["no_pass_paints_outside_the_region_it_owns"],
+        ["the_board_never_overlaps_the_chrome"],
     ),
     (
         # The floor that kept a selection visible on a tiny board kept it

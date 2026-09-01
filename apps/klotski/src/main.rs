@@ -2140,6 +2140,67 @@ mod tests {
         }
     }
 
+    /// A band tall enough for a line draws one.
+    ///
+    /// The converse `centre_line` needs, and the one containment can never
+    /// supply. Both places that choose *how many* lines to stack — `two_lines`
+    /// in the header, `shown` in the footer — are fit checks feeding a second
+    /// fit check, so removing the first one does not make the band spill: it
+    /// makes `centre_line` refuse, and the band goes silently blank. Nothing is
+    /// inside everything, so every containment test in this file passes on a
+    /// program whose header has vanished.
+    ///
+    /// Only the height is squeezed. A band can be legitimately too *narrow* to
+    /// draw in — `split` collapses onto `left` and the title is left with no
+    /// room, which `push_text` is right to refuse — so a width sweep here would
+    /// be asserting the opposite of the test below.
+    #[test]
+    fn a_band_tall_enough_for_a_line_draws_one() {
+        let g = game();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h);
+            let bands: [(&str, Band, Pass, f32); 2] = [
+                (
+                    "header",
+                    |l| &mut l.header,
+                    Klotski::draw_header,
+                    text::line_height(l.big, FontWeightHint::Bold),
+                ),
+                (
+                    "footer",
+                    |l| &mut l.footer,
+                    Klotski::draw_footer,
+                    text::line_height(l.small, FontWeightHint::Regular),
+                ),
+            ];
+            for (name, band, draw, line_h) in bands {
+                let mut base = l;
+                let full = *band(&mut base);
+                if full.w <= 0.0 {
+                    continue;
+                }
+                let mut heights: Vec<f32> = vec![full.h, line_h, line_h * 1.5, line_h * 2.0];
+                for k in 1..16_u8 {
+                    heights.push(full.h * f32::from(k) / 16.0);
+                }
+                for bh in heights {
+                    if bh < line_h || bh > full.h {
+                        continue;
+                    }
+                    let mut sq = l;
+                    *band(&mut sq) = Rect::new(full.x, full.y, full.w, bh);
+                    let mut f = Frame::new(w, h);
+                    draw(&g, &mut f, &sq);
+                    assert!(
+                        !inked(&f).is_empty(),
+                        "at {w}x{h} the {name} band is {bh} tall — room for a \
+                         {line_h}-point line — and it drew nothing"
+                    );
+                }
+            }
+        }
+    }
+
     /// A run is never handed a box it cannot be drawn in.
     ///
     /// Containment cannot see this one. `inked` takes a run's `max_width` as its
@@ -2149,25 +2210,52 @@ mod tests {
     /// string in no room, with `Ellipsis` overflow, and what comes back is the
     /// renderer's business rather than the program's. `push_text` refuses the
     /// call instead, and this is what says so.
+    ///
+    /// Swept over the squeezed bands as well as the real ones. `Layout::new`
+    /// never hands out a header narrow enough for `split` to collapse onto
+    /// `left`, so on the real windows alone `push_text`'s `limit <= 0.0` refusal
+    /// is a branch nothing enters — a guard no test can distinguish from its
+    /// own absence.
     #[test]
     fn no_run_is_pushed_into_a_box_with_no_room() {
+        fn check(state: &str, where_: &str, f: &Frame<Target>) {
+            for cmd in f.commands() {
+                let RenderCommand::Text {
+                    text, x, max_width, ..
+                } = cmd
+                else {
+                    continue;
+                };
+                let Some(max) = max_width else {
+                    unreachable!("push_text always sets a limit");
+                };
+                assert!(
+                    *max > 0.0,
+                    "{state}: {text:?} was pushed at x = {x} with {max} points \
+                     of room, {where_}"
+                );
+            }
+        }
+
         for (state, g) in states() {
             for &(w, h) in WINDOWS {
-                for cmd in g.frame(w, h).commands() {
-                    let RenderCommand::Text {
-                        text, x, max_width, ..
-                    } = cmd
-                    else {
-                        continue;
-                    };
-                    let Some(max) = max_width else {
-                        unreachable!("push_text always sets a limit");
-                    };
-                    assert!(
-                        *max > 0.0,
-                        "{state}: {text:?} was pushed at x = {x} with {max} points \
-                         of room at {w}x{h}"
-                    );
+                check(state, &format!("at {w}x{h}"), &g.frame(w, h));
+
+                let l = Layout::new(w, h);
+                for (pass, band, draw) in SQUEEZABLE {
+                    let mut base = l;
+                    let full = *band(&mut base);
+                    for region in squeezes(full) {
+                        let mut sq = l;
+                        *band(&mut sq) = region;
+                        let mut f = Frame::new(w, h);
+                        draw(&g, &mut f, &sq);
+                        check(
+                            state,
+                            &format!("in the {pass} pass at {w}x{h} given {region:?}"),
+                            &f,
+                        );
+                    }
                 }
             }
         }
@@ -2272,6 +2360,12 @@ mod tests {
             let l = Layout::new(w, h);
             for (name, r) in [
                 ("header", l.header),
+                // The frame before the grid, and both, because the grid alone
+                // is the one region the mat's overhang cannot be seen against:
+                // a solve that forgets to reserve the mat's ring grows `cell`
+                // until the *grid* still fits and the mat no longer does, and
+                // `board` is by construction unable to say so.
+                ("board frame", l.board_frame),
                 ("board", l.board),
                 ("exit", l.exit),
                 ("controls", l.controls),
@@ -2290,9 +2384,15 @@ mod tests {
 
     #[test]
     fn the_board_never_overlaps_the_chrome() {
+        // Against `board_frame` and not `board`. The grid is inset from the mat
+        // by a gap on every side, so a mat that has climbed into the header
+        // leaves the grid clear of it, and a test that asks about the grid says
+        // the picture is fine while a dark mat is painted over the title bar.
+        // The region a pass owns is the region it *paints*, not the one the
+        // layout named after it.
         for &(w, h) in WINDOWS {
             let l = Layout::new(w, h);
-            if l.board.is_empty() {
+            if l.board_frame.is_empty() {
                 continue;
             }
             for (name, r) in [
@@ -2304,9 +2404,9 @@ mod tests {
                     continue;
                 }
                 assert!(
-                    l.board.intersect(r).is_none(),
-                    "at {w}x{h} the board sits on the {name}: board {:?}, {name} {r:?}",
-                    l.board
+                    l.board_frame.intersect(r).is_none(),
+                    "at {w}x{h} the board sits on the {name}: board frame {:?}, {name} {r:?}",
+                    l.board_frame
                 );
             }
         }

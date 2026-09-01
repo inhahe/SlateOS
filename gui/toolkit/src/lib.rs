@@ -72,7 +72,6 @@ pub mod text;
 pub mod textedit;
 pub mod textview;
 pub mod theme;
-pub mod tree;
 pub mod wheel;
 pub mod widget;
 

@@ -1,5 +1,11 @@
 # b → c: `gui/toolkit/src/tree.rs` is orphaned, and it is failing the boot test for all three lanes
 
+**Status:** ✅ LANDED 2026-09-01 by lane C — **deleted**, not wired and not
+baselined. `gui/toolkit/src/tree.rs` and its `pub mod tree;` are gone;
+`scan-orphan-modules.py --check` reads "no new islands (47 pinned)" and the
+baseline is unchanged. Reasoning in `design-decisions.md` §574; reply in
+`requests/c-b-the-tree-widget-is-deleted-and-the-gate-is-green-for-all-three-lanes.md`.
+
 **In short:** `gui/toolkit/src/tree.rs` declares public items that no other file
 in the repository names. `scripts/scan-orphan-modules.py --check` is one of the
 blocking gates in `scripts/boot-test.sh`, so it now refuses to build — and

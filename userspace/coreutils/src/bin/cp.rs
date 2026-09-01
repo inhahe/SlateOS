@@ -249,7 +249,7 @@ use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
-    EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
+    Copied, EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
 };
 use coreutils::fsattr::{
     self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
@@ -260,7 +260,7 @@ use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -1498,85 +1498,6 @@ impl Seen {
         {
             self.dests.insert((target.to_path_buf(), id));
         }
-    }
-}
-
-/// "Have I copied this inode already, and where to?" — GNU's one `src_to_dest`
-/// table (`copy.c:1997`), with its `remember_copied` and `src_to_dest_lookup`.
-///
-/// Two rules read it, and they look unrelated until you notice that both are
-/// asking what a *second* appearance of one inode should become:
-///
-/// * **`--preserve=links`** answers "a hard link to where the first appearance
-///   landed", which is why the value has to be a nameable destination.
-/// * **The directory rule** answers "nothing — a directory cannot appear twice
-///   except by being hard-linked, and hard-linked directories are what GNU
-///   refuses", with its comment naming Netapp snapshot trees as where they turn
-///   up. That refusal quotes the earlier destination too.
-///
-/// One table for both, as GNU has, and one for the whole command rather than
-/// one per operand: `cp --preserve=links a b d` has to notice at `b` that it
-/// already wrote `a`'s inode to `d/a`, so `hash_init` is called once in `main`
-/// (`cp.c:1284`). Its comment "in this command line argument" is about which
-/// *arguments can share* an inode, not about the table's lifetime.
-///
-/// The two rules were split here once — the directory half lived on [`Seen`],
-/// which only [`copy_one`] can reach — and the split was a bug, not a
-/// simplification: a directory found by *walking* was then checked against
-/// nothing at all. Measured before the merge, with `parent/child` a directory:
-/// `cp -r parent/child parent d` copied that subtree twice and exited 0, where
-/// GNU refuses the repeat with `will not create hard link 'd/parent/child' to
-/// directory 'd/child'` and exits 1. See design-decisions.md 736.
-#[derive(Default)]
-struct Copied(HashMap<FileId, PathBuf>);
-
-impl Copied {
-    /// GNU's `remember_copied`: note that `id` is being copied to `target`, and
-    /// answer with where it went *last* time if there was a last time.
-    ///
-    /// Recording and looking up in one call is GNU's shape and not a
-    /// convenience: the two must not be separable, because a source that was
-    /// looked up and then not recorded would let a third operand link to a
-    /// destination the second one never made.
-    ///
-    /// By reference, and so are the two below, because a caller that has to
-    /// [`Copied::forget`] a failed copy needs the same id afterwards. Taking it
-    /// by value costs nothing on a host with inode numbers — [`FileId`] is two
-    /// words there and `Copy` — but the portable stand-in is a `PathBuf`, which
-    /// is not, so the caller could not use the id again and the whole
-    /// `cfg(not(unix))` build stopped compiling. Nobody noticed for a while:
-    /// this crate's gate is the `x86_64-slateos` target, whose `target-family`
-    /// is `unix`.
-    fn remember(&mut self, id: &FileId, target: &Path) -> Option<PathBuf> {
-        if let Some(earlier) = self.0.get(id) {
-            return Some(earlier.clone());
-        }
-        self.0.insert(id.to_owned(), target.to_path_buf());
-        None
-    }
-
-    /// GNU's `src_to_dest_lookup` (`copy.c:2670`): where did this inode go —
-    /// *without* claiming it is going here.
-    ///
-    /// The difference from [`Copied::remember`] is load-bearing and is GNU's.
-    /// A directory reached by walking is looked up and never recorded, because
-    /// only a directory *named on the command line* can be named twice;
-    /// recording walked ones instead would make the second half of a `cp -r p d
-    /// p` accuse the first half's entries of repeating themselves.
-    fn lookup(&self, id: &FileId) -> Option<&Path> {
-        self.0.get(id).map(PathBuf::as_path)
-    }
-
-    /// GNU's `forget_created`, called from its `un_backup` label
-    /// (`copy.c:3362`) when a copy that had just been recorded failed.
-    ///
-    /// Without it a later hard link would be made to a destination that does
-    /// not exist, and the second operand would report `cannot create hard link`
-    /// instead of the failure the first one actually had. Measured: GNU's
-    /// `cp --preserve=links a b d` with `a` unreadable reports the *same*
-    /// `cannot open … for reading` twice.
-    fn forget(&mut self, id: &FileId) {
-        self.0.remove(id);
     }
 }
 

@@ -105273,9 +105273,11 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
 
-**Status:** open, measured but only a third attributed. Not a regression — it
-has presumably always been true — and not a gate: the series that exposes it
-(`vfs_readdir_root`) is tracked, not scored.
+**Status:** open, **now localised** — see the MEASURED section appended at the
+end of this entry (2026-09-01). The cause is being the parent of mount points,
+and it is *far* larger than the estimate below; being a filesystem's own root is
+ruled out. Not a regression — it has presumably always been true — and not a
+gate: the series that exposes it (`vfs_readdir_root`) is tracked, not scored.
 
 **In short:** listing the root directory is about four times more expensive per
 entry than listing an ordinary directory, even though on the boot-test both are
@@ -105349,6 +105351,64 @@ that lost two days to acting on an unmeasured hypothesis.
 as a plain child — rather than reasoning about the code. `bench_vfs_readdir`
 now logs the entry count of `/` and names every boot, so the workload side of the
 comparison is finally pinned.
+
+### MEASURED 2026-09-01 — it is the mount parenthood, and it is 8x the estimate
+
+`bench_vfs_readdir_root_cost` (`kernel/src/bench.rs`) ran the 2x2. It lists one
+8-entry memfs directory four times, varying only what is mounted and where:
+
+| arm | mount table | listed dir is their parent? | min |
+|---|---|---|---|
+| `vfs_readdir_mp_base` | baseline | — | 20990 ns |
+| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns |
+| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** |
+| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns |
+
+**Read the percentages, not the nanoseconds.** The harness flagged this boot as
+an outlier run — everything measured ~38% slower than usual, against a baseline
+that was itself an outlier (x1.307) — and printed the standing instruction not
+to quote its absolute numbers as the cost of anything. The design survives that:
+all four arms ran inside the same window, so a uniform inflation cancels in every
+comparison below. The ratios are the finding; the raw figures are ~1.4x high.
+
+Three results, in decreasing order of how much they change the picture:
+
+1. **Being a mount parent costs +81429 ns, +292%** — and that is against
+   `elsewhere`, so the mount-table growth is already subtracted out. This is not
+   merely "the missing ~20 us": it is the entire 29.4 us gap and roughly 2.5x
+   more, on a directory with a quarter of root's entries. Root's anomaly is
+   here, in `finish_listing`'s per-submount work, and nowhere else.
+
+2. **But it is not the stat.** Per submount that is ~16285 ns, against a measured
+   `vfs_stat_breakdown_resolved` of ~2000 ns — **8x a full stat, per mount
+   point.** The estimate above ("five full stats = 9640 ns, 33% of the gap") had
+   the mechanism's *location* right and its *magnitude* wrong by an order of
+   magnitude. So the fix proposed above is still worth making, and it will not
+   recover most of this: something in the per-submount path costs several stats'
+   worth beyond the stat, and has not been identified yet.
+
+3. **Being a filesystem's own root is free.** `fsroot` is +1636 ns over `base`,
+   which is +273 ns once this boot's own per-mount table cost is subtracted —
+   under 2%. That eliminates the third candidate listed above ("memfs's own
+   root-directory lookup, which may not be structured like a child directory's").
+   It is structured like a child directory's, and it costs the same.
+
+A fourth number falls out that was not the question but is worth recording:
+**each registered mount adds ~1363 ns to every `readdir` in the system**,
+whatever it lists (`base` -> `elsewhere` is +6817 ns for five mounts, on a
+directory none of them are under). That is `resolve_mount`'s longest-prefix scan,
+and it is the reason this benchmark mounts its five filesystems twice in two
+different places rather than measuring a naive before/after — charged to
+`finish_listing`, it would have inflated result 1 by 8%.
+
+**What is still unknown.** Why one submount costs 8 stats. The two candidates
+from the original list that survive are `submount_children` taking the `VFS` lock
+a second time (`finish_listing` holds it, then each `submount_root_ino`
+re-acquires it through `resolve_mount`) and the `PathBuf` join per mount point.
+Neither obviously costs 16 us, so the next step is the same as this one was: a
+breakdown benchmark inside the per-submount path, not an argument from reading
+the code. The same discipline applies — the entry above this one exists because
+two days went into acting on an unmeasured hypothesis.
 
 
 ---

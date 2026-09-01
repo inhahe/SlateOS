@@ -105358,12 +105358,18 @@ than by assuming:
   `copy_permissions` on the next line already carries. Copying them here as
   well would write the access list twice, and the second write would land
   *before* the mode that has to precede it.
-* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:145`,
+* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:119`,
   not `129`; the `preserve_xattr = true` inside it is `mv.c:145`; `copy_attr`
   is `copy.c:1662`, `copy_acl`'s arm is `copy.c:1672` rather than `1668`, and
   the `S_IWUSR` is `copy.c:1450` rather than `1457`.
   The claim they support is right; the citations were not, and a citation that
   does not resolve is worse than none.
+  (Corrected again 2026-09-01: this bullet itself gave `cp_option_init` as
+  `mv.c:145` — the same line as the `preserve_xattr = true` *inside* it, which
+  is the tell that it was copied from the line below rather than read. Both are
+  now verified against `coreutils-9.4/src/mv.c`, where `cp_option_init` opens at
+  119 and its `preserve_xattr = true` is at 145. A correction is not exempt from
+  the rule it is enforcing.)
 * **`preserve_onto_link` needed one too, which reads like a contradiction of
   mv.rs's own doc and is not.** That doc explains at length that a symlink
   returns early at `copy.c:3285` and so never reaches the mode block. But

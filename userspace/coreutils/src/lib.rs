@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-one so far. Three are about the interface these programs share
+//! There are twenty-three so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -339,6 +339,40 @@
 //!   or `..`, which is what makes `cp -r a/. dst` copy a directory's contents,
 //!   and what makes `mv a/.. dst` a request GNU refuses rather than performs.
 //!
+//! The twenty-second is where [`backup`] and [`fileid`] were both heading. Those
+//! two answer questions *about* an existing destination; this one is the
+//! decision the answers feed:
+//!
+//! - [`overwrite`] — `-i`, `-n` and the mode-quoting question they put. `cp`,
+//!   `mv` and `install` are three front ends over one `copy.c` upstream, so
+//!   these four functions and the one enum are shared there by construction and
+//!   nobody had to choose. Here they are separate programs and the choice is
+//!   between this module and two copies — and two copies would be worse than
+//!   [`yesno`]'s were, because three of the four things in it are decisions
+//!   about whether to destroy a file. The rules that would not survive being
+//!   written twice are that `-i`/`-n`/`-f` are one *field* and so the last one
+//!   given wins (`mv -in` is `-n`, `mv -ni` is `-i`), that "writable" is
+//!   `access(W_OK)` with the effective ids rather than an inspection of the
+//!   mode bits — so ACLs, read-only mounts and immutable files each get the
+//!   right prompt — and that a symlink destination counts as writable whatever
+//!   it points at.
+//!
+//! The twenty-third is the operation those three decisions end in, and it is
+//! here because the copies had already disagreed:
+//!
+//! - [`rename`] — a rename that refuses an existing destination rather than
+//!   replacing it. [`backup`] uses it to take `f.~4~` after a scan said `.~4~`
+//!   was free; `mv` uses it to rename *speculatively*, before it has decided
+//!   whether the destination is a directory, so that success can stand as proof
+//!   the name was free. Both are the sentence "I checked that this name was
+//!   free", which a plain `rename(2)` cannot carry — the check and the rename
+//!   are two operations with a window between them, and `RENAME_NOREPLACE`
+//!   closes it by doing both under the kernel's lock. The reason it is a module
+//!   and not two call sites: it *was* two call sites, and they had drifted —
+//!   `backup`'s asked the kernel for the flag, `mv`'s only ever emulated it
+//!   with an `lstat`, so the day the kernel learned the flag only one of them
+//!   noticed. The bug was in there being two.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -356,6 +390,7 @@ pub mod fnmatch;
 pub mod fsattr;
 pub mod getopt;
 pub mod human;
+pub mod overwrite;
 pub mod pathname;
 /// How a name is rendered inside a diagnostic — now `userspace/quoting`.
 ///
@@ -364,6 +399,7 @@ pub mod pathname;
 /// utility crates in the tree need it too and cannot depend on the bundle; see
 /// that crate's docs and `design-decisions.md` §370.
 pub use quoting as quote;
+pub mod rename;
 pub mod shell;
 pub mod stdfd;
 pub mod tabstops;

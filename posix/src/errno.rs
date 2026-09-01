@@ -317,6 +317,14 @@ pub(crate) mod native {
     /// *re-open*, not *retry* — a caller that retries the same handle gets
     /// the same answer forever.
     pub const STALE_HANDLE: i64 = -513;
+    /// The *attribute name* is what is missing, as opposed to [`NOT_FOUND`],
+    /// where the *path* is.  The two shared `NotFound` until lane A's
+    /// `32f35d46b` split them, and the conflation had a cost: `cp
+    /// --preserve=all` cannot tell "this file has no `user.foo`" — which is the
+    /// ordinary case and must be silent — from "this file is gone", which is a
+    /// diagnostic.  `ENODATA` is the errno Linux returns from `getxattr(2)` for
+    /// it; `ENOATTR` is the same number under its BSD name.
+    pub const NO_ATTRIBUTE: i64 = -514;
 
     // --- Device / I/O (600 range: -600 to -602) ---
     pub const IO_ERROR: i64 = -600;
@@ -417,6 +425,7 @@ pub fn errno_for(code: i64) -> i32 {
         native::FILE_TOO_LARGE => EFBIG,
         native::CROSS_DEVICE => EXDEV,
         native::STALE_HANDLE => ESTALE,
+        native::NO_ATTRIBUTE => ENODATA,
 
         // Device / I/O errors
         native::IO_ERROR => EIO,

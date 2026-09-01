@@ -103000,7 +103000,7 @@ property of the design.
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
 
-## B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS (lane B, 2026-08-31) — filed to lane A
+## B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS (lane B, 2026-08-31) — FIXED 2026-08-31
 
 **In short.** Two defects in the kernel's extended-attribute path, both found
 while giving `cp` xattr support, both in `kernel/**` and so filed rather than
@@ -103064,6 +103064,30 @@ tree cannot yet create. Filed now because the cost of 1 grows quietly with each
 new caller that reads `ENOENT` from an xattr call, and because `--preserve=mode`
 ACL support — which needs `removexattr` to answer "already absent" distinctly —
 is the next thing due on `cp`.
+
+**Fixed 2026-08-31.** Lane A fixed both defects and, unasked, the flags word
+that would have made the probe unnecessary: `32f35d46b` (`NoAttribute = -514`,
+plus xattr names typed `&[u8]` end to end — and a *second* UTF-8 site this
+entry did not find, `parse_inline_xattrs`, which silently truncated the
+attribute list rather than failing it), `0593342d9` and `8c8ba6acb` (`arg5`
+bits 1–2 = `XATTR_CREATE`/`XATTR_REPLACE`, decided under the same `fs.lock()`
+hold as the write). Lane B's side: `posix/src/errno.rs` maps `-514` to
+`ENODATA`; `posix/src/xattr.rs`'s `do_setxattr` forwards the flags as bits 1–2
+and the get-then-set probe is gone; `fsattr.rs`'s `remove_xattr` no longer
+accepts `ENOENT` as "already absent", so a `removexattr` on a path that does
+not exist is now reported instead of swallowed.
+
+One deliberate difference from the request's table survives in userspace. The
+kernel answers `EINVAL` for `XATTR_CREATE|XATTR_REPLACE`; Linux does not — it
+passes the pair down and lets the filesystem answer `EEXIST` or `ENODATA` from
+the actual state. `do_setxattr` therefore still resolves that one combination
+itself, with a `SYS_FS_GET_XATTR` size query to choose which of the two
+failures to name. That is not the old probe returning: the old one raced
+between a *read* and a *write*, and this one never writes at all — both flags
+set can never succeed, so the worst a race can cost is the wrong errno on a
+call that was already doomed. Every other flag combination goes to the kernel
+unexamined, and `setxattr_flags_valid` refuses the bits above 2 before they
+can reach `arg5`, which is the masking lane A asked for.
 
 ## A-THE-WIRING-GATE-ASKS-A-QUESTION-IT-COULD-ANSWER-ITSELF (lane A) — FIXED 2026-08-31
 
@@ -103256,7 +103280,7 @@ for short ones. Historical readings near 0.98 were *under*-stating a
 correctly-applied load, not over-stating it, so no past grading verdict flips;
 but do not mine pre-2026-08-31 occupancy figures for precision.
 
-## B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE (lane B, 2026-08-31) — OPEN
+## B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE (lane B, 2026-08-31) — FIXED 2026-08-31
 
 **In short.** `cp -b` (and, shortly, `mv -b`, `ln -b`, `install -b`) picks the
 name for a backup by reading the directory — `f.~1~`, `f.~2~`, … — and then
@@ -103301,6 +103325,18 @@ on lane B's list, so the request will be filed with both callers named.
 caller bakes it in — every caller goes through `backup.rs`'s one function. It
 is a genuine data-loss window rather than a wrong message, which is the only
 reason it is above "cosmetic".
+
+**Fixed 2026-08-31.** Lane A's `6ea052654` made `sys_fs_rename` read `arg4` and
+decode it into `Vfs::rename` / `rename_noreplace` / `rename_exchange`
+(`requests/a-b-rename-flags-word-landed.md`); `posix::file::renameat2` now
+forwards the flags word instead of short-circuiting to `EINVAL`. The prediction
+above — that `backup.rs` "needs no change at all" — held for `backup.rs` and was
+wrong about the tree: `mv`'s speculative rename had its *own* copy of the
+emulation that never called `renameat2` at all, so closing the window in one
+place would have left it open in the other. Both now go through
+`crate::rename::noreplace`. The `lstat` fallback survives for the Windows
+development host, which has no `renameat2` to call; the race is a host-test
+artefact there rather than something a user can reach.
 
 ## B-MV-DECIDED-BY-LOOKING-AT-THE-DESTINATION-WHERE-GNU-LOOKS-AT-THE-RENAME (lane B, 2026-08-31) — FIXED
 

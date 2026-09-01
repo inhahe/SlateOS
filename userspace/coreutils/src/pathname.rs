@@ -212,10 +212,64 @@ pub fn is_relative(name: &[u8]) -> bool {
     !name.first().is_some_and(|&c| is_slash(c))
 }
 
+/// A path as the NUL-terminated byte string a raw syscall takes.
+///
+/// Here rather than in each of the three modules that had written it — the
+/// argument is this module's own: a path is bytes, and the obvious
+/// `CString::new(path.to_str()?)` reintroduces exactly the UTF-8 assumption the
+/// rest of this file exists to remove. It goes through
+/// [`os_bytes`](crate::quote::os_bytes) rather than
+/// `OsStrExt::as_bytes` so that it compiles on the non-POSIX development host
+/// too, where the callers' `unsafe extern "C"` declarations do not.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] if the name already contains a NUL. Refused
+/// rather than truncated: the filesystem forbids the byte, a caller can
+/// nonetheless construct one, and passing it on would silently act on a
+/// *different, shorter* name than the one asked about.
+pub fn c_path(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    let mut bytes = crate::quote::os_bytes(path.as_os_str()).into_owned();
+    if bytes.contains(&0) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "path contains a NUL byte",
+        ));
+    }
+    bytes.push(0);
+    Ok(bytes)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    /// A path with a NUL in it is refused rather than truncated. C has no way
+    /// to express one, so every caller that hands the result to a syscall would
+    /// act on the prefix and report success — `touch "a\0b"` would silently
+    /// stamp `a`, and `mv` would rename onto a name nobody asked for.
+    #[test]
+    #[cfg(unix)]
+    fn a_path_with_a_nul_is_refused_not_truncated() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Path;
+
+        assert_eq!(c_path(Path::new("ab")).unwrap(), vec![b'a', b'b', 0]);
+        assert_eq!(
+            c_path(Path::new(OsStr::from_bytes(b"a\0b")))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        // And a non-UTF-8 path survives the trip, which `CString::new(to_str())`
+        // would not.
+        assert_eq!(
+            c_path(Path::new(OsStr::from_bytes(b"a\xffb"))).unwrap(),
+            vec![b'a', 0xff, b'b', 0]
+        );
+    }
 
     /// Every row measured from GNU coreutils 9.4 on Linux, by printing
     /// `dirname X` and `basename X` for each name.

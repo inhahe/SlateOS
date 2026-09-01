@@ -406,12 +406,14 @@ run_case --fo file.txt dst
 # `no-copy` entry used to get wrong.
 run_case --n file.txt dst
 run_case --no-c file.txt dst
-# `--no-cl` is unambiguous, so it *resolves* — which makes it a test of
-# `--no-clobber`'s behaviour rather than of the abbreviation table, and it stays
-# in section 15 until that option exists. The distinction is the whole point of
-# the three cases above it: an abbreviation that resolves to a missing option is
-# not an abbreviation bug.
-missing --no-cl file.txt dst
+# `--no-cl` is unambiguous, so it *resolves* — which made it a test of
+# `--no-clobber`'s behaviour rather than of the abbreviation table, and it was
+# an xfail until that option existed. It is a plain case now, and the fixture is
+# an existing destination so that what it resolves *to* is visible: an
+# abbreviation that resolved to the wrong option would otherwise agree with GNU
+# by both doing nothing.
+TREE='mktree; printf old > dst'
+run_case --no-cl file.txt dst
 run_case --=x file.txt dst
 # A `-` on its own is a file called `-`, not a request to read standard input:
 # `mv` has no standard-input operand for it to mean anything else.
@@ -700,11 +702,13 @@ STAMPS=1; TREE='mkstamped; chmod 2750 tree'
 run_case tree moved
 
 # =============================================================================
-# 13. -f, which suppresses a prompt this mv never raises
+# 13. -f suppresses prompts and nothing else
 # =============================================================================
-# `-f` has never suppressed errors in GNU `mv`; the previous implementation had
-# it suppress the diagnostic and keep the failure, so a failed move printed
-# nothing and exited 1. See `mv.rs` module docs, bug 2.
+# What `-f` does is §15's subject; what it does *not* do is this section's. It
+# has never suppressed an error in GNU `mv` — the previous implementation had it
+# swallow the diagnostic and keep the failure, so a failed move printed nothing
+# and exited 1. See `mv.rs` module docs, bug 2. These cases are the ones where
+# there is no prompt to suppress, so `-f` must be invisible.
 
 run_case -f file.txt dst
 TREE='mktree; printf old > dst'
@@ -717,7 +721,256 @@ run_case -ff file.txt dst
 run_case -f -f file.txt dst
 
 # =============================================================================
-# 14. --help and --version
+# 14. -v, --verbose
+# =============================================================================
+# The line goes to *stdout*, not stderr, so these cases are the only ones in the
+# file where the two streams could be swapped without any of the others
+# noticing. `renamed 'src' -> 'dst'`, both names quoted in one style, one line
+# per source, and nothing at all when the move fails.
+#
+# The `copied` / `removed` pair that a cross-device move prints is not here, for
+# the reason given at the head of this file: no case moves across a filesystem
+# boundary. Those two sentences are pinned by unit test in `mv.rs` instead.
+
+run_case -v file.txt dst
+run_case -v file.txt dir
+run_case --verbose tree moved
+# Two sources: two lines, in operand order, each naming where it landed rather
+# than the directory that was asked for.
+run_case -v file.txt tree/a.txt dir
+# A failure prints its diagnostic and no verbose line — `emit_verbose` sits
+# inside the `rename_errno == 0` arm (`copy.c:2761`).
+run_case -v nosuchfile dst
+# An overwrite goes through the second rename, which has its own emission site.
+TREE='mktree; printf old > dst'
+run_case -v file.txt dst
+# Clustered, and after the operands, since options permute.
+run_case -fv file.txt dst
+run_case file.txt dst -v
+# A name that needs quoting, which is what the one-style rule is for: the reader
+# has to be able to tell the space *in* the name from the space between names.
+TREE='mktree; printf x > "a b.txt"'
+run_case -v "a b.txt" dst
+
+# =============================================================================
+# 15. -i, -f and -n
+# =============================================================================
+# The three are one field, not three flags, so the last one on the line is the
+# one in effect and the interesting cases are the pairs. They also sit *above*
+# the directory sentences and above the same-file check, which is not where
+# reading the diagnostics would put them — `mv -n tree dst` says `not replacing
+# 'dst'` rather than `cannot overwrite non-directory`, and `mv -n f f` says the
+# same rather than `'f' and 'f' are the same file`.
+#
+# One arm of the decision cannot be reached from here at all: with no option
+# given, GNU asks about an unwritable destination only when stdin is a terminal,
+# and every case in this file runs with stdin redirected from a file. What is
+# reachable is the wording that arm shares with `-i`, which the `chmod 0444`
+# cases below pin — `mv` says `replace 'dst', overriding mode …?` where `cp`
+# says `unwritable 'dst' …; try anyway?`. The terminal arm itself is pinned by
+# unit test in `mv.rs`.
+
+# -n: refuse an existing destination, say so, and exit 1. The exit status is the
+# half worth pinning — Ubuntu's patched `mv` exits 0 here; see
+# `design-decisions.md` §726.
+TREE='mktree; printf old > dst'
+run_case -n file.txt dst
+TREE='mktree; printf old > dst'
+run_case --no-clobber file.txt dst
+# A free name is not an existing destination: an ordinary, silent move.
+run_case -n file.txt new.txt
+run_case -n file.txt dir
+# Into a directory, where the name that is refused is the computed target and
+# not the operand.
+TREE='mktree; printf old > dir/file.txt'
+run_case -n file.txt dir
+# A directory source onto a plain file: `-n` beats the directory sentence.
+TREE='mktree; printf old > dst'
+run_case -n tree dst
+# And it beats the same-file check, by being the reason that check is skipped.
+run_case -n file.txt file.txt
+run_case -n nosuchfile dst
+
+# -i: ask, on stderr, and obey. `ANSWERS` is what stdin holds; empty is end of
+# input straight away, which gnulib reads as a no.
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=''
+run_case -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'yes\n'
+run_case --interactive file.txt dst
+# No destination, no question.
+ANSWERS=$'n\n'
+run_case -i file.txt new.txt
+# A directory source is asked about, unlike `cp`'s, whose block is guarded by
+# `! S_ISDIR (src_mode)` because `cp -r` descends and asks about the files
+# inside instead.
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -i tree dst
+# The same-file check runs first when `-i` is what is given, so this is a
+# refusal and not a prompt — the mirror of the `-n` case above.
+ANSWERS=$'y\n'
+run_case -i file.txt file.txt
+# One question per source, answered in order: the first moves, the second does
+# not, and the command still fails.
+TREE='mktree; printf a > dir/file.txt; printf b > dir/a.txt'; ANSWERS=$'y\nn\n'
+run_case -i file.txt tree/a.txt dir
+
+# The unwritable-destination wording, which is `mv`'s and not `cp`'s because
+# upstream's `clears_destination` is `x->move_mode || …`.
+TREE='mktree; printf old > dst; chmod 0444 dst'; ANSWERS=$'n\n'
+run_case -i file.txt dst
+TREE='mktree; printf old > dst; chmod 0444 dst'; ANSWERS=$'y\n'
+run_case -i file.txt dst
+# Without an option and without a terminal the same file is moved in silence.
+# The prompt is a courtesy to a human, not a permission check.
+TREE='mktree; printf old > dst; chmod 0444 dst'
+run_case file.txt dst
+
+# -f: never ask, in a case where `-i` would have.
+TREE='mktree; printf old > dst; chmod 0444 dst'; ANSWERS=$'n\n'
+run_case -f file.txt dst
+
+# Last of the three wins, in both orders of each pair, clustered, spelled long,
+# and after the operands.
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -i -f file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -f -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -n -f file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -f -n file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -i -n file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -n -i file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -if file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -fi file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -nfi file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case --force --no-clobber file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case file.txt dst -n
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -n file.txt dst -i
+# `-v` and `-i` in one command, which is the only shape that writes to both
+# streams: the prompt on stderr, the `renamed` line on stdout.
+TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
+run_case -vi file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -vi file.txt dst
+
+# =============================================================================
+# 16. -t and -T, the two ways to say what the destination is
+# =============================================================================
+# Without either of them the *last operand* decides its own role, by being a
+# directory or not. That is convenient and it is ambiguous, and both options
+# exist to remove the ambiguity from opposite ends: `-t DIR` names the directory
+# up front so every operand is a source, and `-T` says the destination is a
+# name, never a directory to move into.
+#
+# The ambiguity is not academic. `mv "$f" "$d"` in a script does one thing when
+# `$d` exists as a directory and a different thing when it does not, so a script
+# that means "put this file in that directory" silently renames the file the day
+# the directory is missing. `-t` is what `xargs mv -t dir` is for; `-T` is what
+# makes `mv -T newdir olddir` replace a directory rather than nest it inside
+# itself.
+#
+# The order of the checks below is upstream's (`mv.c:427-500`) and every step of
+# it is observable, which is why the contradictory and the malformed lines are
+# here rather than left to a unit test:
+#
+#   1. the operand count, which `-t` changes: one operand is a whole command
+#   2. `-T` with `-t`, refused before `-t`'s directory is so much as stat'd
+#   3. `-T` with a third operand, which has nowhere to go
+#   4. `-t`'s directory, whose failure says `target directory` where the
+#      trailing operand's says a bare `target`
+#
+# What `-T` switches off has no diagnostic of its own: the question "is the last
+# operand a directory?", which every other two-operand case asks and answers
+# before deciding anything. That is why `mv -T file dir` and `mv file dir` are
+# paired below — the same two operands, one refusal and one move, and no option
+# in sight that says which.
+
+run_case -t dir file.txt
+run_case --target-directory=dir file.txt tree/a.txt
+# The clustered value, which only works through a table that says `t` takes one.
+run_case -tdir file.txt
+# After the operands, since options permute.
+run_case file.txt -t dir
+# A single source still goes *inside*, which is the shape that has no spelling
+# without `-t`: `mv file.txt dir` would too, but only because `dir` happens to
+# be a directory today.
+run_case -t dir tree
+run_case -v -t dir file.txt tree/a.txt
+# A trailing slash on the directory, and a symlink to it: the operand is opened
+# the way gnulib opens it, which follows.
+run_case -t dir/ file.txt
+TREE='mktree; ln -s dir dlink'
+run_case -t dlink file.txt
+# An overwrite inside the directory is an ordinary overwrite.
+TREE='mktree; printf old > dir/file.txt'
+run_case -t dir file.txt
+# Two sources with one basename, which is the collision `dest_info` is for. It
+# needs `-t` no more than it needs a trailing directory, but the operand list is
+# a different shape here and the check must still fire.
+TREE='mktree; mkdir two; printf x > two/a.txt'
+run_case -t dir tree/a.txt two/a.txt
+
+# `-t` and the operand count. One operand is enough; zero is not, and the
+# diagnostic is the one for *no operands at all*, not for a missing destination.
+run_case -t dir
+run_case -t dir ''
+# The directory itself, checked once and named as a *target directory* — a
+# different sentence from the trailing operand's bare `target`.
+run_case -t nosuchdir file.txt
+run_case -t file.txt tree/a.txt
+run_case -t '' file.txt
+# A second `-t` is refused without the two being compared, so naming the same
+# directory twice fails exactly as two different ones do.
+run_case -t dir -t tree file.txt
+run_case -t dir -t dir file.txt
+run_case -t dir --target-directory=tree file.txt
+
+# `-T`: the destination is a name. Against a directory that is a refusal, and
+# without `-T` the very same line moves the file inside.
+run_case -T file.txt dir
+run_case file.txt dir
+run_case -T file.txt new.txt
+run_case --no-target-directory tree moved
+# Directory onto directory, which is the case `-T` exists for: with an empty
+# destination the rename succeeds and replaces it; with a full one it fails
+# rather than nesting.
+run_case -T tree dir
+TREE='mktree; printf x > dir/keep'
+run_case -T tree dir
+# An existing plain destination is overwritten, with no question asked about
+# whether the name was free.
+TREE='mktree; printf old > dst'
+run_case -T file.txt dst
+# Repeating it is not an error: unlike `-t` there is no value to disagree with.
+run_case -T -T file.txt new.txt
+run_case file.txt new.txt -T
+
+# `-T` and the operand count, which it does not change: two, no more and no
+# fewer.
+run_case -T
+run_case -T file.txt
+run_case -T file.txt tree/a.txt dir
+# Both options at once is a diagnostic of its own, raised before `-t`'s
+# directory is looked at — so a *missing* directory is not what gets reported.
+run_case -T -t dir file.txt
+run_case -t dir -T file.txt
+run_case -T -t nosuchdir file.txt
+
+# =============================================================================
+# 17. --help and --version
 # =============================================================================
 # The family's two deliberate differences: `--help` omits the GNU project's
 # `Report bugs to:` block, and `--version` names SlateOS.
@@ -729,67 +982,15 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help file.txt dst
 xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 
 # =============================================================================
-# 15. Options GNU has and this mv has not
+# 18. Options GNU has and this mv has not
 # =============================================================================
 # An inventory, not a permission. Each entry names its option and turns into an
 # XPASS the moment the option lands, which is what forces it to be promoted to a
 # real case above. Every one of these is refused rather than ignored: silently
-# ignoring `-n` overwrites a file the user asked to be left alone.
-
-# -i, --interactive: prompt before overwrite. The prompt is raised whether or
-# not stdin is a terminal, so `ANSWERS` reaches it.
-TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
-missing -i file.txt dst
-TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
-missing -i file.txt dst
-TREE='mktree; printf old > dst'; ANSWERS=''
-missing -i file.txt dst
-TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
-missing --interactive file.txt dst
-# Last of -i/-f/-n wins, which is the only thing that makes the three
-# combinable at all.
-TREE='mktree; printf old > dst'
-missing -i -f file.txt dst
-TREE='mktree; printf old > dst'; ANSWERS=$'y\n'
-missing -f -i file.txt dst
-
-# -n, --no-clobber: refuse an existing destination.
-TREE='mktree; printf old > dst'
-missing -n file.txt dst
-TREE='mktree; printf old > dst'
-missing --no-clobber file.txt dst
-missing -n file.txt dst
-TREE='mktree; printf old > dir/file.txt'
-missing -n file.txt dir
-TREE='mktree; printf old > dst'
-missing -n -f file.txt dst
-TREE='mktree; printf old > dst'
-missing -f -n file.txt dst
-
-# -v, --verbose: name each move on stdout, with `renamed` and the `->` arrow.
-missing -v file.txt dst
-missing -v file.txt dir
-missing --verbose tree moved
-missing -v file.txt tree/a.txt dir
-missing -v nosuchfile dst
-
-# -t, --target-directory: the destination given first, so every operand is a
-# source. It is also the only shape in which one source and a directory is
-# unambiguous.
-missing -t dir file.txt
-missing --target-directory=dir file.txt tree/a.txt
-missing -t dir
-missing -t nosuchdir file.txt
-missing -t file.txt tree/a.txt
-missing -t dir -t tree file.txt
-
-# -T, --no-target-directory: the destination is a name, never a directory to
-# move into.
-missing -T file.txt dir
-missing -T file.txt new.txt
-missing --no-target-directory tree moved
-missing -T file.txt tree/a.txt dir
-missing -T -t dir file.txt
+# ignoring an option that decides whether a file is destroyed is how data is
+# lost. `-v` was promoted this way and became §14; `-i`/`-f`/`-n` became §15;
+# `-t`/`-T` became §16, where the eleven entries that were here turned into
+# thirty-three.
 
 # -u, --update: move only when the source is newer. The fixture pins both times
 # so `older` has a fixed answer.

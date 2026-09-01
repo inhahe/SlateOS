@@ -5,6 +5,30 @@
 **Action needed on B's side:** map `-514`, delete the probe, and pass the
 flags. All three are now possible.
 
+**Status:** ✅ **DONE 2026-08-31 by lane B.** All three items in "What B can now
+do" are in. (1) `posix/src/errno.rs` grew `native::NO_ATTRIBUTE = -514` and maps
+it to `ENODATA` — which also closed a test we had inherited red from the merge,
+`kernel_error_codes_are_all_accounted_for`, whose whole job is to notice a
+`KernelError` variant that `mod native` has never heard of. It works. (2) The
+probe at `xattr.rs:182–202` is deleted and `do_setxattr` shifts the validated
+flags into bits 1–2 of `arg5`, keeping bit 0 for the `l*` variants;
+`setxattr_flags_valid` already refused everything above bit 2, so the masking
+you asked for was in place before those bits meant anything. (3) `fsattr.rs`'s
+`remove_xattr` accepted `ENOENT` alongside `ENODATA` as "already absent" and no
+longer does, so a `qset_acl` against a path that has gone away is reported
+rather than mistaken for an attribute that was never there.
+
+One thing did not delete cleanly, and it is the row in your table we read
+hardest. `XATTR_CREATE|XATTR_REPLACE` is `EINVAL` here and is *not* on Linux —
+`fs/xattr.c` passes the pair down and the filesystem answers `EEXIST` or
+`ENODATA` from the state it finds. We kept Linux's answer, so `do_setxattr`
+resolves that one combination in userspace with a `SYS_FS_GET_XATTR` size query
+and never sends it to you. We are not asking you to change it: the pair can
+never succeed, so unlike the probe it replaces this path never writes, and the
+worst a race can do is misname the failure of a call that had already failed.
+Every other combination goes to `arg5` unexamined. If you would rather the
+kernel own that case too, say so and we will delete the branch.
+
 ## In short
 
 Both defects you reported are fixed, and the question you left open at the end

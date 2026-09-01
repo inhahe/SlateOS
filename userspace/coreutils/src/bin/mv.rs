@@ -22,10 +22,16 @@
 //!    `mv -f a b` on a failure printed *nothing* and exited non-zero: the
 //!    caller was told something went wrong and given no way to find out what.
 //!    That is not what `-f` means anywhere. In GNU `mv`, `-f` suppresses the
-//!    *prompt* that `-i` would otherwise raise before overwriting; it has never
-//!    suppressed errors. This `mv` never prompts, so `-f` is now accepted and
-//!    does nothing at all — which is exactly GNU's behaviour in the absence of
-//!    `-i`, and is why it records no flag.
+//!    *prompt* that would otherwise be raised before overwriting; it has never
+//!    suppressed errors.
+//!
+//!    For a while after the rewrite it was accepted and inert, on the reasoning
+//!    that there were no prompts for it to suppress. That was true and is no
+//!    longer: with [`Interactive`] implemented, `-f` is the third value of the
+//!    field `-i` and `-n` also write, so it cancels an earlier `-i` —
+//!    `mv -i -f a b` moves silently — and it suppresses the question
+//!    [`abandon_move`] puts over an unwritable destination *with no option
+//!    given at all*, which is the arm nobody expects.
 //!
 //! 3. **A source ending in `..` moved something the user never named.**
 //!    `compute_target` did `dest.join(src.file_name().unwrap_or_default())`, and
@@ -102,22 +108,28 @@
 //!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
 //!   directory had been asked to become a subdirectory of itself.
 //!
-//! The harness is the artifact to keep, not the fix list: it is 178 cases, it
-//! runs in about a minute, and it is how the next seventeen get found. Sixty-one
-//! of its cases are marked as differing on purpose — every one is an option this
-//! file does not implement yet, so implementing one is expected to *promote* a
-//! case rather than to add one.
+//! The harness is the artifact to keep, not the fix list: it is 226 cases, it
+//! runs in about a minute, and it is how the next seventeen get found.
+//! Thirty-two of its cases are marked as differing on purpose — every one is an
+//! option this file does not implement yet, so implementing one is expected to
+//! *promote* a case rather than to add one. `-v` was the first to be promoted
+//! that way; its five entries became §14 and gained four more, which is the
+//! shape the rest should follow. `-i`/`-f`/`-n` was the second: its twelve
+//! entries became §15 and gained twenty more, plus the `--no-cl` abbreviation
+//! case in §2 that had been an xfail only because the option it resolves to did
+//! not exist. `-t`/`-T` was the third and the widest so far: eleven entries
+//! became §16 and gained twenty-two more, because those two options are about
+//! *which operand is the destination*, so every operand-count and wrong-shape
+//! diagnostic acquires a second spelling.
 //!
 //! # Options this implementation does not have
 //!
-//! `-b`/`--backup`, `-i`/`--interactive`, `-n`/`--no-clobber`,
-//! `-t`/`--target-directory`, `-T`/`--no-target-directory`, `-u`/`--update`,
-//! `-v`/`--verbose`, `-S`/`--suffix`, `-Z`/`--context`, `--debug`,
-//! `--exchange` and `--strip-trailing-slashes` are recognised and rejected with
-//! a message saying they are not implemented, rather than ignored. Silently
-//! ignoring `-n` would overwrite a file the user asked to be left alone, and
-//! ignoring `-i` would skip a confirmation they asked for; for this utility
-//! both mistakes are unrecoverable, and an error costs only a retype.
+//! `-b`/`--backup`, `-u`/`--update`, `-S`/`--suffix`, `-Z`/`--context`,
+//! `--debug`, `--no-copy` and `--strip-trailing-slashes` are recognised and
+//! rejected with a message saying they are not implemented, rather than
+//! ignored. Silently ignoring `-b` would lose the copy the user asked to be
+//! kept; for this utility that mistake is unrecoverable, and an error costs
+//! only a retype.
 //!
 //! They are all listed in [`LONG_OPTIONS`] anyway, because the table is what
 //! decides whether an abbreviation is ambiguous — drop `--verbose` and `mv --v`
@@ -131,9 +143,11 @@
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
-use coreutils::getopt::{self, Program, Takes};
+use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
+use coreutils::yesno::{Answers, StdinAnswers};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -189,17 +203,84 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 
-/// What the command line asked for.
+/// The options that change what a move *does*.
+#[derive(Default, Clone, Copy)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct MvFlags {
+    /// `-v`/`--verbose`: name every move on **stdout** as it happens. See
+    /// [`announce`] for the three ways this is not the obvious feature.
+    verbose: bool,
+    /// `-i`, `-f` and `-n`, which are **one** field and not three, so the last
+    /// one on the command line wins. See [`Interactive`] and [`abandon_move`].
+    ///
+    /// `-f` used to have no field at all here, on the reasoning that it "only
+    /// suppresses a prompt this `mv` never raises". That reasoning was sound
+    /// while there were no prompts and is wrong now twice over: `-f` after `-i`
+    /// cancels it, and `-f` on its own suppresses the *unwritable-destination*
+    /// question that [`abandon_move`] asks with no option given at all.
+    interactive: Interactive,
+    /// Whether descriptor 0 is a terminal, sampled once at startup rather than
+    /// per operand.
+    ///
+    /// GNU's `x.stdin_tty`, set from `isatty (STDIN_FILENO)` in `mv.c:436` and
+    /// read only by [`abandon_move`]. Sampled once because upstream samples it
+    /// once, and because a `mv` whose stdin is closed part-way through a long
+    /// move should not start behaving differently half-way down its operand
+    /// list.
+    stdin_tty: bool,
+}
+
+/// How the command line named its destination — GNU's `target_directory` and
+/// `no_target_directory` (`mv.c:325`).
 ///
-/// There is no flags struct: the only option this `mv` implements is `-f`, and
-/// `-f` only suppresses a prompt that this `mv` never raises. Recording a field
-/// nothing reads would suggest it changes something. See module docs, bug 2.
+/// Two independent fields rather than one three-state enum, because **both can
+/// be given at once** and that combination is a diagnostic of its own rather
+/// than one of them winning. Collapsing them would have to pick a winner, and
+/// every choice of winner silently obeys an option the user is being told is
+/// contradictory.
+///
+/// It is separate from [`MvFlags`] because it is not a policy applied to each
+/// move: it decides the *shape of the operand list*, once, before any move
+/// happens. Keeping it out also keeps `MvFlags` `Copy`.
+#[derive(Default)]
+#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+struct Destination {
+    /// `-t DIR` / `--target-directory=DIR`: the destination is named ahead of
+    /// the operands, so every operand is a source — which is also the only
+    /// shape in which one source and a directory is unambiguous.
+    directory: Option<OsString>,
+    /// `-T` / `--no-target-directory`: the last operand is a name to move
+    /// *onto*, never a directory to move *into*.
+    no_directory: bool,
+}
+
+/// What the command line asked for.
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 enum Request {
     Help,
     Version,
-    /// Every operand, in order. The last is the destination.
-    Run(Vec<OsString>),
+    /// Every operand, in order, and where they are going. Without `-t` the last
+    /// operand is the destination; with it, every one is a source.
+    Run(MvFlags, Destination, Vec<OsString>),
+}
+
+/// The parts of a run that every step below needs: what was asked for, and the
+/// two streams the answer goes to.
+///
+/// It exists because `-v` gives `mv` a *second* output stream, and threading two
+/// sinks plus a flags struct through [`move_all`] → [`move_one`] as separate
+/// parameters puts both over `clippy::too_many_arguments`. `cp.rs`'s `Job` is
+/// the same struct for the same reason; keeping the shape identical is what lets
+/// the two files' move/copy cores stay readable side by side.
+struct Job<'a, O: Write, E: Write> {
+    flags: MvFlags,
+    /// Where `--verbose` goes. **Not** where diagnostics go — see [`announce`].
+    out: &'a mut O,
+    err: &'a mut E,
+    /// Where `-i`'s answer comes from. A trait object rather than stdin so that
+    /// a test can put a canned reply behind a prompt without a terminal; see
+    /// [`coreutils::yesno::Canned`].
+    answers: &'a mut dyn Answers,
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -221,15 +302,33 @@ fn run_main() -> ExitCode {
             println!("mv (SlateOS coreutils) 0.1.0");
             ExitCode::SUCCESS
         }
-        Ok(Request::Run(paths)) => {
+        Ok(Request::Run(mut flags, dest, paths)) => {
+            // GNU's `mv.c:436`. Sampled here rather than inside the check that
+            // reads it, so that the answer is the one the process started with.
+            flags.stdin_tty = stdfd::is_tty(0);
             // `Stream` and not `io::stderr()`, whose failures the runtime hides: a
             // diagnostic that never arrived has to reach `close_stderr`'s flag.
+            let mut out = Stream::stdout();
             let mut err = Stream::stderr();
-            if move_all(&paths, &mut err) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(1)
-            }
+            let mut answers = StdinAnswers::default();
+            let earned = {
+                let mut job = Job {
+                    flags,
+                    out: &mut out,
+                    err: &mut err,
+                    answers: &mut answers,
+                };
+                if move_all(&mut job, &dest, &paths) {
+                    ExitCode::SUCCESS
+                } else {
+                    ExitCode::from(1)
+                }
+            };
+            // `--verbose` is the only thing `mv` ever writes to stdout, and a
+            // line of it that never arrived has to change the status the same
+            // way a lost diagnostic does — otherwise `mv -v … | head -1`
+            // reports success for output nobody received.
+            stdfd::close_stdout("mv", out, earned)
         }
         Err(e) => {
             diag!("mv: {e}");
@@ -240,14 +339,20 @@ fn run_main() -> ExitCode {
 
 fn help_text() -> String {
     "\
-Usage: mv [OPTION]... SOURCE DEST
+Usage: mv [OPTION]... [-T] SOURCE DEST
   or:  mv [OPTION]... SOURCE... DIRECTORY
+  or:  mv [OPTION]... -t DIRECTORY SOURCE...
 Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
 
-  -f, --force   do not prompt before overwriting (accepted; this mv never
-                  prompts, so it has no effect)
-      --help    display this help and exit
-      --version output version information and exit
+  -f, --force        do not prompt before overwriting
+  -i, --interactive  prompt before overwrite
+  -n, --no-clobber   do not overwrite an existing file
+If you specify more than one of -i, -f, -n, only the final one takes effect.
+  -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY
+  -T, --no-target-directory  treat DEST as a normal file
+  -v, --verbose      explain what is being done
+      --help         display this help and exit
+      --version      output version information and exit
 
 To move a file whose name starts with a '-', for example '-foo',
 use one of these commands:
@@ -259,107 +364,92 @@ use one of these commands:
 
 // ---------------------------------------------------------------- parsing ---
 
+/// GNU `mv`'s short options, in the string it hands `getopt_long`
+/// (`mv.c:339`), colons included.
+///
+/// The colons are the part that matters here. `t:` is what makes `-t dir`
+/// consume the following word, and it has to be declared even while `-t` is
+/// refused: a parser that does not know `-t` takes a value treats `dir` as an
+/// operand, so `mv -t dir file` would refuse the option *and* — had the refusal
+/// been a warning rather than an error — have moved `file` onto `dir` as a
+/// plain two-operand rename. Declaring the shape and refusing the option are
+/// separate questions, and only the second is about what is implemented.
+const SHORT_OPTIONS: &str = "bfint:uvS:TZ";
+
 /// Parse `mv`'s argv into its operands.
 ///
 /// Options and operands may be interleaved — `mv a -f b` is `mv a b` — which is
-/// `getopt_long`'s default permuting behaviour and what the previous
-/// hand-written parser did too.
+/// `getopt_long`'s default permuting behaviour and what [`getopt::Parser`] does.
+///
+/// This walks the shared parser rather than the hand-written scanner that used
+/// to be here. The scanner could not express an option that takes a value at
+/// all: it split every non-`--` word into bytes and looked each up, so `-t` had
+/// no way to reach for the word after it. That was invisible while `-t` was
+/// refused and would have been a wrong answer the moment it was not.
 ///
 /// # Errors
 ///
-/// An unknown option, a recognised option this implementation does not have, or
-/// a long option given a value it does not take.
+/// An unknown option, a recognised option this implementation does not have, a
+/// long option given a value it does not take, or one denied a value it needs.
 fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
+    let mut flags = MvFlags::default();
+    let mut dest = Destination::default();
     let mut paths: Vec<OsString> = Vec::new();
-    let mut only_operands = false;
 
-    for arg in args {
-        if only_operands {
-            paths.push(arg.clone());
-            continue;
-        }
-        let bytes = arg_bytes(arg);
-
-        if bytes == b"--" {
-            only_operands = true;
-        } else if bytes == b"-" || bytes.first() != Some(&b'-') {
-            // A lone `-` is a file called `-`. `mv` has no standard-input
-            // operand for it to mean anything else.
-            paths.push(arg.clone());
-        } else if let Some(body) = bytes.strip_prefix(b"--") {
-            match parse_long(body, &bytes)? {
-                Some(request) => return Ok(request),
-                None => continue,
+    for item in MV.parse(args, SHORT_OPTIONS, LONG_OPTIONS) {
+        match item? {
+            // A lone `-` arrives here, not as an option: `mv` has no
+            // standard-input operand for it to mean anything else.
+            Opt::Operand(name) => paths.push(name.clone()),
+            Opt::Long("help", _) => return Ok(Request::Help),
+            Opt::Long("version", _) => return Ok(Request::Version),
+            // One field, three spellings, last one wins — including inside a
+            // single cluster, since the parser hands a bundle over one byte at a
+            // time. `mv -if` does not ask; `mv -fi` does. Assignment and not
+            // `|=` for the same reason: `mv --force --interactive` asks.
+            Opt::Short(b'f', _) | Opt::Long("force", _) => {
+                flags.interactive = Interactive::AlwaysYes;
             }
-        } else {
-            // Bytes, not `char`s. `-é` is two bytes in UTF-8, and iterating
-            // `char`s would answer `invalid option -- 'é'` — an option nobody
-            // typed, and one that cannot be typed, since options are single
-            // bytes. It also would not survive an argument that is not UTF-8 at
-            // all, which is the whole point of this rewrite.
-            for &b in bytes.get(1..).unwrap_or_default() {
-                apply_short(b)?;
+            Opt::Short(b'i', _) | Opt::Long("interactive", _) => {
+                flags.interactive = Interactive::AskUser;
             }
+            Opt::Short(b'n', _) | Opt::Long("no-clobber", _) => {
+                flags.interactive = Interactive::AlwaysNo;
+            }
+            Opt::Short(b'v', _) | Opt::Long("verbose", _) => flags.verbose = true,
+            Opt::Short(b't', value) | Opt::Long("target-directory", value) => {
+                // Refused here rather than at use, and refused without
+                // comparing the two directories — GNU asks only whether one was
+                // given already, so `mv -t d -t d a` fails as surely as
+                // `-t d -t e` does. Measured, not assumed.
+                //
+                // A plain diagnostic with no "Try 'mv --help'" after it, because
+                // upstream raises it with `error (EXIT_FAILURE, …)` and not
+                // through `usage`.
+                if dest.directory.is_some() {
+                    return Err(MV.usage("multiple target directories specified".into()));
+                }
+                // Unreachable: `t:` in [`SHORT_OPTIONS`] and `Takes::Required`
+                // in [`LONG_OPTIONS`] both make the parser supply a value or
+                // fail before this arm is reached.
+                let Some(dir) = value else {
+                    return Err(MV.short_missing_argument(b't'));
+                };
+                dest.directory = Some(dir);
+            }
+            Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
+                dest.no_directory = true;
+            }
+            // GNU `mv`'s remaining options, refused by name. Reaching them
+            // means the parser recognised the option and, for `-S`, has already
+            // taken its value out of argv — which is what keeps the *rest* of
+            // the line reading the way GNU reads it.
+            Opt::Short(flag, _) => return Err(unimplemented_short(flag)),
+            Opt::Long(name, _) => return Err(unimplemented_long(name)),
         }
     }
 
-    Ok(Request::Run(paths))
-}
-
-/// Handle one `--name[=value]` argument.
-///
-/// Returns `Some(request)` for the two options that end parsing immediately, and
-/// `None` for one that does not.
-///
-/// # Errors
-///
-/// The name resolving to nothing or to more than one option, a value given to an
-/// option that takes none, or an option this implementation lacks.
-fn parse_long(body: &[u8], whole: &[u8]) -> Result<Option<Request>, getopt::Error> {
-    // Split before resolving: the name is what gets matched, and the argument
-    // *as typed* — `=VALUE` included — is what gets echoed back if it resolves
-    // to nothing.
-    let (typed, inline) = match body.iter().position(|&c| c == b'=') {
-        Some(at) => (
-            body.get(..at).unwrap_or_default(),
-            Some(body.get(at.saturating_add(1)..).unwrap_or_default()),
-        ),
-        None => (body, None),
-    };
-    // Every option name is ASCII, so a name that is not UTF-8 can match none of
-    // them. It takes the unrecognised path — reported as the bytes typed —
-    // rather than failing in some third way.
-    let typed = std::str::from_utf8(typed).map_err(|_| MV.unrecognized_option(whole))?;
-    let (name, takes) = MV.resolve_long(typed, whole, LONG_OPTIONS)?;
-
-    if inline.is_some() && takes == Takes::Nothing {
-        return Err(MV.long_unwanted_argument(name));
-    }
-
-    match name {
-        "help" => Ok(Some(Request::Help)),
-        "version" => Ok(Some(Request::Version)),
-        // Accepted and deliberately inert; see module docs, bug 2.
-        "force" => Ok(None),
-        other => Err(unimplemented_long(other)),
-    }
-}
-
-/// Handle one short option byte.
-///
-/// # Errors
-///
-/// A byte that is no option of `mv`'s, or one this implementation lacks.
-fn apply_short(flag: u8) -> Result<(), getopt::Error> {
-    match flag {
-        // Accepted and deliberately inert; see module docs, bug 2.
-        b'f' => Ok(()),
-        // GNU `mv`'s remaining short options.
-        b'b' | b'i' | b'n' | b't' | b'T' | b'u' | b'v' | b'S' | b'Z' => {
-            Err(unimplemented_short(flag))
-        }
-        other => Err(MV.invalid_option(other)),
-    }
+    Ok(Request::Run(flags, dest, paths))
 }
 
 /// The diagnostic for an option that GNU `mv` has and this one does not.
@@ -376,17 +466,6 @@ fn unimplemented_short(flag: u8) -> getopt::Error {
 
 fn unimplemented_long(name: &str) -> getopt::Error {
     MV.usage_referring(format!("option '--{name}' is not implemented by this mv"))
-}
-
-#[cfg(unix)]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    a.as_os_str().as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn arg_bytes(a: &OsString) -> Vec<u8> {
-    a.to_string_lossy().into_owned().into_bytes()
 }
 
 // ----------------------------------------------------------------- moving ---
@@ -418,29 +497,22 @@ enum Renamed {
 /// onto a free name — then costs one syscall and skips every check, and the
 /// checks are only reached when there is something to check.
 ///
-/// `RENAME_NOREPLACE` is a `renameat2` flag that `std` does not expose, so this
-/// is gnulib's own fallback for a host that lacks the syscall
-/// (`lib/renameatu.c:134`): look first, then rename. That has a race, and
-/// gnulib's comment says so — between the look and the rename someone else may
-/// create the destination, and it is then overwritten. Upstream accepts the
-/// race on such hosts, and the alternative here would be to guess at a raw
-/// syscall number.
+/// [`coreutils::rename::noreplace`] is the call, shared with [`backup`] because
+/// both are saying "I checked that this name was free" and a plain `rename(2)`
+/// cannot say it. This used to be a private copy that only ever emulated the
+/// flag with an `lstat`, which kept gnulib's race after the kernel had stopped
+/// having one; see that module.
+///
+/// [`backup`]: coreutils::backup
 fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<()> {
-    // `symlink_metadata`: a *dangling* symlink at the destination still occupies
-    // the name, so it is "exists" for this question.
-    match fs::symlink_metadata(dst) {
-        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        Err(_) => {}
-    }
-    fs::rename(src, dst)
+    coreutils::rename::noreplace(src, dst)
 }
 
 /// Is this the errno that means "the destination is already there"?
 ///
 /// Compared as a *kind* rather than as a number because [`rename_noreplace`]
-/// synthesises it rather than receiving it from the kernel, and the two must
-/// answer alike.
+/// may synthesise it rather than receive it from the kernel — the emulated path
+/// does — and the two must answer alike.
 fn is_exists(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::AlreadyExists
 }
@@ -503,43 +575,112 @@ fn target_in_directory(dir: &Path, src: &Path) -> (PathBuf, OsString) {
     (dir.join(&base), base)
 }
 
-/// Move every source onto the destination, reporting failures to `err`.
+/// Move every source onto the destination, reporting failures to `job.err`.
 ///
-/// Returns `true` if every source was moved. Takes the error sink as a parameter
-/// rather than writing to `stderr` directly so the diagnostics — the part of
-/// `mv` a caller actually sees when something goes wrong — can be asserted on in
-/// tests. The old file had no test of this path at all, which is how bugs 2–4 in
-/// the module docs survived.
+/// Returns `true` if every source was moved. Takes both streams through [`Job`]
+/// rather than writing to `stderr` and `stdout` directly so the diagnostics —
+/// the part of `mv` a caller actually sees when something goes wrong — and the
+/// `--verbose` lines can be asserted on in tests. The old file had no test of
+/// this path at all, which is how bugs 2–4 in the module docs survived.
 ///
 /// A failure on one source does not stop the others: `mv a b c dir/` with `b`
 /// unmovable still moves `a` and `c`, and exits 1.
 ///
-/// The shape follows GNU's `main` (`mv.c:440-550`), and the order is
+/// This is where [`Destination`] is resolved into one of three shapes — every
+/// operand into `-t`'s directory, one operand onto `-T`'s name, or the trailing
+/// operand deciding between the two. The order of the checks that pick between
+/// them is GNU's and is observable at every step; see the comments inline.
+///
+/// The shape follows GNU's `main` (`mv.c:427-550`), and the order is
 /// load-bearing rather than stylistic — see [`Renamed`].
-fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
-    // Zero and one operand are distinct diagnostics, as in GNU. "missing
-    // operand" alone left the user to work out *which*.
-    let Some((dest, sources)) = paths.split_last() else {
-        let _ = writeln!(
-            err,
-            "mv: {}",
-            MV.usage_referring("missing file operand".into())
-        );
-        return false;
-    };
-    if sources.is_empty() {
-        let _ = writeln!(
-            err,
-            "mv: {}",
-            MV.usage_referring(format!(
+fn move_all<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    dest: &Destination,
+    paths: &[OsString],
+) -> bool {
+    // GNU's `n_files <= !target_directory` (`mv.c:427`). With `-t` the
+    // destination came from the option, so *one* operand is a whole command;
+    // without it the last operand is the destination and two are needed. Zero
+    // and one are distinct diagnostics, as in GNU — "missing operand" alone left
+    // the user to work out *which*.
+    if paths.len() <= usize::from(dest.directory.is_none()) {
+        let message = match paths.first() {
+            None => "missing file operand".to_string(),
+            Some(first) => format!(
                 "missing destination file operand after {}",
-                quoteaf_os(dest)
-            ))
-        );
+                quoteaf_os(first)
+            ),
+        };
+        let _ = writeln!(job.err, "mv: {}", MV.usage_referring(message));
         return false;
     }
 
-    let last = Path::new(dest);
+    // Both `-T` refusals come before `-t`'s directory is so much as stat'd,
+    // which is GNU's order and is observable: `mv -T -t nosuchdir a b` reports
+    // the combination and not the missing directory.
+    if dest.no_directory {
+        if dest.directory.is_some() {
+            let _ = writeln!(
+                job.err,
+                "mv: cannot combine --target-directory (-t) and --no-target-directory (-T)"
+            );
+            return false;
+        }
+        // `-T` says the destination is exactly one name, so a third operand is
+        // not a third source — there is nowhere for it to go.
+        if let Some(extra) = paths.get(2) {
+            let _ = writeln!(
+                job.err,
+                "mv: {}",
+                MV.usage_referring(format!("extra operand {}", quoteaf_os(extra)))
+            );
+            return false;
+        }
+    }
+
+    // `-t`: every operand is a source, and the directory is checked once, here.
+    // The failure names it as a *target directory*, which is a different
+    // sentence from the trailing operand's bare `target` below — the user named
+    // this one as a directory, so being told it is not one is the whole answer.
+    if let Some(dir) = &dest.directory {
+        if let Err(e) = target_directory_operand(Path::new(dir)) {
+            let why = strerror(&e);
+            let _ = writeln!(job.err, "mv: target directory {}: {why}", quoteaf_os(dir));
+            return false;
+        }
+        return move_into_directory(job, Path::new(dir), paths);
+    }
+
+    // Unreachable: the operand count was checked above.
+    let Some((dest_operand, sources)) = paths.split_last() else {
+        return false;
+    };
+    let last = Path::new(dest_operand);
+
+    // `-T`: the destination is a name to move *onto*, so it is never asked
+    // whether it is a directory — that question is the whole of what `-T`
+    // switches off, and `mv -T file dir` therefore reaches the sentence about
+    // overwriting a directory rather than putting `file` inside it.
+    //
+    // `Renamed::NotTried` and not the speculative attempt below, matching
+    // upstream, whose `renameatu (…, RENAME_NOREPLACE)` sits in the branch
+    // neither option reaches (`mv.c:501`). The attempt is not skipped so much as
+    // moved: [`move_one`] makes it on `NotTried`, with the same arguments and
+    // the same answer. What it does not do here is come *before* the
+    // last-operand-is-a-directory probe, because under `-T` there is no such
+    // probe for it to come before.
+    if dest.no_directory {
+        return move_one(
+            job,
+            Path::new(&sources[0]),
+            last,
+            dest_operand,
+            Renamed::NotTried,
+            true,
+            &mut None,
+        );
+    }
+
     let mut state = if sources.len() == 1 {
         match rename_noreplace(Path::new(&sources[0]), last) {
             Ok(()) => Renamed::Done,
@@ -566,7 +707,7 @@ fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
                 // `error (EXIT_FAILURE, …)` at `mv.c:495`.
                 if sources.len() > 1 {
                     let why = strerror(&e);
-                    let _ = writeln!(err, "mv: target {}: {why}", quoteaf_os(dest));
+                    let _ = writeln!(job.err, "mv: target {}: {why}", quoteaf_os(dest_operand));
                     return false;
                 }
             }
@@ -576,16 +717,35 @@ fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
     let Some(dir) = into else {
         // Two operands, last operand not a directory: one move, to that name.
         return move_one(
+            job,
             Path::new(&sources[0]),
             last,
-            dest,
+            dest_operand,
             state,
             true,
             &mut None,
-            err,
         );
     };
 
+    move_into_directory(job, dir, sources)
+}
+
+/// Move every source in `sources` into `dir`, which the caller has already
+/// established is a directory.
+///
+/// Both spellings of "the destination is a directory" end here — the trailing
+/// operand and `-t` — which is the point of the split. `-t`'s only difference
+/// from a trailing directory is *which operands are sources*; once that is
+/// settled, the collision bookkeeping, the per-source diagnostics and the
+/// exit status are the same code and not a second copy of it.
+///
+/// Returns `true` if every source moved. One failure does not stop the rest:
+/// `mv a b c dir/` with `b` unmovable still moves `a` and `c`, and exits 1.
+fn move_into_directory<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    dir: &Path,
+    sources: &[OsString],
+) -> bool {
     // The set is built only when it can matter — GNU's comment at `mv.c:526`:
     // "the problem it is used to detect can arise only if there are two or more
     // files to move."
@@ -599,13 +759,13 @@ fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
         // follows could collide with it (`copy.c:2779`).
         let last_file = i.saturating_add(1) == sources.len();
         if !move_one(
+            job,
             src_path,
             &target,
             &base,
             Renamed::NotTried,
             last_file,
             &mut seen,
-            err,
         ) {
             ok = false;
         }
@@ -622,21 +782,27 @@ fn move_all<W: Write>(paths: &[OsString], err: &mut W) -> bool {
 ///
 /// Returns `false` if this source should count against the exit status.
 #[allow(clippy::too_many_lines)]
-fn move_one<W: Write>(
+fn move_one<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
     src: &Path,
     target: &Path,
     relname: &OsString,
     state: Renamed,
     last_file: bool,
     seen: &mut Option<DestInfo>,
-    err: &mut W,
 ) -> bool {
     let mut failure = match state {
         // Already moved, and with `last_file` the recording is skipped too, so
         // there is nothing left to do. This is the common case.
-        Renamed::Done => return record_move(target, relname, last_file, seen),
+        Renamed::Done => {
+            announce(job, "renamed", src, target);
+            return record_move(target, relname, last_file, seen);
+        }
         Renamed::NotTried => match rename_noreplace(src, target) {
-            Ok(()) => return record_move(target, relname, last_file, seen),
+            Ok(()) => {
+                announce(job, "renamed", src, target);
+                return record_move(target, relname, last_file, seen);
+            }
             Err(e) => e,
         },
         Renamed::Failed(e) => e,
@@ -655,7 +821,7 @@ fn move_one<W: Write>(
             // 2)`, which is neither POSIX's wording nor what this utility prints
             // on the target it ships on.
             let why = strerror(&e);
-            let _ = writeln!(err, "mv: cannot stat {}: {why}", quoteaf_os(src));
+            let _ = writeln!(job.err, "mv: cannot stat {}: {why}", quoteaf_os(src));
             return false;
         }
     };
@@ -672,7 +838,7 @@ fn move_one<W: Write>(
     // The refusals are asked only of a destination that is actually there —
     // there is nothing to refuse to overwrite otherwise.
     if let Some(dst_meta) = &dst_meta
-        && !refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, err)
+        && !refuse_overwrite_checks(src, &src_meta, target, dst_meta, relname, seen, job)
     {
         return false;
     }
@@ -686,7 +852,10 @@ fn move_one<W: Write>(
     // this true, so the ordinary overwrite still passes through here.)
     if is_exists(&failure) {
         match fs::rename(src, target) {
-            Ok(()) => return record_move(target, relname, last_file, seen),
+            Ok(()) => {
+                announce(job, "renamed", src, target);
+                return record_move(target, relname, last_file, seen);
+            }
             Err(e) => failure = e,
         }
     }
@@ -696,7 +865,7 @@ fn move_one<W: Write>(
     // signal, and the alternative is the unhelpfully bare `Invalid argument`.
     if is_subdirectory_of_itself(&failure) {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: cannot move {} to a subdirectory of itself, {}",
             quoteaf_os(src),
             quoteaf_os(target)
@@ -710,10 +879,14 @@ fn move_one<W: Write>(
         // "is more likely to confuse the user than be helpful"
         // (`copy.c:2851`).
         if blames_the_destination(&failure) {
-            let _ = writeln!(err, "mv: cannot overwrite {}: {why}", quoteaf_os(target));
+            let _ = writeln!(
+                job.err,
+                "mv: cannot overwrite {}: {why}",
+                quoteaf_os(target)
+            );
         } else {
             let _ = writeln!(
-                err,
+                job.err,
                 "mv: cannot move {} to {}: {why}",
                 quoteaf_os(src),
                 quoteaf_os(target)
@@ -722,17 +895,83 @@ fn move_one<W: Write>(
         return false;
     }
 
+    // Announced *before* the copy is attempted, which is upstream's order and
+    // not an accident of this file's shape: `copy.c:2887` prints `copied` in the
+    // block that clears the destination, and only then falls through to the copy
+    // itself. So a cross-device move whose copy fails still prints the line —
+    // measured, `mv -v` of an unreadable file onto another filesystem prints
+    // `copied 'u' -> '…'` on stdout, `mv: cannot open 'u' for reading:
+    // Permission denied` on stderr, and exits 1. It looks like a bug and reads
+    // like one; it is what the reference does, and `scripts/mv-diff.sh` compares
+    // both streams byte-for-byte, so "fixing" it here would turn a passing case
+    // red.
+    //
+    // The `is_dir` guard is GNU's `!S_ISDIR (src_mode)`. A directory gets no
+    // line, which is what this `mv` needs anyway — it refuses the recursive copy
+    // on the next line, and announcing a copy it is about to decline would be a
+    // lie rather than an oddity.
+    if !src_meta.is_dir() {
+        announce(job, "copied", src, target);
+    }
+
     if let Err(e) = copy_across_devices(src, target, &src_meta) {
         let why = strerror(&e);
         let _ = writeln!(
-            err,
+            job.err,
             "mv: cannot move {} to {}: {why}",
             quoteaf_os(src),
             quoteaf_os(target)
         );
         return false;
     }
+    // The second line of the pair, and it comes from somewhere else entirely in
+    // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
+    // and it is `remove.c:400` that prints it. That is why the wording is
+    // `removed 'src'` with no arrow and no destination — it is `rm -v`'s
+    // sentence, not `mv`'s. Reached only on success, because `do_move` only
+    // calls `rm()` when `copy` returned true.
+    announce_removed(job, src);
     record_move(target, relname, last_file, seen)
+}
+
+/// GNU's `emit_verbose` (`copy.c:2082`) with the verb its callers prefix —
+/// `renamed` for a move that `rename(2)` performed, `copied` for the
+/// cross-device fallback.
+///
+/// Three things about it are not what the obvious implementation would do:
+///
+/// * **It goes to stdout, not stderr.** `emit_verbose` is a `printf`. So
+///   `mv -v a b > log` captures the line and `mv -v a b 2>/dev/null` does not
+///   silence it — the reverse of what a diagnostic does. That is also why
+///   [`run_main`] routes stdout through [`stdfd::close_stdout`]: with `-v` this
+///   utility finally *has* stdout output whose loss must change the status.
+/// * **Both names are quoted, in one style.** GNU writes `quoteaf_n (0, src)`
+///   and `quoteaf_n (1, dst)` — two slots of the same style, not two styles — so
+///   `mv -v 'a b' c` prints `'a b' -> c` and the reader can tell a space *in* a
+///   name from the space *between* names.
+/// * **There is no flush.** The line is buffered like any other stdout write and
+///   leaves through [`Stream`]'s close, so `mv -v` into a pipe writes in blocks
+///   rather than a syscall per file.
+fn announce<O: Write, E: Write>(job: &mut Job<'_, O, E>, verb: &str, src: &Path, dst: &Path) {
+    if !job.flags.verbose {
+        return;
+    }
+    let _ = writeln!(job.out, "{verb} {} -> {}", quoteaf_os(src), quoteaf_os(dst));
+}
+
+/// `rm -v`'s line, printed by `mv` for the source it removes after a
+/// cross-device copy (`remove.c:400`, reached through `mv.c:238`).
+///
+/// Separate from [`announce`] because it is a different sentence with a
+/// different shape — one name, no arrow — and because upstream's is
+/// `removed directory %s` for a directory. This `mv` cannot reach that case: it
+/// refuses cross-device directory moves outright, so the only file it ever
+/// removes here is a non-directory.
+fn announce_removed<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path) {
+    if !job.flags.verbose {
+        return;
+    }
+    let _ = writeln!(job.out, "removed {}", quoteaf_os(src));
 }
 
 /// Note that the file just moved now sits at `relname`, so a later source that
@@ -782,20 +1021,44 @@ fn record_move(
 /// rename that would replace it. Returns `false` once one has been reported.
 ///
 /// The order is GNU's, and it is observable: a request that trips two of these
-/// gets the first one's wording.
-fn refuse_overwrite_checks<W: Write>(
+/// gets the first one's wording. Two of the orderings look wrong until measured
+/// against 9.4, and both are pinned by tests:
+///
+/// * `-n` and `-i` come **before** the directory checks, not after. `mv -n dir
+///   file` prints `not replacing 'file'` rather than `cannot overwrite
+///   non-directory 'file' with directory 'dir'`, and `mv -i dir file` *asks*.
+///   Upstream's `abandon_move` block is at `copy.c:2409` and the directory
+///   sentences begin at 2455.
+/// * `-n` comes **before** the same-file check too, by being the reason that
+///   check is skipped — see step 1. So `mv -n s f`, where `s` is a symlink to
+///   `f`, prints `not replacing 'f'` rather than `'s' and 'f' are the same
+///   file`.
+///
+/// Unlike `cp`'s, none of this exempts a **directory source**: `cp`'s block is
+/// guarded by `! S_ISDIR (src_mode)` because `cp -r` descends and asks about the
+/// files inside, while `mv` renames the tree in one operation and so has one
+/// question to put about it.
+fn refuse_overwrite_checks<O: Write, E: Write>(
     src: &Path,
     src_meta: &fs::Metadata,
     target: &Path,
     dst_meta: &fs::Metadata,
     relname: &OsString,
     seen: &Option<DestInfo>,
-    err: &mut W,
+    job: &mut Job<'_, O, E>,
 ) -> bool {
     // 1. Is the destination the source? (`copy.c:2345`)
-    if !same_file_ok(src, src_meta, target, dst_meta) {
+    //
+    //    Skipped entirely under `-n`, which is upstream's `x->interactive !=
+    //    I_ALWAYS_NO &&` guard on the call and not an optimisation: the two
+    //    produce different sentences for the same command line, and `-n`'s is
+    //    the one GNU prints. Measured — `mv -n f l` on a hard link pair says
+    //    `not replacing 'l'`.
+    if job.flags.interactive != Interactive::AlwaysNo
+        && !same_file_ok(src, src_meta, target, dst_meta)
+    {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: {} and {} are the same file",
             quoteaf_os(src),
             quoteaf_os(target)
@@ -803,14 +1066,26 @@ fn refuse_overwrite_checks<W: Write>(
         return false;
     }
 
+    // 2. Is this destination to be left alone? (`copy.c:2407-2431`)
+    if abandon_move(target, dst_meta, job) {
+        // GNU sets `*rename_succeeded = true` here so that `mv` does not go on
+        // to `rm` the source. This `mv` has no such flag to set: the caller
+        // returns on `false` without reaching either the rename or the
+        // cross-device `rm`, so the source survives by construction.
+        if job.flags.interactive == Interactive::AlwaysNo {
+            let _ = writeln!(job.err, "mv: not replacing {}", quoteaf_os(target));
+        }
+        return false;
+    }
+
     let (src_dir, dst_dir) = (src_meta.is_dir(), dst_meta.is_dir());
 
-    // 2. A directory onto a non-directory (`copy.c:2455`). The destination is
+    // 3. A directory onto a non-directory (`copy.c:2455`). The destination is
     //    named first, which reads oddly until you notice the sentence is about
     //    what is being destroyed.
     if !dst_dir && src_dir {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: cannot overwrite non-directory {} with directory {}",
             quoteaf_os(target),
             quoteaf_os(src)
@@ -818,7 +1093,7 @@ fn refuse_overwrite_checks<W: Write>(
         return false;
     }
 
-    // 3. A destination this same command line just created (`copy.c:2473`).
+    // 4. A destination this same command line just created (`copy.c:2473`).
     //    GNU's comment: "Don't let the user destroy their data, even if they
     //    try hard: this mv command must fail: mv a/f b/f c".
     if !dst_dir
@@ -827,7 +1102,7 @@ fn refuse_overwrite_checks<W: Write>(
         && set.contains(&(relname.clone(), id))
     {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: will not overwrite just-created {} with {}",
             quoteaf_os(target),
             quoteaf_os(src)
@@ -835,23 +1110,23 @@ fn refuse_overwrite_checks<W: Write>(
         return false;
     }
 
-    // 4. A non-directory onto a directory (`copy.c:2485`), which unlike 2 does
+    // 5. A non-directory onto a directory (`copy.c:2485`), which unlike 3 does
     //    not name the source at all.
     if !src_dir && dst_dir {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: cannot overwrite directory {} with non-directory",
             quoteaf_os(target)
         );
         return false;
     }
 
-    // 5. `copy.c:2504`. Unreachable while 2 stands above it — it is GNU's
+    // 6. `copy.c:2504`. Unreachable while 3 stands above it — it is GNU's
     //    belt-and-braces for the `--backup` path that lets 2 through — and kept
     //    so that adding `-b` does not silently lose the guard.
     if src_dir && !dst_dir {
         let _ = writeln!(
-            err,
+            job.err,
             "mv: cannot move directory onto non-directory: {} -> {}",
             quotef_os(src),
             quotef_os(target)
@@ -860,6 +1135,61 @@ fn refuse_overwrite_checks<W: Write>(
     }
 
     true
+}
+
+/// GNU's `abandon_move` (`copy.c:2062`): should this move be given up rather
+/// than performed? `true` means leave both files where they are.
+///
+/// Upstream's comment beside the call site is the reason this is `mv`'s own
+/// function and not [`coreutils::overwrite`]'s: "cp and mv treat -i and -f
+/// differently." Three of the four differences are here.
+///
+/// **The `-i`/`-n`/`-f` half is the ordinary one.** `-n` abandons without
+/// asking, `-i` asks, `-f` never abandons. All three are one field, so the last
+/// one on the command line decides -- `mv -in` is `-n`, `mv -ni` is `-i`,
+/// `mv -if` is `-f`. All measured.
+///
+/// **The fourth arm is the one nobody expects, and it fires with no option at
+/// all.** With [`Interactive::Unspecified`], if stdin is a terminal *and* the
+/// destination is not writable, `mv` asks anyway. So the same command is silent
+/// in a script and puts a question in a shell:
+///
+/// ```text
+/// $ chmod 444 d
+/// $ mv f d                       # in a script: moves, silently, exit 0
+/// $ mv f d                       # at a terminal:
+/// mv: replace 'd', overriding mode 0444 (r--r--r--)?
+/// ```
+///
+/// Both measured against 9.4 -- the second through `script(1)`, since it needs a
+/// real terminal on descriptor 0. That is also why `scripts/mv-diff.sh` cannot
+/// reach this arm: its cases run with stdin redirected, which is the first
+/// branch. It is pinned by unit test instead.
+///
+/// `cp` has no such arm. For `cp` an unwritable destination changes only the
+/// *wording* of a question `-i` had already decided to ask; for `mv` it is the
+/// reason to ask one. That asymmetry is deliberate upstream: `cp` writes
+/// *through* the destination and will simply be refused by the kernel, while
+/// `mv` unlinks it, which the mode does not prevent -- so for `mv` the mode is
+/// the only warning there will be.
+fn abandon_move<O: Write, E: Write>(
+    target: &Path,
+    dst_meta: &fs::Metadata,
+    job: &mut Job<'_, O, E>,
+) -> bool {
+    let ask = match job.flags.interactive {
+        Interactive::AlwaysNo => return true,
+        Interactive::AlwaysYes => return false,
+        Interactive::AskUser => true,
+        Interactive::Unspecified => {
+            job.flags.stdin_tty && !overwrite::writable_destination(target, dst_meta)
+        }
+    };
+    // `clears_destination` is `true` unconditionally: it is upstream's
+    // `x->move_mode || ...`, and this program is `move_mode`. So `mv` only ever
+    // puts the `replace ..., overriding mode ...?` form of the question, never
+    // `cp`'s `unwritable ...; try anyway?`.
+    ask && !overwrite::overwrite_ok(job.err, "mv", target, Some(dst_meta), true, job.answers)
 }
 
 /// Would moving `src` onto `target` destroy the very thing being moved? GNU's
@@ -1094,6 +1424,7 @@ fn symlink(_points_at: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    use coreutils::yesno::Canned;
     use scratchdir::ScratchDir;
 
     fn args(items: &[&str]) -> Vec<OsString> {
@@ -1102,8 +1433,23 @@ mod tests {
 
     /// The operands of a successful parse, or a panic naming what came back.
     fn run_parse(items: &[&str]) -> Vec<String> {
+        run_parse_full(items).1
+    }
+
+    /// The flags *and* operands of a successful parse.
+    fn run_parse_full(items: &[&str]) -> (MvFlags, Vec<String>) {
+        let (f, _, p) = run_parse_dest(items);
+        (f, p)
+    }
+
+    /// The whole of a successful parse, [`Destination`] included.
+    fn run_parse_dest(items: &[&str]) -> (MvFlags, Destination, Vec<String>) {
         match parse_args(&args(items)).unwrap() {
-            Request::Run(p) => p.iter().map(|o| o.to_string_lossy().into_owned()).collect(),
+            Request::Run(f, d, p) => (
+                f,
+                d,
+                p.iter().map(|o| o.to_string_lossy().into_owned()).collect(),
+            ),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1125,7 +1471,7 @@ mod tests {
     }
 
     #[test]
-    fn force_is_accepted_and_changes_nothing() {
+    fn force_is_accepted() {
         assert_eq!(run_parse(&["-f", "a", "b"]), vec!["a", "b"]);
         assert_eq!(run_parse(&["--force", "a", "b"]), vec!["a", "b"]);
     }
@@ -1133,6 +1479,92 @@ mod tests {
     #[test]
     fn force_clustered_and_repeated() {
         assert_eq!(run_parse(&["-ff", "a", "b"]), vec!["a", "b"]);
+    }
+
+    /// The whole of `-i`/`-f`/`-n`'s parsing, which is one assignment each and
+    /// would need no test but for the rule that makes them one field: **the
+    /// last one wins**, and it wins across every spelling and across a cluster.
+    ///
+    /// Every row is measured against GNU 9.4 by running the command; the
+    /// harness's §15 has the same table from the other end, as observed
+    /// behaviour rather than as a parse.
+    #[test]
+    fn the_last_of_minus_i_f_n_wins() {
+        let cases: &[(&[&str], Interactive)] = &[
+            (&[], Interactive::Unspecified),
+            (&["-i"], Interactive::AskUser),
+            (&["-f"], Interactive::AlwaysYes),
+            (&["-n"], Interactive::AlwaysNo),
+            (&["--interactive"], Interactive::AskUser),
+            (&["--force"], Interactive::AlwaysYes),
+            (&["--no-clobber"], Interactive::AlwaysNo),
+            // Two options, two orders, two answers.
+            (&["-i", "-n"], Interactive::AlwaysNo),
+            (&["-n", "-i"], Interactive::AskUser),
+            (&["-i", "-f"], Interactive::AlwaysYes),
+            (&["-f", "-i"], Interactive::AskUser),
+            (&["-n", "-f"], Interactive::AlwaysYes),
+            (&["-f", "-n"], Interactive::AlwaysNo),
+            // A cluster is not one option: `getopt` hands the bytes over
+            // singly, so last-wins applies *inside* it too.
+            (&["-if"], Interactive::AlwaysYes),
+            (&["-fi"], Interactive::AskUser),
+            (&["-nfi"], Interactive::AskUser),
+            (&["-ifn"], Interactive::AlwaysNo),
+            // Long and short mix, and options may follow the operands.
+            (&["--force", "-i"], Interactive::AskUser),
+            (&["-i", "--no-clobber"], Interactive::AlwaysNo),
+        ];
+        for (opts, want) in cases {
+            let mut items: Vec<&str> = opts.to_vec();
+            items.extend_from_slice(&["a", "b"]);
+            let (flags, paths) = run_parse_full(&items);
+            assert_eq!(flags.interactive, *want, "{opts:?}");
+            assert_eq!(paths, vec!["a", "b"], "{opts:?}");
+        }
+        // Trailing, after the operands, since parsing permutes.
+        assert_eq!(
+            run_parse_full(&["a", "b", "-i", "-n"]).0.interactive,
+            Interactive::AlwaysNo
+        );
+    }
+
+    #[test]
+    fn verbose_is_recorded_by_both_spellings() {
+        for form in [
+            vec!["-v", "a", "b"],
+            vec!["--verbose", "a", "b"],
+            // The abbreviation has to be unambiguous, so `--verb` and not
+            // `--verb`'s shorter prefixes; see `ambiguous_abbreviation_is_refused`.
+            vec!["--verb", "a", "b"],
+            // Clustered with the option it is most often typed beside.
+            vec!["-fv", "a", "b"],
+        ] {
+            let (flags, paths) = run_parse_full(&form);
+            assert!(flags.verbose, "{form:?}");
+            assert_eq!(paths, vec!["a", "b"], "{form:?}");
+        }
+    }
+
+    #[test]
+    fn verbose_is_off_unless_asked_for() {
+        let (flags, _) = run_parse_full(&["a", "b"]);
+        assert_eq!(flags, MvFlags::default());
+        assert!(!flags.verbose);
+    }
+
+    /// `--verbose=1` is a value given to an option that takes none, which is a
+    /// usage error rather than a truthy flag. Worth pinning because the natural
+    /// way to add a flag — matching on the name and ignoring `inline` — accepts
+    /// it silently.
+    #[test]
+    fn verbose_takes_no_value() {
+        let e = fail(&["--verbose=1", "a", "b"]);
+        assert!(
+            e.sentence.contains("doesn't allow an argument"),
+            "{:?}",
+            e.sentence
+        );
     }
 
     #[test]
@@ -1229,13 +1661,19 @@ mod tests {
         assert!(e.sentence.contains("--zzz=1"), "{:?}", e.sentence);
     }
 
-    /// Unimplemented options are rejected *by name*, not as typos. `-n` asks
-    /// for an existing file to be left alone; answering "invalid option" sends
-    /// the user to check a spelling that was right, and ignoring it would
-    /// overwrite the file they were protecting.
+    /// Unimplemented options are rejected *by name*, not as typos. `-b` asks
+    /// for the old contents to be kept somewhere; answering "invalid option"
+    /// sends the user to check a spelling that was right, and ignoring it would
+    /// destroy the copy they were preserving.
+    ///
+    /// `-i`, `-n`, `--interactive` and `--no-clobber` were on this list until
+    /// they were implemented, which is what a promotion out of it looks like:
+    /// the letters move to [`the_last_of_minus_i_f_n_wins`] and the harness's
+    /// `missing` markers move to its own section. `-t` and `-T` left the same
+    /// way, to [`a_target_directory_is_taken_out_of_the_operands`] and §16.
     #[test]
     fn unimplemented_short_options_are_rejected_by_name() {
-        for flag in ["-b", "-i", "-n", "-t", "-T", "-u", "-v", "-S", "-Z"] {
+        for flag in ["-b", "-u", "-S", "-Z"] {
             let e = fail(&[flag, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -1249,12 +1687,8 @@ mod tests {
     fn unimplemented_long_options_are_rejected_by_name() {
         for name in [
             "--backup",
-            "--interactive",
-            "--no-clobber",
-            "--no-target-directory",
             "--strip-trailing-slashes",
             "--update",
-            "--verbose",
             "--no-copy",
             "--debug",
             "--context",
@@ -1266,6 +1700,93 @@ mod tests {
                 e.sentence
             );
         }
+    }
+
+    /// An option that takes a value takes it even while the option is refused:
+    /// `-S`'s suffix does not survive into the operand list as a file to move.
+    ///
+    /// This is the half of [`SHORT_OPTIONS`] that is not about which options
+    /// exist. Nothing user visible depends on it while the refusal is fatal,
+    /// which is exactly why it is pinned before it starts mattering — `-t`
+    /// spent a release in this test for that reason and is now
+    /// [`a_target_directory_is_taken_out_of_the_operands`] instead.
+    #[test]
+    fn a_refused_option_still_consumes_its_value() {
+        let e = fail(&["-S", ".bak", "a", "b"]);
+        assert!(e.sentence.contains("not implemented"), "{e:?}");
+        // And a value that is *absent* is the parser's error, not the
+        // refusal's — GNU reports the same, because `getopt` never reaches the
+        // switch arm.
+        let e = fail(&["-S"]);
+        assert!(e.sentence.contains("requires an argument"), "{e:?}");
+    }
+
+    /// All four spellings of `-t`, and the fact that its value never lands in
+    /// the operand list. `-tdir` is the one that could only work through a
+    /// table that says the letter takes a value; `mv a b -t d` is the one that
+    /// could only work through a parser that permutes.
+    #[test]
+    fn a_target_directory_is_taken_out_of_the_operands() {
+        for spelling in [
+            &["-t", "d", "a", "b"][..],
+            &["-td", "a", "b"][..],
+            &["--target-directory=d", "a", "b"][..],
+            &["--target-directory", "d", "a", "b"][..],
+            &["a", "b", "-t", "d"][..],
+        ] {
+            let (_, dest, paths) = run_parse_dest(spelling);
+            assert_eq!(dest.directory, Some(OsString::from("d")), "{spelling:?}");
+            assert!(!dest.no_directory, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+        }
+    }
+
+    /// GNU compares nothing here — it asks only whether one was given already —
+    /// so naming the same directory twice fails just as two different ones do.
+    #[test]
+    fn a_second_target_directory_is_refused() {
+        for spelling in [
+            &["-t", "d", "-t", "d", "a"][..],
+            &["-t", "d", "-t", "e", "a"][..],
+            &["-t", "d", "--target-directory=e", "a"][..],
+        ] {
+            let e = fail(spelling);
+            assert_eq!(e.sentence, "multiple target directories specified");
+            // `error (EXIT_FAILURE, …)` upstream, not `usage`, so there is no
+            // "Try 'mv --help'" after it.
+            assert_eq!(e.referral, None, "{spelling:?}");
+        }
+    }
+
+    /// `-T` is a flag, both spellings, and it does not disturb the operands.
+    /// Repeating it is not an error — unlike `-t`, there is no value to
+    /// disagree with.
+    #[test]
+    fn no_target_directory_is_a_flag_both_ways() {
+        for spelling in [
+            &["-T", "a", "b"][..],
+            &["--no-target-directory", "a", "b"][..],
+            &["-T", "-T", "a", "b"][..],
+            &["a", "b", "-T"][..],
+        ] {
+            let (_, dest, paths) = run_parse_dest(spelling);
+            assert!(dest.no_directory, "{spelling:?}");
+            assert_eq!(dest.directory, None, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+        }
+    }
+
+    /// The contradiction is *recorded*, not resolved, by the parser: both
+    /// fields come back set, and the diagnostic is [`move_all`]'s. This is what
+    /// [`Destination`]'s two fields buy — a single three-state field would have
+    /// had to pick a winner here, and every winner obeys an option the user is
+    /// about to be told is contradictory.
+    #[test]
+    fn both_target_options_together_survive_parsing() {
+        let (_, dest, paths) = run_parse_dest(&["-T", "-t", "d", "a"]);
+        assert_eq!(dest.directory, Some(OsString::from("d")));
+        assert!(dest.no_directory);
+        assert_eq!(paths, ["a"]);
     }
 
     #[test]
@@ -1289,7 +1810,7 @@ mod tests {
             "the fixture must be un-representable as String, or it tests nothing"
         );
         match parse_args(&[OsString::from("-f"), bad.clone(), OsString::from("d")]).unwrap() {
-            Request::Run(p) => assert_eq!(p, vec![bad, OsString::from("d")]),
+            Request::Run(_, _, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1327,7 +1848,7 @@ mod tests {
             "the fixture must be un-representable as String, or it tests nothing"
         );
         match parse_args(&[OsString::from("-f"), bad.clone(), OsString::from("d")]).unwrap() {
-            Request::Run(p) => assert_eq!(p, vec![bad, OsString::from("d")]),
+            Request::Run(_, _, p) => assert_eq!(p, vec![bad, OsString::from("d")]),
             other => panic!("expected Run, got {other:?}"),
         }
     }
@@ -1418,10 +1939,71 @@ mod tests {
 
     /// `move_all` plus whatever it wrote to its error sink.
     fn mv(paths: &[&Path]) -> (bool, String) {
+        let (ok, _, err) = mv_flags(MvFlags::default(), paths);
+        (ok, err)
+    }
+
+    /// `move_all` under given flags, plus both of its streams: `(ok, out, err)`.
+    ///
+    /// The answer source is empty, which [`coreutils::yesno`] reads as end of
+    /// input and therefore as "no" — the same thing a `-i` in a script with no
+    /// stdin gets. A test that means to answer uses [`mv_answering`].
+    fn mv_flags(flags: MvFlags, paths: &[&Path]) -> (bool, String, String) {
+        let (ok, out, err, _) = mv_answering(flags, &[], paths);
+        (ok, out, err)
+    }
+
+    /// `mv_flags` with canned replies for `-i`'s prompts, and the count of
+    /// prompts that actually consumed one: `(ok, out, err, asked)`.
+    ///
+    /// `asked` is what distinguishes "did not prompt" from "prompted and the
+    /// wording changed", which asserting on the transcript alone cannot.
+    fn mv_answering(
+        flags: MvFlags,
+        replies: &[&str],
+        paths: &[&Path],
+    ) -> (bool, String, String, usize) {
+        mv_to(flags, Destination::default(), replies, paths)
+    }
+
+    /// [`mv_answering`] with a [`Destination`] other than the default, which is
+    /// how `-t` and `-T` are exercised without going through argv.
+    fn mv_to(
+        flags: MvFlags,
+        dest: Destination,
+        replies: &[&str],
+        paths: &[&Path],
+    ) -> (bool, String, String, usize) {
         let owned: Vec<OsString> = paths.iter().map(|p| p.as_os_str().to_owned()).collect();
+        let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
-        let ok = move_all(&owned, &mut err);
-        (ok, String::from_utf8_lossy(&err).into_owned())
+        let mut answers = Canned::new(replies);
+        let ok = {
+            let mut job = Job {
+                flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+            };
+            move_all(&mut job, &dest, &owned)
+        };
+        (
+            ok,
+            String::from_utf8_lossy(&out).into_owned(),
+            String::from_utf8_lossy(&err).into_owned(),
+            answers.consumed(),
+        )
+    }
+
+    /// The name a scratch path prints as inside a `--verbose` line.
+    ///
+    /// The lines carry whole paths, and a scratch directory's is
+    /// machine-specific, so the assertions below compare against this rather
+    /// than against a literal. It goes through [`quoteaf_os`] for the same
+    /// reason the real line does — a temp directory on the development host can
+    /// hold a space, and then the quoted form is not the bare path.
+    fn shown(p: &Path) -> String {
+        quoteaf_os(p).to_string()
     }
 
     #[test]
@@ -1447,6 +2029,503 @@ mod tests {
         let (ok, err) = mv(&[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
+    }
+
+    // ----------------------------------------------------------- verbose --
+
+    #[test]
+    fn verbose_names_a_rename_on_stdout() {
+        let dir = scratch("v_rename");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"hello").unwrap();
+        let (ok, out, err) = mv_flags(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            &[&a, &b],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        // GNU: `renamed 'a' -> 'b'`, on stdout, one line, both names quoted.
+        assert_eq!(out, format!("renamed {} -> {}\n", shown(&a), shown(&b)));
+    }
+
+    /// Silence is the default, and it has to be *complete* silence: a `mv` that
+    /// wrote its line unconditionally would break every pipeline that reads
+    /// `mv`'s stdout expecting nothing.
+    #[test]
+    fn without_verbose_stdout_stays_empty() {
+        let dir = scratch("v_quiet");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"hello").unwrap();
+        let (ok, out, err) = mv_flags(MvFlags::default(), &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!(out, "");
+    }
+
+    /// One line per source, in operand order, and each names the *target it
+    /// landed on* rather than the directory that was asked for.
+    #[test]
+    fn verbose_names_each_source_moved_into_a_directory() {
+        let dir = scratch("v_into_dir");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        let sub = dir.path("sub");
+        fs::write(&a, b"1").unwrap();
+        fs::write(&b, b"2").unwrap();
+        fs::create_dir(&sub).unwrap();
+        let (ok, out, err) = mv_flags(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            &[&a, &b, &sub],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "renamed {} -> {}\nrenamed {} -> {}\n",
+                shown(&a),
+                shown(&sub.join("a")),
+                shown(&b),
+                shown(&sub.join("b"))
+            )
+        );
+    }
+
+    /// An overwrite goes through the *second* rename — the one keyed on
+    /// `EEXIST` — and that path has its own `announce` call. Left out, a plain
+    /// `mv -v a b` with `b` already there would move the file and say nothing.
+    #[test]
+    fn verbose_names_an_overwriting_rename() {
+        let dir = scratch("v_overwrite");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let (ok, out, err) = mv_flags(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            &[&a, &b],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(out, format!("renamed {} -> {}\n", shown(&a), shown(&b)));
+        assert_eq!(fs::read(&b).unwrap(), b"new");
+    }
+
+    /// A move that failed prints no line at all: GNU's `emit_verbose` sits
+    /// *inside* the `rename_errno == 0` arm (`copy.c:2761`). The cross-device
+    /// fallback is the one exception, and it is deliberate — see [`move_one`].
+    #[test]
+    fn a_failed_move_announces_nothing() {
+        let dir = scratch("v_failure");
+        let missing = dir.path("nosuch");
+        let b = dir.path("b");
+        let (ok, out, err) = mv_flags(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            &[&missing, &b],
+        );
+        assert!(!ok);
+        assert_eq!(out, "");
+        assert!(err.contains("cannot stat"), "{err}");
+    }
+
+    /// A refusal is a failure too, and it is reported on stderr while stdout
+    /// stays empty — the two streams do not mix.
+    #[test]
+    fn a_refused_overwrite_announces_nothing() {
+        let dir = scratch("v_refused");
+        let a = dir.path("a");
+        fs::write(&a, b"x").unwrap();
+        let (ok, out, err) = mv_flags(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            &[&a, &a],
+        );
+        assert!(!ok);
+        assert_eq!(out, "");
+        assert!(err.contains("are the same file"), "{err}");
+    }
+
+    /// The cross-device pair, pinned at the sentence level.
+    ///
+    /// It is asserted here and not through [`move_all`] because nothing in this
+    /// test suite — or in `scripts/mv-diff.sh`, which says so at its head — can
+    /// produce an `EXDEV`: that needs two filesystems, and both have one. So the
+    /// branch that emits these is covered only by its wording, which is still
+    /// the half that goes wrong silently. `copied` and `renamed` are different
+    /// verbs for a reason, and `removed` is a different *sentence* — one name,
+    /// no arrow — because it comes from `rm -v` rather than from `mv`.
+    #[test]
+    fn the_cross_device_pair_reads_as_rm_and_cp_write_it() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let mut job = Job {
+            flags: MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            out: &mut out,
+            err: &mut err,
+            answers: &mut answers,
+        };
+        announce(&mut job, "copied", Path::new("g"), Path::new("/other/g"));
+        announce_removed(&mut job, Path::new("g"));
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "copied 'g' -> '/other/g'\nremoved 'g'\n"
+        );
+        assert!(err.is_empty());
+    }
+
+    /// Both halves obey the flag. [`announce_removed`] having its own early
+    /// return is easy to forget, and forgetting it makes a plain `mv` across a
+    /// filesystem boundary print `removed 'g'` at a user who asked for nothing.
+    #[test]
+    fn neither_verbose_sentence_is_printed_unasked() {
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let mut job = Job {
+            flags: MvFlags::default(),
+            out: &mut out,
+            err: &mut err,
+            answers: &mut answers,
+        };
+        announce(&mut job, "renamed", Path::new("a"), Path::new("b"));
+        announce(&mut job, "copied", Path::new("a"), Path::new("b"));
+        announce_removed(&mut job, Path::new("a"));
+        assert!(out.is_empty());
+    }
+
+    // ----------------------------------------------------- -i / -f / -n --
+
+    /// The one flag these three options set, spelled out so the tests below read
+    /// as the option they are about rather than as a struct literal.
+    fn overwrite(interactive: Interactive) -> MvFlags {
+        MvFlags {
+            interactive,
+            ..MvFlags::default()
+        }
+    }
+
+    /// `-n` refuses, says so, and **fails**. The exit status is the surprising
+    /// half — "did not overwrite" sounds like a success, and Ubuntu's patched
+    /// `mv` agrees, which is exactly why this is pinned; see
+    /// `design-decisions.md` §726. Upstream 9.4 exits 1 and this follows
+    /// upstream.
+    #[test]
+    fn no_clobber_refuses_and_fails() {
+        let dir = scratch("n_refuses");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let (ok, out, err, asked) =
+            mv_answering(overwrite(Interactive::AlwaysNo), &["y\n"], &[&a, &b]);
+        assert!(!ok);
+        assert_eq!(out, "");
+        assert_eq!(err, format!("mv: not replacing {}\n", shown(&b)));
+        assert_eq!(asked, 0, "-n is a decision, not a question");
+        // Neither end moved: the source is still there, which is the part a
+        // `rename_succeeded` bug would break rather than the diagnostic.
+        assert_eq!(fs::read(&a).unwrap(), b"new");
+        assert_eq!(fs::read(&b).unwrap(), b"old");
+    }
+
+    /// `-n` is about *existing* destinations only. A `mv -n` onto a free name is
+    /// an ordinary move, silent and successful.
+    #[test]
+    fn no_clobber_over_a_free_name_just_moves() {
+        let dir = scratch("n_free");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"x").unwrap();
+        let (ok, out, err) = mv_flags(overwrite(Interactive::AlwaysNo), &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!((out.as_str(), err.as_str()), ("", ""));
+        assert!(!a.exists());
+        assert_eq!(fs::read(&b).unwrap(), b"x");
+    }
+
+    /// `-i` asks on stderr and does what it is told. The prompt has no trailing
+    /// newline — it ends `? ` so the answer is typed on the same line — and the
+    /// accepted answers are gnulib's `^[yY]`, which is why `yes` and `Y` are in
+    /// the table beside `y` and `n` is not merely "the other one".
+    #[test]
+    fn interactive_asks_and_obeys_the_answer() {
+        let dir = scratch("i_answers");
+        for (i, (reply, expect_moved)) in [
+            ("y\n", true),
+            ("yes\n", true),
+            ("Y", true),
+            ("n\n", false),
+            ("no\n", false),
+            ("", false),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let a = dir.path(&format!("src{i}"));
+            let b = dir.path(&format!("dst{i}"));
+            fs::write(&a, b"new").unwrap();
+            fs::write(&b, b"old").unwrap();
+            let (ok, out, err, asked) =
+                mv_answering(overwrite(Interactive::AskUser), &[reply], &[&a, &b]);
+            assert_eq!(asked, 1, "reply {reply:?}");
+            assert_eq!(
+                err,
+                format!("mv: overwrite {}? ", shown(&b)),
+                "reply {reply:?}"
+            );
+            assert_eq!(out, "", "reply {reply:?}");
+            assert_eq!(ok, expect_moved, "reply {reply:?}");
+            assert_eq!(a.exists(), !expect_moved, "reply {reply:?}");
+            let want: &[u8] = if expect_moved { b"new" } else { b"old" };
+            assert_eq!(fs::read(&b).unwrap(), want, "reply {reply:?}");
+        }
+    }
+
+    /// End of input is a "no". `mv -i a b < /dev/null` in a script must not
+    /// silently overwrite because nobody was there to say no.
+    #[test]
+    fn interactive_takes_silence_for_no() {
+        let dir = scratch("i_silence");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let (ok, _, err, asked) = mv_answering(overwrite(Interactive::AskUser), &[], &[&a, &b]);
+        assert!(!ok);
+        assert_eq!(asked, 1, "it asked; there was simply no one to answer");
+        assert_eq!(err, format!("mv: overwrite {}? ", shown(&b)));
+        assert_eq!(fs::read(&b).unwrap(), b"old");
+    }
+
+    /// `-f` is the whole of `abandon_move`'s `I_ALWAYS_YES` arm: no question,
+    /// under any circumstance the other arms would have asked in. `stdin_tty` is
+    /// on here precisely because that is the state in which an unflagged `mv`
+    /// *would* prompt for an unwritable destination.
+    #[test]
+    fn force_never_asks() {
+        let dir = scratch("f_silent");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let flags = MvFlags {
+            interactive: Interactive::AlwaysYes,
+            stdin_tty: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err, asked) = mv_answering(flags, &["n\n"], &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!((out.as_str(), err.as_str(), asked), ("", "", 0));
+        assert_eq!(fs::read(&b).unwrap(), b"new");
+    }
+
+    /// With **no option at all**, a destination the user cannot write is asked
+    /// about — but only at a terminal, and in `mv`'s wording rather than `cp`'s.
+    ///
+    /// Measured through `script(1)` against 9.4:
+    ///
+    /// ```text
+    /// mv: replace 'd', overriding mode 0444 (r--r--r--)?
+    /// ```
+    ///
+    /// `cp` says `unwritable 'd' (mode 0444, r--r--r--); try anyway?` for the
+    /// same file. The difference is upstream's `clears_destination`, which is
+    /// `x->move_mode || …` and so is unconditionally true here: `cp` writes
+    /// *through* the destination and will be refused by the kernel, while `mv`
+    /// unlinks it, which the mode does not prevent. Getting this wrong would
+    /// promise the user a refusal that is not going to come.
+    #[cfg(unix)]
+    #[test]
+    fn the_unwritable_prompt_is_mvs_wording_not_cps() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root writes any file, so the prompt never appears and there is
+        // nothing to assert. Skipping beats asserting the wrong thing.
+        if overwrite::can_write_any_file() {
+            return;
+        }
+        let dir = scratch("unwritable");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        fs::set_permissions(&b, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let at_tty = MvFlags {
+            stdin_tty: true,
+            ..MvFlags::default()
+        };
+        let (ok, _, err, asked) = mv_answering(at_tty, &["n\n"], &[&a, &b]);
+        assert!(!ok);
+        assert_eq!(asked, 1);
+        assert_eq!(
+            err,
+            format!(
+                "mv: replace {}, overriding mode 0444 (r--r--r--)? ",
+                shown(&b)
+            )
+        );
+
+        // Same file, same mode, no terminal: GNU moves it without a word. The
+        // prompt is a courtesy to a human, not a permission check.
+        let (ok, out, err, asked) = mv_answering(MvFlags::default(), &["n\n"], &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!((out.as_str(), err.as_str(), asked), ("", "", 0));
+        assert_eq!(fs::read(&b).unwrap(), b"new");
+    }
+
+    /// The other half of that arm: a destination that *is* writable is not asked
+    /// about even at a terminal. Without the `!writable_destination` test, a
+    /// plain interactive `mv` would prompt on every overwrite — which is `-i`,
+    /// and is not the default.
+    #[test]
+    fn a_writable_destination_is_not_asked_about_at_a_terminal() {
+        let dir = scratch("writable_tty");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"old").unwrap();
+        let flags = MvFlags {
+            stdin_tty: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err, asked) = mv_answering(flags, &["n\n"], &[&a, &b]);
+        assert!(ok, "{err}");
+        assert_eq!((out.as_str(), err.as_str(), asked), ("", "", 0));
+        assert_eq!(fs::read(&b).unwrap(), b"new");
+    }
+
+    /// `-n` and `-i` sit **above** the directory sentences, so a directory source
+    /// onto a plain file is refused or asked about rather than being told it
+    /// cannot overwrite a non-directory. Measured: `mv -n d g` says `not
+    /// replacing 'g'` and `mv -i d g` asks `overwrite 'g'? `.
+    ///
+    /// This is where `mv` parts company with `cp`, whose equivalent block is
+    /// guarded by `! S_ISDIR (src_mode)`.
+    #[test]
+    fn the_refusals_come_before_the_directory_sentences() {
+        let dir = scratch("refusal_order");
+        let d = dir.path("d");
+        let g = dir.path("g");
+        fs::create_dir(&d).unwrap();
+        fs::write(&g, b"old").unwrap();
+
+        let (ok, _, err, asked) = mv_answering(overwrite(Interactive::AlwaysNo), &[], &[&d, &g]);
+        assert!(!ok);
+        assert_eq!(err, format!("mv: not replacing {}\n", shown(&g)));
+        assert_eq!(asked, 0);
+
+        let (ok, _, err, asked) =
+            mv_answering(overwrite(Interactive::AskUser), &["n\n"], &[&d, &g]);
+        assert!(!ok);
+        assert_eq!(err, format!("mv: overwrite {}? ", shown(&g)));
+        assert_eq!(asked, 1);
+
+        // And with neither, the directory sentence is what comes out.
+        let (ok, _, err) = mv_flags(MvFlags::default(), &[&d, &g]);
+        assert!(!ok);
+        assert_eq!(
+            err,
+            format!(
+                "mv: cannot overwrite non-directory {} with directory {}\n",
+                shown(&g),
+                shown(&d)
+            )
+        );
+        assert!(
+            d.is_dir() && g.is_file(),
+            "nothing moved in any of the three"
+        );
+    }
+
+    /// `-n` displaces the same-file refusal rather than losing to it, because
+    /// upstream guards the whole `same_file_ok` call with `x->interactive !=
+    /// I_ALWAYS_NO`. Measured: `mv f f` says `'f' and 'f' are the same file`,
+    /// `mv -n f f` says `not replacing 'f'`. Both exit 1, so only the wording
+    /// tells them apart — which is why the wording is the assertion.
+    #[test]
+    fn no_clobber_displaces_the_same_file_refusal() {
+        let dir = scratch("n_same_file");
+        let f = dir.path("f");
+        fs::write(&f, b"x").unwrap();
+
+        let (ok, _, err) = mv_flags(MvFlags::default(), &[&f, &f]);
+        assert!(!ok);
+        assert_eq!(
+            err,
+            format!("mv: {} and {} are the same file\n", shown(&f), shown(&f))
+        );
+
+        let (ok, _, err) = mv_flags(overwrite(Interactive::AlwaysNo), &[&f, &f]);
+        assert!(!ok);
+        assert_eq!(err, format!("mv: not replacing {}\n", shown(&f)));
+        assert_eq!(fs::read(&f).unwrap(), b"x");
+    }
+
+    /// A refusal ends that *operand*, not the command. Measured: `mv -n a b sub`
+    /// with `sub/a` present moves `b`, leaves `a`, and exits 1.
+    #[test]
+    fn one_refusal_does_not_abandon_the_other_operands() {
+        let dir = scratch("n_partial");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        let sub = dir.path("sub");
+        fs::write(&a, b"new").unwrap();
+        fs::write(&b, b"two").unwrap();
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("a"), b"old").unwrap();
+
+        let (ok, _, err) = mv_flags(overwrite(Interactive::AlwaysNo), &[&a, &b, &sub]);
+        assert!(!ok);
+        assert_eq!(
+            err,
+            format!("mv: not replacing {}\n", shown(&sub.join("a")))
+        );
+        assert!(a.is_file(), "the refused source stays");
+        assert_eq!(fs::read(sub.join("a")).unwrap(), b"old");
+        assert!(!b.exists(), "the other operand still moved");
+        assert_eq!(fs::read(sub.join("b")).unwrap(), b"two");
+    }
+
+    /// The prompt goes to stderr and the `--verbose` line to stdout, in the one
+    /// command that produces both. A prompt on stdout would be invisible to a
+    /// user running `mv -iv … > log` — they would sit at an apparently hung
+    /// terminal — and a verbose line on stderr would corrupt every script that
+    /// treats `mv`'s stderr as its error report.
+    #[test]
+    fn verbose_and_interactive_use_different_streams() {
+        let dir = scratch("iv_streams");
+        let p = dir.path("p");
+        let q = dir.path("q");
+        fs::write(&p, b"new").unwrap();
+        fs::write(&q, b"old").unwrap();
+        let flags = MvFlags {
+            verbose: true,
+            interactive: Interactive::AskUser,
+            ..MvFlags::default()
+        };
+        let (ok, out, err, asked) = mv_answering(flags, &["y\n"], &[&p, &q]);
+        assert!(ok, "{err}");
+        assert_eq!(asked, 1);
+        assert_eq!(out, format!("renamed {} -> {}\n", shown(&p), shown(&q)));
+        assert_eq!(err, format!("mv: overwrite {}? ", shown(&q)));
     }
 
     #[test]
@@ -1486,6 +2565,192 @@ mod tests {
         assert!(err.contains("Not a directory"), "{err}");
         // Nothing was touched.
         assert!(a.is_file() && b.is_file() && c.is_file());
+    }
+
+    // ------------------------------------------------------------ -t and -T --
+
+    /// `-t DIR`, as a [`Destination`].
+    fn into_dir(dir: &Path) -> Destination {
+        Destination {
+            directory: Some(dir.as_os_str().to_owned()),
+            no_directory: false,
+        }
+    }
+
+    /// `-T`. Named for what it does rather than for the letter: the destination
+    /// is a name, not a directory to fill.
+    fn as_name() -> Destination {
+        Destination {
+            directory: None,
+            no_directory: true,
+        }
+    }
+
+    fn mv_dest(dest: Destination, paths: &[&Path]) -> (bool, String) {
+        let (ok, _, err, _) = mv_to(MvFlags::default(), dest, &[], paths);
+        (ok, err)
+    }
+
+    /// The shape `-t` exists for and that nothing else can spell: a *single*
+    /// operand that still goes inside the directory rather than being taken for
+    /// the destination.
+    #[test]
+    fn a_target_directory_takes_every_operand_as_a_source() {
+        let dir = scratch("t_one");
+        let dest = dir.path("dest");
+        fs::create_dir(&dest).unwrap();
+        let a = dir.path("a");
+        fs::write(&a, b"A").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&dest), &[&a]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert_eq!(fs::read(dest.join("a")).unwrap(), b"A");
+        assert!(!a.exists());
+    }
+
+    /// The collision check is not a property of the trailing-directory shape —
+    /// `move_into_directory` is one function precisely so that `-t` cannot
+    /// arrive at it by a route that skips the bookkeeping.
+    #[test]
+    fn a_target_directory_still_refuses_a_shared_basename() {
+        let dir = scratch("t_collide");
+        let dest = dir.path("dest");
+        let one = dir.path("one");
+        let two = dir.path("two");
+        for d in [&dest, &one, &two] {
+            fs::create_dir(d).unwrap();
+        }
+        fs::write(one.join("same"), b"1").unwrap();
+        fs::write(two.join("same"), b"2").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&dest), &[&one.join("same"), &two.join("same")]);
+        assert!(!ok);
+        assert!(err.contains("will not overwrite just-created"), "{err}");
+        // The first arrival is the one that survives, and the second is still
+        // where it was.
+        assert_eq!(fs::read(dest.join("same")).unwrap(), b"1");
+        assert!(two.join("same").is_file());
+    }
+
+    /// With `-t` the destination is not the last operand, so *one* operand is a
+    /// whole command and zero is the "no operands at all" diagnostic — not the
+    /// "missing destination" one, which would name an operand that was given.
+    #[test]
+    fn a_target_directory_makes_one_operand_enough() {
+        let dir = scratch("t_count");
+        let dest = dir.path("dest");
+        fs::create_dir(&dest).unwrap();
+        let (ok, err) = mv_dest(into_dir(&dest), &[]);
+        assert!(!ok);
+        assert!(err.contains("missing file operand"), "{err}");
+        assert!(!err.contains("missing destination"), "{err}");
+    }
+
+    /// `target directory 'x': …`, not the trailing operand's bare `target 'x':
+    /// …`. The user named this one as a directory, so being told it is not one
+    /// is the whole answer; the other sentence has to also say *which* role the
+    /// operand was being read in.
+    #[test]
+    fn a_target_directory_that_is_not_one_is_named_as_a_target_directory() {
+        let dir = scratch("t_notdir");
+        let a = dir.path("a");
+        let plain = dir.path("plain");
+        fs::write(&a, b"A").unwrap();
+        fs::write(&plain, b"P").unwrap();
+
+        let (ok, err) = mv_dest(into_dir(&plain), &[&a]);
+        assert!(!ok);
+        assert!(err.contains("target directory"), "{err}");
+        assert!(err.contains("Not a directory"), "{err}");
+        assert!(
+            a.is_file(),
+            "nothing may move once the directory is refused"
+        );
+
+        let (ok, err) = mv_dest(into_dir(&dir.path("nosuch")), &[&a]);
+        assert!(!ok);
+        assert!(err.contains("target directory"), "{err}");
+        assert!(err.contains("No such file"), "{err}");
+    }
+
+    /// `-T` against a directory is a refusal, and the very same operands
+    /// *without* `-T` are a move into it. The pair is the whole point of the
+    /// option, so it is asserted as a pair.
+    #[test]
+    fn no_target_directory_refuses_the_directory_the_default_would_fill() {
+        let dir = scratch("cap_t_dir");
+        let a = dir.path("a");
+        let d = dir.path("d");
+        fs::write(&a, b"A").unwrap();
+        fs::create_dir(&d).unwrap();
+
+        let (ok, err) = mv_dest(as_name(), &[&a, &d]);
+        assert!(!ok);
+        assert!(
+            err.contains("cannot overwrite directory"),
+            "{err}: -T must not move it inside"
+        );
+        assert!(!d.join("a").exists());
+
+        let (ok, err) = mv_dest(Destination::default(), &[&a, &d]);
+        assert!(ok, "{err}");
+        assert!(d.join("a").is_file());
+    }
+
+    /// The case `-T` is *for*: replacing a directory rather than nesting it
+    /// inside itself. `mv newdir olddir` puts `newdir` at `olddir/newdir`;
+    /// `mv -T newdir olddir` makes `newdir` *be* `olddir`.
+    #[test]
+    fn no_target_directory_replaces_an_empty_directory() {
+        let dir = scratch("cap_t_replace");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&dst).unwrap();
+        fs::write(src.join("inside"), b"I").unwrap();
+
+        let (ok, err) = mv_dest(as_name(), &[&src, &dst]);
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        assert!(!src.exists());
+        assert_eq!(fs::read(dst.join("inside")).unwrap(), b"I");
+    }
+
+    /// `-T` says the destination is exactly one name, so a third operand is not
+    /// a third source — there is nowhere for it to go.
+    #[test]
+    fn no_target_directory_refuses_a_third_operand() {
+        let dir = scratch("cap_t_extra");
+        let (ok, err) = mv_dest(as_name(), &[&dir.path("a"), &dir.path("b"), &dir.path("c")]);
+        assert!(!ok);
+        assert!(err.contains("extra operand"), "{err}");
+        assert!(err.contains('c'), "{err}");
+    }
+
+    /// Both options at once is a diagnostic of its own, and it is raised
+    /// *before* `-t`'s directory is stat'd — so a directory that does not exist
+    /// is not what gets reported. That order is GNU's and this is the only case
+    /// that can see it.
+    #[test]
+    fn both_target_options_are_refused_before_the_directory_is_looked_at() {
+        let dir = scratch("cap_t_combine");
+        let dest = Destination {
+            directory: Some(dir.path("nosuchdir").into_os_string()),
+            no_directory: true,
+        };
+        let (ok, err) = mv_dest(dest, &[&dir.path("a")]);
+        assert!(!ok);
+        assert!(
+            err.contains("cannot combine --target-directory (-t) and --no-target-directory (-T)"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("nosuchdir"),
+            "the missing directory must not be reported: {err}"
+        );
+        // And it is a plain line, not a usage error, so there is no referral.
+        assert!(!err.contains("Try 'mv"), "{err}");
     }
 
     /// Bug 2 in the module docs: with `-f` the old code printed nothing here and

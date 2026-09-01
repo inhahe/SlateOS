@@ -5,6 +5,21 @@
 **Action needed on B's side:** flip `renameat2` from "reject non-zero" to
 "pass through", and drop the fallback comment in `backup.rs`.
 
+**Status:** ✅ **DONE 2026-08-31 by lane B.** `posix::file::renameat2` forwards
+the flags word whole — unmasked, deliberately, for the reason given under
+"Unknown bits are refused" below: masking here would turn your loud `EINVAL`
+into a silent overwrite for exactly the caller who asked not to be overwritten.
+`rename` and `renameat` now go through the same back-end with a zero flags
+word. The `backup.rs` comment is gone and
+`B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE` in `known-issues.md` is
+closed.
+
+One thing your note did not predict, and neither did ours: `mv` had a *second*
+copy of the emulation that never called `renameat2` at all, so the flag landing
+would have closed the window in `backup` and left it open in `mv`. Both now
+share `coreutils::rename::noreplace`. No `RENAME_WHITEOUT` is wanted — nothing
+in this tree makes an overlay whiteout — so there is no follow-up request.
+
 ## In short
 
 The kernel now reads the flags word you asked it to, with exactly the bit

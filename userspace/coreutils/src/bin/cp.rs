@@ -246,6 +246,7 @@
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
 use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
+use coreutils::copytree::{ModeDebt, make_dir, read_dir_fastread};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
@@ -2112,58 +2113,6 @@ fn place_source<O: Write, E: Write>(
     place_entity(src_path, metadata, target, dest, true, job)
 }
 
-/// The part of a destination's permission bits that is deliberately not on it
-/// yet, and what has to be put back once it is safe.
-///
-/// GNU's three locals `omitted_permissions`, `restore_dst_mode` and `dst_mode`
-/// (`copy.c:2211`), carried together because they are one fact in three pieces:
-/// a destination is created **narrower** than its source on purpose, and
-/// something has to remember by how much.
-///
-/// Two different reasons put bits in here, and they are the two branches of
-/// GNU's expression at `copy.c:2900`:
-///
-/// * **The ownership is about to change.** Under `--preserve=ownership` the
-///   destination is created with no group or other permissions at all
-///   (`S_IRWXG | S_IRWXO`, i.e. `0o077`), because between the creation and the
-///   `chown` it belongs to the *copying* user. A source that is group-readable
-///   by its own owner's group would, for that window, be readable by the
-///   copier's group instead — a different set of people.
-/// * **It is a directory whose contents are not written yet.** Group- and
-///   other-*write* (`0o022`) are withheld so that nobody can slip a file into a
-///   directory that is about to look like a faithful copy.
-///
-/// The first subsumes the second, which is why GNU's expression is an
-/// `if`/`else` rather than a union — and why a *regular file* has a debt at all
-/// under `-p`, where before `-p` existed only directories did.
-#[derive(Clone, Copy, Default)]
-struct ModeDebt {
-    /// GNU's `omitted_permissions`: the bits withheld at creation.
-    omitted: u32,
-    /// GNU's `restore_dst_mode` and `dst_mode` in one value. `Some(mode)` means
-    /// the destination's mode has already been read and must be written back —
-    /// either because a directory was forced owner-rwx so it could be filled,
-    /// or because the settle-up stat showed the withheld bits genuinely absent.
-    forced: Option<u32>,
-}
-
-impl ModeDebt {
-    /// GNU's `omitted_permissions = dst_mode_bits & (…)` (`copy.c:2899`).
-    fn new(flags: &CpFlags, src_mode: u32, is_dir: bool) -> Self {
-        let withhold = if flags.preserve.ownership {
-            0o077
-        } else if is_dir {
-            0o022
-        } else {
-            0
-        };
-        ModeDebt {
-            omitted: src_mode & withhold,
-            forced: None,
-        }
-    }
-}
-
 /// What kind of destination [`preserve_attributes`] is stamping.
 ///
 /// Three kinds and not a `bool`, because all three answer the two questions
@@ -2266,7 +2215,7 @@ fn place_entity<O: Write, E: Write>(
     // here — one expression covering all three kinds (`copy.c:2899`), read by
     // whichever of them creates the destination and settled by the tail they
     // share. See [`ModeDebt`].
-    let debt = ModeDebt::new(job.flags, src_mode, metadata.is_dir());
+    let debt = ModeDebt::new(job.flags.preserve.ownership, src_mode, metadata.is_dir());
     let mut dest_exists = dest.exists();
 
     // Clearing the way, before anything is said or written. GNU's one unlink
@@ -2800,60 +2749,6 @@ fn copy_tree<O: Write, E: Write>(
     TreeResult::Made { new, ok }
 }
 
-/// Every entry of `src`, read in one go and put in the order GNU walks them.
-///
-/// This is gnulib's `savedir (dir, SAVEDIR_SORT_FASTREAD)`, which is what
-/// `copy.c`'s `copy_dir` calls, reproduced for two reasons that are the same
-/// reason twice.
-///
-/// **The order is observable now.** Until `--verbose` there was no way to tell
-/// what order a tree was walked in — the copy it leaves is the same either way
-/// — and `fs::read_dir`'s raw `readdir` order was as good as any. `cp -rv` puts
-/// that order on stdout, and on ext4 the two disagree: a directory holding
-/// `a.txt`, `sub` and `link` created in the order `sub`, `a.txt`, `link` is
-/// named by GNU in creation order and by an unsorted `readdir` in hash order.
-/// Neither is more correct, but only one of them is GNU's, and this program's
-/// job is to be indistinguishable from GNU.
-///
-/// **And the order GNU picked is the fast one**, which is why gnulib calls it
-/// `FASTREAD` rather than `SORTED`. Inode number is roughly on-disk position on
-/// every filesystem that allocates inodes in tables, so walking a directory in
-/// inode order turns the scattered reads of a `stat` per entry into a forward
-/// scan. That is a real win on a cold cache and costs one sort of a list that
-/// had to be materialised anyway.
-///
-/// The eager read is gnulib's too, and it changes one thing besides order: a
-/// `readdir` that fails part-way through now abandons the whole directory
-/// rather than copying the entries it had already seen. `savedir` returns
-/// `NULL` in exactly that case, and `copy_dir` reports it as the one
-/// `cannot access` diagnostic — so this is not a new behaviour so much as the
-/// one GNU always had.
-///
-/// # Errors
-///
-/// Opening the directory, or any `readdir` within it.
-fn read_dir_fastread(src: &Path) -> io::Result<Vec<fs::DirEntry>> {
-    // `mut` is written only by the `#[cfg(unix)]` arm below. Off Unix there is
-    // no inode to sort by, so the binding is never assigned to and the compiler
-    // would rightly say so.
-    #[cfg_attr(not(unix), allow(unused_mut))]
-    let mut entries: Vec<fs::DirEntry> = fs::read_dir(src)?.collect::<io::Result<Vec<_>>>()?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirEntryExt as _;
-        // `d_ino` straight out of the `dirent`, not a `stat` — the sort must
-        // not cost what it is there to save. Unstable sort because gnulib's
-        // `qsort_r` is unstable too, and the only way to get a tie is two hard
-        // links to one inode in one directory, where the two orders differ in
-        // which of two names is copied first and in nothing else.
-        entries.sort_unstable_by_key(fs::DirEntry::ino);
-    }
-    // Off Unix there is nothing to sort by, which is also gnulib's answer:
-    // `SAVEDIR_SORT_FASTREAD` degrades to `SAVEDIR_SORT_NONE` where
-    // `D_INO_IN_DIRENT` is not defined. See the `#[cfg(unix)]` arm above.
-    Ok(entries)
-}
-
 /// One entry of a directory being walked. Split out of [`copy_tree`] only to
 /// keep the mode bookkeeping either side of the walk readable in one screen.
 ///
@@ -3000,30 +2895,6 @@ fn copy_entry<O: Write, E: Write>(
     // `--preserve=links` from consulting its table for a singly-linked file
     // inside a tree.
     place_entity(&from, &meta, &to, &dest_state, false, job).is_ok()
-}
-
-/// Create `dest` as a directory with mode `mode`, before the umask is applied.
-///
-/// `Ok(true)` if it was created, `Ok(false)` if a directory was already there —
-/// a distinction the caller needs, because an existing directory's mode is left
-/// alone. Plain `create_dir` and not `create_dir_all`: GNU's single `mkdirat`
-/// does not invent missing parents either, and `cp -r a no/such/dir` must fail
-/// rather than quietly build the path.
-fn make_dir(dest: &Path, mode: u32) -> io::Result<bool> {
-    match create_dir_with_mode(dest, mode) {
-        Ok(()) => Ok(true),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            // Only "already there" if it is a *directory*. A regular file under
-            // that name is a failure, and reporting it as one is what stops the
-            // walk from writing a directory's contents into whatever it found.
-            if fs::metadata(dest).is_ok_and(|m| m.is_dir()) {
-                Ok(false)
-            } else {
-                Err(e)
-            }
-        }
-        Err(e) => Err(e),
-    }
 }
 
 /// Copy the regular file `src` to `dst`.
@@ -3786,19 +3657,6 @@ fn open_new(dst: &Path, _mode: u32) -> io::Result<fs::File> {
 /// [`permission_bits`] of the name `path`, without following a final symlink.
 fn permission_bits_of(path: &Path) -> io::Result<u32> {
     fs::symlink_metadata(path).map(|m| permission_bits(&m))
-}
-
-/// `mkdir(path, mode)`; the kernel narrows `mode` by the umask.
-#[cfg(unix)]
-fn create_dir_with_mode(path: &Path, mode: u32) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new().mode(mode).create(path)
-}
-
-/// See [`open_new`]'s non-unix arm.
-#[cfg(not(unix))]
-fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
-    fs::create_dir(path)
 }
 
 /// `chmod(path, mode)`.

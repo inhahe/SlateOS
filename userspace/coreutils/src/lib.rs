@@ -395,6 +395,7 @@ pub mod backup;
 mod bignat;
 pub mod canon;
 pub mod cfmt;
+pub mod copytree;
 pub mod digest;
 pub mod errmsg;
 pub mod extfloat;

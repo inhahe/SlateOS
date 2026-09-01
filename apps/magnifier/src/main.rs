@@ -2209,12 +2209,22 @@ impl Magnifier {
         // The sheet's inner column, once its own left and right margins are
         // taken out. A sheet narrower than the two margins together leaves a
         // *negative* width here, and every run below would then be pushed at a
-        // left edge sitting to the right of its own right edge. Naming it as a
-        // `Rect` and refusing an empty one is the bound. The alternative --
-        // clamping the column split into `left..=right` -- does not merely fail
-        // to bound it, it panics outright, because `f32::clamp` requires
-        // `min <= max`; that panic is how this was found, from a squeezed
-        // window in the sheet's own containment test.
+        // left edge sitting to the right of its own right edge. Naming the
+        // column as a `Rect` is what makes that expressible at all; the
+        // alternative -- clamping the column split into `left..=right` -- does
+        // not merely fail to bound it, it panics outright, because `f32::clamp`
+        // requires `min <= max`, and that panic is how this was found, from a
+        // squeezed window in the sheet's own containment test.
+        //
+        // The early return is a fast path, **not** the bound, and the
+        // difference matters to anyone editing below it. An earlier version of
+        // this comment called it the bound, which would license loosening the
+        // `intersect`s that follow -- and those are what actually hold. With a
+        // negative `inner.w` every box built below is a rectangle of negative
+        // width, and `Rect::intersect` answers `None` for any of them, so each
+        // site already refuses on its own account. Deleting these four lines
+        // changes not one command in the frame; the sweep says so, and
+        // `mutate.py` records it as an equivalent mutant rather than a hole.
         let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);
         if inner.is_empty() {
             f.hit(Target::ToggleHelp, l.window);
@@ -4941,6 +4951,272 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The sheet's own layout, rebuilt from the numbers `draw_help` uses.
+    ///
+    /// Repeated from the drawing code rather than factored out of it. A shared
+    /// helper would make the tests below true by construction — they would be
+    /// checking that a number equals itself — whereas a copy disagrees with the
+    /// original the moment one of them changes, and disagreeing is the whole
+    /// job. Same reasoning as automator's sidebar-row invariant.
+    fn help_geometry(l: &Layout) -> (Rect, f32, f32, f32) {
+        let h = l.help;
+        let inner = Rect::new(h.x + l.pad * 1.5, h.y, h.w - l.pad * 3.0, h.h);
+        let title = (l.big * 0.8).clamp(9.0, 18.0);
+        let title_h = text::line_height(title, FontWeightHint::Bold);
+        let top = h.y + l.pad * 2.0 + title_h;
+        let foot = text::line_height(l.font * 0.8, FontWeightHint::Regular) + l.pad;
+        let room = (h.bottom() - foot - top).max(0.0);
+        #[expect(clippy::cast_precision_loss, reason = "fourteen rows; exact in f32")]
+        let step = room / HELP_ROWS.len() as f32;
+        (inner, top, step, foot)
+    }
+
+    /// Every sheet the suite can put on screen: the real window sizes, and the
+    /// squeezed ones that shrink the sheet while leaving `pad` and the font
+    /// sizes as the real window set them.
+    ///
+    /// That mismatch is deliberate and is what makes the sheet interesting —
+    /// it is the case where the sheet is too small for the type it was asked to
+    /// carry, which no unsqueezed size reaches.
+    fn help_sheets() -> Vec<(f32, f32, Layout)> {
+        let mut out = Vec::new();
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            let mut windows = vec![l.window];
+            windows.extend(squeezes(l.window));
+            for win in windows {
+                let mut sq = l;
+                sq.window = win;
+                let help_w = (win.w * 0.94).min(460.0);
+                let help_h = (win.h * 0.94).min(400.0);
+                sq.help = Rect::new(
+                    win.x + (win.w - help_w) / 2.0,
+                    win.y + (win.h - help_h) / 2.0,
+                    help_w,
+                    help_h,
+                );
+                out.push((w, h, sq));
+            }
+        }
+        out
+    }
+
+    /// A row is drawn in a strip `step` points tall, and the type in it is
+    /// sized *from* `step` — so when the sheet is short enough that `step` falls
+    /// under the six-point floor, the line wants more room than the strip has
+    /// and `centre_line` refuses the row rather than drawing it.
+    ///
+    /// Containment is structurally blind to that refusal, which is why this
+    /// test is separate from the one above rather than another assertion inside
+    /// it: a row drawn in a strip too short for it does not leave the sheet, it
+    /// lands on top of its neighbour. Both runs are still inside the panel and
+    /// both are unreadable. Overlap, not escape, is the fault here.
+    #[test]
+    fn no_two_help_rows_are_drawn_on_top_of_each_other() {
+        let mut a = app();
+        a.show_help = true;
+        let keys: Vec<&str> = HELP_ROWS.iter().map(|(k, _)| *k).collect();
+        let mut crowded = 0_u32;
+        for (w, h, l) in help_sheets() {
+            let mut f = Frame::new(w, h);
+            Magnifier::draw_help(&a, &mut f, &l);
+            let mut rows: Vec<Rect> = inked(&f)
+                .into_iter()
+                .filter(|(t, _)| keys.contains(&t.as_str()))
+                .map(|(_, r)| r)
+                .collect();
+            rows.sort_by(|p, q| p.y.total_cmp(&q.y));
+            let (_, _, step, _) = help_geometry(&l);
+            // The sheets that would overlap if the refusal were dropped: the
+            // strip is shorter than the line it is asked to hold. The first
+            // draft of this counted sheets where such a strip had *drawn* a
+            // row, which is a condition that can only hold when the refusal is
+            // already broken — a coverage assertion that fails against correct
+            // code and passes against faulty code, i.e. exactly backwards. What
+            // is being covered is the input, not the outcome.
+            let size = (step * 0.72).clamp(6.0, l.font);
+            if step > 0.0 && step < text::line_height(size, FontWeightHint::Bold) {
+                crowded += 1;
+            }
+            for pair in rows.windows(2) {
+                let (prev, next) = (pair[0], pair[1]);
+                assert!(
+                    next.y >= prev.bottom() - 0.01,
+                    "at {w}x{h} with the sheet at {:?}, a help row starting at {} runs into the \
+                     one above it, which ends at {} — the strip is {step} tall and the line \
+                     needs more",
+                    l.help,
+                    next.y,
+                    prev.bottom()
+                );
+            }
+        }
+        // The refusal has to actually be reached, or this test is a sweep over
+        // sheets that were all roomy enough and would pass against a version
+        // with no refusal in it at all.
+        assert!(
+            crowded > 0,
+            "no sheet in the sweep was short enough for its rows to want more room than \
+             their strips, so nothing here exercised the refusal"
+        );
+    }
+
+    /// The sheet keeps margins, and a run in the margin is a run outside the
+    /// column it belongs to even though it is comfortably inside the panel.
+    ///
+    /// This is the tighter half of the containment test above, and it is what
+    /// catches the split being computed from the wrong rectangle. Both columns
+    /// are placed from one `split`, so a split taken from the *panel*'s width
+    /// instead of the *column*'s moves the keys and the description together
+    /// and they stay consistent with each other — the pair simply slides into
+    /// the left margin. Measuring the pair against the panel cannot see that;
+    /// measuring each run against the column can. A bound on a run is only as
+    /// good as the box it is measured against, and here the box with the claim
+    /// on it is the column, not the sheet.
+    #[test]
+    fn every_run_the_help_sheet_draws_stays_inside_its_inner_column() {
+        let mut a = app();
+        a.show_help = true;
+        for (w, h, l) in help_sheets() {
+            let (inner, ..) = help_geometry(&l);
+            if inner.is_empty() {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            Magnifier::draw_help(&a, &mut f, &l);
+            for (text, r) in inked(&f) {
+                assert!(
+                    r.x >= inner.x - 0.01 && r.right() <= inner.right() + 0.01,
+                    "at {w}x{h} the sheet drew {text:?} spanning {}..{}, outside its column at \
+                     {}..{}",
+                    r.x,
+                    r.right(),
+                    inner.x,
+                    inner.right()
+                );
+            }
+        }
+    }
+
+    /// The row rects are inside the sheet before `intersect` is applied to
+    /// them, so the `intersect` never actually cuts one.
+    ///
+    /// That sounds like an argument for deleting it, and it is the opposite.
+    /// A sweep deleting the `intersect` survives, so without this test the cut
+    /// is a line no mutation can kill — and the reason it survives is not that
+    /// it is pointless but that the rows are held inside by *arithmetic
+    /// elsewhere*: `room` is measured down from `h.bottom()`, so `top + n·step`
+    /// cannot pass the sheet's foot. The `intersect` is what makes the rows
+    /// safe independently of that arithmetic, and this test is what makes the
+    /// arithmetic itself checked. If an edit to `room` or `top` ever lets a row
+    /// hang off the sheet, this fails and the `intersect` quietly starts doing
+    /// work — which is exactly the moment someone should be told.
+    ///
+    /// Recorded as the reason the two `draw_help` refusal mutations are marked
+    /// equivalent in `mutate.py` rather than left as open survivors.
+    #[test]
+    fn the_help_sheets_rows_are_inside_it_before_they_are_cut_to_it() {
+        let mut checked = 0_u32;
+        for (w, h, l) in help_sheets() {
+            let (inner, top, step, _) = help_geometry(&l);
+            if inner.is_empty() {
+                continue;
+            }
+            for i in 0..HELP_ROWS.len() {
+                #[expect(clippy::cast_precision_loss, reason = "fourteen rows; exact in f32")]
+                let y = step.mul_add(i as f32, top);
+                let row = Rect::new(inner.x, y, inner.w, step);
+                if row.is_empty() {
+                    continue;
+                }
+                checked += 1;
+                // `inside`, not `intersect(..) == Some(row)`. The cut
+                // recomputes the height as `bottom - y`, which for a row that
+                // spans the sheet exactly returns a value half a millionth of a
+                // point from the one it went in with — so exact equality here
+                // reports a rounding step as a containment failure. What is
+                // being asserted is that the cut takes nothing away, and a
+                // tolerance is the honest way to say that about floats.
+                assert!(
+                    inside(l.help, row),
+                    "at {w}x{h} help row {i} at {row:?} is not wholly inside the sheet at {:?}, \
+                     so the cut that follows it is load-bearing after all",
+                    l.help
+                );
+            }
+        }
+        assert!(
+            checked > 0,
+            "no sheet in the sweep produced a row at all, so nothing was checked"
+        );
+    }
+
+    /// `push_text`'s three refusals, tested on `push_text` rather than through
+    /// a window size that happens to reach them.
+    ///
+    /// The sweep test below is the one that was *meant* to cover the
+    /// `limit <= 0.0` arm, and a mutation deleting that arm survived it. Not
+    /// because the sweep is weak — because after the centring rewrite there is
+    /// no longer any band in the layout that produces a limit of zero. Every
+    /// column is now measured from a `Rect` that a refusal already emptied, so
+    /// the arm is real but unreached, and a guard the suite cannot reach is a
+    /// guard the suite cannot keep.
+    ///
+    /// Widening the layout sweep until it produced a zero limit would be
+    /// testing the wrong thing: the arm is a promise `push_text` makes to every
+    /// caller, present and future, not a fact about today's four bands. So it
+    /// is tested where it is made. This is the general shape — when a sweep
+    /// cannot reach a helper's guard, move the test to the helper instead of
+    /// contorting the sweep, and leave the sweep asserting what it is good at.
+    #[test]
+    fn push_text_refuses_a_box_with_no_room_in_it() {
+        let cases: [(&str, f32, &str, f32); 5] = [
+            ("no width at all", 12.0, "Zoom 4x", 0.0),
+            ("a width below zero", 12.0, "Zoom 4x", -3.0),
+            ("no type size", 0.0, "Zoom 4x", 80.0),
+            ("a type size below zero", -1.0, "Zoom 4x", 80.0),
+            ("nothing to say", 12.0, "", 80.0),
+        ];
+        for (why, size, text_str, limit) in cases {
+            let mut f = Frame::new(200.0, 100.0);
+            push_text(
+                &mut f,
+                10.0,
+                10.0,
+                text_str,
+                size,
+                TEXT_COLOR,
+                FontWeightHint::Regular,
+                limit,
+            );
+            assert!(
+                inked(&f).is_empty(),
+                "given {why}, push_text drew {:?} anyway",
+                inked(&f)
+            );
+        }
+        // The other half of the biconditional. Without it the assertions above
+        // are satisfied by a `push_text` that never draws anything at all, and
+        // the mutation that empties the function would pass a test named for
+        // guarding it.
+        let mut f = Frame::new(200.0, 100.0);
+        push_text(
+            &mut f,
+            10.0,
+            10.0,
+            "Zoom 4x",
+            12.0,
+            TEXT_COLOR,
+            FontWeightHint::Regular,
+            80.0,
+        );
+        assert_eq!(
+            inked(&f).len(),
+            1,
+            "given a real box and a real string, push_text drew nothing"
+        );
     }
 
     #[test]

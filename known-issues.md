@@ -102883,6 +102883,64 @@ the shared expression underneath them.
 
 ---
 
+### Lesson 107: a clip hides a drawing pass's overrun from every test but one (lane C, 2026-09-01)
+
+**In short:** the contacts detail panel drew a contact's fields down a column
+and never checked that it still had column left. A contact with six phone
+numbers and a paragraph of notes pushed the group chips **below the box they
+were being drawn in**, where they landed on top of the Edit / Star / Delete
+buttons. The edit form did the same to Save and Cancel. Both faults were
+present from the first commit, under a suite of 230 tests, and not one of them
+could see either.
+
+They could not see it because the clip that was in force hides the overrun from
+**two of the three kinds of thing a frame contains, but not the third**:
+
+| what is emitted | what the clip does to it | can a test see the overrun? |
+|---|---|---|
+| a run of text | `put_text` asks `Frame::is_visible` first and emits nothing | **no** — the run is simply absent |
+| a hit box | `Frame::hit` trims to the clip and drops an empty result | **no** — the control is simply absent |
+| a filled box | pushed to the display list exactly as asked | **yes** — the rect is in the frame |
+
+So every test phrased over text ("is the label inside the window?", "is the
+column bounded?") and every test phrased over controls ("does every hit box lie
+inside the window?", "is the panel clear of the status line?") passes over a
+pass that has run hundreds of pixels past its box. The picture on screen is
+even *correct* — the compositor throws the overrun away. The fault is real all
+the same: the moment anything is drawn **after** the offending pass under a
+different clip, as the buttons are, the overrun lands on top of it.
+
+**The rule.** *A clip makes a fault invisible, not absent — and it hides it
+unevenly, so the test that owns "a pass stops at its box" must be phrased over
+fills, never over text or hit boxes.* The general form: when a mechanism
+suppresses output, enumerate which of your assertion surfaces it suppresses.
+Whichever surface it leaves alone is the only one that can carry the assertion.
+
+**The exemption is the rule, not a hole in it.** "No fill is painted entirely
+outside the clip" is too strong as written: a two-pixel sliver of a contact row
+at the bottom edge draws its 40-pixel avatar circle in full, forty pixels below
+the cut, and that is correct — *the unit of "do not draw this" is the item, and
+an item is drawn whole or not at all.* The honest assertion is therefore: a
+fill wholly outside the clip is allowed exactly when some other fill **drawn
+under the same clip** encloses it and is itself partly visible. That excuses
+the avatar (its row's own background carries it) and excuses nothing else — a
+row three hundred pixels below the list has no such parent, because the only
+fill enclosing it is its own background, which is just as invisible as it is.
+Note the "same clip" qualifier: without it, the window background excuses
+everything.
+
+**Where else to look.** Every app in the wiring campaign whose panels are
+`f.clip(...)`-ed and whose contents are laid out with a running `y` cursor:
+the list bodies, the form bodies, and any column of sections. Grep for a `for`
+loop that increments a `y` inside a `clip`/`unclip` pair and does not test the
+cursor against the bottom of the box. In this crate the list already had the
+guard (`if cy >= l.list.bottom() { break; }`) and the two panels did not, which
+is the usual shape: the scrolling thing is guarded because someone thought
+about scrolling, and the "it always fits" thing is not, because at the default
+window size it always does.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31

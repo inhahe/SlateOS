@@ -3,8 +3,14 @@ name = "contacts"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Contacts — address book and contact manager"
+
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The address book had no way in. `main` built a store, drew one frame into a
+# `Vec` and dropped it, so every control below -- the `+` button, the search
+# bar, the A-Z rail, the rows, Edit, Star, Delete, Save, Cancel, Merge -- was
+# a painted rectangle that answered nothing. `oswindow` is the door.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

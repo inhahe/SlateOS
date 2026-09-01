@@ -3037,7 +3037,20 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 ///
 /// Each entry is serialized as:
 ///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size`
-///   (entry_type: 0=file, 1=dir, 2=symlink, 3=volume_label)
+///   (entry_type: 0=file, 1=dir, 2=volume_label, 3=symlink,
+///    4=char_device, 5=block_device)
+///
+/// This table read `2=symlink, 3=volume_label` until 2026-08-31 and omitted
+/// 4 and 5 entirely. Both handlers have always emitted `2=VolumeLabel,
+/// 3=Symlink`, as have `SYS_FS_LIST_DIR` (603) and `posix`'s
+/// `kernel_type_to_dt`, so the comment was the only thing that disagreed
+/// with the system — and it is the *only* documentation of the type byte for
+/// [`SYS_FS_GETDENTS_PINNED`], whose own note defers to this one. Lane B
+/// caught it before wiring 664 (`requests/b-a-the-647-664-entry-type-table-
+/// has-symlink-and-volume-label-swapped.md`). Worth the paragraph because of
+/// how it fails: a symlink decoded as a volume label is a plausible value
+/// rather than a fault, so a `cp -r` built from this table would have
+/// dereferenced every link it walked and no return code would have said so.
 ///
 /// Returns: packed `(total_entries << 32) | entries_written`.
 /// If the buffer is too small, entries are truncated (not an error).
@@ -3769,7 +3782,9 @@ pub const SYS_FS_JOURNAL_FLUSH: u64 = 627;
 ///
 /// Output layout (see `FS_META_SIZE`):
 /// - `[0..8]`:   file size (u64 LE)
-/// - `[8]`:      entry type (0=file, 1=dir, 2=vol, 3=symlink)
+/// - `[8]`:      entry type (0=file, 1=dir, 2=volume_label, 3=symlink,
+///   4=char_device, 5=block_device — the encoding [`SYS_FS_READDIR_AT`]
+///   documents in full)
 /// - `[9..16]`:  padding
 /// - `[16..24]`: created_ns (u64 LE)
 /// - `[24..32]`: modified_ns (u64 LE)

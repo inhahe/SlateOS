@@ -11682,11 +11682,17 @@ pub fn sys_fs_handle_path(args: &SyscallArgs) -> SyscallResult {
 /// Each entry is serialized as:
 ///   `u8 entry_type | u32 name_len | name bytes | u64 size`
 ///
-/// `entry_type` is `0=file, 1=dir, 2=volume_label, 3=symlink, 4=char_device`
-/// — the same encoding `SYS_FS_READDIR` and `SYS_FS_STAT` use, so one decoder
-/// serves all three. The record *layout* differs between them (this one is
-/// variable-length, `SYS_FS_READDIR`'s is fixed-size); only the type byte is
-/// shared, and it is shared deliberately.
+/// `entry_type` is `0=file, 1=dir, 2=volume_label, 3=symlink, 4=char_device,
+/// 5=block_device` — the same encoding `SYS_FS_READDIR` and `SYS_FS_STAT`
+/// use, so one decoder serves all three. The record *layout* differs between
+/// them (this one is variable-length, `SYS_FS_READDIR`'s is fixed-size); only
+/// the type byte is shared, and it is shared deliberately.
+///
+/// The list ended at `4=char_device` until 2026-08-31, which is the same
+/// omission `SYS_FS_READDIR_AT`'s note in `number.rs` carried and matters for
+/// the same reason: `devfs` produces block devices, 603 has emitted `5` since
+/// it was written, and a decoder built from a truncated table maps the byte
+/// it has never heard of onto whatever its own fallback is.
 ///
 /// Returns: packed `(total_entries << 32) | entries_written`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -11741,10 +11747,11 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 }
 
                 // Entry type: 0=file, 1=dir, 2=volume_label, 3=symlink,
-                // 4=char_device — the same byte `SYS_FS_READDIR` and
-                // `SYS_FS_STAT` use. This encoder used to swap 2 and 3 while
-                // agreeing on 0, 1 and 4, which is the worst shape an ABI byte
-                // can have: a decoder written against either syscall looks
+                // 4=char_device, 5=block_device — the same byte
+                // `SYS_FS_READDIR` and `SYS_FS_STAT` use. This encoder used to
+                // swap 2 and 3 while agreeing on the rest, which is the worst
+                // shape an ABI byte can have: a decoder written against
+                // either syscall looks
                 // correct on every ordinary file and silently mistakes a
                 // symlink for a volume label. Aligned before any client existed
                 // to depend on the old numbering — nothing outside the kernel

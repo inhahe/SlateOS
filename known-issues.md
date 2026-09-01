@@ -103231,6 +103231,60 @@ first sweep's eight survivors, one of shape 1, three of shape 2, four of shape
    a control given an empty box draws nothing at all, since a zero-sized fill
    is inside every region there is.
 
+**hangman** (2026-09-01) — done: 160 tests, 48/48 mutation rows caught. The
+grep said 9 sites; the app had four unclamped-centring faults and five more that
+only the sweeps found. taskscheduler's three survivor shapes all recurred, so
+treat them as the standing budget rather than that app's peculiarity. Four
+things this app added to the recipe:
+
+4. **The squeeze has to reach the pass, and a `Layout` field is how.** A band
+   computed inline inside the pass that paints it cannot be handed a smaller
+   box, so every bound below it is unverified — `draw_result`'s region was
+   `Rect::new(gallows.x, gallows.y, gallows.w.max(word.w), word.bottom() -
+   gallows.y)`, four lines into the drawing code, and its card-height clamp and
+   its button-fit check both survived because nothing could squeeze it. Naming
+   it `Layout::overlay` is what made both rows die. **Sort the passes into those
+   whose band is an *input* and those whose band is *derived*, squeeze the
+   first group and say in the test why the second is excluded** — hangman's
+   keyboard band is computed from `key` and `key_gap`, so a keyboard band shrunk
+   on its own is a band the keys were never sized for and the resulting overrun
+   would be the test's fault, not the program's.
+5. **Squeeze to fractions of the band, not only to absolute slivers.** A fixed
+   12-point band is below every font size in the app and so only ever reaches
+   the outermost refusal. The interesting failures live in the gap between "the
+   type fits" and "the type *and what hangs below it* fits", which is a fraction
+   of the band and not a constant: leaving `RULE_WIDTH / 2.0` out of a rule-fit
+   check is wrong for one narrow range of heights and right on either side of
+   it. `squeezes()` now yields sixteenths of `r.h` and `r.w` as well as
+   `[0, 1, 3, 6, 12]`.
+6. **Measure a stroke's thickness on both axes, or the check is blind to any
+   pass made of strokes.** A vertical or zero-length line has no extent on one
+   axis; an empty rectangle is inside everything; so hangman's gallows — four
+   strokes and a twelve-sided head, no fills at all — was measured as painting
+   nothing and could be drawn anywhere. Widen a line's bounding box by its
+   thickness across the line, and on *both* axes when it runs along neither.
+   Then expect a real finding to fall out, because a stroke straddles the line
+   it is drawn on and thicknesses usually have a floor of one point that does
+   not scale: the gallows had to be inset by a whole stroke width before the
+   6-point band stopped drawing the beam above its own top edge.
+7. **"Drew something" is too weak a converse.** Shape 3's reachability
+   assertion has to name a run from the pass's *far end* — the alphabet's last
+   key, the statistics column's list of wrong letters, the result card's second
+   button — because a column that stops after its heading has drawn something.
+   And the empty-band half should assert **no command at all**, not merely no
+   ink and no hit box: a degenerate fill is how a pass says it never looked at
+   the band it was given, and it is invisible to containment.
+
+One more, which is really shape 2 wearing a comment: **a guard whose answer is
+recomputed downstream is dominated even when the downstream copy is inside a
+shared helper.** `draw_word` said "one `centre_line` for the row rather than one
+per letter" while its loop called `run_in`, which asks `centre_line` again for
+every cell — so the row's answer placed nothing but the rule, and replacing the
+row's guard with the bare centring it exists to prevent changed no test's
+answer. The fix was to make the code true rather than to delete either copy:
+the letters are placed on the row's single baseline now, through `span` for the
+horizontal half. If a comment claims a guard is the only one, mutate it.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
@@ -105456,9 +105510,11 @@ or a target-side test that renames between two mounts and asserts `EXDEV`.
 
 ## `readdir("/")` costs 4x per entry what the same memfs code costs anywhere else
 
-**Status:** open, measured but only a third attributed. Not a regression — it
-has presumably always been true — and not a gate: the series that exposes it
-(`vfs_readdir_root`) is tracked, not scored.
+**Status:** open, **now localised** — see the MEASURED section appended at the
+end of this entry (2026-09-01). The cause is being the parent of mount points,
+and it is *far* larger than the estimate below; being a filesystem's own root is
+ruled out. Not a regression — it has presumably always been true — and not a
+gate: the series that exposes it (`vfs_readdir_root`) is tracked, not scored.
 
 **In short:** listing the root directory is about four times more expensive per
 entry than listing an ordinary directory, even though on the boot-test both are
@@ -105533,13 +105589,74 @@ as a plain child — rather than reasoning about the code. `bench_vfs_readdir`
 now logs the entry count of `/` and names every boot, so the workload side of the
 comparison is finally pinned.
 
+### MEASURED 2026-09-01 — it is the mount parenthood, and it is 8x the estimate
+
+`bench_vfs_readdir_root_cost` (`kernel/src/bench.rs`) ran the 2x2. It lists one
+8-entry memfs directory four times, varying only what is mounted and where:
+
+| arm | mount table | listed dir is their parent? | min |
+|---|---|---|---|
+| `vfs_readdir_mp_base` | baseline | — | 20990 ns |
+| `vfs_readdir_mp_elsewhere` | +5, under a *sibling* | no | 27807 ns |
+| `vfs_readdir_mp_parent` | +5, under the listed dir | **yes** | **109236 ns** |
+| `vfs_readdir_fsroot` | +1, the listed dir *is* the mount | — | 22626 ns |
+
+**Read the percentages, not the nanoseconds.** The harness flagged this boot as
+an outlier run — everything measured ~38% slower than usual, against a baseline
+that was itself an outlier (x1.307) — and printed the standing instruction not
+to quote its absolute numbers as the cost of anything. The design survives that:
+all four arms ran inside the same window, so a uniform inflation cancels in every
+comparison below. The ratios are the finding; the raw figures are ~1.4x high.
+
+Three results, in decreasing order of how much they change the picture:
+
+1. **Being a mount parent costs +81429 ns, +292%** — and that is against
+   `elsewhere`, so the mount-table growth is already subtracted out. This is not
+   merely "the missing ~20 us": it is the entire 29.4 us gap and roughly 2.5x
+   more, on a directory with a quarter of root's entries. Root's anomaly is
+   here, in `finish_listing`'s per-submount work, and nowhere else.
+
+2. **But it is not the stat.** Per submount that is ~16285 ns, against a measured
+   `vfs_stat_breakdown_resolved` of ~2000 ns — **8x a full stat, per mount
+   point.** The estimate above ("five full stats = 9640 ns, 33% of the gap") had
+   the mechanism's *location* right and its *magnitude* wrong by an order of
+   magnitude. So the fix proposed above is still worth making, and it will not
+   recover most of this: something in the per-submount path costs several stats'
+   worth beyond the stat, and has not been identified yet.
+
+3. **Being a filesystem's own root is free.** `fsroot` is +1636 ns over `base`,
+   which is +273 ns once this boot's own per-mount table cost is subtracted —
+   under 2%. That eliminates the third candidate listed above ("memfs's own
+   root-directory lookup, which may not be structured like a child directory's").
+   It is structured like a child directory's, and it costs the same.
+
+A fourth number falls out that was not the question but is worth recording:
+**each registered mount adds ~1363 ns to every `readdir` in the system**,
+whatever it lists (`base` -> `elsewhere` is +6817 ns for five mounts, on a
+directory none of them are under). That is `resolve_mount`'s longest-prefix scan,
+and it is the reason this benchmark mounts its five filesystems twice in two
+different places rather than measuring a naive before/after — charged to
+`finish_listing`, it would have inflated result 1 by 8%.
+
+**What is still unknown.** Why one submount costs 8 stats. The two candidates
+from the original list that survive are `submount_children` taking the `VFS` lock
+a second time (`finish_listing` holds it, then each `submount_root_ino`
+re-acquires it through `resolve_mount`) and the `PathBuf` join per mount point.
+Neither obviously costs 16 us, so the next step is the same as this one was: a
+breakdown benchmark inside the per-submount path, not an argument from reading
+the code. The same discipline applies — the entry above this one exists because
+two days went into acting on an unmeasured hypothesis.
+
 
 ---
 
 ## A host out-of-memory during QEMU is recorded as a kernel PANIC, and zeroes the clean streak
 
-**Status:** open. Observed once, 2026-09-01, on a `--bench` boot in the lane-A
-worktree. Nothing in the tree was wrong; the boot history now says otherwise.
+**Status:** FIXED 2026-09-01 (see the closing section at the end of this entry).
+Observed once, 2026-09-01, on a `--bench` boot in the lane-A worktree. Nothing
+in the tree was wrong; the boot history said otherwise. The misdiagnosis is
+fixed; the host-side memory spike that caused it is not, and cannot be from
+here.
 
 **In short:** the machine running QEMU briefly ran out of mappable memory. QEMU
 could not give the emulated GPU the memory it asked for, the kernel correctly
@@ -105630,6 +105747,41 @@ its own absent-means-no default.
 re-run, and the streak counter should be read as a lower bound. This run was
 re-run and the entry will be updated if it recurs — one occurrence is not yet
 evidence about frequency.
+
+### FIXED 2026-09-01 — `HOST_FAIL` is implemented as specified above
+
+`boot-test.sh` now redirects QEMU's stderr to `build/qemu-stderr.txt` (and still
+echoes it to the console on the way out, so the redirect costs the operator
+nothing it used to show them), passes it to the recorder as `--qemu-stderr`, and
+deletes it alongside the serial log so a leftover can never excuse the *next*
+boot. `boot-history.py` grew `HOST_FAIL_SIGNATURES` — the four literal
+substrings tabulated above — plus `host_failure()`, `read_qemu_stderr()`, and a
+`describes_tree()` predicate that is now the single filter behind the streak,
+the clean/total counts, and both sets of medians.
+
+Both constraints this entry named are met, and both are covered by tests.
+Detection reads QEMU's stderr only: `test_a_kernel_cannot_forge_a_host_failure`
+puts the signature in the *guest's* log and asserts the verdict stays `PANIC`.
+And the default is unchanged:
+`test_a_host_signature_overrides_a_verdict_that_blames_the_tree` classifies this
+run's real serial log both ways — `PANIC` without the host's words, `HOST_FAIL`
+with them — so the override is doing the work, rather than the sample having
+been chosen to classify harmlessly.
+
+Two things went beyond the specification, both in the safe direction. The
+override runs *downward only*: a host signature never rewrites a verdict that
+clears the tree, because destroying a real clean boot would be worse than the
+bug being fixed. And `fingerprints_for` skips `HOST_FAIL` entirely — the
+matchers key on the shape of the exception without consulting the verdict, and a
+host OOM lands on whatever allocation the kernel happened to be making, so a
+host-killed boot could otherwise be filed as a recurrence of a known issue that
+did not recur.
+
+Reasoning in full, including the four rejected alternatives, in
+`design-decisions.md` §669. The underlying *cause* is not fixed and is not ours
+to fix — the boot lock serialises the three lanes' QEMU runs, but nothing
+serialises their `cargo` builds — so a recurrence remains possible. What changes
+is that it will be labelled rather than blamed on the kernel.
 
 ---
 

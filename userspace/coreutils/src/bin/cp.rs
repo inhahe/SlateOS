@@ -256,6 +256,7 @@ use coreutils::fsattr::{
     owner_of, permission_bits, times_of,
 };
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
@@ -2250,127 +2251,12 @@ fn hard_links(meta: &fs::Metadata) -> u64 {
 /// `--preserve=links` off by exactly the amount that host cannot honour it: the
 /// `st_nlink > 1` half of the condition never fires, and the dereference half
 /// still does, so `cp --preserve=links -L la lb d` is the only spelling that
-/// reaches [`create_hard_link`] — and there it fails with whatever the platform
+/// reaches [`hardlink::force_link`] — and there it fails with whatever the platform
 /// says about [`fs::hard_link`], which is the honest answer.
 #[cfg(not(unix))]
 fn hard_links(_meta: &fs::Metadata) -> u64 {
     1
 }
-
-/// Link `earlier` to `target`, replacing whatever is at `target`. GNU's
-/// `create_hard_link` (`copy.c:2122`) over gnulib's `force_linkat`.
-///
-/// "Replacing" is why this is not one `fs::hard_link` call. `link(2)` fails with
-/// `EEXIST` and has no force flag, so gnulib links to a fresh name in the
-/// destination's own directory and `rename`s that over the destination — which
-/// is atomic, and is what makes `cp --preserve=links a b d` work when `d/b` was
-/// already something else. The temporary must be in the *same* directory or the
-/// rename would cross a filesystem and fail.
-///
-/// The unlink of the temporary is unconditional in gnulib, and its comment says
-/// why: if `dsttmp` and `target` were already the same link, `renameat` is a
-/// no-op that leaves both names, so the cleanup cannot be skipped on success.
-///
-/// `-v` prints `removed 'target'` *here*, after the arrow line rather than
-/// before it, because this replacement happens after `emit_verbose` rather than
-/// in the pre-copy unlink. Measured, with `d/b` a dangling symlink:
-///
-/// ```text
-/// 'a' -> 'd/a'
-/// 'b' -> 'd/b'
-/// removed 'd/b'
-/// ```
-///
-/// # Following
-///
-/// GNU passes `AT_SYMLINK_FOLLOW` when `should_dereference`; [`fs::hard_link`]
-/// is `linkat` with no flags and cannot. The difference is unreachable rather
-/// than unimplemented: the thing being linked *from* is a destination this same
-/// command created, and a command that dereferences creates no symlinks — under
-/// `-L`, and under `-H` for an operand, every source is stat'd through, so every
-/// destination is a regular file. The reachable case is the opposite one and
-/// needs the flag *off*: `cp -P --preserve=links l1 l2 d`, where `l1` and `l2`
-/// are two hard links to one symlink, must give `d/l1` and `d/l2` one inode that
-/// is still a symlink — measured, and what this produces.
-fn create_hard_link<O: Write, E: Write>(
-    earlier: &Path,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let existed = match fs::hard_link(earlier, target) {
-        Ok(()) => false,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match link_over(earlier, target) {
-            Ok(()) => true,
-            Err(e) => return report_link_failure(&e, earlier, target, job),
-        },
-        Err(e) => return report_link_failure(&e, earlier, target, job),
-    };
-    if existed && job.flags.verbose {
-        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
-    }
-    true
-}
-
-/// gnulib's `cannot create hard link %s to %s`, destination first.
-fn report_link_failure<O: Write, E: Write>(
-    e: &io::Error,
-    earlier: &Path,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let why = strerror(e);
-    let _ = writeln!(
-        job.err,
-        "cp: cannot create hard link {} to {}: {why}",
-        quoteaf_os(target),
-        quoteaf_os(earlier)
-    );
-    false
-}
-
-/// The replace half of `force_linkat`: link into a temporary name beside
-/// `target`, rename it over, and remove the temporary either way.
-///
-/// The name is gnulib's `CuXXXXXX` pattern with the random part supplied by the
-/// only two things available without a dependency — the process id and a
-/// counter — and retried, because a collision must not be reported as the
-/// caller's failure. `O_EXCL` semantics come free: `link(2)` fails with
-/// `EEXIST` rather than clobbering, so a name that loses the race is simply
-/// tried again.
-fn link_over(earlier: &Path, target: &Path) -> io::Result<()> {
-    let (dir, base) = split_entry(target);
-    for attempt in 0..PLACE_TEMP_TRIES {
-        let mut name = OsString::from("Cu");
-        name.push(format!("{:x}{attempt:x}", std::process::id()));
-        // Beside the destination and not in `/tmp`: `rename` cannot cross a
-        // filesystem, and the destination's directory is the only place
-        // guaranteed to be on the same one.
-        let tmp = dir.join(&name);
-        match fs::hard_link(earlier, &tmp) {
-            Ok(()) => {
-                let result = fs::rename(&tmp, target);
-                // Even when the rename worked: if `tmp` and `target` were
-                // already one link, the rename was a no-op and left both names
-                // (gnulib's own comment at `force-link.c:117`).
-                let _ = fs::remove_file(&tmp);
-                return result;
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    // Every candidate name was taken, which needs `PLACE_TEMP_TRIES`
-    // simultaneous `cp`s in one directory. Reported as the errno the last
-    // attempt earned rather than as a panic.
-    let _ = base;
-    Err(io::Error::from(io::ErrorKind::AlreadyExists))
-}
-
-/// How many temporary names [`link_over`] tries before giving up. gnulib's
-/// `try_tempname_len` uses six random characters and the whole space; this
-/// walks a counter instead, and the bound is what stops an unlucky directory
-/// from spinning.
-const PLACE_TEMP_TRIES: u32 = 64;
 
 /// Copy one source of a known kind onto a settled destination path: the symlink,
 /// the directory and the regular file, and nothing else.
@@ -2525,7 +2411,14 @@ fn place_entity<O: Write, E: Write>(
         && let Some(id) = file_id(src_path, metadata)
     {
         if let Some(earlier) = job.copied.remember(&id, target) {
-            return if create_hard_link(&earlier, target, job) {
+            return if hardlink::force_link(
+                "cp",
+                &earlier,
+                target,
+                job.flags.verbose,
+                &mut *job.out,
+                &mut *job.err,
+            ) {
                 Placed::Linked
             } else {
                 // GNU reaches its `un_backup` label from here too (`copy.c:2705`

@@ -7,7 +7,7 @@
 //! to read and no faster to build. This library is for the exceptions: the
 //! things where two utilities disagreeing would itself be the bug.
 //!
-//! There are twenty-three so far. Three are about the interface these programs share
+//! There are twenty-four so far. Three are about the interface these programs share
 //! whether or not anyone designed it that way: a script that reads `grep`'s
 //! diagnostic and a script that reads `cp`'s are the same script, and a person
 //! who learned to type `ls --col` expects `cat --squeeze` to work too.
@@ -373,6 +373,20 @@
 //!   with an `lstat`, so the day the kernel learned the flag only one of them
 //!   noticed. The bug was in there being two.
 //!
+//! The twenty-fourth is [`rename`]'s mirror image, and arrives by the same
+//! route — one utility had it, a second turned out to need exactly it:
+//!
+//! - [`hardlink`] — a hard link that *takes* a name already in use, where
+//!   [`rename`] is an operation that refuses one. `link(2)` has no force flag
+//!   and no `RENAME_NOREPLACE`-shaped counterpart, so gnulib links to a
+//!   temporary name beside the destination and renames that over it; the point
+//!   is the absence of a window, since unlinking first leaves an interval in
+//!   which the name does not exist and a concurrent reader sees a file missing
+//!   that was only ever going to be replaced. `cp --preserve=links` needs it
+//!   when two operands are two names for one inode, and `mv` needs it for the
+//!   same rule across a filesystem boundary, where a copy stands in for a
+//!   rename and a rename would have kept the names together.
+//!
 //! The regex engine, which is the other thing they must not disagree about,
 //! lives in `userspace/ere` rather than here — the shell needs it too, and it
 //! cannot depend on the coreutils. See `design-decisions.md` §322.
@@ -389,6 +403,7 @@ pub mod filekind;
 pub mod fnmatch;
 pub mod fsattr;
 pub mod getopt;
+pub mod hardlink;
 pub mod human;
 pub mod overwrite;
 pub mod pathname;

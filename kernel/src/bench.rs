@@ -7360,12 +7360,18 @@ fn bench_vfs_readdir_root_cost() {
     readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
 
     if Vfs::mkdir_all(dir).is_err() || Vfs::mkdir_all(sibling).is_err() {
-        serial_println!("[bench] vfs_readdir_root_cost: SKIP (cannot create {})", ROOT);
+        serial_println!(
+            "[bench] vfs_readdir_root_cost: SKIP (cannot create {})",
+            ROOT
+        );
         readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
         return;
     }
     if !readdir_mount_populate(dir) {
-        serial_println!("[bench] vfs_readdir_root_cost: SKIP (cannot populate {})", dir);
+        serial_println!(
+            "[bench] vfs_readdir_root_cost: SKIP (cannot populate {})",
+            dir
+        );
         readdir_mount_cleanup(ROOT, dir, sibling, fsroot);
         return;
     }

@@ -1325,6 +1325,53 @@ fn move_one<O: Write, E: Write>(
         return false;
     }
 
+    // The one shape this fallback cannot do, asked **before** the destination is
+    // cleared and not inside [`copy_across_devices`] with the rest of the kind
+    // analysis. GNU's order is clear-then-copy, and it can afford that because
+    // its copy handles a directory; ours does not, so clearing first would
+    // delete a destination that this command is then going to refuse to
+    // replace — losing a file to a move that did not happen, which is worse
+    // than either the refusal or the move.
+    //
+    // No `copied` line precedes it, matching GNU's `!S_ISDIR (src_mode)` guard
+    // and reading correctly besides: announcing a copy about to be declined
+    // would be a lie rather than an oddity.
+    if src_meta.is_dir() {
+        return give_up_cross_device(job, src, target, &no_directories(), moved_aside.as_deref());
+    }
+
+    // Clear the destination, so that the copy standing in for the rename ends
+    // with a *new* file at that name rather than the old one rewritten. GNU
+    // says why in as many words — "remove any existing destination file so that
+    // a cross-device `mv` acts as if it were really using the rename syscall"
+    // (`copy.c:2870`) — and the difference is not bookkeeping. Written through
+    // instead, the destination keeps its inode, and with it its mode, its owner
+    // and *its other hard links*: `mv /other/fs/f g`, where `g` is one of a
+    // linked pair, silently rewrote the pair's other name too, and `g` came out
+    // wearing a mode the source never had. A rename does none of that.
+    //
+    // Not conditional on the `dst_meta` taken further up: that stat and this
+    // unlink are two syscalls with a rename attempt between them, and the name
+    // may have been freed — or taken — since. `ENOENT` is therefore the
+    // ordinary answer rather than a failure, and it is the *only* one excused;
+    // GNU spells the test `errno != ENOENT` exactly.
+    if let Err(e) = clear_destination(target) {
+        let why = strerror(&e);
+        let _ = writeln!(
+            job.err,
+            "mv: inter-device move failed: {} to {}; unable to remove target: {why}",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+        // No `un_backup` here, deliberately, and that is upstream's shape:
+        // `copy.c:2884` returns straight out rather than jumping to its
+        // `un_backup` label. So a `-b` whose backup was made and whose target
+        // could not then be cleared leaves the backup standing with no
+        // destination — the same odd-but-measured outcome the rename failures
+        // above produce, for the same reason.
+        return false;
+    }
+
     // Announced *before* the copy is attempted, which is upstream's order and
     // not an accident of this file's shape: `copy.c:2887` prints `copied` in the
     // block that clears the destination, and only then falls through to the copy
@@ -1335,41 +1382,10 @@ fn move_one<O: Write, E: Write>(
     // like one; it is what the reference does, and `scripts/mv-diff.sh` compares
     // both streams byte-for-byte, so "fixing" it here would turn a passing case
     // red.
-    //
-    // The `is_dir` guard is GNU's `!S_ISDIR (src_mode)`. A directory gets no
-    // line, which is what this `mv` needs anyway — it refuses the recursive copy
-    // on the next line, and announcing a copy it is about to decline would be a
-    // lie rather than an oddity.
-    if !src_meta.is_dir() {
-        announce(job, "copied", src, target, moved_aside.as_deref());
-    }
+    announce(job, "copied", src, target, moved_aside.as_deref());
 
     if let Err(e) = copy_across_devices(src, target, &src_meta) {
-        let why = strerror(&e);
-        let _ = writeln!(
-            job.err,
-            "mv: cannot move {} to {}: {why}",
-            quoteaf_os(src),
-            quoteaf_os(target)
-        );
-        // **The only place `mv` puts a backup back**, and that is upstream's
-        // shape rather than an omission here. Eleven `goto un_backup`s exist in
-        // `copy.c` and every one of them is in the *copying* machinery that a
-        // cross-device move falls through into; the move-mode rename failures
-        // above it all say `return false` outright (`copy.c:2866`). So
-        // `mv -b a b` whose rename fails leaves `b~` in place with no `b` —
-        // odd, measured, and deliberately reproduced, because `scripts/mv-diff.sh`
-        // compares the resulting tree and "fixing" it here would turn a passing
-        // case red.
-        backup::un_backup(
-            "mv",
-            moved_aside.as_deref(),
-            target,
-            job.flags.verbose,
-            &mut *job.out,
-            &mut *job.err,
-        );
-        return false;
+        return give_up_cross_device(job, src, target, &e, moved_aside.as_deref());
     }
     // The second line of the pair, and it comes from somewhere else entirely in
     // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
@@ -2032,14 +2048,82 @@ fn is_cross_device(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::CrossesDevices
 }
 
+/// Say that a cross-device move failed, put back anything `-b` moved aside, and
+/// report the move as not done.
+///
+/// One function because the two callers must agree: upstream reaches its
+/// `un_backup` label from eleven places, all of them in the *copying* machinery
+/// that this fallback is, and both of ours are in it. What is **not** here is
+/// the destination-clearing failure above, which upstream returns from directly;
+/// keeping that one out of this helper is the point of having the helper.
+fn give_up_cross_device<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    src: &Path,
+    target: &Path,
+    err: &io::Error,
+    moved_aside: Option<&Path>,
+) -> bool {
+    let why = strerror(err);
+    let _ = writeln!(
+        job.err,
+        "mv: cannot move {} to {}: {why}",
+        quoteaf_os(src),
+        quoteaf_os(target)
+    );
+    // **The only place `mv` puts a backup back**, and that is upstream's shape
+    // rather than an omission here: the move-mode rename failures above it all
+    // say `return false` outright (`copy.c:2866`). So `mv -b a b` whose rename
+    // fails leaves `b~` in place with no `b` — odd, measured, and deliberately
+    // reproduced, because `scripts/mv-diff.sh` compares the resulting tree and
+    // "fixing" it here would turn a passing case red.
+    backup::un_backup(
+        "mv",
+        moved_aside,
+        target,
+        job.flags.verbose,
+        &mut *job.out,
+        &mut *job.err,
+    );
+    false
+}
+
+/// What a cross-device move of a directory is refused with. See
+/// `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`, and
+/// `scripts/mv-diff.sh` §22 for the case that becomes an XPASS the moment a
+/// recursive fallback lands.
+fn no_directories() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "moving a directory across filesystems is not implemented by this mv",
+    )
+}
+
+/// Unlink whatever is at `target`, treating "nothing was there" as done.
+///
+/// The kind comes from the caller having already established that the source is
+/// not a directory, which is GNU's `S_ISDIR (src_mode) ? AT_REMOVEDIR : 0` with
+/// the directory arm unreachable: a directory source against a non-directory
+/// destination was refused much further up, so the two kinds agree, and the
+/// source is the one whose `stat` is already in hand.
+fn clear_destination(target: &Path) -> io::Result<()> {
+    match fs::remove_file(target) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// The `EXDEV` fallback: reproduce the source at `target`, then remove it.
+///
+/// `target` is a free name: [`clear_destination`] has just unlinked anything
+/// that was there, so every kind here creates rather than overwrites.
 ///
 /// # Errors
 ///
-/// Any failure of the copy or the removal, and the two cases this does not
-/// implement: a directory (which needs a recursive copy preserving modes,
-/// symlinks and hard links) and recreating a symlink on a host without
-/// `symlink(2)`.
+/// Any failure of the copy or the removal, and the one case this does not
+/// implement: recreating a symlink on a host without `symlink(2)`. A directory
+/// never reaches here — [`move_one`] refuses it before the destination is
+/// cleared, because clearing first and refusing second would destroy a file for
+/// a move that then did not happen.
 fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io::Result<()> {
     let kind = metadata.file_type();
 
@@ -2054,10 +2138,7 @@ fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io
     }
 
     if kind.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "moving a directory across filesystems is not implemented by this mv",
-        ));
+        return Err(no_directories());
     }
 
     fs::copy(src, target)?;
@@ -3650,6 +3731,77 @@ mod tests {
         copy_across_devices(&a, &b, &meta).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
+    }
+
+    /// The destination is *replaced*, not written through, and this is the step
+    /// that makes that true. Without it the copy opens the existing name and
+    /// truncates it, so the file that comes out keeps the old one's inode — and
+    /// with it its mode and every other name linked to it.
+    ///
+    /// Measured against GNU 9.4 across a real filesystem boundary: `mv far/f g`,
+    /// with `g` one of a linked pair, left both `g` and `g2` rewritten and still
+    /// linked, where GNU leaves `g2` untouched at its old size. The harness case
+    /// is in `scripts/mv-diff.sh` §22; this is the unit underneath it.
+    #[test]
+    fn clearing_the_destination_breaks_its_other_links() {
+        let dir = scratch("xdev_clear");
+        let one = dir.path("one");
+        let two = dir.path("two");
+        fs::write(&one, b"original").unwrap();
+        fs::hard_link(&one, &two).unwrap();
+
+        clear_destination(&one).unwrap();
+
+        assert!(fs::symlink_metadata(&one).is_err(), "the name is free");
+        assert_eq!(
+            fs::read(&two).unwrap(),
+            b"original",
+            "the other name still reads what it always did"
+        );
+    }
+
+    /// `ENOENT` is the ordinary answer, not a failure: the usual cross-device
+    /// move is onto a name that was never there, and `-b` has just renamed away
+    /// any name that was. GNU spells the test `errno != ENOENT`.
+    #[test]
+    fn clearing_a_destination_that_is_not_there_succeeds() {
+        let dir = scratch("xdev_clear_absent");
+        clear_destination(&dir.path("never-existed")).unwrap();
+    }
+
+    /// A symlink at the destination is unlinked as itself. Following it would
+    /// clear whatever it names — a file in another directory entirely — and
+    /// leave the name being moved onto still occupied.
+    #[test]
+    #[cfg(unix)]
+    fn clearing_a_symlink_destination_does_not_follow_it() {
+        let dir = scratch("xdev_clear_link");
+        let real = dir.path("real");
+        let link = dir.path("link");
+        fs::write(&real, b"kept").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        clear_destination(&link).unwrap();
+
+        assert!(fs::symlink_metadata(&link).is_err(), "the link is gone");
+        assert_eq!(fs::read(&real).unwrap(), b"kept", "its target is not");
+    }
+
+    /// Anything else is reported, so that the caller can print
+    /// `inter-device move failed: … unable to remove target`. A directory is the
+    /// reachable shape: `unlink` refuses one, and this `mv` is holding a
+    /// non-directory source, so the two kinds disagreeing is exactly the case
+    /// that must not be silently skipped.
+    #[test]
+    fn clearing_a_destination_that_will_not_go_is_reported() {
+        let dir = scratch("xdev_clear_dir");
+        let sub = dir.path("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("inside"), b"x").unwrap();
+
+        clear_destination(&sub).unwrap_err();
+
+        assert!(sub.join("inside").is_file(), "nothing may be removed");
     }
 
     /// Not implemented, and it says so rather than moving part of the tree.

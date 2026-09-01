@@ -103988,7 +103988,7 @@ see it through the whole program. Write it with the fix.
 
 ---
 
-## B-MVS-CROSS-DEVICE-COPY-WRITES-THROUGH-THE-DESTINATION — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-COPY-WRITES-THROUGH-THE-DESTINATION — FIXED 2026-09-01
 
 **In short:** moving a file onto an existing name, across a filesystem boundary,
 overwrites *every* name that file had, not the one that was asked for. If `g` and
@@ -104025,9 +104025,22 @@ copy a directory, and clearing the destination and then refusing would destroy a
 file for a move that never happened), and its own failure must not undo a backup.
 
 **How it is caught.** `scripts/mv-diff.sh` §22, the case whose fixture is
-`printf XXXXXXXXXX > g; chmod 606 g; ln g g2`. Today ours leaves both names
-rewritten at five bytes and mode 741; GNU leaves `g2` at ten bytes and mode 606.
-It is an `xfail_case` naming this entry and becomes an XPASS when the fix lands.
+`printf XXXXXXXXXX > g; chmod 606 g; ln g g2`. Measured before the fix, ours left
+both names at five bytes and mode 644 and still hard-linked to each other; GNU
+left `g2` at ten bytes, mode 606, and unlinked from `g`. Note what the case's
+fixture does *not* carry: no set-user-ID bit and no pinned time, because a case
+that also measured the copy's attribute losses would have gone on differing after
+this fix and so could never have reported it.
+
+**Fixed** by `move_one`'s `clear_destination` call, placed exactly where GNU's
+`unlinkat` sits — after the directory refusal (hoisted above it, since this `mv`
+cannot copy a directory and clearing-then-refusing would destroy a file for a
+move that never happened) and before the `copied` line. `ENOENT` is the only
+excused error, and the failure path deliberately does not `un_backup`, matching
+`copy.c:2884`. Four unit tests cover `clear_destination` directly — the
+hard-link case, the absent destination, a symlink destination that must not be
+followed, and a destination that will not go — and the §22 case is now a plain
+`run_case`.
 
 ---
 

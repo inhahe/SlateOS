@@ -1691,12 +1691,17 @@ xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the
 # The case the unlink quoted above exists for. `g` and `g2` are one inode with
 # two names, and only `g` is named on the command line. After a rename `g2`
 # still holds the old ten bytes at mode 606; after a fallback that truncates
-# and rewrites the destination in place it holds the new five at mode 741, and
+# and rewrites the destination in place it holds the new five at mode 644, and
 # a file nobody mentioned has been overwritten.
+#
+# The source is left at the default mode and carries no pinned time, unlike
+# almost every other fixture in this section. That is deliberate: a set-user-ID
+# bit here would make the case differ for the copy's *attribute* losses too, and
+# it would go on differing after the unlink landed — a case that measures two
+# defects at once cannot report either of them being fixed.
 TREE='printf XXXXXXXXXX > g; chmod 606 g; ln g g2'
-FAR='printf hello > f; chmod 4741 f'
-xfail_case "B-MVS-CROSS-DEVICE-COPY-WRITES-THROUGH-THE-DESTINATION" \
-  -v @FAR@/f g
+FAR='printf hello > f'
+run_case -v @FAR@/f g
 
 # A symlink. The fallback must copy the link — its text, not its target's bytes
 # — which means `readlink` and `symlink` and not `open`. The target is left

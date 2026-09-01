@@ -131,9 +131,9 @@ MUTATIONS = [
         # control.  A hit box on it swallows a click and does nothing, which is
         # worse than no hit box: the click it ate would have reached the cell.
         "the exit strip records a target",
-        "            fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));",
-        "            fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));\n"
-        "            f.hit(Target::Cell(GRID_ROWS, WIN_COL), l.exit);",
+        "        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));",
+        "        fill(f, l.exit, MAUVE, CornerRadii::all(l.gap.max(1.0)));\n"
+        "        f.hit(Target::Cell(GRID_ROWS, WIN_COL), l.exit);",
         ["the_exit_strip_records_no_target"],
     ),
     (
@@ -152,8 +152,14 @@ MUTATIONS = [
     ),
     (
         "the win panel records no way on",
-        "            }\n            f.hit(target, r);",
-        "            }",
+        # Anchored on the label call above it: `f.hit(target, r);` on its own
+        # also ends `draw_controls`' loop, and an anchor that matches twice
+        # patches two sites, so the row stops saying what its name says.
+        "                r,\n"
+        "            );\n"
+        "            f.hit(target, r);",
+        "                r,\n"
+        "            );",
         ["the_win_overlay_offers_a_way_on"],
     ),
     (
@@ -182,8 +188,8 @@ MUTATIONS = [
         # `total_width - PADDING - 100.0` — a guess at how wide "Moves: 1234"
         # would turn out to be.
         "the right-aligned text guesses its own width",
-        "    let w = text::measure(l.text, l.size, l.weight);",
-        "    let w = 100.0;",
+        "    let w = text::measure(l.text, l.size, l.weight).min(room);",
+        "    let w = 100.0_f32.min(room);",
         [
             "the_move_counter_is_right_aligned_from_its_own_width",
             "the_move_counter_moves_left_as_the_number_grows",
@@ -201,14 +207,14 @@ MUTATIONS = [
         # separate argument, used it to pick the centre, and then drew with
         # `max_width: None`.
         "a centred label is given no width limit",
-        "        Some(r.w),",
-        "        None,",
-        ["a_centred_label_is_given_the_width_of_the_box_it_sits_in"],
+        "    push_text(f, l, x, y, r.right() - x);",
+        "    push_text(f, l, x, y, f32::MAX);",
+        ["a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box"],
     ),
     (
         "a centred label starts at the right-hand edge of its box",
-        "        r.x + (r.w - w) / 2.0,",
-        "        r.x + r.w,",
+        "    let x = r.x + (r.w - w) / 2.0;",
+        "    let x = r.x + r.w;",
         ["the_block_label_stays_inside_the_block"],
     ),
     (
@@ -492,6 +498,206 @@ MUTATIONS = [
         "        }\n",
         "",
         ["the_window_close_request_exits"],
+    ),
+    # ── C-CENTRING-IS-NOT-A-BOUND (lesson 109) ──────────────────────
+    (
+        # The whole campaign in one row: centring without asking whether the
+        # band has the room is an arrangement, not a bound.
+        "centre_line never refuses a band",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    Some(band.y + (band.h - height) / 2.0)",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "centre_line always refuses",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    None",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "a band with no width is still a band",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    (band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a band one point short is close enough",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    (!band.is_empty() && band.h + 1.0 >= height).then(|| band.y + (band.h - height) / 2.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        # A run told it may fill nought points is a run the renderer is asked to
+        # ellipsise into nothing. Containment cannot see it -- an empty box is
+        # inside everything -- so it needs a test of its own.
+        "a run is pushed into a box with no room",
+        "    if l.text.is_empty() || limit <= 0.0 {",
+        "    if l.text.is_empty() {",
+        ["no_run_is_pushed_into_a_box_with_no_room"],
+    ),
+    (
+        "the renderer is never told where to stop",
+        "        max_width: Some(limit),",
+        "        max_width: None,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # Lesson 8: a run's width limit is measured from where the run starts,
+        # not from the width of the band the caller had in mind.
+        # Anchored on the signature, because `label_right` ends in the same
+        # statement and an anchor that matches twice patches two sites.
+        "a labels limit is measured from the band, not from where it starts",
+        "fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, right: f32) {\n"
+        "    push_text(f, l, x, y, right - x);",
+        "fn label(f: &mut Frame<Target>, l: &Label, x: f32, y: f32, right: f32) {\n"
+        "    push_text(f, l, x, y, right);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a right-aligned label has no left bound",
+        "    let w = text::measure(l.text, l.size, l.weight).min(room);",
+        "    let w = text::measure(l.text, l.size, l.weight);",
+        ["the_headers_title_stops_where_its_counters_begin"],
+    ),
+    (
+        "a centred label centres without asking",
+        "    let Some(y) = centre_line(r, lh) else {\n"
+        "        return;\n"
+        "    };",
+        "    let y = r.y + (r.h - lh) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The fault this row reproduces was live: `label_centred` insets the run
+        # by half the slack and then handed the renderer the *box's* width as the
+        # limit, so a run may end half the slack past the box's right edge.  On a
+        # 120-point window the "Next" label was allowed to reach 123.5 in a band
+        # 120 wide.  A limit is a distance from where the run starts.
+        "a centred labels limit is measured from the box, not from where it starts",
+        "    push_text(f, l, x, y, r.right() - x);",
+        "    push_text(f, l, x, y, r.w);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The header stacks one or two lines and then centres the stack. Asking
+        # about nothing at all is the shape the guard had before: present,
+        # unreachable, and worth no coverage.
+        "the header asks whether its band can hold nothing",
+        "        let Some(top) = centre_line(l.header, stack) else {",
+        "        let Some(top) = centre_line(l.header, 0.0) else {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the header centres one line when it drew two",
+        "        let stack = if two_lines { title_h + sub_h } else { title_h };",
+        "        let stack = title_h;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # Two columns in one band: each staying inside the band is not the two
+        # of them staying off each other.
+        "the header title runs to the far edge of the band",
+        "        let split = (right - counters - l.pad).max(left);",
+        "        let split = right;",
+        ["the_headers_title_stops_where_its_counters_begin"],
+    ),
+    (
+        "the header title is given no column at all",
+        "        let split = (right - counters - l.pad).max(left);",
+        "        let split = (right - counters - l.pad).min(left);",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "the split is measured from the narrower counter",
+        "        let counters = text::measure(&moves, l.font, FontWeightHint::Regular).max(if two_lines {",
+        "        let counters = text::measure(&moves, l.font, FontWeightHint::Regular).min(if two_lines {",
+        ["the_headers_title_stops_where_its_counters_begin"],
+    ),
+    (
+        "the footer centres its stack as though it were one line",
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {",
+        "        let Some(top) = centre_line(l.footer, lh) else {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the footer lines run one padding past their band",
+        "                l.footer.right() - l.pad,",
+        "                l.footer.right() + l.pad,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the victory card centres its title and forgets the rest",
+        "        let Some(top) = centre_line(panel, stack) else {",
+        "        let Some(top) = centre_line(panel, title_h) else {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the victory card does not ask at all",
+        "        let Some(top) = centre_line(panel, stack) else {\n"
+        "            return;\n"
+        "        };",
+        "        let top = panel.y + (panel.h - stack) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The solve sizes the mat, not the grid. Sizing the grid and painting a
+        # mat around it is how the mat ends up outside the band -- and on any
+        # window wider than it is tall the vertical shortfall is nought, so
+        # there is nowhere for the extra gap to go.
+        "the solve does not reserve the mats ring above and below",
+        "            + GAP_PER_CELL * 2.0",
+        "            + GAP_PER_CELL",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the solve does not reserve the mats ring left and right",
+        "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 + 1.0) * GAP_PER_CELL;",
+        "        let per_w = GRID_COLS as f32 + (GRID_COLS as f32 - 1.0) * GAP_PER_CELL;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the grid is centred and the mat is drawn around it",
+        "            let fy = band.y + (band.h - frame_h) / 2.0;",
+        "            let fy = band.y + (band.h - stack_h) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The floor that kept a selection visible on a tiny board kept it
+        # visible by drawing it outside the board.
+        "the selection halo has a floor that outgrows the ring",
+        "                let grow = l.gap;",
+        "                let grow = (l.gap * 0.8).max(1.0);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the mat is painted over the whole window",
+        "        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));",
+        "        fill(f, l.window, CRUST, CornerRadii::all(l.gap.max(1.0)));",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # Lesson 11: `Frame::clip` pushes a command whether or not the rectangle
+        # has area, so a pass that clips before it has refused its band cannot
+        # be silent about a band it never had.
+        "the footer clips its band before it has refused it",
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {\n"
+        "            return;\n"
+        "        };\n"
+        "        f.clip(l.footer);",
+        "        f.clip(l.footer);\n"
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {\n"
+        "            return;\n"
+        "        };",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "a rectangle with no area is still filled",
+        "    if r.is_empty() {\n"
+        "        return;\n"
+        "    }\n"
+        "    f.push(RenderCommand::FillRect {",
+        "    f.push(RenderCommand::FillRect {",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
 ]
 

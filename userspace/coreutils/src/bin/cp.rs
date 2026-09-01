@@ -3618,7 +3618,10 @@ fn create_destination<O: Write, E: Write>(
         0
     };
 
-    match open_new(dst, (permission_bits(src_meta) & !debt.omitted) | debt.extra) {
+    match open_new(
+        dst,
+        (permission_bits(src_meta) & !debt.omitted) | debt.extra,
+    ) {
         Ok(f) => {
             top_up_extra(&f, debt);
             Ok((f, true))
@@ -3672,9 +3675,8 @@ fn top_up_extra(f: &fs::File, debt: &mut ModeDebt) {
         return;
     }
     let on = On::File(f);
-    let arrived = current_mode(on).is_ok_and(|now| {
-        now | debt.extra == now || fsattr::set_mode(on, now | debt.extra).is_ok()
-    });
+    let arrived = current_mode(on)
+        .is_ok_and(|now| now | debt.extra == now || fsattr::set_mode(on, now | debt.extra).is_ok());
     if !arrived {
         debt.extra = 0;
     }

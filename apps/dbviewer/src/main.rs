@@ -8609,4 +8609,138 @@ mod tests {
             "the frame was drawn at one size and the app remembers another"
         );
     }
+
+    /// The drawing passes that take a plain box, by name.
+    ///
+    /// `draw_data_grid` and `draw_bottom_panels` are not here: they take a
+    /// whole `Layout` rather than a box, and what they draw into is already
+    /// covered by the sweeps over the window.
+    /// Whether `inner` lies inside `outer`, to within a hundredth of a point.
+    ///
+    /// Not `outer.intersect(inner) == Some(inner)`, which is the idiom the
+    /// sweeps over the window use. That form asks for exact equality, and the
+    /// intersection recomputes the height as `bottom - y` from two numbers that
+    /// are already inexact: a filter row placed at `y = 111.99999` with
+    /// `h = 18.0` comes back 18.000004 tall and compares unequal to itself.
+    /// The window's own edges are whole numbers, so the sweeps never meet it;
+    /// a box laid out from a chain of fractions does.
+    fn bounded_by(outer: Rect, inner: Rect) -> bool {
+        inner.x >= outer.x - 0.01
+            && inner.y >= outer.y - 0.01
+            && inner.right() <= outer.right() + 0.01
+            && inner.bottom() <= outer.bottom() + 0.01
+    }
+
+    /// One drawing pass: the app it belongs to, the frame it writes into, and
+    /// the box it is told to stay inside.
+    type Pass = fn(&DbViewerApp, &mut Frame<Target>, Rect);
+
+    fn passes() -> Vec<(&'static str, Pass)> {
+        vec![
+            ("toolbar", DbViewerApp::draw_toolbar),
+            ("database tabs", DbViewerApp::draw_db_tabs),
+            ("sidebar", DbViewerApp::draw_sidebar),
+            ("sql editor", DbViewerApp::draw_sql_editor),
+            ("results", DbViewerApp::draw_results),
+            ("schema", DbViewerApp::draw_schema),
+            ("diagram", DbViewerApp::draw_diagram),
+            ("status bar", DbViewerApp::draw_status_bar),
+        ]
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_box_it_was_given() {
+        // Phrased over *fills*, and it has to be. A clip stops the renderer
+        // showing a run of text past the edge and makes `Frame::hit` drop the
+        // boxes out there, so a pass that overran would look correct from both
+        // -- but a fill is pushed exactly as asked. The fill is the only
+        // witness left. (known-issues.md, Lesson 107.)
+        for (state, app) in states() {
+            for (name, pass) in passes() {
+                for (w, h) in [
+                    (300.0, 200.0),
+                    (220.0, 120.0),
+                    (400.0, 90.0),
+                    (200.0, 400.0),
+                    (120.0, 40.0),
+                    (60.0, 18.0),
+                ] {
+                    // The frame is bigger than the box on every side, so an
+                    // overrun has somewhere to go and is not quietly clamped.
+                    let area = Rect::new(10.0, 10.0, w, h);
+                    let mut f = Frame::new(area.right() + 40.0, area.bottom() + 40.0);
+                    pass(&app, &mut f, area);
+                    for command in f.commands() {
+                        let RenderCommand::FillRect {
+                            x,
+                            y,
+                            width,
+                            height,
+                            ..
+                        } = command
+                        else {
+                            continue;
+                        };
+                        let filled = Rect::new(*x, *y, *width, *height);
+                        if filled.is_empty() {
+                            continue;
+                        }
+                        assert!(
+                            bounded_by(area, filled),
+                            "{state}: the {name} pass, given {area:?}, filled \
+                             {filled:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_sidebar_is_given_up_before_the_grid_falls_below_a_table() {
+        for step in 0..=400_u32 {
+            let w = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 6.0;
+            let l = Layout::solve(w, 800.0);
+            if l.sidebar.w <= 0.0 {
+                continue;
+            }
+            assert!(
+                l.sidebar.w >= MIN_SIDEBAR_WIDTH,
+                "at {w} across the sidebar is {} wide, which is narrower than a \
+                 table name",
+                l.sidebar.w
+            );
+            assert!(
+                l.grid.w >= MIN_GRID_WIDTH,
+                "at {w} across the sidebar took {} and left the grid {}",
+                l.sidebar.w,
+                l.grid.w
+            );
+        }
+    }
+
+    #[test]
+    fn the_bottom_panel_and_the_tab_strip_are_given_up_before_the_grid_is() {
+        for step in 0..=400_u32 {
+            let h = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 4.0;
+            let l = Layout::solve(1200.0, h);
+            if l.panel.h > 0.0 {
+                assert!(
+                    l.grid.h >= MIN_GRID_HEIGHT,
+                    "at {h} tall the panel took {} and left the grid {}, which \
+                     is less than a header, a row and a pagination bar",
+                    l.panel.h,
+                    l.grid.h
+                );
+            }
+            if l.tabs.h > 0.0 {
+                assert!(
+                    l.grid.h >= MIN_GRID_HEIGHT,
+                    "at {h} tall the tab strip took {} and left the grid {}",
+                    l.tabs.h,
+                    l.grid.h
+                );
+            }
+        }
+    }
 }

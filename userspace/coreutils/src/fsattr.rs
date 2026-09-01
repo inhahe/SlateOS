@@ -838,11 +838,6 @@ const ERANGE: i32 = 34;
 #[cfg(unix)]
 const ENODATA: i32 = 61;
 
-/// `ENOENT` — "no such file". Named here only because this OS's kernel answers
-/// a missing *attribute* with it too; see [`remove_xattr`].
-#[cfg(unix)]
-const ENOENT: i32 = 2;
-
 /// Whether a failure means "this filesystem simply has no extended attributes",
 /// as opposed to "the attributes exist and something went wrong".
 ///
@@ -1108,18 +1103,18 @@ pub fn set_xattr(on: On<'_>, name: &[u8], value: &[u8]) -> io::Result<()> {
 /// `cp -p` onto an ordinary file print a diagnostic about an attribute nobody
 /// asked for.
 ///
-/// `ENODATA` is Linux's answer for that case, and `ENOENT` is this OS's for now:
-/// the kernel has one error for "no such file" and "no such attribute"
-/// (`known-issues.md` → `B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS`,
-/// filed to lane A). Accepting both means a genuinely missing *path* is also
-/// swallowed here — which costs nothing, because every caller has just operated
-/// on that path and would have failed earlier if it were gone. When the kernel
-/// grows a distinct code, drop the `ENOENT`.
+/// `ENODATA` is the answer, on Linux and now here too. It used to accept
+/// `ENOENT` as well, because the kernel had one error for "no such file" and
+/// "no such attribute" and there was no way to fold in the second without also
+/// folding in the first — swallowing a genuinely missing *path*. Lane A's
+/// `32f35d46b` split them (`NoAttribute`, mapped to `ENODATA` in
+/// `posix::errno`), so the `ENOENT` is gone and a vanished path is reported
+/// again.
 ///
 /// # Errors
 ///
-/// Whatever `removexattr`/`lremovexattr`/`fremovexattr` said, except the two
-/// codes above, or [`io::ErrorKind::InvalidInput`] for a name containing a NUL.
+/// Whatever `removexattr`/`lremovexattr`/`fremovexattr` said, except `ENODATA`,
+/// or [`io::ErrorKind::InvalidInput`] for a name containing a NUL.
 #[cfg(unix)]
 pub fn remove_xattr(on: On<'_>, name: &[u8]) -> io::Result<()> {
     use std::os::unix::io::AsRawFd;
@@ -1153,7 +1148,7 @@ pub fn remove_xattr(on: On<'_>, name: &[u8]) -> io::Result<()> {
         return Ok(());
     }
     let err = io::Error::last_os_error();
-    if matches!(err.raw_os_error(), Some(ENODATA | ENOENT)) {
+    if err.raw_os_error() == Some(ENODATA) {
         return Ok(());
     }
     Err(err)

@@ -104413,3 +104413,101 @@ that lost two days to acting on an unmeasured hypothesis.
 as a plain child — rather than reasoning about the code. `bench_vfs_readdir`
 now logs the entry count of `/` and names every boot, so the workload side of the
 comparison is finally pinned.
+
+
+---
+
+## A host out-of-memory during QEMU is recorded as a kernel PANIC, and zeroes the clean streak
+
+**Status:** open. Observed once, 2026-09-01, on a `--bench` boot in the lane-A
+worktree. Nothing in the tree was wrong; the boot history now says otherwise.
+
+**In short:** the machine running QEMU briefly ran out of mappable memory. QEMU
+could not give the emulated GPU the memory it asked for, the kernel correctly
+reported that as an I/O error, a self-test correctly called it fatal — and the
+boot history wrote it down as "kernel died", which reset the consecutive
+clean-boot streak from 9 to 0 and added a failure to the project's headline
+health counts. Every step behaved correctly and the recorded conclusion is still
+false.
+
+**What actually happened, in order.** QEMU printed, on its own stderr:
+
+```
+C:\program files\qemu\qemu-system-x86_64.exe: warning: Failed to CreateFileMapping:
+The paging file is too small for this operation to complete.
+```
+
+and a shell helper in the same harness died of the same pressure:
+
+```
+0 [main] date (85728) child_copy: cygheap read copy failed, 0x0..0x80000CD40,
+done 0, windows pid 85728, Win32 error 299
+```
+
+(`299` is `ERROR_PARTIAL_COPY`.) The guest then saw its GPU refuse an
+allocation:
+
+```
+[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the bound was
+             rejected: I/O error (-600)
+FATAL: virtio-gpu render-resource self-test failed: internal kernel error (-1)
+```
+
+and `boot-history.py` classified the run:
+
+```
+[boot-history] PANIC -- kernel died (PANIC / FATAL in the serial log)
+[boot-history] current consecutive clean streak: 0
+```
+
+**Why the message is especially misleading.** The self-test that failed is a
+*boundary* test — "a resource exactly at the bound was rejected". A host OOM
+landing on that allocation produces a log line that reads exactly like a
+genuine off-by-one in the bound check. Anyone reading the history later would
+have every reason to bisect for a virtio-gpu regression and would find no
+guilty commit, which is the same shape as the `http_build_response_1KiB`
+mode-split that `bench-history.py:mode_structure` was written to prevent.
+
+**It was not the tree, and it was not a leak.** Inspected minutes afterwards:
+no `qemu-system-x86_64` processes were alive, 28.85 GiB of 63.95 GiB physical
+was free, and the pagefile was 191191 MiB allocated against 20632 MiB in use
+with a 22649 MiB peak — nowhere near exhausted. Windows grows the pagefile
+lazily, so a fast allocation spike can outrun that growth and produce this exact
+message on a machine with tens of gigabytes free. The likely source of the spike
+is a concurrent `cargo build` in another lane's worktree: the boot lock
+serialises QEMU across the three lanes, but nothing serialises their builds.
+
+**The proper fix.** `boot-history.py` already has the right concept — a boot
+whose outcome "is evidence about the probe, not about the tree" is tagged
+`experiment` and kept out of every statistic (`is_experiment`, line 671). A
+host-resource failure is the same category and needs the same treatment, but it
+must not reuse the `experiment` flag: that flag means "invoked deliberately
+under non-default conditions", and silently widening it to mean "or the host
+hiccupped" would let a real failure be waved away by an unrelated predicate.
+
+So: a distinct verdict — `HOST_FAIL` — set when the harness sees an
+unambiguous host-side signature in QEMU's own output, excluded from the streak
+and from the clean/total counts exactly as `experiment` rows are, and printed
+with a reason so the row still says what happened. Candidate signatures, all
+emitted by QEMU or Cygwin rather than by the guest, so a kernel bug cannot
+forge them:
+
+| signature | source |
+|---|---|
+| `Failed to CreateFileMapping` | QEMU, Windows memory backend |
+| `The paging file is too small` | QEMU, quoting Windows |
+| `cannot set up guest memory` | QEMU, generic allocation failure |
+| `cygheap read copy failed` | Cygwin fork failure under pressure |
+
+Two things to get right when implementing it. The detection must read QEMU's
+**stderr**, not the guest's serial log — a guest that printed
+`Failed to CreateFileMapping` must not be able to excuse itself. And the
+existing `PANIC` classification must stay the default: `HOST_FAIL` is only
+reachable on a positive match, because the direction that fails safely here is
+the one that over-reports failures, exactly as `is_experiment`'s doc argues for
+its own absent-means-no default.
+
+**Until it is fixed,** a boot that dies this way has to be spotted by eye and
+re-run, and the streak counter should be read as a lower bound. This run was
+re-run and the entry will be updated if it recurs — one occurrence is not yet
+evidence about frequency.

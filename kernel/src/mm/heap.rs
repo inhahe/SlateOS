@@ -166,11 +166,15 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
         // and `is_valid_frame_ptr` is three range checks against statics — no
         // lock, so no new edge under the heap lock this may be holding.
         //
-        // Capped at 8 frames: the freeing call site is within two or three of
-        // `dealloc`, and an allocator that printed 32 lines per event would bury
-        // the harness output that gives the frames their meaning.
+        // 16 frames, not 8. Eight was chosen on the guess that the freeing call
+        // site sits two or three above `dealloc`; the first capture disproved
+        // it. The allocator and `alloc`'s own drop glue occupy frames 0..8
+        // exactly — poison_free, slab_dealloc, dealloc, __rust_dealloc,
+        // Global::deallocate, RawVecInner::deallocate, RawVec::drop,
+        // drop_in_place<RawVec<T>> — so a cap of 8 names the *type* being freed
+        // and never the code that owns it, which is the actual question.
         let bt = crate::backtrace::capture();
-        for (i, f) in bt.frames.iter().take(bt.count).take(8).enumerate() {
+        for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
             serial_println!("[heap]   double-free frame {i}: {:#x}", f.return_addr);
         }
         return true;

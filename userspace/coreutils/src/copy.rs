@@ -1,20 +1,32 @@
-//! The directory side of a recursive copy: making a destination directory,
-//! reading a source one in the order GNU walks it, and the bookkeeping for the
-//! permission bits that are deliberately withheld while a copy is in flight.
+//! The copy engine `cp` and `mv` are both supposed to be, named for the
+//! upstream file it is being reassembled from.
 //!
-//! Split out of `cp` so that `mv` can reach it. The two are one program
-//! upstream — there is a single `copy_internal` in `copy.c`, parameterised by
-//! `struct cp_options`, and `mv` is that engine with `move_mode` set
-//! (`mv.c:119`) — so a second walk written for `mv` would be a second home for
-//! every bug this one has. This module is the first instalment of putting them
-//! back together; see `known-issues.md` →
-//! `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` for the staged plan and for
-//! why the stages are separated the way they are.
+//! The two are one program upstream — there is a single `copy_internal` in
+//! `copy.c`, parameterised by `struct cp_options`, and `mv` is that engine with
+//! `move_mode` set (`mv.c:119`) — so anything written a second time for `mv` is
+//! a second home for every bug the first one has. That is not a theoretical
+//! risk. It has happened twice already in this tree, and both times the fix
+//! landed on one copy and not the other: `mv` created its destinations with the
+//! extra owner-write bit that lets a read-only file's extended attributes be
+//! written and `cp` did not; then `cp` gained the repair for when the umask
+//! eats that bit and `mv` did not. Two halves of one fix, one half in each
+//! program, neither program wrong in a way its own tests could see.
 //!
-//! Nothing here consults an option struct. That is the property that makes the
-//! module shareable at all, and it is worth keeping as the rest of the engine
-//! arrives: [`ModeDebt::new`] takes the single flag it needs as a `bool`, and
-//! the other three functions take none.
+//! **The module is being assembled in stages and is not finished.** See
+//! `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED` for the
+//! plan, for why the stages are cut where they are, and for how each is
+//! certified. What is here now is stage 1: the leaf helpers that were already
+//! free of any option struct.
+//!
+//! Nothing here consults one *yet* — [`ModeDebt::new`] takes the single flag it
+//! needs as a `bool`, and the other three functions take none. That is what
+//! made this first instalment moveable without deciding anything, and it is
+//! deliberately **not** a rule for the module: the stages that follow bring the
+//! preserve tail and the walk, neither of which can be expressed without an
+//! options struct. Upstream's is `struct cp_options` and ours will be the same
+//! thing under a Rust name — the fields the engine actually reads, with `mv`
+//! supplying the constants `mv.c`'s `cp_option_init` supplies. A module that
+//! refused one would not be shareable; it would just be empty.
 
 use std::fs;
 use std::io;

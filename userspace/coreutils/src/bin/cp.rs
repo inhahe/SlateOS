@@ -246,7 +246,7 @@
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
 use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
-use coreutils::copytree::{ModeDebt, make_dir, read_dir_fastread};
+use coreutils::copy::{ModeDebt, make_dir, read_dir_fastread};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{

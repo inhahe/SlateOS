@@ -111,6 +111,16 @@ struct Layout {
     /// The statistics column, or [`Rect::EMPTY`] when the window cannot pay
     /// for one.
     stats: Rect,
+    /// The band the end-of-round card dims and sits in: the gallows and the
+    /// word together, which is the part of the screen the round was played on.
+    ///
+    /// A field rather than an expression inside `draw_result`, because a band
+    /// that is only ever written down inside the pass that paints it is a band
+    /// no test can name -- and a region no test can name is a region no test
+    /// checks the pass against. It was `Rect::new(gallows.x, gallows.y,
+    /// gallows.w.max(word.w), word.bottom() - gallows.y)`, four lines into the
+    /// middle of the drawing code.
+    overlay: Rect,
     /// The side of one key, and the gap between two.
     key: f32,
     key_gap: f32,
@@ -140,7 +150,17 @@ impl Layout {
         let title = (font * 1.4).clamp(12.0, 24.0);
         let small = (font - 2.0).max(7.0);
 
-        let header = Rect::new(pad, pad, (w - pad * 2.0).max(0.0), (font * 3.4).min(h));
+        // `.min(h)` is not a bound on a band that does not start at the top: the
+        // bar begins a pad down, so a height clamped to the whole window
+        // finishes a pad *below* it. A 740x12 window put a 12 px bar at y = 4
+        // and the bar's bottom edge was drawn 4 px past the glass. The room a
+        // band has is the room left below where it starts, never `h`.
+        let header = Rect::new(
+            pad,
+            pad,
+            (w - pad * 2.0).max(0.0),
+            (font * 3.4).min((h - pad).max(0.0)),
+        );
 
         // The keyboard is measured before anything else is given room. Ten
         // keys and their gaps have to fit the width, and three rows have to
@@ -154,7 +174,17 @@ impl Layout {
         let by_width = ((w - pad * 4.0) / cols - pad * 0.4).max(0.0);
         let by_height = (h * 0.30 / 3.0 - pad * 0.4).max(0.0);
         let key = by_width.min(by_height).clamp(0.0, 34.0);
-        let key_gap = (key * 0.14).clamp(1.0, 5.0);
+        // The gap is a gap *between keys*, so when there are no keys there is
+        // no gap. `(key * 0.14).clamp(1.0, 5.0)` has a floor of one point that
+        // does not care whether the key it is scaled from exists, so a window
+        // with no room for a keyboard still got `3 * 0 + 2 * 1` = two points of
+        // keyboard -- an empty band with a height, which then took its height
+        // out of everything above it.
+        let key_gap = if key > 0.0 {
+            (key * 0.14).clamp(1.0, 5.0)
+        } else {
+            0.0
+        };
         let kb_w = cols * key + (cols - 1.0) * key_gap;
         let kb_h = 3.0f32.mul_add(key, 2.0 * key_gap);
         let keyboard = Rect::new(
@@ -207,6 +237,12 @@ impl Layout {
         let word_h = (word_font_for(font) * 2.0).min(free_h);
         let gallows = Rect::new(pad, free_y, main_w, (free_h - word_h).max(0.0));
         let word = Rect::new(pad, gallows.bottom(), main_w, word_h);
+        let overlay = Rect::new(
+            gallows.x,
+            gallows.y,
+            gallows.w.max(word.w),
+            (word.bottom() - gallows.y).max(0.0),
+        );
 
         Self {
             window,
@@ -215,6 +251,7 @@ impl Layout {
             word,
             keyboard,
             stats,
+            overlay,
             key,
             key_gap,
             pad,
@@ -418,29 +455,6 @@ fn text_at(
     });
 }
 
-/// Draw `s` horizontally centred within `within`, with its top at `y`.
-///
-/// The centre comes from measuring the string that is about to be drawn, not
-/// from a constant guessed for one particular string at one particular font
-/// size -- the menu title used to be centred by subtracting a literal 80.0
-/// (lesson 93).
-fn centred_text(
-    f: &mut Frame<Target>,
-    s: &str,
-    within: Rect,
-    y: f32,
-    size: f32,
-    weight: FontWeightHint,
-    color: Color,
-) {
-    let tw = text::measure(s, size, weight);
-    // `.max(within.x)` because centring is not a bound in this direction
-    // either: a string wider than the box it is centred in starts to the
-    // *left* of the box and hangs the same distance off the other end.
-    let x = (within.x + (within.w - tw) / 2.0).max(within.x);
-    text_at(f, s, x, y, size, weight, color, Some(within.right() - x));
-}
-
 /// The `y` at which a run `size` points tall sits centred in `band`, or `None`
 /// when the band is too short to hold it.
 ///
@@ -461,10 +475,16 @@ fn centre_line(band: Rect, size: f32) -> Option<f32> {
 /// asks for the run to be centred. Answers `None` when the band has no room
 /// left at all, so a caller cannot draw into a box of no width.
 ///
-/// The centred arm clamps at `band.x` for the same reason [`centred_text`]
-/// does, and the returned width is measured from the run's *actual* left edge
-/// rather than being `band.w`: a run inset by a pad and given `band.w` as its
-/// `max_width` may elide nothing and still finish a pad past the right edge.
+/// The centred arm clamps at `band.x` because centring is not a bound in this
+/// direction either: a string wider than the box it is centred in starts to
+/// the *left* of the box and hangs the same distance off the other end. The
+/// returned width is measured from the run's *actual* left edge rather than
+/// being `band.w`: a run inset by a pad and given `band.w` as its `max_width`
+/// may elide nothing and still finish a pad past the right edge.
+///
+/// This absorbed a `centred_text` helper that did the horizontal half of the
+/// job and had no vertical guard at all, which is how the menu's title and
+/// subtitle came to be drawn above a window too short to hold them.
 fn span(
     band: Rect,
     s: &str,
@@ -1132,27 +1152,31 @@ impl HangmanApp {
         // Centred by measuring, not by subtracting a guessed 80.0 from half
         // the window -- which is what this did, so the title sat left of
         // centre at the one size it was tuned for and anywhere at all in any
-        // other.
+        // other. `column_line` rather than a bare centring because the menu is
+        // a column like any other: it starts at the top and each line goes
+        // where the last one finished, so it runs out of window the same way.
         let title_size = l.title * 1.4;
         let mut y = l.window.y + l.pad * 2.0;
-        centred_text(
+        column_line(
             f,
-            title,
             l.window,
             y,
+            title,
             title_size,
             FontWeightHint::Bold,
             LAVENDER,
+            None,
         );
         y += title_size * 1.5;
-        centred_text(
+        column_line(
             f,
-            subtitle,
             l.window,
             y,
+            subtitle,
             l.font,
             FontWeightHint::Regular,
             SUBTEXT0,
+            None,
         );
         y += l.font * 2.0;
 
@@ -1207,8 +1231,9 @@ impl HangmanApp {
         #[expect(clippy::cast_precision_loss, reason = "five categories; exact in f32")]
         let rows = Category::ALL.len() as f32;
         let mut chip_y = rows.mul_add(btn_h + btn_gap, y) + l.pad;
-        if chip_y + btn_h <= l.window.bottom() {
-            self.draw_difficulty_chips(f, l, btn_x, chip_y, btn_w);
+        let chips = Rect::new(btn_x, chip_y, btn_w, btn_h);
+        if chips.bottom() <= l.window.bottom() {
+            self.draw_difficulty_chips(f, l, chips);
             chip_y += btn_h + l.pad;
         }
 
@@ -1240,16 +1265,29 @@ impl HangmanApp {
     /// The three difficulty chips, drawn from [`Difficulty::ALL`] and each
     /// recording a hit box, so the `1`/`2`/`3` keys are a shortcut rather than
     /// the only way in.
-    fn draw_difficulty_chips(&self, f: &mut Frame<Target>, l: &Layout, x: f32, y: f32, w: f32) {
+    ///
+    /// `band` is the strip the row of chips owns. It used to be `x`, `y` and
+    /// `w` -- three of a rectangle's four fields, with the height left to the
+    /// pass to invent as `l.font * 2.0`. A sub-pass's contract is "stay inside
+    /// the box you are given", and it cannot honour a contract it was not
+    /// given the terms of: with no height the chips were as tall as the type
+    /// asked for, and only the caller's own `chip_y + btn_h` check kept them
+    /// off the line below. Naming the band makes the bound the pass's own.
+    fn draw_difficulty_chips(&self, f: &mut Frame<Target>, l: &Layout, band: Rect) {
+        if band.is_empty() {
+            return;
+        }
         #[expect(clippy::cast_precision_loss, reason = "three chips; exact in f32")]
         let n = Difficulty::ALL.len().max(1) as f32;
         let gap = l.pad * 0.4;
-        let chip_w = ((w - gap * (n - 1.0)) / n).max(0.0);
-        let chip_h = (l.font * 2.0).max(1.0);
+        let chip_w = ((band.w - gap * (n - 1.0)) / n).max(0.0);
+        let chip_h = (l.font * 2.0).min(band.h);
         for (i, diff) in Difficulty::ALL.iter().enumerate() {
             #[expect(clippy::cast_precision_loss, reason = "three chips; exact in f32")]
-            let cx = (i as f32).mul_add(chip_w + gap, x);
-            let r = Rect::new(cx, y, chip_w, chip_h);
+            let cx = (i as f32).mul_add(chip_w + gap, band.x);
+            let Some(r) = Rect::new(cx, band.y, chip_w, chip_h).intersect(band) else {
+                continue;
+            };
             let on = *diff == self.difficulty;
             fill(
                 f,
@@ -1687,13 +1725,8 @@ impl HangmanApp {
     /// The end-of-round card, with the two things a player can do next drawn
     /// as buttons rather than described as keystrokes.
     fn draw_result(&self, f: &mut Frame<Target>, l: &Layout) {
-        let over = Rect::new(
-            l.gallows.x,
-            l.gallows.y,
-            l.gallows.w.max(l.word.w),
-            (l.word.bottom() - l.gallows.y).max(0.0),
-        );
-        if over.w <= 0.0 || over.h <= 0.0 {
+        let over = l.overlay;
+        if over.is_empty() {
             return;
         }
         fill(f, over, Color::rgba(17, 17, 27, 200), CornerRadii::ZERO);
@@ -3192,7 +3225,16 @@ mod tests {
     /// A spread of window sizes, from smaller than anything sane up to a
     /// large one. Every layout test sweeps these rather than checking the
     /// one size the drawing was authored at.
-    const SIZES: [(f32, f32); 9] = [
+    ///
+    /// The second half are *slivers*, and they are the half that finds things.
+    /// A grid that steps 240, 320, 480, 640 never asks what happens when a
+    /// band is shorter than the line centred in it, because at every one of
+    /// those sizes every band is comfortably taller than its type -- so the
+    /// arithmetic that only misbehaves in a squeezed band is never run. Every
+    /// fault lesson 109 is about lives below 60 px of height, and `900x55` is
+    /// named in `Layout::solve`'s own comment as the size at which the free
+    /// band began after it ended.
+    const SIZES: [(f32, f32); 15] = [
         (240.0, 200.0),
         (320.0, 240.0),
         (480.0, 320.0),
@@ -3202,6 +3244,12 @@ mod tests {
         (1280.0, 720.0),
         (1920.0, 1080.0),
         (600.0, 1000.0),
+        (900.0, 55.0),
+        (740.0, 60.0),
+        (740.0, 12.0),
+        (120.0, 560.0),
+        (24.0, 24.0),
+        (0.0, 0.0),
     ];
 
     /// Every letter of the alphabet, lowercase.
@@ -4086,6 +4134,468 @@ mod tests {
                     letter as char
                 );
             }
+        }
+    }
+
+    // -- Containment (lesson 109) -----------------------------------------
+    //
+    // `band.y + (band.h - size) / 2.0` is where a run goes when the band is
+    // tall enough to hold it, and it is *above* the band the moment the band
+    // is not: the subtraction goes negative and centring obligingly halves it.
+    // Hangman had nine of them. What follows is the test that says so, because
+    // the fix without it is a fix that survives until the next edit.
+
+    /// One drawing pass, as the tests call it: the app, a frame and the
+    /// layout. Named so the sweeps below can hold an array of them.
+    type Pass = fn(&HangmanApp, &mut Frame<Target>, &Layout);
+
+    /// True when `inner` is inside `outer`, or is nothing at all.
+    ///
+    /// An empty rectangle is inside everything, which is the honest answer --
+    /// nothing was painted -- and the reason [`a_squeezed_pass_that_draws_at_all
+    /// _draws_something_reachable`] exists: containment on its own can always
+    /// be satisfied by drawing nothing.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    /// Every rectangle a pass filled or stroked, and every line it drew.
+    ///
+    /// A line is a rectangle of no thickness for this purpose: `draw_word`'s
+    /// rules and `draw_stats`' divider are strokes and nothing else, so a pass
+    /// that drew only lines would otherwise be measured as drawing nothing.
+    fn painted(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                }
+                | RenderCommand::StrokeRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                RenderCommand::Line {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    width,
+                    ..
+                } => Some(Rect::new(
+                    x1.min(*x2),
+                    y1.min(*y2) - width / 2.0,
+                    (x2 - x1).abs(),
+                    (y2 - y1).abs() + width,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every run of text a pass inked, as the box it occupies.
+    ///
+    /// A `Text` command carries no height, which is exactly why the centring
+    /// fault went unseen for as long as it did: the question "did that line
+    /// leave its band?" cannot be asked of the command stream until someone
+    /// supplies the height, and the height is the font size.
+    fn inked(f: &Frame<Target>) -> Vec<(String, Rect)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let w =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    Some((text.clone(), Rect::new(*x, *y, w, *font_size)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The states the containment sweeps are drawn in.
+    ///
+    /// Every branch that paints something has to appear, because a branch
+    /// nobody enters is a branch nobody measures. The spent hint, the six
+    /// figure parts, the "None yet" line and the two result cards are each
+    /// drawn by code the default state never reaches.
+    fn states() -> Vec<(&'static str, HangmanApp)> {
+        let mut spent = playing_app("dolphin");
+        spent.hint_used = true;
+        spent.guess_letter(b'z');
+
+        let mut nearly_lost = playing_app("dolphin");
+        for b in b"zqxjvk" {
+            nearly_lost.guess_letter(*b);
+        }
+
+        let mut won = playing_app("cat");
+        for b in b"cat" {
+            won.guess_letter(*b);
+        }
+
+        let mut lost = playing_app("dolphin");
+        for b in b"zqxjvkw" {
+            lost.guess_letter(*b);
+        }
+
+        let mut long_word = playing_app("technology");
+        long_word.guess_letter(b'e');
+        long_word.stats = Stats {
+            wins: 1234,
+            losses: 5678,
+            current_streak: 90,
+            best_streak: 4321,
+        };
+
+        let mut menu = test_app();
+        menu.category_cursor = Category::ALL.len().saturating_sub(1);
+        menu.difficulty = Difficulty::Hard;
+
+        vec![
+            ("a fresh menu", test_app()),
+            ("the menu on the last category", menu),
+            ("a fresh game", playing_app("dolphin")),
+            ("a game with the hint spent", spent),
+            ("a game one guess from losing", nearly_lost),
+            ("a won game", won),
+            ("a lost game", lost),
+            ("a long word and four-digit statistics", long_word),
+        ]
+    }
+
+    #[test]
+    fn nothing_is_painted_outside_the_window() {
+        // The coarsest bound there is, and the only one the program had. It
+        // catches a picture drawn at a size the window does not have -- which
+        // is what `render` did before it took a width and a height at all --
+        // and it catches nothing else, because every band is inside the window
+        // by construction. See the next test for what it cannot see.
+        for (name, app) in states() {
+            for (w, h) in SIZES {
+                let window = Rect::new(0.0, 0.0, w, h);
+                let f = app.draw((w, h));
+                for r in painted(&f) {
+                    assert!(
+                        inside(window, r),
+                        "{name}: a rect at {r:?} escapes a {w}x{h} window"
+                    );
+                }
+                for (s, r) in inked(&f) {
+                    assert!(
+                        inside(window, r),
+                        "{name}: {s:?} at {r:?} escapes a {w}x{h} window"
+                    );
+                }
+                for (target, rect) in f.hits() {
+                    assert!(
+                        inside(window, *rect),
+                        "{name}: {target:?} is hit-boxed at {rect:?}, outside a {w}x{h} window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        // A pass that overruns its own band paints on top of a *sibling*, and
+        // the window test above sees nothing at all: the overrun is still
+        // inside the window. That is the whole blind spot. `draw_gallows` sized
+        // its square `w.min(h)` and then placed it at `x + pad`, so in any band
+        // wider than tall the right-hand upright was drawn one padding into the
+        // statistics column beside it -- inside the window, on top of the
+        // column, and invisible to every test the program had.
+        //
+        // Text and hit boxes are checked as well as fills, because whole passes
+        // here paint no fill of their own: `draw_word` is a row of runs and
+        // rules, and `draw_stats` is a column of runs.
+        for (name, app) in states() {
+            for (w, h) in SIZES {
+                let l = Layout::solve(w, h);
+                let state = format!("{name} at {w}x{h}");
+                let passes: [(&str, Rect, Pass); 7] = [
+                    ("menu", l.window, HangmanApp::draw_menu),
+                    ("header", l.header, HangmanApp::draw_header),
+                    ("gallows", l.gallows, HangmanApp::draw_gallows),
+                    ("word", l.word, HangmanApp::draw_word),
+                    ("keyboard", l.keyboard, HangmanApp::draw_keyboard),
+                    ("stats", l.stats, HangmanApp::draw_stats),
+                    ("result", l.overlay, HangmanApp::draw_result),
+                ];
+                for (pass, region, draw) in passes {
+                    let mut f = Frame::new(w, h);
+                    draw(&app, &mut f, &l);
+                    check_containment(&state, pass, region, &f);
+                }
+            }
+        }
+    }
+
+    /// `r`, and `r` squeezed to boxes the layout does not currently hand out.
+    ///
+    /// A sub-pass's contract is "stay inside the box you are given" for *any*
+    /// box, not for the boxes today's `Layout::solve` happens to produce. The
+    /// difficulty chips are only ever handed a `btn_w`-wide strip one button
+    /// tall; the guard being tested lives in the chips, and the chips take
+    /// their box as an argument, so the test can simply hand them another.
+    ///
+    /// The heights go down to zero because zero is where centring inverts, and
+    /// the widths because a box can run out sideways as easily as downwards.
+    fn squeezes(r: Rect) -> Vec<Rect> {
+        let mut out = vec![r];
+        for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+            if h < r.h {
+                out.push(Rect::new(r.x, r.y, r.w, h));
+            }
+        }
+        for w in [0.0, 1.0, 5.0, 30.0] {
+            if w < r.w {
+                out.push(Rect::new(r.x, r.y, w, r.h));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn the_difficulty_chips_stay_inside_any_strip_they_are_given() {
+        // The one pass in this program that takes its box as an argument, and
+        // so the one that can be asked the question directly rather than
+        // through whatever window makes `Layout::solve` produce a small band.
+        // It used to take `x`, `y` and `w` -- three quarters of a rectangle --
+        // and invent its height from the font, which is not a contract it can
+        // keep because it was never told the terms.
+        for (name, app) in states() {
+            for (w, h) in SIZES {
+                let l = Layout::solve(w, h);
+                let full = Rect::new(l.pad, l.pad, (w - l.pad * 2.0).max(0.0), l.font * 2.6);
+                for band in squeezes(full) {
+                    let mut f = Frame::new(w.max(band.right()), h.max(band.bottom()));
+                    app.draw_difficulty_chips(&mut f, &l, band);
+                    check_containment(&format!("{name} at {w}x{h}"), "difficulty chips", band, &f);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_stays_inside_any_band_it_is_given() {
+        // `run_in` and `column_line` are where every centred and every stacked
+        // run in the program now goes, so a bound proved here is a bound that
+        // holds in all nine places rather than the eight somebody remembered.
+        let band = Rect::new(20.0, 30.0, 200.0, 40.0);
+        for b in squeezes(band) {
+            for size in [7.0, 12.0, 30.0, 90.0] {
+                for s in ["", "x", "Statistics", "a considerably longer line of text"] {
+                    for inset in [None, Some(0.0), Some(8.0), Some(500.0)] {
+                        let mut f = Frame::<Target>::new(400.0, 400.0);
+                        run_in(
+                            &mut f,
+                            b,
+                            s,
+                            size,
+                            FontWeightHint::Regular,
+                            TEXT_COLOR,
+                            inset,
+                        );
+                        check_containment(&format!("{s:?}/{size}/{inset:?}"), "run_in", b, &f);
+
+                        let mut f = Frame::<Target>::new(400.0, 400.0);
+                        for y in [
+                            b.y - 5.0,
+                            b.y,
+                            b.y + b.h / 2.0,
+                            b.bottom(),
+                            b.bottom() + 5.0,
+                        ] {
+                            column_line(
+                                &mut f,
+                                b,
+                                y,
+                                s,
+                                size,
+                                FontWeightHint::Regular,
+                                TEXT_COLOR,
+                                inset,
+                            );
+                        }
+                        check_containment(&format!("{s:?}/{size}/{inset:?}"), "column_line", b, &f);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative() {
+        // The four lines the whole campaign is about. `band.y + (band.h - size)
+        // / 2.0` is not wrong when it fits and slightly wrong when it does not:
+        // it is *above the band* the moment `size > band.h`, by half the
+        // shortfall, and it hangs the same distance below the bottom.
+        let band = Rect::new(10.0, 100.0, 80.0, 20.0);
+        assert_eq!(
+            centre_line(band, 20.0),
+            Some(100.0),
+            "an exact fit is a fit"
+        );
+        assert_eq!(centre_line(band, 10.0), Some(105.0));
+        assert_eq!(centre_line(band, 20.1), None, "a hair too tall is too tall");
+        assert_eq!(centre_line(band, 200.0), None);
+        assert_eq!(
+            centre_line(Rect::new(10.0, 100.0, 0.0, 20.0), 10.0),
+            None,
+            "a band with no width is no band, however tall it is"
+        );
+        assert_eq!(centre_line(Rect::EMPTY, 1.0), None);
+
+        // And the property, over the same grid the passes are swept on: a
+        // baseline that is offered is a baseline that fits.
+        for b in squeezes(Rect::new(0.0, 50.0, 100.0, 40.0)) {
+            for size in [0.5, 1.0, 6.0, 12.0, 40.0] {
+                if let Some(y) = centre_line(b, size) {
+                    assert!(
+                        y >= b.y - 0.01 && y + size <= b.bottom() + 0.01,
+                        "centre_line({b:?}, {size}) answered {y}, which is outside the band"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn span_never_answers_a_box_that_starts_or_finishes_outside_its_band() {
+        // The horizontal half. The returned width is measured from the run's
+        // *actual* left edge, not `band.w`: a run inset by a pad and given the
+        // band's full width as its `max_width` may elide nothing and still
+        // finish a pad past the right-hand edge.
+        for b in squeezes(Rect::new(12.0, 0.0, 140.0, 20.0)) {
+            for s in ["", "x", "a considerably longer line of text"] {
+                for size in [7.0, 30.0] {
+                    for inset in [None, Some(0.0), Some(4.0), Some(1000.0)] {
+                        let Some((x, w)) = span(b, s, size, FontWeightHint::Regular, inset) else {
+                            continue;
+                        };
+                        assert!(w > 0.0, "span offered a box of {w} points of width");
+                        assert!(
+                            x >= b.x - 0.01 && x + w <= b.right() + 0.01,
+                            "span({b:?}, {s:?}, inset {inset:?}) answered ({x}, {w})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_pass_with_room_paints_and_a_pass_with_none_paints_nothing() {
+        // Containment can always be satisfied by drawing nothing. Every bound
+        // added for lesson 109 is an intersection or a refusal, and both are
+        // perfectly happy to answer "nothing" -- so a pass that had quietly
+        // stopped drawing would pass every assertion above and this program
+        // would ship a blank window. The containment sweep needs its converse
+        // or it is measuring a `return;` at the top of each function.
+        for (name, app) in states() {
+            for (w, h) in [(740.0_f32, 560.0_f32), (1280.0, 720.0)] {
+                let l = Layout::solve(w, h);
+                let state = format!("{name} at {w}x{h}");
+                let menu = app.phase == GamePhase::CategorySelect;
+                let over = app.phase == GamePhase::Won || app.phase == GamePhase::Lost;
+                let passes: [(&str, bool, Pass); 7] = [
+                    ("menu", menu, HangmanApp::draw_menu),
+                    ("header", !menu, HangmanApp::draw_header),
+                    ("gallows", !menu, HangmanApp::draw_gallows),
+                    ("word", !menu, HangmanApp::draw_word),
+                    ("keyboard", !menu, HangmanApp::draw_keyboard),
+                    ("stats", !menu, HangmanApp::draw_stats),
+                    ("result", over, HangmanApp::draw_result),
+                ];
+                for (pass, expected, draw) in passes {
+                    if !expected {
+                        continue;
+                    }
+                    let mut f = Frame::new(w, h);
+                    draw(&app, &mut f, &l);
+                    assert!(
+                        !f.commands().is_empty(),
+                        "{state}: the {pass} pass drew nothing in a window with room for it"
+                    );
+                }
+
+                // And every pass handed a band of no height draws nothing at
+                // all -- no ink, and, just as importantly, no hit box. A button
+                // that is not painted but is still clickable is worse than
+                // either half on its own.
+                let mut squeezed = l;
+                squeezed.header = Rect::new(l.header.x, l.header.y, l.header.w, 0.0);
+                squeezed.gallows = Rect::new(l.gallows.x, l.gallows.y, l.gallows.w, 0.0);
+                squeezed.word = Rect::new(l.word.x, l.word.y, l.word.w, 0.0);
+                squeezed.stats = Rect::EMPTY;
+                squeezed.overlay = Rect::EMPTY;
+                squeezed.window = Rect::new(l.window.x, l.window.y, l.window.w, 0.0);
+                for (pass, draw) in [
+                    ("menu", HangmanApp::draw_menu as Pass),
+                    ("header", HangmanApp::draw_header),
+                    ("gallows", HangmanApp::draw_gallows),
+                    ("word", HangmanApp::draw_word),
+                    ("stats", HangmanApp::draw_stats),
+                    ("result", HangmanApp::draw_result),
+                ] {
+                    let mut f = Frame::new(w, h);
+                    draw(&app, &mut f, &squeezed);
+                    let ink: Vec<String> = inked(&f).into_iter().map(|(s, _)| s).collect();
+                    assert!(
+                        ink.is_empty(),
+                        "{state}: the {pass} pass inked {ink:?} into a band of no height"
+                    );
+                    assert!(
+                        f.hits().is_empty(),
+                        "{state}: the {pass} pass hit-boxed {:?} in a band of no height",
+                        f.hits().iter().map(|(t, _)| t).collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Assert that nothing in `f` -- fill, stroke, run or hit box -- is outside
+    /// `region`.
+    fn check_containment(state: &str, pass: &str, region: Rect, f: &Frame<Target>) {
+        for r in painted(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, painted {r:?}"
+            );
+        }
+        for (s, r) in inked(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
+            );
+        }
+        for (target, rect) in f.hits() {
+            assert!(
+                inside(region, *rect),
+                "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+            );
         }
     }
 }

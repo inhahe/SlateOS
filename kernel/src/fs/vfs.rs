@@ -1148,6 +1148,30 @@ pub struct FileId {
     pub ino: u64,
 }
 
+/// Which of the three renames a caller is asking for.
+///
+/// The VFS owns this rather than the syscall layer because it names a
+/// *filesystem semantic*, not an encoding: the path route
+/// ([`Vfs::rename`], [`Vfs::rename_noreplace`], [`Vfs::rename_exchange`])
+/// and the handle route ([`Vfs::rename_at_pinned`]) offer the same three,
+/// and one type for them is what stops the two routes drifting into
+/// offering different sets.
+///
+/// The *decode* from a flags word lives with the ABI, in
+/// `crate::syscall::handlers` — the bit values are Linux's and are a
+/// statement about the syscall interface, not about the filesystem.  The
+/// split is deliberate: the semantics belong here, the encoding belongs
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameMode {
+    /// Replace the destination if it exists.
+    Replace,
+    /// `RENAME_NOREPLACE` — refuse if the destination exists.
+    NoReplace,
+    /// `RENAME_EXCHANGE` — swap the two entries atomically.
+    Exchange,
+}
+
 /// A directory handle's identity, captured when the handle was opened.
 ///
 /// `path` is what the handle was opened **as**; `id` is what it opened
@@ -3142,6 +3166,10 @@ impl Vfs {
     /// Rename or move a file or directory.
     ///
     /// Both paths must be on the same mount point.
+    ///
+    /// See [`RenameMode`] for the three semantics this family offers and
+    /// [`rename_at_pinned`](Self::rename_at_pinned) for the handle-resolved
+    /// form.
     pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
         let from = from.as_ref();
         let to = to.as_ref();
@@ -4144,6 +4172,181 @@ impl Vfs {
         super::index::on_file_changed(&new_child);
         super::journal::record(super::journal::JournalEventType::Created, &new_child);
         super::audit::log_ok(super::audit::AuditOp::Link, 0, &new_child);
+        Ok(())
+    }
+
+    /// Rename `old_name` in the directory `old_dir` denotes to `new_name` in
+    /// the directory `new_dir` denotes, refusing if either handle no longer
+    /// denotes the directory it was opened on.
+    ///
+    /// This is the entry point `renameat`/`renameat2` needs, and the last
+    /// member of the pinned family.  Lane B asked for it by naming the race it
+    /// closes: "the destination race was the one that could create a file
+    /// somewhere I never named"
+    /// (`requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`).
+    /// A `mv` that resolves its destination directory by path can have that
+    /// directory swapped under it between the resolve and the rename, and then
+    /// writes the entry into whatever now answers to the name.
+    ///
+    /// ## No symlink following, on either side
+    ///
+    /// Rename operates on *names*, never on what a final component resolves
+    /// to: `mv link other` moves the link, it does not move the link's target.
+    /// So unlike [`link_at_pinned`](Self::link_at_pinned) there is no `follow`
+    /// argument and no branch where the object leaves the pinned directory.
+    /// Both pins are therefore verified under the *write's own lock*, not
+    /// merely by a pre-pass — this is the strongest guarantee any member of the
+    /// family offers, and it comes for free from what rename already is.
+    ///
+    /// ## Cross-mount is refused, where the path route copies
+    ///
+    /// [`rename_inner`](Self::rename_inner) falls back to copy+delete when the
+    /// two paths are on different mounts.  This does not, and returns
+    /// [`KernelError::CrossDevice`] (→ `EXDEV`, which is what Linux returns for
+    /// the whole case).
+    ///
+    /// That is a deliberate divergence rather than an omission.  A copy+delete
+    /// is a *sequence* of independent lock acquisitions — `stat`, `copy`,
+    /// `set_permissions`, `set_owner`, `remove` — and a pin cannot span it: the
+    /// directory could be swapped out between any two of those steps, which is
+    /// the exact condition this call exists to refuse.  Offering it would hand
+    /// the caller a handle-verified operation whose verification quietly lapses
+    /// halfway through, which is worse than not offering it, because the caller
+    /// has no way to tell the two apart.  A caller that genuinely wants the
+    /// convenience copy wants the path route, where the pin was buying it
+    /// nothing anyway.
+    ///
+    /// The refusal also buys the property [`link_at_pinned`](Self::link_at_pinned)
+    /// relies on: in every case that can succeed at all, both directories are
+    /// behind *one* filesystem lock, so there is no lock ordering to get wrong
+    /// because there are never two locks.
+    ///
+    /// ## Returns
+    ///
+    /// `StaleHandle` if either handle no longer denotes its directory;
+    /// `CrossDevice` if the two are on different mounts; `AlreadyExists` for
+    /// [`RenameMode::NoReplace`] onto a taken name; `NotSupported` if the
+    /// filesystem cannot exchange; otherwise whatever the rename itself
+    /// reports.
+    pub fn rename_at_pinned(
+        old_dir: &PinnedDir,
+        old_name: &[u8],
+        new_dir: &PinnedDir,
+        new_name: &[u8],
+        mode: RenameMode,
+    ) -> KernelResult<()> {
+        check_at_name(old_name)?;
+        check_at_name(new_name)?;
+
+        // Pass 1, on both handles: a stale handle is refused before the
+        // intercept hook runs. Each guard is taken and dropped in turn, so
+        // this cannot deadlock even when both directories are on one
+        // filesystem.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&old_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, old_dir)?;
+        }
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&new_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, new_dir)?;
+        }
+
+        let old_child = old_dir.path.join(old_name);
+        let new_child = new_dir.path.join(new_name);
+
+        // Both sides are namespace-checked. A rename *removes* the source name
+        // as surely as it creates the destination, so checking only the
+        // destination would let a caller unlink out of a namespace it cannot
+        // write to by renaming within it.
+        crate::ipc::namespace::check_writable(&old_child)?;
+        crate::ipc::namespace::check_writable(&new_child)?;
+        check_path_access(&old_child, PathAccess::Write)?;
+        check_path_access(&new_child, PathAccess::Write)?;
+        check_writable(&old_child)?;
+        check_writable(&new_child)?;
+        super::intercept::pre_rename(&old_child, &new_child)?;
+
+        let dest_inval = {
+            // Every mount-table lookup happens before any filesystem guard is
+            // taken, so no ordering between the VFS lock and a filesystem lock
+            // can arise.
+            let (fs_old, old_fs_id, _opts, old_dir_rel) = resolve_mount(&old_dir.path)?;
+            let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
+            if !Arc::ptr_eq(&fs_old, &fs_new) {
+                return Err(KernelError::CrossDevice);
+            }
+            let old_rel = old_dir_rel.join(old_name);
+            let new_rel = new_dir_rel.join(new_name);
+
+            let mut guard = fs_new.lock();
+            // Pass 2, on both handles, under the guard that performs the
+            // rename. `Arc::ptr_eq` above established that one guard reaches
+            // both directories, so unlike `link_at_pinned` there is no case
+            // where only one of the two can be re-verified here.
+            verify_pinned(&mut guard, new_fs_id, &new_dir_rel, new_dir)?;
+            verify_pinned(&mut guard, old_fs_id, &old_dir_rel, old_dir)?;
+
+            match mode {
+                RenameMode::Exchange => {
+                    guard.rename_exchange(&old_rel, &new_rel)?;
+                    // Both names still exist afterwards, so nothing is
+                    // unlinked and no page cache identity dies.
+                    None
+                }
+                RenameMode::NoReplace => {
+                    // The existence check and the rename run under the *same*
+                    // hold, which is the whole content of the guarantee:
+                    // a separate pre-check would leave exactly the window
+                    // `RENAME_NOREPLACE` exists to close.
+                    match guard.stat(&new_rel) {
+                        Ok(_) => return Err(KernelError::AlreadyExists),
+                        Err(KernelError::NotFound) => {}
+                        Err(e) => return Err(e),
+                    }
+                    guard.rename(&old_rel, &new_rel)?;
+                    // Nothing was displaced -- the check above proved it.
+                    None
+                }
+                RenameMode::Replace => {
+                    // A replacing rename unlinks whatever held the destination
+                    // name, and that inode's number may be reused later, so
+                    // its cached pages must go. Captured before the rename,
+                    // while the name still reaches it.
+                    let id = cache_identity(&mut guard, new_fs_id, &new_rel);
+                    guard.rename(&old_rel, &new_rel)?;
+                    id
+                }
+            }
+        };
+        if let Some((fs_id, ino)) = dest_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
+        }
+
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.invalidate_prefix(&old_child);
+            dcache.invalidate_prefix(&new_child);
+        }
+        // An exchange leaves BOTH names present with swapped contents, so the
+        // indexer must be told they *changed* rather than that one moved --
+        // `on_file_renamed` would drop a path it still needs to track. This is
+        // the same split `rename_exchange` makes on the path route.
+        match mode {
+            RenameMode::Exchange => {
+                super::notify::emit_renamed(&old_child, &new_child);
+                super::notify::emit_renamed(&new_child, &old_child);
+                super::index::on_file_changed(&old_child);
+                super::index::on_file_changed(&new_child);
+            }
+            RenameMode::Replace | RenameMode::NoReplace => {
+                super::notify::emit_renamed(&old_child, &new_child);
+                super::index::on_file_renamed(&old_child, &new_child);
+            }
+        }
+        super::journal::record_rename(&old_child, &new_child);
+        super::audit::log_ok(super::audit::AuditOp::Rename, 0, &old_child);
         Ok(())
     }
 
@@ -7919,7 +8122,10 @@ pub fn self_test() -> KernelResult<()> {
                 "/tmp/_pin2/dst/hard",
                 "/tmp/_pin2/dst/link",
                 "/tmp/_pin2/dst/stamped",
+                "/tmp/_pin2/dst/moved",
                 "/tmp/_pin2/src/f",
+                "/tmp/_pin2/src/mv_me",
+                "/tmp/_pin2/src/mv_me2",
             ] {
                 let _ = Vfs::remove(p);
             }
@@ -8109,6 +8315,101 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
 
+            // renameat, all three modes.  Unlike the four above, this one
+            // *removes* a name as well as creating one, so every assertion
+            // below checks both ends: a rename that created the destination
+            // without unlinking the source would leave a copy, and one that
+            // unlinked without creating would lose the file outright.
+            Vfs::write_file("/tmp/_pin2/src/mv_me", b"cargo")?;
+            Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::Replace)?;
+            match (
+                Vfs::metadata("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Err(KernelError::NotFound), Ok(v)) if v == b"cargo" => {}
+                (from, to) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned left source {:?} and destination {:?}, \
+                         want the source gone and the destination holding the payload",
+                        from.map(|_| "present"),
+                        to.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // NoReplace onto a name that is taken.  Both names must survive
+            // untouched: the failure mode worth catching is a primitive that
+            // unlinks the source first and only then discovers the destination
+            // is occupied, which loses the file and reports an error for it.
+            Vfs::write_file("/tmp/_pin2/src/mv_me", b"second")?;
+            match Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::NoReplace) {
+                Err(KernelError::AlreadyExists) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned(NoReplace) onto a taken name = {other:?}, \
+                         want AlreadyExists"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match (
+                Vfs::read_file("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Ok(a), Ok(b)) if a == b"second" && b == b"cargo" => {}
+                (a, b) => {
+                    serial_println!(
+                        "[vfs]   FAIL: a refused NoReplace rename disturbed the tree — source \
+                         {:?}, destination {:?}, want both exactly as they were",
+                        a.map(|v| v.len()),
+                        b.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // Exchange: both names stay, their contents swap.  Checked by
+            // content in *both* directions, since an implementation that moved
+            // one way and dropped the other would satisfy a one-sided check.
+            Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::Exchange)?;
+            match (
+                Vfs::read_file("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Ok(a), Ok(b)) if a == b"cargo" && b == b"second" => {}
+                (a, b) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned(Exchange) gave source {:?} destination \
+                         {:?}, want the two payloads swapped with both names still present",
+                        a.map(|v| v.len()),
+                        b.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The same handle on both sides -- a rename within one directory,
+            // which is what `mv a b` in a single directory compiles to and the
+            // case where a naive two-lock implementation would deadlock on
+            // itself.
+            Vfs::rename_at_pinned(&src, b"mv_me", &src, b"mv_me2", RenameMode::Replace)?;
+            match (
+                Vfs::metadata("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/src/mv_me2"),
+            ) {
+                (Err(KernelError::NotFound), Ok(v)) if v == b"cargo" => {}
+                (from, to) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned within one pinned directory left source \
+                         {:?} destination {:?}",
+                        from.map(|_| "present"),
+                        to.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
             // The one-component containment, on all four.  `..` is the
             // load-bearing entry: a create that climbed out of the verified
             // directory is the whole class of bug the pin exists to stop, and
@@ -8170,6 +8471,43 @@ pub fn self_test() -> KernelResult<()> {
                         return Err(KernelError::InvalidArgument);
                     }
                 }
+                // Both of rename's names too, and the source side is the one
+                // that would be the worse bug: an uncontained source name is a
+                // way to *unlink* something outside the pinned directory,
+                // where an uncontained destination merely creates.
+                match Vfs::rename_at_pinned(&src, bad, &dst, b"escaped", RenameMode::Replace) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: rename_at_pinned(src {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                match Vfs::rename_at_pinned(&src, b"f", &dst, bad, RenameMode::Replace) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: rename_at_pinned(dst {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+            }
+            // The containment loop above asked for 10 renames of `src/f` and
+            // every one had to be refused, so the file is still there. Stated
+            // as an assertion rather than assumed: if any of them had gone
+            // through, the refusals loop would still have passed on the *next*
+            // iteration's `InvalidArgument`, and the missing file would only
+            // surface much later.
+            if Vfs::metadata("/tmp/_pin2/src/f").is_err() {
+                serial_println!(
+                    "[vfs]   FAIL: src/f is gone after ten refused renames — a refusal that still \
+                     unlinked the source is the same bug as one that still created"
+                );
+                return Err(KernelError::InvalidArgument);
             }
 
             // Now the swap, on the destination -- the pin that matters for a
@@ -8219,8 +8557,30 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
 
-            // The half that the return value cannot tell you.  Three of the
-            // four calls above would have *created* `intruder` had they
+            match Vfs::rename_at_pinned(&src, b"f", &dst, b"intruder", RenameMode::Replace) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned into a swapped destination = {other:?}, \
+                         want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            // Rename is the only member of the family whose refusal has to be
+            // checked at the *source* as well: the other four cannot destroy
+            // anything, so for them "refused" and "left the source alone" are
+            // the same statement. Here they are not.
+            if Vfs::metadata("/tmp/_pin2/src/f").is_err() {
+                serial_println!(
+                    "[vfs]   FAIL: a rename refused for a stale destination still unlinked the \
+                     source — the file is now in neither place"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // The half that the return value cannot tell you.  Four of the
+            // five calls above would have *created* `intruder` had they
             // re-resolved the name, so the impostor being empty is the real
             // assertion and the StaleHandle results are only corroboration.
             match Vfs::readdir("/tmp/_pin2/dst") {
@@ -8281,6 +8641,8 @@ pub fn self_test() -> KernelResult<()> {
         for p in [
             "/tmp/_pin2/aside/hard",
             "/tmp/_pin2/aside/link",
+            "/tmp/_pin2/aside/stamped",
+            "/tmp/_pin2/aside/moved",
             "/tmp/_pin2/dst/intruder",
         ] {
             let _ = Vfs::remove(p);
@@ -8290,15 +8652,17 @@ pub fn self_test() -> KernelResult<()> {
         result?;
 
         serial_println!(
-            "[vfs]   pinned mkdir/symlink/link/utimens: OK (a swapped destination refuses all \
-             four with StaleHandle and leaves the impostor directory empty; both of linkat's \
-             names are contained; a symlink target keeps `..` and `/` while a link *name* with \
-             them is refused; mkdirat's mode is stamped, utimensat leaves a zero argument alone, \
-             linkat shares an inode)"
+            "[vfs]   pinned mkdir/symlink/link/utimens/rename: OK (a swapped destination refuses \
+             all five with StaleHandle and leaves the impostor directory empty; both of linkat's \
+             and both of renameat's names are contained; a symlink target keeps `..` and `/` \
+             while a link *name* with them is refused; mkdirat's mode is stamped, utimensat \
+             leaves a zero argument alone, linkat shares an inode; renameat moves, refuses \
+             NoReplace onto a taken name without disturbing either end, swaps under Exchange, \
+             and never unlinks the source on a path it refuses)"
         );
     } else {
         skips.record(
-            "pinned mkdir/symlink/link/utimens (the set `cp -r` needs)",
+            "pinned mkdir/symlink/link/utimens/rename (the set `cp -r` and `mv` need)",
             "/tmp not mounted",
         );
     }

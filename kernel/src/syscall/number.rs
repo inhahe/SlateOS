@@ -3628,6 +3628,52 @@ pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 /// directory it was opened on; otherwise a negative error code.
 pub const SYS_FS_UTIMENSAT_PINNED: u64 = 669;
 
+/// Rename a name in one pinned directory to a name in another, resolving
+/// *both handles* rather than their names.
+///
+/// `arg0`: source directory handle.  `arg1`: source name pointer.
+/// `arg2`: destination directory handle.  `arg3`: destination name pointer.
+/// `arg4`: the two name lengths, packed `(source_len << 32) | dest_len`.
+/// `arg5`: flags, using the same Linux `renameat2` bit values as
+/// [`SYS_FS_RENAME`]: `0` replaces, `1` is `RENAME_NOREPLACE`, `2` is
+/// `RENAME_EXCHANGE`. Any other value is `InvalidArgument`.
+///
+/// Both handles follow the §648 rule: `0` is not the cwd and is rejected as
+/// `InvalidHandle`. Both names must be exactly one component. The two handles
+/// may be the same.
+///
+/// **Why the lengths are packed.** Six registers cannot hold two handles, two
+/// counted names *and* a flags word — the same wall [`SYS_FS_LINKAT_PINNED`]
+/// hit. There it was answered by dropping the flag, because that flag was
+/// `AT_SYMLINK_FOLLOW`, whose whole effect is to leave the pinned directory:
+/// refusing it costs a caller nothing the pin was providing. That argument
+/// does **not** transfer here. `RENAME_NOREPLACE` and `RENAME_EXCHANGE` are
+/// not escapes from the pin — they are atomicity guarantees *within* it, and
+/// they are what the intended caller wants (`mv -n` is `RENAME_NOREPLACE`, and
+/// there is no way to synthesise it from a plain rename without reopening the
+/// race it exists to close). So the flag stays and a register is bought back
+/// by packing instead. Two `u32` lengths in one `u64` is the established
+/// convention in this table — `SYS_FS_READDIR_AT` packs `(offset << 32) |
+/// count` in `arg2`, and the GPU calls pack `width | (height << 32)`.
+/// A garbage packed value is bounded rather than dangerous: each half is read
+/// through `read_user_path`, which caps the read at `PATH_MAX`, and any length
+/// that is not one valid component is then refused by the name check.
+///
+/// **Cross-mount is refused**, with `CrossDevice` (→ `EXDEV`), where the
+/// path-based [`SYS_FS_RENAME`] falls back to copy-then-delete. That is a
+/// deliberate divergence, not an omission: a copy-then-delete is a *sequence*
+/// of independent operations, and a handle whose verification lapses between
+/// them would be a pin in name only. Refusing says so in a code the caller can
+/// act on; POSIX already requires `mv` to handle `EXDEV` by copying, which is
+/// precisely the fallback it would take.
+///
+/// Returns: 0 on success; `ESTALE` if either handle no longer denotes the
+/// directory it was opened on; `AlreadyExists` (→ `EEXIST`) if
+/// `RENAME_NOREPLACE` was asked for and the destination is taken;
+/// `CrossDevice` (→ `EXDEV`) if the two directories are on different mounts;
+/// otherwise a negative error code.
+pub const SYS_FS_RENAMEAT_PINNED: u64 = 670;
+
 /// Close an open file handle.
 ///
 /// `arg0`: file handle.

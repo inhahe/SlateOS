@@ -9679,6 +9679,77 @@ pub fn sys_fs_linkat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// `SYS_FS_RENAMEAT_PINNED` — rename a name in one pinned directory to a name
+/// in another, refusing if either handle no longer denotes the directory it was
+/// opened on.
+///
+/// `arg0`: source directory handle.  `arg1`: source name pointer.
+/// `arg2`: destination directory handle.  `arg3`: destination name pointer.
+/// `arg4`: the two name lengths, packed `(source_len << 32) | dest_len`.
+/// `arg5`: flags — the Linux `renameat2` values, decoded by
+/// [`RenameMode::from_flags`] exactly as the path-based [`sys_fs_rename`]
+/// decodes them, so one flags word means one thing on both routes.
+///
+/// The packing exists because six registers cannot hold two handles, two
+/// counted names *and* flags. Unlike [`sys_fs_linkat_pinned`], dropping the
+/// flag was not an option: its values are `RENAME_NOREPLACE` and
+/// `RENAME_EXCHANGE`, which are atomicity guarantees *inside* the pinned
+/// directory rather than requests to leave it. See [`SYS_FS_RENAMEAT_PINNED`]
+/// for the full argument.
+///
+/// There is no `follow` argument on either side, and this is not a register
+/// shortage: rename operates on *names*, never on what a final component
+/// resolves to. `mv link other` moves the link, and there is no variant in
+/// which it does not.
+pub fn sys_fs_renameat_pinned(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
+        return SyscallResult::err(e);
+    }
+
+    let mode = match RenameMode::from_flags(args.arg5) {
+        Ok(m) => m,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    // Unpacked as two independent `u32`s. A garbage value cannot produce a
+    // large read: `read_user_path` bounds each half at `PATH_MAX`, and a
+    // length that survives that but is not one valid component is refused by
+    // the VFS's name check.
+    let old_len = (args.arg4 >> 32) as u32 as usize;
+    let new_len = (args.arg4 & 0xffff_ffff) as usize;
+
+    let old_name = match read_user_path(args.arg1, old_len) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let new_name = match read_user_path(args.arg3, new_len) {
+        Ok(n) => n,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let old_dir = match pinned_dir_arg(args.arg0) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+    // Resolved separately even when it is the same handle, for the reason
+    // given in `sys_fs_linkat_pinned`: two snapshots of one directory are two
+    // equal values, not an aliasing problem.
+    let new_dir = match pinned_dir_arg(args.arg2) {
+        Ok(d) => d,
+        Err(e) => return SyscallResult::err(e),
+    };
+
+    match crate::fs::Vfs::rename_at_pinned(
+        &old_dir,
+        old_name.as_bytes(),
+        &new_dir,
+        new_name.as_bytes(),
+        mode,
+    ) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// `SYS_FS_UTIMENSAT_PINNED` — set the timestamps of `name` within the
 /// directory a handle was opened on, refusing if the handle no longer denotes
 /// that directory.
@@ -9982,24 +10053,29 @@ pub fn sys_fs_truncate(args: &SyscallArgs) -> SyscallResult {
 
 /// Which rename a `SYS_FS_RENAME` flags word asks for.
 ///
-/// Split out of [`sys_fs_rename`] so the mapping can be tested: the rest
-/// of the handler reads user pointers and so cannot run from kernel
-/// space, but the flag decode is where a mistake would be silent — an
-/// unknown bit quietly ignored gives the caller a plain rename when it
-/// asked to be refused, which is the exact failure `RENAME_NOREPLACE`
-/// exists to prevent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenameMode {
-    /// Replace the destination if it exists.
-    Replace,
-    /// `RENAME_NOREPLACE` — refuse if the destination exists.
-    NoReplace,
-    /// `RENAME_EXCHANGE` — swap the two paths atomically.
-    Exchange,
-}
+/// The type itself lives in the VFS, because it names a *filesystem
+/// semantic* that both the path route ([`crate::fs::Vfs::rename`] and
+/// friends) and the handle route ([`crate::fs::Vfs::rename_at_pinned`])
+/// implement; one type for both is what stops the two routes drifting
+/// into offering different sets of renames.  It is re-exported here
+/// rather than merely referenced so that the callers and tests that
+/// already name it as `crate::syscall::handlers::RenameMode` — including
+/// the boot self-test in `crate::syscall::linux` — keep working.
+///
+/// What stays on this side of the split is the *decode* below.  The bit
+/// values are Linux's and are a statement about the syscall ABI, not
+/// about the filesystem, so they belong with the handlers.
+pub use crate::fs::vfs::RenameMode;
 
 impl RenameMode {
     /// Decode a `SYS_FS_RENAME` flags word.  Bit values are Linux's.
+    ///
+    /// Split out of [`sys_fs_rename`] so the mapping can be tested: the
+    /// rest of the handler reads user pointers and so cannot run from
+    /// kernel space, but the flag decode is where a mistake would be
+    /// silent — an unknown bit quietly ignored gives the caller a plain
+    /// rename when it asked to be refused, which is the exact failure
+    /// `RENAME_NOREPLACE` exists to prevent.
     ///
     /// Bits 0 and 1 together are `InvalidArgument` (Linux agrees: the two
     /// requests contradict), and so is any other bit, so that a flag added

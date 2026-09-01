@@ -2669,13 +2669,26 @@ impl Vfs {
         Self::mkdir_mode(path, Self::DEFAULT_DIR_MODE)
     }
 
-    /// Create a directory, stamping it with `mode` (masked to the low 9
-    /// permission bits) instead of the 0o755 default.
+    /// Create a directory, stamping it with `mode` (masked to `0o1777` — the
+    /// nine permission bits plus sticky) instead of the 0o755 default.
     ///
     /// `mode` is expected to be **already umask-masked by the caller** — the
     /// umask lives in the userspace POSIX layer, so the kernel treats `mode`
     /// as the final on-disk permission bits (same thin-primitive model as the
     /// file-create path in [`crate::fs::handle::open_with_mode`]).
+    ///
+    /// **Ten bits, not nine and not twelve**, matching Linux's `vfs_mkdir`
+    /// (`mode &= (S_IRWXUGO|S_ISVTX)`) exactly. This is deliberately *narrower*
+    /// than the file-create path's `0o7777`, and Linux draws the same line in
+    /// the same place (`vfs_create` keeps `S_IALLUGO`): setgid on a directory
+    /// is *inherited from the parent*, not requested by the creator, so a mode
+    /// word is the wrong channel for it. See `design-decisions.md` §663.
+    ///
+    /// It is also wider than it was. This masked to `0o777` until 2026-09-01,
+    /// which meant §639's widening of `sys_fs_mkdir_mode` to `0o7777` never
+    /// reached the filesystem — the handler stopped dropping sticky and this
+    /// line dropped it one layer down, so `mkdir(path, 0o1777)` produced a
+    /// `0o777` directory exactly as before and nothing said otherwise.
     pub fn mkdir_mode(path: impl AsRef<Path>, mode: u16) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
@@ -2693,7 +2706,7 @@ impl Vfs {
         // Stamp the caller-supplied (umask-masked) permission bits; the
         // underlying mkdir stamps a 0o755 default, so only override when the
         // requested mode differs.
-        let perm = mode & 0o777;
+        let perm = mode & 0o1777;
         if perm != Self::DEFAULT_DIR_MODE {
             Self::set_permissions(&path, perm)?;
         }
@@ -3734,7 +3747,11 @@ impl Vfs {
         super::intercept::pre_mkdir(&child)?;
         enforce_quota_create(&child)?;
 
-        let perm = mode & 0o777;
+        // `0o1777`, the same mask `mkdir_mode` applies — see its doc and §663.
+        // One operation with two masks depending on which route ran is worse
+        // than either mask, which is the argument that decided `link`'s error
+        // code the same week.
+        let perm = mode & 0o1777;
         {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
             let mut guard = fs.lock();
@@ -7859,6 +7876,64 @@ pub fn self_test() -> KernelResult<()> {
                         "[vfs]   FAIL: mkdir_at_pinned(0o700) then read back = {:?}, want a \
                          directory with mode 0o700",
                         other.map(|m| (m.entry_type, m.permissions))
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // Sticky survives the create, on *both* routes, and the two routes
+            // agree.  This is asserted because the opposite was true and
+            // nothing noticed: §639 widened `sys_fs_mkdir_mode`'s mask on
+            // 2026-08-30, but `mkdir_mode` and `mkdir_at_pinned` both went on
+            // masking to `0o777` one layer below, so the widening reached
+            // nothing.  A test that only checks `0o700` (as the one above does)
+            // cannot see that, because every bit it asserts is inside `0o777`.
+            //
+            // The `!= DEFAULT_DIR_MODE` guard on the stamp is the other reason
+            // to use a mode whose low nine bits are `0o755`: `0o1755` must
+            // still be stamped, and a guard comparing the *masked* value
+            // against the default would skip it and leave a plain 0o755
+            // directory behind.
+            Vfs::mkdir_at_pinned(&dst, b"sticky", 0o1755)?;
+            match Vfs::metadata_at_pinned(&dst, b"sticky", false) {
+                Ok(m) if m.permissions == 0o1755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned(0o1755) read back = {:?}, want mode \
+                         0o1755 — the sticky bit was dropped between the handler and the disk",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            Vfs::mkdir_mode("/tmp/_pin2/dst/sticky_path", 0o1755)?;
+            match Vfs::metadata("/tmp/_pin2/dst/sticky_path") {
+                Ok(m) if m.permissions == 0o1755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_mode(0o1755) read back = {:?}, want mode 0o1755 — \
+                         the path route drops sticky where the pinned route keeps it",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // setgid is refused by both routes, which is the half of §663 that
+            // is a *narrowing*.  `mkdir(2)` takes a new directory's setgid bit
+            // from its parent, never from the mode word; accepting it here
+            // would offer an authority Linux does not, in the bit that decides
+            // who owns files created in the directory later.  Asserted rather
+            // than assumed because the mask that drops it is one character
+            // different from the mask that keeps it.
+            Vfs::mkdir_at_pinned(&dst, b"nosgid", 0o2755)?;
+            match Vfs::metadata_at_pinned(&dst, b"nosgid", false) {
+                Ok(m) if m.permissions == 0o755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned(0o2755) read back = {:?}, want mode \
+                         0o755 — setgid must not be settable from a directory create mode",
+                        other.map(|m| m.permissions)
                     );
                     return Err(KernelError::InvalidArgument);
                 }

@@ -2854,8 +2854,18 @@ pub const SYS_FS_MKDIR: u64 = 604;
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
 /// `arg2`: create mode — the final on-disk permission bits (already
-///   umask-masked by the userspace POSIX layer).  0 means "unspecified" →
-///   the historical 0o755 default.
+///   umask-masked by the userspace POSIX layer), masked to `0o1777`: the nine
+///   permission bits plus sticky.  0 means "unspecified" → the historical
+///   0o755 default.
+///
+/// Ten bits and not twelve, which is Linux's `vfs_mkdir` mask exactly.  A new
+/// directory's setgid bit is inherited from its parent rather than taken from
+/// this argument, so accepting it here would offer an authority `mkdir(2)` does
+/// not have, in the one bit that decides who owns files created in that
+/// directory later.  Sticky is accepted because creating `/tmp`-shaped
+/// directories in two steps leaves a window in which they are world-writable
+/// and not yet sticky.  [`SYS_FS_MKDIRAT_PINNED`] applies the identical mask.
+/// See `design-decisions.md` §663.
 ///
 /// A separate number from [`SYS_FS_MKDIR`] so the 2-argument mkdir ABI is
 /// unchanged for already-built binaries.  Number 660.
@@ -3481,9 +3491,15 @@ pub const AT_SYMLINK_FOLLOW_PINNED: u64 = 0x400;
 /// `arg0`: directory handle; `0` is not the cwd and is rejected as
 /// `InvalidHandle` (§648).
 /// `arg1`: name pointer.  `arg2`: name length.
-/// `arg3`: mode — the low nine permission bits, **already umask-masked by the
-/// caller**, since the umask lives in the userspace POSIX layer. Bits above the
-/// nine are masked off rather than rejected, matching [`SYS_FS_MKDIR_MODE`].
+/// `arg3`: mode — masked to `0o1777` (the nine permission bits plus sticky),
+/// **already umask-masked by the caller**, since the umask lives in the
+/// userspace POSIX layer. Bits above those ten are masked off rather than
+/// rejected, matching [`SYS_FS_MKDIR_MODE`], which applies the same `0o1777`.
+/// Ten and not twelve because setuid/setgid have no meaning in a directory
+/// creation mode — Linux's `vfs_mkdir` masks to exactly this — and ten rather
+/// than nine because a sticky directory created in one step has no window in
+/// which it is world-writable but not yet sticky. See `design-decisions.md`
+/// §663.
 /// `arg4`: flags — must be `0`. `mkdirat(2)` defines none, and refusing unknown
 /// bits now keeps the argument free for a later one.
 ///

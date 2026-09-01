@@ -8863,19 +8863,35 @@ pub fn sys_fs_mkdir_mode(args: &SyscallArgs) -> SyscallResult {
     // arg2 = directory create mode (already umask-masked).  Zero → historical
     // 0o755 default.
     //
-    // Twelve bits, not nine.  This masked to `0o777` until 2026-08-30, which
-    // silently dropped the sticky bit — and the sticky bit is not an exotic
-    // corner of `mkdir`: it is what makes `/tmp` safe, and `mkdir(path,
-    // 0o1777)` is the single most common place anyone sets it.  The mask was
-    // never a limit of the filesystem (ext4's `set_permissions_ino` masks to
-    // `0o7777` and `stat` reads twelve back), only of this line.  See
-    // `design-decisions.md` §639.
+    // Ten bits: the nine permission bits plus sticky.  This masked to `0o777`
+    // until 2026-08-30 and then to `0o7777` until 2026-09-01; `0o1777` is
+    // Linux's own `vfs_mkdir` mask (`mode &= (S_IRWXUGO|S_ISVTX)`) and is the
+    // width that is actually right for a *directory create*.
+    //
+    // Sticky is in because it is not an exotic corner of `mkdir`: it is what
+    // makes `/tmp` safe, and it is the one bit where creating it in one step
+    // is worth something — the two-step alternative leaves a window in which
+    // the directory is world-writable and anyone may delete anyone's files.
+    //
+    // setuid/setgid are out because `mkdir(2)` has no channel for them: a new
+    // directory's setgid bit is *inherited from the parent*, never taken from
+    // the mode word, so honouring it here would offer an authority Linux does
+    // not — in the one bit that decides who owns files created in that
+    // directory later.  We do not implement that inheritance either, so the
+    // bit would be metadata asserting a semantic the kernel does not perform.
+    //
+    // This is narrower than the file-create path's `0o7777` on purpose, and
+    // Linux splits it the same way (`vfs_create` keeps `S_IALLUGO`).  §639
+    // widened this line to twelve while reasoning about `openat2` and swept
+    // `mkdir` along "to match"; the match was the mistake.  `fchmodat` (665)
+    // still takes twelve, so a caller that genuinely wants a setgid directory
+    // asks for it explicitly and separately.  See `design-decisions.md` §663.
     #[allow(clippy::cast_possible_truncation)]
     let mode_raw = args.arg2 as u16;
     let mode = if mode_raw == 0 {
         crate::fs::Vfs::DEFAULT_DIR_MODE
     } else {
-        mode_raw & 0o7777
+        mode_raw & 0o1777
     };
 
     match crate::fs::Vfs::mkdir_mode(&path, mode) {
@@ -9519,15 +9535,19 @@ pub fn sys_fs_fchmodat_pinned(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: directory handle; `0` is not the cwd and is rejected as
 /// `InvalidHandle` (§648).  `arg1`: name pointer.  `arg2`: name length.
-/// `arg3`: mode (nine bits, already umask-masked by the caller).
+/// `arg3`: mode (ten bits, already umask-masked by the caller).
 /// `arg4`: flags — must be `0`.
 ///
-/// Nine bits, not the twelve `sys_fs_fchmodat_pinned` takes. That is not an
-/// inconsistency: `SYS_FS_MKDIR_MODE` masks to nine, and a *creation* mode is
-/// the one place the extra three are least defensible — a directory that is
-/// setgid or sticky from the instant it exists is a policy decision, and the
-/// caller can still make it one with a following `fchmodat`, where the request
-/// is explicit and separately auditable.
+/// Ten bits — `0o1777` — which is what `SYS_FS_MKDIR_MODE` masks to, because
+/// one operation with two masks depending on which route ran is worse than
+/// either mask. Not the twelve `sys_fs_fchmodat_pinned` takes: setuid/setgid
+/// have no meaning in a directory *creation* mode, and sticky does. See
+/// `design-decisions.md` §663 for the full argument.
+///
+/// This said "nine bits, not twelve" and justified it on the grounds that
+/// "`SYS_FS_MKDIR_MODE` masks to nine" — which stopped being true on
+/// 2026-08-30, when §639 widened it and left this note behind. The claim was
+/// load-bearing for the conclusion, so the conclusion did not survive it.
 pub fn sys_fs_mkdirat_pinned(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -9543,7 +9563,7 @@ pub fn sys_fs_mkdirat_pinned(args: &SyscallArgs) -> SyscallResult {
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    let mode = (args.arg3 as u16) & 0o777;
+    let mode = (args.arg3 as u16) & 0o1777;
 
     let name = match read_user_path(args.arg1, args.arg2 as usize) {
         Ok(n) => n,

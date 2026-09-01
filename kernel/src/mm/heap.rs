@@ -155,6 +155,24 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
             ptr as usize,
             class_size
         );
+        // Name the call site, not just the slot. A slot address identifies the
+        // memory and nothing about the code, so the report alone left ~200
+        // candidate `/proc` generators when `fs::conformance` first hit this;
+        // the frames say which `drop` ran twice.
+        //
+        // Safe to walk from inside the allocator, which is the only reason this
+        // is done here rather than by the caller: `capture` fills a fixed
+        // 32-frame array and allocates nothing, so it cannot re-enter the heap,
+        // and `is_valid_frame_ptr` is three range checks against statics — no
+        // lock, so no new edge under the heap lock this may be holding.
+        //
+        // Capped at 8 frames: the freeing call site is within two or three of
+        // `dealloc`, and an allocator that printed 32 lines per event would bury
+        // the harness output that gives the frames their meaning.
+        let bt = crate::backtrace::capture();
+        for (i, f) in bt.frames.iter().take(bt.count).take(8).enumerate() {
+            serial_println!("[heap]   double-free frame {i}: {:#x}", f.return_addr);
+        }
         return true;
     }
 

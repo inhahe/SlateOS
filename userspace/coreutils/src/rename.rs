@@ -26,6 +26,20 @@
 //! back, and gnulib's comment says as much. Keeping it is not a hedge: without
 //! it the utilities would not build on the host they are tested on.
 //!
+//! **This does not reach `SYS_FS_RENAMEAT_PINNED` (670), and that is a property
+//! of `AT_FDCWD` rather than a gap here.** On the target, libc's `renameat`
+//! prefers the pinned call — the kernel re-verifies the directory *handle*
+//! instead of trusting the path a descriptor once had — but only when both ends
+//! are a real directory fd and a name with no slashes in it. `AT_FDCWD` is
+//! neither, so both callers take the path route, exactly as gnulib's
+//! `renameatu` does on Linux. Reaching the pinned call would mean opening each
+//! parent directory and splitting each operand into (parent, final component),
+//! which moves `ENOENT` and `ENOTDIR` from the rename to the open and changes
+//! the wording of the resulting diagnostic. It would also buy little: the pin
+//! pays in recursive walks, which re-derive a directory by name between deciding
+//! to descend into it and acting on it, and neither of these callers derives
+//! anything — each is one rename of a name the caller was given.
+//!
 //! Sharing this between the two callers is the point of the module. They had a
 //! copy each, and the copies had already diverged — `backup`'s called
 //! `renameat2` and fell back, `mv`'s only ever emulated, so `mv` kept the race

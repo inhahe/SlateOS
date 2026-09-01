@@ -106,6 +106,16 @@ relinked all nine fixtures against a stale libc and recreated incident #2 by
 hand. A build step never faces that question — it rebuilds whatever is behind,
 in dependency order, and which side moved stops mattering.
 
+There is a fifth question hiding inside the fourth: *which* libc.a. Until
+2026-09-01 this script verified `<worktree>/toolchain/sysroot/lib/libc.a` and
+fastpy linked `<fastpy>/../os/toolchain/sysroot/lib/libc.a`, because nothing
+set `FASTPY_SLATEOS_SYSROOT` and that sibling is fastpy's fallback. Two files,
+one gate — so the gate could pass on a libc that no fixture linked. `build` now
+exports the variable (`_slateos_sysroot_env`), which is what makes the four
+guards above statements about the artifact that actually ships. Note the shape
+of the fault: from `os` the two paths are the same directory, so it was
+invisible in the only tree we integrate in and live in all three we work in.
+
 Usage
 -----
     python scripts/ctest-fixtures.py build          # build what is missing/stale
@@ -195,7 +205,18 @@ for _stream in (sys.stdout, sys.stderr):
 
 REPO = Path(__file__).resolve().parent.parent
 SERVICES = REPO / "services"
-LIBC = REPO / "toolchain" / "sysroot" / "lib" / "libc.a"
+
+# The sysroot this worktree verifies *and* links against. It is one name
+# because for weeks those were two different directories: the staleness gate
+# reasoned about `REPO/toolchain/sysroot`, while fastpy — which does the actual
+# linking — resolved an unset `FASTPY_SLATEOS_SYSROOT` to a *sibling* `os`
+# checkout (`fastpy/compiler/toolchain.py::_find_slateos_sysroot_lib`). From a
+# lane worktree those are different files on disk, so the gate could pass while
+# the ELF it had just blessed was linked against an old libc.a from the
+# integration tree. `build` now exports this path explicitly; see
+# `_slateos_sysroot_env`.
+SYSROOT = REPO / "toolchain" / "sysroot"
+LIBC = SYSROOT / "lib" / "libc.a"
 
 # What `libc.a` is built from, and the stamp recording their content at the
 # moment it was built. See `sysroot_staleness` for why a stamp exists at all
@@ -256,7 +277,7 @@ def _posix_path_deps() -> tuple[str, ...]:
 
 
 SYSROOT_ROOTS = _STATIC_SYSROOT_ROOTS + _posix_path_deps()
-SYSROOT_STAMP = REPO / "toolchain" / "sysroot" / ".sysroot.stamp"
+SYSROOT_STAMP = SYSROOT / ".sysroot.stamp"
 
 # Suffixes hashed with CRLF folded to LF. Anything else is hashed raw. The
 # default is *raw* on purpose: folding a file that is genuinely binary could
@@ -741,6 +762,50 @@ def _report_sysroot_staleness(mode: str, findings: list[str]) -> None:
         print("[ctest]         build-sysroot.ps1 writes the stamp and makes this check exact.)")
 
 
+def _slateos_sysroot_env() -> str | None:
+    """The value to export as `FASTPY_SLATEOS_SYSROOT`, or `None` to refuse.
+
+    fastpy's `_find_slateos_sysroot_lib` (`fastpy/compiler/toolchain.py`) tries
+    `$FASTPY_SLATEOS_SYSROOT` first and otherwise falls back to a *sibling* `os`
+    directory next to the fastpy checkout — a good default for a fastpy user
+    with one `os` checkout beside it, and the wrong answer for every lane
+    worktree, which is not that directory. Nothing here used to set the
+    variable, so the fallback fired every time: `sysroot_staleness()` proved
+    `os-lane-b/toolchain/sysroot/lib/libc.a` was current, and the linker then
+    reached for `os/toolchain/sysroot/lib/libc.a`, an integration tree nobody
+    builds a sysroot in. All three lanes were observed sharing one eleven-day-old
+    copy. The two hashes differed on this branch when the fix landed, so the
+    fixtures on it had been linked against the other file.
+
+    Reported by lane A in
+    `requests/a-b-ctest-fixtures-verify-one-libc-and-link-a-different-one.md`;
+    note their observation that `main` is the one checkout where the two paths
+    coincide, so the fault was invisible in exactly the tree we integrate in.
+
+    Two deliberate choices, both from that request:
+
+    * **Set, never `setdefault`.** An inherited `FASTPY_SLATEOS_SYSROOT` from an
+      unrelated shell is the same class of bug — a linked libc that is not the
+      verified one — and `setdefault` would let it win silently. A worktree that
+      wants a different sysroot should say so with a flag, not by ambient
+      inheritance.
+    * **Refuse rather than point at a miss.** If our `libc.a` is absent, fastpy
+      skips a candidate that does not contain one and falls *through* to the
+      sibling anyway. Exporting the variable would then be worse than not
+      exporting it: the environment reads as if it were honoured while the old
+      resolution quietly happens. So the caller errors instead.
+    """
+    if LIBC.is_file():
+        return str(SYSROOT)
+    print(f"[ctest] ERROR: no {LIBC.relative_to(REPO).as_posix()} to link against.")
+    print("[ctest]        Build the sysroot first:")
+    print("[ctest]          powershell -File toolchain/build-sysroot.ps1")
+    print("[ctest]        Refusing to build: fastpy would fall back to a sibling")
+    print("[ctest]        `os` checkout's sysroot, so the fixtures would link a")
+    print("[ctest]        libc.a this script never verified.")
+    return None
+
+
 def _fastpy_dir() -> Path | None:
     """The fastpy checkout whose `compiler` package each build.py imports.
 
@@ -872,12 +937,20 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         print("[ctest]        or place the fastpy checkout beside this repo:")
         print(f"[ctest]          {REPO.parent / 'fastpy'}")
         return 1
+    # Resolving fastpy says which compiler runs; this says which libc it links.
+    # The staleness gate above answered a question about a file that was not the
+    # file that mattered until this line existed -- see `_slateos_sysroot_env`.
+    sysroot = _slateos_sysroot_env()
+    if sysroot is None:
+        return 1
     child_env = dict(os.environ)
     existing = child_env.get("PYTHONPATH", "")
     child_env["PYTHONPATH"] = (
         f"{fastpy}{os.pathsep}{existing}" if existing else str(fastpy)
     )
+    child_env["FASTPY_SLATEOS_SYSROOT"] = sysroot
     print(f"[ctest] fastpy: {fastpy}")
+    print(f"[ctest] sysroot: {sysroot}")
 
     # Finding the checkout is not the same as being able to use it.  Every
     # build.py below starts by importing fastpy's compiler, which imports

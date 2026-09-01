@@ -27,26 +27,28 @@
 # construction and the column is a constant rather than a coin-flip. A case
 # where it stops being constant has found something.
 #
-# ## What this harness cannot do, and it is the interesting half
+# ## The second filesystem, which this harness used to say it could not have
 #
-# **No case moves across a filesystem boundary.** The `EXDEV` fallback — copy,
-# then unlink — is the part of `mv` that has to reproduce by hand everything a
-# rename gets for free: the mode, the times, the ownership, the symlink's text
-# rather than its target's bytes, and a directory's whole subtree. It is also
-# the part with the most room to be quietly wrong, and three of the four bugs in
-# `mv.rs`'s module docs lived there.
+# The `EXDEV` fallback — copy, then unlink — is the part of `mv` that has to
+# reproduce by hand everything a rename gets for free: the mode, the times, the
+# ownership, the symlink's text rather than its target's bytes, and a
+# directory's whole subtree. It is also the part with the most room to be
+# quietly wrong, and three of the four bugs in `mv.rs`'s module docs lived
+# there.
 #
-# Reaching it needs a second filesystem, which needs `mount`, which needs a
-# privilege this harness must not ask for: the WSL user is uid 1000 and `sudo`
-# wants a password. A harness that prompts for one is a harness that hangs in
-# every unattended run.
+# This file used to say that reaching it needed `mount`, which needed a password
+# no unattended harness may ask for, and left the fallback to `mv.rs`'s unit
+# tests. **That was wrong, and it cost real coverage.** Linux already has a
+# second filesystem mounted and world-writable: `/dev/shm` is a tmpfs wherever
+# POSIX shared memory exists, `$XDG_RUNTIME_DIR` is a per-user tmpfs wherever
+# systemd-logind does, and either is a different `st_dev` from the ext4 that
+# `mktemp -d` lands on. §22 uses one, and the first run of it found two bugs
+# that the reasoning above had been quietly protecting for as long as the file
+# said what it said. The lesson is `known-issues.md`'s recurring one: *an
+# argument for why something cannot be tested is not evidence about the thing.*
 #
-# So the fallback is covered by `mv.rs`'s own unit tests, which can at least
-# drive `copy_across_devices` directly, and the gap is written down here rather
-# than left to be discovered. If a loop device or a user-namespace `tmpfs` ever
-# becomes available without a password, the cases to add are: a regular file
-# with a non-default mode and a pinned mtime, a symlink (relative, resolving),
-# a dangling symlink, a hard-link pair moved together, and a directory.
+# See [`FAR`] for how a case names the other filesystem, and [`far_root`] for
+# how one is found — including why the device is *checked* rather than assumed.
 #
 # **No case moves a FIFO or a device**, for `cp-diff.sh`'s reason: reading a
 # FIFO nothing writes to blocks until the timeout, which certifies a hang.
@@ -106,6 +108,46 @@ pass=0; fail=0; xfail=0; xpass=0
 work=$DIFF_TMP/work
 mkdir -p "$work"
 
+# --- the other filesystem -----------------------------------------------------
+# Where §22's cases put the half of their fixture that has to be on a different
+# device. Empty means none was found, and §22 is skipped rather than run against
+# one device and reported as if it had crossed a boundary.
+#
+# `$XDG_RUNTIME_DIR` is tried first because it is private to this user and is
+# removed at logout; `/dev/shm` is shared, so the directory below it is made with
+# `mktemp -d` and removed on the way out. `/run/user/$(id -u)` is the same place
+# as the first under a shell that did not inherit the variable.
+#
+# **The device is compared, not assumed.** A container can bind-mount `/dev/shm`
+# off the root filesystem, and a `/tmp` that is itself a tmpfs may be the very
+# same one. A §22 that ran on a single device would exercise `rename(2)` while
+# reporting that it had exercised the copy fallback — a harness lying in the one
+# direction that matters, which is worse than a harness that skips.
+far_root=
+for far_candidate in "${XDG_RUNTIME_DIR:-}" /dev/shm "/run/user/$(id -u)"; do
+  # A trailing slash is legal in the variable and survives every path built from
+  # it, which puts a `//` in the middle of the names [`scrub`] matches. They
+  # still match, because both sides are built the same way — but the reported
+  # path is what a reader retypes, so it is normalised here rather than trusted.
+  far_candidate=${far_candidate%/}
+  [ -n "$far_candidate" ] && [ -d "$far_candidate" ] && [ -w "$far_candidate" ] || continue
+  [ "$(stat -c %d "$far_candidate")" != "$(stat -c %d "$work")" ] || continue
+  far_root=$(mktemp -d "$far_candidate/mv-diff.XXXXXX") && break
+  far_root=
+done
+
+# `diff-wsl.sh` asks callers to extend its cleanup rather than set a second
+# `EXIT` trap, which would replace the first and leak `$DIFF_TMP`.
+diff_cleanup() {
+  chmod -R u+rwx "$DIFF_TMP" 2>/dev/null
+  rm -rf "$DIFF_TMP"
+  if [ -n "$far_root" ]; then
+    chmod -R u+rwx "$far_root" 2>/dev/null
+    rm -rf "$far_root"
+  fi
+  return 0
+}
+
 case_no=0
 
 # --- the fixture --------------------------------------------------------------
@@ -146,13 +188,24 @@ mktree() {
 # `%T@` and not a formatted time, for `cp-diff.sh`'s reason: seconds-and-
 # fraction since the epoch is what `utimensat` carries, and a formatted column
 # would hide a move that got the seconds right and threw the nanoseconds away.
+# A case with a [`FAR`] fixture has *two* trees to account for, and both matter:
+# what arrived on the near side and what is left on the far one. They are listed
+# one after the other, the far one's paths prefixed `far/`, rather than merged
+# and re-sorted — two sorted blocks are as deterministic as one and a reader can
+# see at a glance which side a line is about.
 snapshot() {
+  snapshot_in '' "$1"
+  [ -n "${2:-}" ] && snapshot_in 'far/' "$2"
+  return 0
+}
+
+snapshot_in() {
   local t=''
   [ -n "$STAMPS" ] && t=' %T@'
-  ( cd "$1" 2>/dev/null && find . -mindepth 1 \
-        \( -type d -printf "%P %m d$t\n" \
-        -o -type l -printf "%P l -> %l$t\n" \
-        -o -printf "%P %m %s$t\n" \) 2>/dev/null \
+  ( cd "$2" 2>/dev/null && find . -mindepth 1 \
+        \( -type d -printf "$1%P %m d$t\n" \
+        -o -type l -printf "$1%P l -> %l$t\n" \
+        -o -printf "$1%P %m %s$t\n" \) 2>/dev/null \
       | fold_now | LC_ALL=C sort )
 }
 
@@ -188,9 +241,20 @@ fold_now() {
 #
 # Sorted twice: by name before grouping so a group's members are listed in a
 # fixed order, and by line afterwards so the groups themselves are.
+#
+# The two trees are listed separately rather than together, and here that is
+# forced rather than chosen: a hard link cannot span filesystems, so a group can
+# never have members on both sides, and the inode numbers used to group them are
+# only unique *within* one device.
 hardlinks() {
-  ( cd "$1" 2>/dev/null || return 0
-    find . -mindepth 1 ! -type d -links +1 -printf '%i\t%P\n' 2>/dev/null \
+  hardlinks_in '' "$1"
+  [ -n "${2:-}" ] && hardlinks_in 'far/' "$2"
+  return 0
+}
+
+hardlinks_in() {
+  ( cd "$2" 2>/dev/null || return 0
+    find . -mindepth 1 ! -type d -links +1 -printf "%i\t$1%P\n" 2>/dev/null \
       | LC_ALL=C sort -t"$(printf '\t')" -k2 \
       | awk -F'\t' '{ g[$1] = ($1 in g) ? g[$1] " " $2 : $2 }
                     END { for (k in g) print g[k] }' \
@@ -207,10 +271,16 @@ hardlinks() {
 # never compared at all — a blind spot that announces itself on the harness's
 # own stderr and is still a blind spot.
 contents() {
-  ( cd "$1" 2>/dev/null || return 0
+  contents_in '' "$1"
+  [ -n "${2:-}" ] && contents_in 'far/' "$2"
+  return 0
+}
+
+contents_in() {
+  ( cd "$2" 2>/dev/null || return 0
     find . -type f -printf '%P\0' 2>/dev/null | LC_ALL=C sort -z \
       | while IFS= read -r -d '' f; do
-      printf '== %s\n' "$f"
+      printf '== %s%s\n' "$1" "$f"
       cat -- "$f"
       printf '\n'
     done )
@@ -234,7 +304,17 @@ STAMPS=
 # was not. They are knobs rather than a fixed export because each is *overridden*
 # by its option, so the interesting cases are the pairs.
 ENVV=()
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); }
+# Shell run inside the case's directory *on the other filesystem* to build the
+# half of the fixture that has to live there. Empty — every case but §22's —
+# means no such directory is made and the case is an ordinary one.
+#
+# A case that sets it writes `@FAR@` wherever it wants that directory's path in
+# an argument, and [`run_one`] substitutes the side's own. The placeholder is
+# necessary rather than tidy: the two sides run in two different directories on
+# both filesystems, so the path cannot be a constant, and a case that named
+# `$far_root` directly would name whichever side happened to be set up last.
+FAR=
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); FAR=''; }
 reset_knobs
 
 # A fixture whose every path carries a pinned time, for the `STAMPS` cases.
@@ -256,14 +336,28 @@ mkstamped() {
 # raw would fail on the one thing that is supposed to differ. The replacement is
 # per side, not of a common prefix: a path pointing anywhere other than that
 # side's own directory survives and shows up as a difference.
-scrub() { sed -e "s|$1|<DIR>|g"; }
+scrub() {
+  local exprs=(-e "s|$1|<DIR>|g")
+  # And the same for the other filesystem's directory, which a §22 case names on
+  # the command line and both programs then echo back.
+  [ -n "${2:-}" ] && exprs+=(-e "s|$2|<FAR>|g")
+  sed "${exprs[@]}"
+}
 
 # --- running one side ---------------------------------------------------------
 
 run_one() {
-  local side=$1 dir=$2 out=$3 err=$4 rcf=$5; shift 5
+  local side=$1 dir=$2 out=$3 err=$4 rcf=$5 far=$6; shift 6
   mkdir -p "$dir"
   ( cd "$dir" && eval "$TREE" ) >/dev/null 2>&1
+  # The other filesystem's half of the fixture, and the substitution that lets a
+  # case refer to it. See [`FAR`] for why the placeholder exists.
+  local args=() a
+  if [ -n "$far" ]; then
+    mkdir -p "$far"
+    ( cd "$far" && eval "$FAR" ) >/dev/null 2>&1
+  fi
+  for a in "$@"; do args+=("${a//@FAR@/$far}"); done
   # One file per side rather than one shared one: the two sides run one after
   # the other and a shared file would be consumed by whichever ran first.
   local answers=$dir.stdin
@@ -281,7 +375,7 @@ run_one() {
     PATH="$bindir/$side:$PATH"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
-    diff_run timeout -k 2 30 env "${ENVV[@]}" mv "$@" >"$out" 2>"$err"
+    diff_run timeout -k 2 30 env "${ENVV[@]}" mv "${args[@]}" >"$out" 2>"$err"
   ) <"$answers"
   echo $? >"$rcf"
   return 0
@@ -291,13 +385,15 @@ run_one() {
 
 judge() {
   local o_dir=$1 g_dir=$2 o_out=$3 g_out=$4 o_extra=$5 g_extra=$6 label=$7
+  local o_far=$8 g_far=$9
   local o_snap g_snap o_body g_body o_show g_show o_link g_link
-  o_snap=$(snapshot "$o_dir"); g_snap=$(snapshot "$g_dir")
-  o_link=$(hardlinks "$o_dir"); g_link=$(hardlinks "$g_dir")
-  o_body=$(contents "$o_dir" | scrub "$o_dir"); g_body=$(contents "$g_dir" | scrub "$g_dir")
-  o_show=$(scrub "$o_dir" <"$o_out"); g_show=$(scrub "$g_dir" <"$g_out")
-  o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir")
-  g_extra=$(printf '%s' "$g_extra" | scrub "$g_dir")
+  o_snap=$(snapshot "$o_dir" "$o_far"); g_snap=$(snapshot "$g_dir" "$g_far")
+  o_link=$(hardlinks "$o_dir" "$o_far"); g_link=$(hardlinks "$g_dir" "$g_far")
+  o_body=$(contents "$o_dir" "$o_far" | scrub "$o_dir" "$o_far")
+  g_body=$(contents "$g_dir" "$g_far" | scrub "$g_dir" "$g_far")
+  o_show=$(scrub "$o_dir" "$o_far" <"$o_out"); g_show=$(scrub "$g_dir" "$g_far" <"$g_out")
+  o_extra=$(printf '%s' "$o_extra" | scrub "$o_dir" "$o_far")
+  g_extra=$(printf '%s' "$g_extra" | scrub "$g_dir" "$g_far")
 
   if [ "$o_show" = "$g_show" ] && [ "$o_extra" = "$g_extra" ] \
      && [ "$o_snap" = "$g_snap" ] && [ "$o_body" = "$g_body" ] \
@@ -322,16 +418,19 @@ compare() {
   local o_out=$work/oo$case_no g_out=$work/go$case_no
   local o_err=$work/oe$case_no g_err=$work/ge$case_no
   local o_rc=$work/or$case_no g_rc=$work/gr$case_no
+  local o_far='' g_far=''
+  [ -z "$FAR" ] || { o_far=$far_root/o$case_no; g_far=$far_root/g$case_no; }
   local label="mv $*"
   [ -z "$ANSWERS" ] || label="$label   [in: ${ANSWERS//$'\n'/\\n}]"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
+  [ -z "$FAR" ] || label="$label   [far: $FAR]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
-  run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
-  run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
+  run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$o_far" "$@"
+  run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$g_far" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
     "rc=$(cat "$o_rc") err{$(cat "$o_err")}" \
     "rc=$(cat "$g_rc") err{$(cat "$g_err")}" \
-    "$label"
+    "$label" "$o_far" "$g_far"
   reset_knobs
 }
 
@@ -372,6 +471,11 @@ missing() { xfail_case "not implemented by this mv" "$@"; }
 echo "mv-diff:"
 echo "  ours: $OURS"
 echo "  gnu:  $gnu_real"
+if [ -n "$far_root" ]; then
+  echo "  far:  $far_root"
+else
+  echo "  far:  none found on a second device -- section 22 skipped"
+fi
 
 # =============================================================================
 # 1. Too few operands
@@ -643,6 +747,28 @@ run_case file.txt ro/dst
 # An unreadable source directory still renames: the walk never happens.
 TREE='mktree; chmod 0000 tree/sub'
 run_case tree moved
+
+# A destination that cannot be stat'd at all, which is a different diagnostic
+# from a destination that can be stat'd and refused. `mv` looks the destination
+# up *after* the rename has already failed, and reports what that lookup said —
+# naming the destination alone, because nothing was moved and the source is not
+# implicated. `cannot move A to B` here would be a false claim that a rename was
+# attempted, carrying an errno left over from the speculative one.
+#
+# The three ways to fail it: a trailing slash on a name that is not a directory,
+# a path *through* a regular file, and a symlink loop in the path. The loop is
+# the one upstream nearly excuses — `copy.c:2326` lets `ELOOP` past when
+# `unlink_dest_after_failed_open` is set, and `mv` sets it false (`mv.c:128`),
+# so it does not.
+run_case file.txt tree/a.txt/
+run_case file.txt file.txt/x
+TREE='mktree; ln -s loop loop'
+run_case file.txt loop/x
+# And the loop as the destination *itself* rather than a component of it, which
+# does not fail: `lstat` does not follow, so the dangling symlink is an ordinary
+# thing in the way and is replaced.
+TREE='mktree; ln -s loop loop'
+run_case file.txt loop
 
 # =============================================================================
 # 10. Names that are hard to hold
@@ -1344,18 +1470,19 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 # `-b`/`--backup`/`-S` became §18, where fifteen turned into fifty-eight: a backup
 # is a second file with a chosen name, so every case has a name to check as well
 # as a tree, and the option lifts three of §13's refusals besides.
-
-# --strip-trailing-slashes, which changes what a source ending in `/` names.
-missing --strip-trailing-slashes tree/ dir
-TREE='mktree; ln -s tree treelink'
-missing --strip-trailing-slashes treelink/ moved
+# `--strip-trailing-slashes` became §21, where two turned into twenty-four — half
+# of them pairs, because the option has no behaviour of its own and can only be
+# measured as the difference between a command line carrying it and the same one
+# without.
 
 # --debug, which implies -v and explains the method.
 missing --debug file.txt dst
 missing --debug tree moved
 
 # --no-copy, which turns the EXDEV fallback off. On one filesystem it changes
-# nothing, so this case measures only that the option is accepted.
+# nothing, so this case measures only that the option is accepted; the one that
+# measures what the option *does* is at the end of §22, where there is a
+# boundary for it to refuse to cross.
 missing --no-copy file.txt dst
 
 # -Z, --context. Without SELinux on the build host GNU takes the
@@ -1363,6 +1490,363 @@ missing --no-copy file.txt dst
 # only that the option is accepted.
 missing -Z file.txt dst
 missing --context file.txt dst
+
+# =============================================================================
+# 21. --strip-trailing-slashes
+# =============================================================================
+# The option has no policy of its own. It edits the operand list and then every
+# other decision is taken exactly as it would have been, so there is nothing to
+# measure about it in isolation — which is why half the cases here are pairs,
+# the same command line with the option and without, and the case is the
+# difference between them.
+#
+# What the difference *is* comes down to one line of GNU's `main` (`mv.c:505`)
+# and where it sits:
+#
+#   if (remove_trailing_slashes)
+#     for (int i = 0; i < n_files; i++)
+#       strip_trailing_slashes (file[i]);
+#
+# It is late — after the missing-operand check, after `-T`'s extra-operand
+# check, after `-t`'s directory is opened, after the speculative
+# `renameatu (…, RENAME_NOREPLACE)`, and after the probe that asks whether the
+# last operand is a directory. And it runs over `n_files`, which that probe has
+# already decremented when the destination *was* a directory. So the option
+# reaches less of the program than its help text suggests, and the cases below
+# are mostly about which side of that line each observable effect falls on.
+#
+# `-v` is on wherever the case would otherwise be silent, because the names
+# `mv` prints are the only place the stripping is directly visible: the tree
+# column says a file arrived under some name but not which spelling of the
+# source `mv` believed it was moving.
+
+# The option's actual purpose, and the one shape it was added for: a symlink to
+# a directory whose trailing slash the shell's tab-completion supplied. The
+# slash makes the kernel resolve the link, so the unstripped command asks to
+# rename the *directory* through it and gets ENOTDIR; stripped, the symlink
+# itself moves and is still a symlink afterwards, which the tree column's `->`
+# is what proves.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes treelink/ dir
+TREE='mktree; ln -s tree treelink'
+run_case -v treelink/ dir
+# `-t` reaches the same place by the other route: its directory came from the
+# option and never was one of `file[]`, so every operand is a source and every
+# operand is stripped.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes -t dir treelink/
+TREE='mktree; ln -s tree treelink'
+run_case -v -t dir treelink/
+
+# And the shape it does *not* rescue, which is the sharpest thing in this
+# section. With two operands and a destination that does not exist, GNU has
+# already tried `renameatu (file[0], file[1], RENAME_NOREPLACE)` on the
+# unstripped words and kept the errno; nothing afterwards retries it. So the
+# move still fails ENOTDIR — but the diagnostic quotes the *stripped* name,
+# naming a rename that was never attempted. The name in the message and the
+# error in it come from two different command lines. Upstream's, and reproduced
+# deliberately: see `strip_operands` in `mv.rs`.
+TREE='mktree; ln -s tree treelink'
+run_case --strip-trailing-slashes treelink/ moved
+TREE='mktree; ln -s tree treelink'
+run_case treelink/ moved
+
+# gnulib's `strip_trailing_slashes` removes a run, not a slash.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes treelink/// dir
+
+# A real directory is the boring half and is here to bound the interesting one:
+# a trailing slash on a name that really is a directory changes nothing about
+# what the kernel does, at any depth.
+run_case -v --strip-trailing-slashes tree/ dir
+run_case -v --strip-trailing-slashes tree/sub/ dir
+# So with a real directory source the option's whole observable effect is the
+# word `-v` prints — `dir` where the unstripped run says `dir/`. A case that
+# compares only trees would certify these two as the same run.
+run_case -v --strip-trailing-slashes dir/ newname
+run_case -v dir/ newname
+
+# The loop covers every source, not the first, and the two failures it prevents
+# are different failures: the directory link fails at the rename, the file link
+# fails at the `stat` before it. Both sides of the pair have to agree about the
+# order those two lines are printed in as well as their text.
+TREE='mktree; ln -s tree treelink; ln -s file.txt filelink'
+run_case -v --strip-trailing-slashes treelink/ filelink/ dir
+TREE='mktree; ln -s tree treelink; ln -s file.txt filelink'
+run_case -v treelink/ filelink/ dir
+
+# The destination is an operand too when it is not a directory, so a slashed
+# name for an existing *file* is stripped and the move succeeds. Unstripped it
+# does not even reach the rename: the probe fails, the speculative rename's
+# ENOTDIR stands, and `mv` reports it as a failure to `stat`.
+run_case -v --strip-trailing-slashes file.txt tree/a.txt/
+run_case -v file.txt tree/a.txt/
+
+# The four diagnostics asked before the loop, each quoting the slash the user
+# typed. These are the cases a from-memory implementation gets wrong, because
+# the natural place to strip operands is on the way in, and there every one of
+# these messages loses its slash.
+run_case --strip-trailing-slashes file.txt/
+run_case --strip-trailing-slashes -T file.txt dst extra/
+run_case --strip-trailing-slashes file.txt dir tree/a.txt/
+run_case --strip-trailing-slashes -t nodir/ file.txt
+
+# `-T` takes neither the probe nor the speculative rename, so both its operands
+# are stripped — and that is observable on the destination rather than the
+# source: stripped, `treelink` is a symlink and is replaced; unstripped,
+# `treelink/` is a directory and `mv` refuses to overwrite one with a file.
+TREE='mktree; ln -s tree treelink'
+run_case -v --strip-trailing-slashes -T file.txt treelink/
+TREE='mktree; ln -s tree treelink'
+run_case -v -T file.txt treelink/
+run_case -v --strip-trailing-slashes -T tree/ dir/
+
+# Spelling. The name is matched by unambiguous prefix like every other long
+# option, and `getopt_long` permutes, so the option may follow the operands it
+# governs.
+TREE='mktree; ln -s tree treelink'
+run_case -v --str treelink/ dir
+# Permuted *and* the one asymmetry worth its own case: the destination here is a
+# directory, so `n_files--` took it out of the loop and it keeps its slash —
+# which the verbose line then joins to the source's basename. The option was
+# given, and the destination is the one operand it did not touch.
+TREE='mktree; ln -s tree treelink'
+run_case -v file.txt treelink/ --strip-trailing-slashes
+
+# =============================================================================
+# 22. Across a filesystem boundary
+# =============================================================================
+# The one section whose cases are not about an option. `rename(2)` returns
+# `EXDEV` when its two operands are on different filesystems, and every `mv`
+# answers that by doing the move the long way: copy the source, then unlink it.
+# What makes the section worth its length is that a rename gets for free
+# everything the copy has to reproduce deliberately — the mode including its
+# set-ID and sticky bits, both timestamps at nanosecond resolution, the owner,
+# the extended attributes, a symlink's text rather than its target's bytes,
+# a directory's whole subtree, and the identity of a hard-linked group — and
+# each of those is a separate chance to be wrong in a way that only a second
+# filesystem can show.
+#
+# GNU's fallback is `copy.c:2833-2892`, reached from `movefile`'s
+# `if (rename_errno == EXDEV)`. Read in order it is: refuse unless the errno
+# really was `EXDEV` and `--no-copy` was not given; **unlink the destination**;
+# print `copied` if verbose; set `new_dst`; then copy with `preserve_ownership`
+# on, which is what makes the group and other permission bits get held back
+# until after the `chown`. The unlink is the part that is easiest to miss and
+# the hardest to justify from the help text — its comment says it plainly:
+#
+#   /* Remove any existing destination file so that a cross-device `mv' acts
+#      as if it were really using the rename syscall.  */
+#
+# A rename replaces the destination *directory entry*; it does not write
+# through it. So a destination with a second hard link must come out of a
+# cross-device `mv` with that other link still pointing at the old bytes, and a
+# fallback that opens the destination for writing instead of unlinking it
+# rewrites a file the user never named. That is what case 3 below measures.
+#
+# ## Where the second filesystem comes from
+#
+# `$far_root`, found at startup — see its definition for why the device is
+# compared rather than assumed. If none was found the whole section is skipped
+# rather than silently run on one device, because a §22 that ran on one device
+# would exercise `rename(2)` while reporting that it had exercised the copy.
+# A case names the far directory as `@FAR@` and builds its half of the fixture
+# with [`FAR`]; `FAR=':'` is how a case that wants an *empty* far directory
+# (because it is moving *towards* it) asks for one to exist.
+#
+# ## Both directions, and a control
+#
+# The fallback is not symmetric in the way it first appears: what is copied is
+# read off the far side and written to the near one in the near→far cases and
+# the reverse in the others, and the destination-clearing happens on whichever
+# side the destination is. Both directions are here. So is a case whose two
+# operands are *both* far, which is a plain rename and must agree — it is the
+# control that certifies the section is testing the fallback because of where
+# the files are and not because something about the far directory makes every
+# case differ.
+
+if [ -z "$far_root" ]; then
+  echo "SKIP section 22: no writable directory found on a second device"
+else
+
+# The plainest possible fallback: one regular file, a fresh name on the other
+# filesystem. It carries a set-user-ID bit and a pinned sub-second time so that
+# the case measures the three things the copy has to carry across rather than
+# only that the bytes arrived.
+TREE=''
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -v @FAR@/f g
+
+# The same file onto a name that already exists. Nothing about the fallback
+# changes, but the destination's own mode and times must not survive under the
+# new contents: a rename would have replaced the inode entirely.
+TREE='printf XXXXXXXXXX > g; chmod 606 g'
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -v @FAR@/f g
+
+# The case the unlink quoted above exists for. `g` and `g2` are one inode with
+# two names, and only `g` is named on the command line. After a rename `g2`
+# still holds the old ten bytes at mode 606; after a fallback that truncates
+# and rewrites the destination in place it holds the new five at mode 644, and
+# a file nobody mentioned has been overwritten.
+#
+# The source is left at the default mode and carries no pinned time, unlike
+# almost every other fixture in this section. That is deliberate: a set-user-ID
+# bit here would make the case differ for the copy's *attribute* losses too, and
+# it would go on differing after the unlink landed — a case that measures two
+# defects at once cannot report either of them being fixed.
+TREE='printf XXXXXXXXXX > g; chmod 606 g; ln g g2'
+FAR='printf hello > f'
+run_case -v @FAR@/f g
+
+# A symlink. The fallback must copy the link — its text, not its target's bytes
+# — which means `readlink` and `symlink` and not `open`. The target is left
+# behind on the far side deliberately: if the copy resolved the link the
+# arriving `g` would be a five-byte regular file and the tree column says so.
+TREE=''
+FAR='printf hello > t; ln -s t l; touch -h -d "2001-02-03 04:05:06" l'
+STAMPS=1
+run_case -v @FAR@/l g
+
+# The same, dangling. Nothing can be opened at all, so a fallback that resolves
+# links cannot even appear to work. It has no pinned time, unlike the case
+# above: `touch -h` on a link to nowhere is refused on some filesystems, so the
+# pair is deliberately split — the case above measures the link's own stamp and
+# this one measures that the link text survives with nothing behind it.
+TREE=''
+FAR='ln -s nowhere l'
+run_case -v @FAR@/l g
+
+# An absolute link text, which must arrive unrewritten. A fallback that
+# reconstructed the link relative to its new directory would silently repoint
+# it, and the tree column's `->` is where that shows.
+TREE=''
+FAR='ln -s /etc/hostname l'
+run_case -v @FAR@/l g
+
+# Two names for one far inode, both moved, in one command. A rename would have
+# kept them one inode; the fallback has to notice the second source is already
+# copied and link to the first result instead of copying twice. The link column
+# is the whole case — the tree and the bytes agree either way.
+TREE='mkdir d'
+FAR='printf hello > a; ln a b'
+xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS" \
+  -v @FAR@/a @FAR@/b d
+
+# The same inode, but only one of its names moved. Here the *right* answer is
+# two separate files, and the far side must keep `b` with its bytes: a fallback
+# that unlinked the inode rather than the named link would lose it.
+TREE=''
+FAR='printf hello > a; ln a b'
+run_case -v @FAR@/a g
+
+# A directory. GNU recurses; this `mv` refuses, and the refusal is deliberate
+# rather than an oversight — see `mv.rs`'s cross-device fallback. The setgid
+# bit and the subdirectory are on the fixture so that the case keeps measuring
+# something after the refusal is lifted.
+TREE=''
+FAR='mkdir -p d/sub; printf hello > d/f; chmod 2750 d'
+xfail_case "B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED" \
+  -v @FAR@/d g
+
+# `-u` across the boundary. The comparison is made before the fallback is
+# chosen, so the option decides whether the copy happens at all. Older
+# destination: it does.
+TREE='printf XXX > g; touch -d "1999-01-01" g'
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+
+# Newer destination: it does not, and no fallback is entered at all. It is the
+# pair that separates `-u`'s comparison from the copy it guards: the case above
+# exercises both and this one only the comparison, so a regression in either can
+# be told from a regression in the other by which of the two goes red.
+TREE='printf XXX > g; touch -d "2030-01-01" g'
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+
+# `-b` across the boundary. The backup is made on the destination's filesystem
+# by renaming the destination aside, which is a same-device rename however far
+# away the source is — so the backup itself must agree even while the copied
+# file does not.
+TREE='printf XXX > g'
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -bv @FAR@/f g
+
+# The other direction: near to far. Everything above reads from the far side;
+# this reads from the near one and writes to the far, and a fallback that got
+# an argument order backwards would pass the cases above and fail this one.
+TREE='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+FAR=':'
+STAMPS=1
+run_case -v f @FAR@/g
+
+# The control. Both operands are on the far filesystem, so this is a rename and
+# must agree exactly — including the verbose line's word, which is `renamed`
+# here and `copied` in every case above. If this one ever differs, the section
+# is measuring the far directory rather than the boundary.
+TREE=''
+FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
+STAMPS=1
+run_case -v @FAR@/f @FAR@/g
+
+# One command line, two sources, one on each side, into a near directory. The
+# per-operand decision is what is being measured: `n` is a rename and `f` is a
+# copy, in the same run, and the verbose lines say which was which. No pinned
+# times and no special bits on the fixture, deliberately — this case is about
+# the routing and agrees today; the copy's own losses have their own cases and
+# would only make this one differ for a reason it is not asking about.
+TREE='mkdir d; printf near > n'
+FAR='printf far > f'
+run_case -v n @FAR@/f d
+
+# A far source that cannot be read. The fallback has to open it, so this fails
+# where a rename would have succeeded — the one place where being on another
+# filesystem changes whether a move is *possible* rather than only how it is
+# done. Both sides fail, with the same errno, after the same `copied` line, and
+# now with the same sentence: `cannot open 'f' for reading`, which names the
+# step rather than the operation. This case is why the fallback opens the source
+# itself instead of handing both names to one library call — the call returns
+# one error for the read end and the write end alike, and the case below is that
+# same errno at the other end.
+TREE=''
+FAR='printf hello > f; chmod 000 f'
+run_case -v @FAR@/f g
+
+# A destination directory that cannot be written. The failure is on the near
+# side and before any bytes move, so the far source must still be there
+# afterwards: a fallback that unlinked the source before confirming the write
+# would have destroyed it. Both sides leave it, and this is the second half of
+# the pair above — the same errno at the *other* end of the copy, and the two
+# sentences have to disagree with each other: `cannot create regular file 'd/g'`
+# here against `cannot open 'f' for reading` there.
+TREE='mkdir d; chmod 555 d'
+FAR='printf hello > f'
+run_case -v @FAR@/f d/g
+
+# `-n` and `-i` across the boundary, to certify that the refusal happens before
+# the fallback is chosen rather than after the copy has already been made.
+TREE='printf XXX > g'
+FAR='printf hello > f'
+run_case -nv @FAR@/f g
+TREE='printf XXX > g'
+FAR='printf hello > f'
+ANSWERS=$'n\n'
+run_case -iv @FAR@/f g
+
+# `--no-copy` is the option that turns this whole section off: across a
+# boundary it makes the `EXDEV` an error instead of a fallback, which is the
+# only place it has any behaviour at all. This is §20's entry given the one
+# fixture that can measure it.
+TREE=''
+FAR='printf hello > f'
+missing --no-copy @FAR@/f g
+
+fi
 
 # =============================================================================
 echo

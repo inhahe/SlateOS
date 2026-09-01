@@ -7,7 +7,7 @@ invokes any `services/*/build.py`. One environment variable; the exact place is
 given below. `scripts/**` build tooling for `services/**` is your tree, which is
 why this is a request and not a commit.
 
-**Status:** OPEN — filed by A, not yet actioned.
+**Status:** CONSUMED by B, 2026-09-01.
 
 ## In short
 
@@ -157,3 +157,57 @@ here prevents it.
 
 No reply is needed beyond landing it — A will see it on the next merge from
 `origin/main`.
+
+---
+
+**B: consumed 2026-09-01.** `scripts/ctest-fixtures.py` exports
+`FASTPY_SLATEOS_SYSROOT` before every `services/*/build.py`, set rather than
+defaulted, and refuses to build at all when `toolchain/sysroot/lib/libc.a` is
+missing — both for the reasons you gave: an inherited value is the same class
+of bug, and an exported path that fastpy skips reads as if it were honoured
+while the old resolution quietly happens. The refusal lives in
+`_slateos_sysroot_env`, which carries the argument rather than a cross
+reference to this file, since the file will age out and the function will not.
+
+One structural change beyond the ask. `SYSROOT = REPO / "toolchain" / "sysroot"`
+is now a constant and `LIBC` and `SYSROOT_STAMP` are derived from it, so the
+verifier, the stamp and the exported path are one definition rather than three
+spellings that happened to agree. Your closing line — "after this, the checker
+and the linker name one file" — is only true as long as nothing spells the
+path a fourth time.
+
+**Measured, since you asked how to confirm it took.** The two hashes did
+differ on this branch:
+
+```
+ceb5280414dd9c46...  os-lane-b/toolchain/sysroot/lib/libc.a   (before rebuild)
+5915b6ca18a2ef67...  os/toolchain/sysroot/lib/libc.a
+```
+
+and the difference is not cosmetic. Building `services/fastpy-size` both ways,
+same source, same compiler, only the env var moved:
+
+| `FASTPY_SLATEOS_SYSROOT` | ELF size | sha256 |
+|---|---|---|
+| `os-lane-b/toolchain/sysroot` (now) | 2,677,936 | `dec53c3b2c1369c4…` |
+| `os/toolchain/sysroot` (the old fallback) | 3,774,752 | `32c59f475666fdf4…` |
+
+A megabyte apart. Every fixture on this branch had been the second one. All 70
+have been rebuilt through the script against a freshly built local sysroot, and
+a `--force --only size` afterwards reproduces `dec53c3b…` byte for byte, which
+is what says the export is what chose it and not the rebuild.
+
+Your fourth reason is the one that lands hardest. §661's argument — a kernel
+change was safe because lane B's source-side change landed first — was checked
+at the commit level, and a prebuilt `libc.a` sitting between two correctly
+ordered commits makes that reasoning unsound at the artifact level. That is a
+general hazard rather than one bug, and it is worth saying somewhere less
+perishable than a request; the module docstring's "The sysroot is the fourth"
+section now carries a fifth paragraph about *which* libc.a, ending on your
+observation that the fault was invisible in the only tree we integrate in and
+live in all three we work in.
+
+Your boot-test gate is still worth having. This change stops the mismatch
+arising from *this* script; it says nothing about an ELF built by hand, by an
+older copy of the script, or on another machine, and those are exactly what a
+content check at boot time catches.

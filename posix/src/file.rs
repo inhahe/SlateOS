@@ -2205,9 +2205,10 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
 
 /// Create a directory.
 ///
-/// The new directory's permission bits are `mode & ~umask` (masked to the
-/// low 9 bits), computed here and passed to the kernel as the 3rd syscall
-/// argument (the kernel is a thin create primitive — see `Vfs::mkdir_mode`).
+/// The new directory's permission bits are `mode & ~umask`, masked to the low
+/// **ten** — the nine permission bits plus `S_ISVTX` — by
+/// [`apply_umask_mkdir`], and passed to the kernel as the 3rd syscall argument
+/// (the kernel is a thin create primitive; see `Vfs::mkdir_mode`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
     if path.is_null() {
@@ -2956,8 +2957,9 @@ pub(crate) fn resolve_dirfd_path(
 //
 // `SYS_FS_UNLINKAT_PINNED` (662), `SYS_FS_FSTATAT_PINNED` (663),
 // `SYS_FS_FCHMODAT_PINNED` (665), `SYS_FS_MKDIRAT_PINNED` (666),
-// `SYS_FS_SYMLINKAT_PINNED` (667), `SYS_FS_LINKAT_PINNED` (668) and
-// `SYS_FS_UTIMENSAT_PINNED` (669) resolve the handle instead.  Where the
+// `SYS_FS_SYMLINKAT_PINNED` (667), `SYS_FS_LINKAT_PINNED` (668),
+// `SYS_FS_UTIMENSAT_PINNED` (669) and `SYS_FS_RENAMEAT_PINNED` (670)
+// resolve the handle instead.  Where the
 // arguments fit their shape — a real directory fd and a single-component name —
 // they are used, and the join is not reached at all.  Everything else still
 // goes through `resolve_dirfd_path`, because a multi-component name is a walk
@@ -2974,17 +2976,48 @@ pub(crate) fn resolve_dirfd_path(
 // destination directory partway through the walk is a write primitive rather
 // than a disclosure: every remaining entry in the tree is created somewhere the
 // caller never named.  With those four wired, the destination side is closed.
-// The **source** side is not: the walk still re-derives each source directory by
-// name, because `SYS_FS_GETDENTS_PINNED` (664) has no caller yet.  That is a
-// read-side race — you read the wrong file — rather than a write-side one, which
-// is why it is the remaining half rather than the urgent one.  Tracked in
-// known-issues.md.
+//
+// The **source** side closed on 2026-09-01, when `SYS_FS_GETDENTS_PINNED` (664)
+// got its caller: every directory stream in [`crate::dirent`] — `opendir`,
+// `fdopendir` and the raw `getdents64` alike — now lists *through* the
+// descriptor rather than through the path the descriptor once had.  A recursive
+// walk therefore no longer re-derives a source directory by name between
+// deciding to descend into it and reading it.  This was a read-side race — you
+// read the wrong file, rather than writing one — which is why it was the
+// remaining half rather than the urgent one.
+//
+// The one thing 664 does not pin is [`pinned_base`]'s own precondition: it
+// translates an fd to a handle, so a stream over an fd this libc did not open
+// still works, but an fd with no kernel handle behind it (a pipe, a socket, an
+// emulated descriptor) is reported `ENOTDIR` rather than falling back to a
+// path.  Refusing is the point — a fallback there would reintroduce the race on
+// the exact descriptors least able to justify it.
+//
+// The family was completed on 2026-09-01 by `SYS_FS_RENAMEAT_PINNED` (670),
+// the only member that *moves* a name rather than creating, stamping or
+// reading one.  Its source side is therefore the sharp one: an uncontained
+// source name would be a way to unlink something outside the pinned directory,
+// where an uncontained destination merely creates.  It is also the only member
+// with a flags word — 668 gave its sixth register to a name length and dropped
+// `AT_SYMLINK_FOLLOW`, which cost nothing because following is leaving the
+// pinned directory, but `RENAME_NOREPLACE` and `RENAME_EXCHANGE` cannot be
+// synthesised by a caller at all, so 670 packs both name lengths into one
+// register to keep the flag.  See [`pack_pinned_name_lengths`].
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
 // reintroduce the very race the call exists to close, and would do it silently
 // on the failure path where nobody is looking.  Only "this kernel does not
 // have the call" falls back.
+//
+// 670's `CrossDevice` is the single exception, and it is an exception because
+// there the two routes do *different operations* rather than the same one
+// twice: the path-based `SYS_FS_RENAME` answers a cross-mount rename with a
+// copy-then-delete, which no pin could ever have covered, so declining gives up
+// nothing 670 was offering.  Forwarding it instead would make `renameat` return
+// EXDEV or silently copy depending on whether its arguments happened to be
+// pinnable — the two-contracts bug [`linkat`] already refused.  See
+// [`try_pinned_renameat`] and `design-decisions.md` §742.
 //
 // "This kernel does not have the call" is now something the kernel *says*
 // rather than something this side infers.  An empty dispatch slot answers
@@ -3093,7 +3126,12 @@ fn pinned_answer(ret: i64) -> Option<i32> {
 /// working directory" — and the kernel's working directory is not this libc's
 /// (see [`openat2_forward`]). Real file handles are never 0, so this can only
 /// fire on a corrupt fd table, where falling back is the safe answer.
-fn pinned_base(dirfd: i32) -> Option<u64> {
+///
+/// `pub(crate)` because [`crate::dirent`] needs the same translation to hand a
+/// directory fd to `SYS_FS_GETDENTS_PINNED`. There the `None` case *is*
+/// diagnosed — as `ENOTDIR`, since no kernel handle means nothing the kernel
+/// can list — but the rule above still holds: this function does not set it.
+pub(crate) fn pinned_base(dirfd: i32) -> Option<u64> {
     let entry = crate::fdtable::get_fd(dirfd)?;
     if entry.kind != HandleKind::File || entry.handle == 0 {
         return None;
@@ -3281,11 +3319,12 @@ unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i
 /// function is what makes the two routes agree by construction rather than by
 /// two mask constants that have to be kept equal by hand.
 ///
-/// 666 masks to **nine** bits where 665 masks to twelve, and the difference is
-/// not an inconsistency to paper over: a directory that is setgid or sticky
-/// from the instant it exists is a policy decision. See [`apply_umask_mkdir`]
-/// for why nine is right for a directory even though twelve is right for a
-/// file, and for the one bit (`S_ISVTX`) that may yet move.
+/// 666 masks to **ten** bits where 665 masks to twelve, and the difference is
+/// not an inconsistency to paper over: a directory that is setgid from the
+/// instant it exists is a policy decision, and Linux's answer is that it comes
+/// from the parent rather than from the mode word. Sticky is the tenth bit and
+/// went in on 2026-09-01, once the kernel's routes stopped discarding it. See
+/// [`apply_umask_mkdir`].
 ///
 /// # Safety
 ///
@@ -3459,6 +3498,102 @@ unsafe fn try_pinned_utimensat(
         modified_ns,
         pinned_flags,
     );
+    pinned_answer(ret)
+}
+
+/// The two name lengths as syscall 670's `arg4`: source in the high half,
+/// destination in the low half.
+///
+/// A named function rather than a shift written at the call site, because 670's
+/// argument order is the one thing about it that reads wrong — six registers
+/// hold two handles, two pointers, *both* lengths and a flags word, so the
+/// fifth argument is the only one in the whole pinned family that is not a
+/// single value. Spelled inline it would look like an arithmetic slip.
+///
+/// Neither half can reach into the other: [`is_pinnable_component`] has already
+/// refused anything longer than [`PINNED_NAME_MAX`], and a name that is not
+/// exactly one component is refused on the kernel side as well, so no legal
+/// length is within nine orders of magnitude of 2^32. The `debug_assert` states
+/// that dependency rather than trusting it silently.
+///
+/// A pure function over two numbers, so it is testable on the host where the
+/// syscall itself is compiled out — the same reason [`is_pinnable_component`]
+/// is one.
+fn pack_pinned_name_lengths(source: usize, destination: usize) -> u64 {
+    debug_assert!(source <= PINNED_NAME_MAX && destination <= PINNED_NAME_MAX);
+    ((source as u64) << 32) | destination as u64
+}
+
+/// Rename `oldpath` under `olddirfd` to `newpath` under `newdirfd` through
+/// syscall 670, if that is possible here.
+///
+/// `Some(ret)` is the call's answer and is final — including its errors.
+/// `None` means the fast path did not apply and the caller must fall back;
+/// errno is untouched in that case.
+///
+/// Both ends must be pinnable, for the same reason [`try_pinned_linkat`]'s are:
+/// the call resolves both handles and there is no half-pinned form. The source
+/// side is the sharper half here, though, and this is the first member of the
+/// family where that is true — the other six create, stamp or read, while this
+/// one *removes* a name. An uncontained source would let the call unlink
+/// something outside the directory the handle pins.
+///
+/// `flags` is forwarded whole, unmasked, exactly as [`rename_ex`] forwards it to
+/// the path-based call: 670 takes the same three values `SYS_FS_RENAME` does and
+/// refuses the rest, so an unknown bit is `EINVAL` either way and the route
+/// cannot change the answer.
+///
+/// # `CrossDevice` is the one answer that falls back
+///
+/// This is a deliberate exception to the family's rule that a pinned call which
+/// answers has answered. 670 refuses a cross-mount rename; the path-based
+/// `SYS_FS_RENAME` copies and then deletes. Forwarding the refusal would give
+/// `renameat` two contracts selected by the shape of its arguments — EXDEV when
+/// both names happen to be single components under real directory fds, a silent
+/// copy otherwise — and [`linkat`] already settled that question the other way,
+/// in lane A's own words: one operation with two error contracts depending on
+/// which route ran is the worse bug.
+///
+/// Nothing is given up by falling back, because the pin was never available for
+/// this operation. The copy is a sequence of independent operations each taking
+/// its own lock, so no verification could cover it; 670 refuses precisely
+/// because it cannot make the promise, not because some future version might.
+/// The race in the fallback is the copy's own, not one this reintroduced. See
+/// `design-decisions.md` §742.
+///
+/// The check reads the *raw* return rather than `pinned_answer`'s translation,
+/// so that errno is still untouched when this returns `None` — the fallback
+/// then produces its own diagnosis, as it does for every other decline.
+///
+/// # Safety
+///
+/// `oldpath` and `newpath` must each be null or a valid C string.
+unsafe fn try_pinned_renameat(
+    olddirfd: i32,
+    oldpath: *const u8,
+    newdirfd: i32,
+    newpath: *const u8,
+    flags: u64,
+) -> Option<i32> {
+    // SAFETY: forwarded from this function's own contract.
+    let old_name = unsafe { pinnable_name(oldpath) }?;
+    // SAFETY: as above.
+    let new_name = unsafe { pinnable_name(newpath) }?;
+    let old_base = pinned_base(olddirfd)?;
+    let new_base = pinned_base(newdirfd)?;
+
+    let ret = syscall6(
+        SYS_FS_RENAMEAT_PINNED,
+        old_base,
+        old_name.as_ptr() as u64,
+        new_base,
+        new_name.as_ptr() as u64,
+        pack_pinned_name_lengths(old_name.len(), new_name.len()),
+        flags,
+    );
+    if ret == crate::errno::native::CROSS_DEVICE {
+        return None;
+    }
     pinned_answer(ret)
 }
 
@@ -3640,6 +3775,19 @@ pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
 /// Rename a file relative to directory fds.
 ///
 /// POSIX: each `dirfd` is ignored when its corresponding path is absolute.
+///
+/// When *both* ends are the common shape — a real directory fd and a
+/// single-component name — this goes through [`try_pinned_renameat`], which has
+/// the kernel resolve the two handles instead of rebuilding two paths from the
+/// directories the fds once named. There is no half-pinned form, for
+/// [`linkat`]'s reason: 670 resolves both handles, and a guarantee that held for
+/// one end would be one nothing in the signature announced.
+///
+/// A cross-mount rename still copies and deletes, on this route as much as the
+/// other. 670 refuses it — a pin cannot span a copy — and this side treats that
+/// refusal as "the fast path does not apply" rather than forwarding it, so the
+/// answer does not depend on whether the arguments happened to be pinnable.
+/// [`try_pinned_renameat`] has the argument in full.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn renameat(
     olddirfd: i32,
@@ -3667,6 +3815,11 @@ fn renameat_ex(
     // Either name being empty is ENOENT, and the old name is examined first.
     if reject_empty_path(oldpath) || reject_empty_path(newpath) {
         return -1;
+    }
+    // SAFETY: both paths are this function's own `*const u8` contract — null or
+    // a valid C string — which is what `try_pinned_renameat` requires.
+    if let Some(ret) = unsafe { try_pinned_renameat(olddirfd, oldpath, newdirfd, newpath, flags) } {
+        return ret;
     }
     // Resolve each path independently — each dirfd is ignored for
     // absolute paths (POSIX).
@@ -4361,32 +4514,40 @@ pub(crate) fn apply_umask_create(mode: ModeT) -> ModeT {
     apply_umask_keeping(mode, 0o7777)
 }
 
-/// Apply the process umask to `mkdir`'s mode: **nine** bits.
+/// Apply the process umask to `mkdir`'s mode: **ten** bits.
 ///
 /// `mkdir(2)`, DESCRIPTION: "in the absence of a default ACL, the mode of the
 /// created directory is `(mode & ~umask & 0777)`. Whether other mode bits are
 /// honored for the created directory depends on the operating system." Nine is
-/// therefore the portable answer, and — unlike the nine [`apply_umask_create`]
-/// used to use — it is a decision rather than an oversight.
+/// the portable floor; the tenth bit is Linux's one extension, `S_ISVTX`
+/// (VERSIONS: "apart from the permission bits, the `S_ISVTX` mode bit is also
+/// honored"), and it is worth having because it is the one bit where a
+/// race-free create means something — a sticky directory made in one step never
+/// exists in the window where it is world-writable but not yet sticky.
 ///
-/// Linux's one extension is `S_ISVTX` (VERSIONS: "apart from the permission
-/// bits, the `S_ISVTX` mode bit is also honored"), which would let a sticky
-/// directory be created without the window in which it exists world-writable
-/// but not yet sticky. We do not send it, because the kernel would drop it
-/// anyway: `Vfs::mkdir_mode` and `mkdir_at_pinned` both compute `mode & 0o777`.
-/// Asked of lane A in
-/// `requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`;
-/// widen this to `0o1777` in the same change that widens those and not before,
-/// since a libc that sends a bit the kernel discards has moved the silent drop
-/// rather than fixed it.
+/// This masked to nine until 2026-09-01, deliberately: the kernel discarded the
+/// bit (`Vfs::mkdir_mode` and `mkdir_at_pinned` both computed `mode & 0o777`),
+/// and a libc that sends a bit the kernel drops has *moved* the silent drop
+/// rather than fixed it. Lane A widened both routes plus `SYS_FS_MKDIR_MODE`
+/// (660) and `SYS_FS_MKDIRAT_PINNED` (666) to `0o1777` in one commit
+/// (design-decisions.md §663, `requests/a-b-mkdirs-mode-is-ten-bits-now-move-apply-umask-mkdir-to-1777.md`),
+/// which is what makes the bit reachable and this widening honest.
 ///
-/// setuid/setgid are not the extension to make here even then. Linux does not
-/// take a directory's setgid bit from `mkdir`'s mode argument — it inherits it
-/// from the parent ("If the parent directory has the set-group-ID bit set, then
-/// so will the newly created directory"). Accepting it from the mode word would
-/// let a caller produce a directory that `mkdir(2)` on Linux could not.
+/// **The umask stays narrowed to nine**, in [`apply_umask_keeping`], and that
+/// is what lets sticky through rather than an oversight: `umask(2)` says only
+/// the file permission bits of the mask are used, so `~(umask & 0o777)` has bit
+/// `0o1000` set and cannot clear `S_ISVTX` — exactly as it cannot clear setuid.
+/// Masking the umask to ten instead would let `umask(01000)` silently strip the
+/// sticky bit off `mkdir(p, 0o1777)`, which no Unix does.
+///
+/// setuid/setgid stay out. Linux does not take a directory's setgid bit from
+/// `mkdir`'s mode argument — it inherits it from the parent ("If the parent
+/// directory has the set-group-ID bit set, then so will the newly created
+/// directory"). Accepting it from the mode word would let a caller produce a
+/// directory that `mkdir(2)` on Linux could not; 660 and 666 refuse it on the
+/// kernel side too, so this is agreement rather than a second opinion.
 pub(crate) fn apply_umask_mkdir(mode: ModeT) -> ModeT {
-    apply_umask_keeping(mode, 0o777)
+    apply_umask_keeping(mode, 0o1777)
 }
 
 // ---------------------------------------------------------------------------
@@ -7498,7 +7659,7 @@ mod tests {
         umask(0o022);
     }
 
-    /// A create keeps twelve bits; a `mkdir` keeps nine.
+    /// A create keeps twelve bits; a `mkdir` keeps ten.
     ///
     /// One function masked both to `0o777` until 2026-08-31, so a caller's
     /// `open("s", O_CREAT, 0o4755)` produced a plain `0755` file with no error
@@ -7507,11 +7668,21 @@ mod tests {
     /// stamps `create_mode & 0o7777`, citing §639). The widening reached
     /// nothing, because this side narrowed the word first.
     ///
-    /// The `mkdir` half is deliberately still nine: `mkdir(2)` states the
-    /// result is `(mode & ~umask & 0777)`, and the kernel's two mkdir routes
-    /// both compute `mode & 0o777`, so sending more would only move the drop.
+    /// The `mkdir` half was nine until 2026-09-01 and is now ten: sticky is
+    /// Linux's one documented extension to `(mode & ~umask & 0777)`, and lane A
+    /// widened both kernel routes to `0o1777` (§663) so the bit now survives the
+    /// whole way. setuid and setgid stay out on both sides — Linux takes a
+    /// directory's setgid from its parent, not from the mode word.
+    ///
+    /// Note the shape of every assertion here: each uses a mode with a bit
+    /// *outside* the mask being tested. That is not stylistic. A mask can only
+    /// be tested by a value it would change, and asserting `0o755` survives
+    /// tells you nothing about whether the mask is `0o777`, `0o1777` or
+    /// `0o7777` — which is precisely how lane A's `Vfs::mkdir_mode` went on
+    /// narrowing to nine for two days after 660 was widened, with every test
+    /// green.
     #[test]
-    fn a_create_keeps_the_special_bits_and_a_mkdir_does_not() {
+    fn a_create_keeps_the_special_bits_and_a_mkdir_keeps_only_sticky() {
         let _g = lock_umask_for_test();
         umask(0o022);
 
@@ -7519,9 +7690,14 @@ mod tests {
         assert_eq!(apply_umask_create(0o4755), 0o4755);
         assert_eq!(apply_umask_create(0o2755), 0o2755);
         assert_eq!(apply_umask_create(0o1777), 0o1755);
-        // ... and the same words lose them on a directory create.
+        // A directory create keeps sticky and drops the other two.
         assert_eq!(apply_umask_mkdir(0o4755), 0o0755);
-        assert_eq!(apply_umask_mkdir(0o1777), 0o0755);
+        assert_eq!(apply_umask_mkdir(0o2755), 0o0755);
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1755);
+        // The canonical caller: /tmp. `mkdir(p, 0o1777)` under the usual
+        // umask must not come back as a plain 0o755 directory.
+        umask(0o000);
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1777);
 
         // The umask still only ever clears permission bits. `umask` itself
         // narrows its argument to nine, so this is belt-and-braces against a
@@ -7530,6 +7706,9 @@ mod tests {
         umask(0o7777);
         assert_eq!(get_umask(), 0o777);
         assert_eq!(apply_umask_create(0o4755), 0o4000);
+        // ... and neither must a sticky bit, which is the whole reason
+        // `apply_umask_keeping` narrows the mask and not just the mode.
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1000);
 
         // A file-type bit in the mode word is the kernel's business, not
         // something to forward — this is what `0o7777` buys over no mask.
@@ -14837,9 +15016,10 @@ mod tests {
 
     mod pinned_at {
         use super::super::{
-            AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, Stat, fstatat, is_pinnable_component, pinned_answer,
-            pinned_base, try_pinned_fchmodat, try_pinned_fstatat, try_pinned_linkat,
-            try_pinned_mkdirat, try_pinned_symlinkat, try_pinned_unlinkat, try_pinned_utimensat,
+            AT_REMOVEDIR, AT_SYMLINK_NOFOLLOW, PINNED_NAME_MAX, Stat, fstatat,
+            is_pinnable_component, pack_pinned_name_lengths, pinned_answer, pinned_base,
+            try_pinned_fchmodat, try_pinned_fstatat, try_pinned_linkat, try_pinned_mkdirat,
+            try_pinned_renameat, try_pinned_symlinkat, try_pinned_unlinkat, try_pinned_utimensat,
             unlinkat,
         };
         use crate::fdtable::{self, HandleKind};
@@ -15128,6 +15308,21 @@ mod tests {
             assert_eq!(pinned_answer(0), Some(0));
         }
 
+        /// `CrossDevice` is 670's exception and *only* 670's — the shared
+        /// decision function still calls it final.
+        ///
+        /// Worth stating because the cheap way to write the exception would
+        /// have been a line in [`pinned_answer`], which would have silently
+        /// given it to all seven calls. The other six have no cross-mount
+        /// answer to fall back from: 668 already reports a cross-mount link as
+        /// `EINVAL` on both routes precisely so that the route cannot be
+        /// observed, and a fallback here would have undone that.
+        #[test]
+        fn a_cross_device_answer_is_final_everywhere_but_the_rename() {
+            assert_eq!(pinned_answer(crate::errno::native::CROSS_DEVICE), Some(-1));
+            assert_eq!(crate::errno::get_errno(), crate::errno::EXDEV);
+        }
+
         /// `mkdirat`'s gate, which is the plainest of the family: one name, and
         /// a flags word that is always zero.
         #[test]
@@ -15265,6 +15460,133 @@ mod tests {
                 );
                 assert_eq!(
                     try_pinned_linkat(a, b"f\0".as_ptr(), b, core::ptr::null()),
+                    None
+                );
+            }
+
+            assert!(fdtable::close_fd(pipe).is_some());
+            assert!(fdtable::close_fd(b).is_some());
+            assert!(fdtable::close_fd(a).is_some());
+        }
+
+        /// 670's fifth argument carries *both* name lengths, and the halves
+        /// must not touch.
+        ///
+        /// The interesting direction is the one a shift written at the call
+        /// site would get wrong: a source length that leaked into the low half
+        /// would be read as a destination length, so the kernel would compare a
+        /// truncated destination name — a silent rename onto the wrong entry,
+        /// not a refusal. Asserting the round trip is what makes that
+        /// impossible to introduce without a failing test.
+        #[test]
+        fn both_name_lengths_fit_one_register_without_touching() {
+            for source in [1usize, 2, 7, 255] {
+                for destination in [1usize, 2, 7, 255] {
+                    let packed = pack_pinned_name_lengths(source, destination);
+                    assert_eq!(
+                        (packed >> 32) as usize,
+                        source,
+                        "source {source} destination {destination}"
+                    );
+                    assert_eq!(
+                        (packed & 0xffff_ffff) as usize,
+                        destination,
+                        "source {source} destination {destination}"
+                    );
+                }
+            }
+
+            // The two are not interchangeable, which is the whole reason the
+            // packing has a name: a swapped pair is a different word.
+            assert_ne!(
+                pack_pinned_name_lengths(1, 2),
+                pack_pinned_name_lengths(2, 1)
+            );
+
+            // The longest pair the gate can ever produce still leaves the high
+            // half far from full, so no legal length can overflow into flags
+            // territory or wrap.
+            let widest = pack_pinned_name_lengths(PINNED_NAME_MAX, PINNED_NAME_MAX);
+            assert_eq!(widest, (255u64 << 32) | 255);
+        }
+
+        /// 670 resolves *both* handles, like 668, and declines on the same
+        /// shapes at either end.
+        ///
+        /// The source-side rows matter more here than they do for 668. Every
+        /// other member of the family creates, stamps or reads; this one
+        /// removes a name, so a source that escaped containment would be an
+        /// unlink of something the pinned directory does not hold.
+        ///
+        /// The flags word is swept too, because it is the only argument the
+        /// rest of the family does not have. No value of it may decline the
+        /// fast path: 670 takes the same three the path-based call takes and
+        /// refuses the rest, so letting an unknown bit fall back would put the
+        /// `EINVAL` on whichever route happened to run.
+        #[test]
+        fn a_pinned_rename_needs_both_ends_and_declines_when_either_is_wrong() {
+            let a = fdtable::alloc_fd(HandleKind::File, 0x1234).expect("fd table full");
+            let b = fdtable::alloc_fd(HandleKind::File, 0x5678).expect("fd table full");
+            let pipe = fdtable::alloc_fd(HandleKind::Pipe, 0x9abc).expect("fd table full");
+
+            // SAFETY: all the names are valid C strings.
+            unsafe {
+                // Both ends well-formed, under every flags value including ones
+                // the kernel would refuse: declines only for want of a kernel.
+                for flags in [0u64, 1, 2, 3, 4, u64::MAX] {
+                    assert_eq!(
+                        try_pinned_renameat(a, b"f\0".as_ptr(), b, b"g\0".as_ptr(), flags),
+                        None,
+                        "flags {flags:#x}"
+                    );
+                }
+                // The same handle on both sides is legal — `mv a b` inside one
+                // directory is the ordinary case, and the kernel does not
+                // deadlock on it.
+                assert_eq!(
+                    try_pinned_renameat(a, b"f\0".as_ptr(), a, b"g\0".as_ptr(), 0),
+                    None
+                );
+                // A name that is not one component, on either side.
+                for (old, new) in [
+                    (&b"x/f\0"[..], &b"g\0"[..]),
+                    (b"f\0", b"x/g\0"),
+                    (b"..\0", b"g\0"),
+                    (b"f\0", b"..\0"),
+                    (b".\0", b"g\0"),
+                    (b"f\0", b".\0"),
+                    (b"\0", b"g\0"),
+                    (b"f\0", b"\0"),
+                ] {
+                    assert_eq!(
+                        try_pinned_renameat(a, old.as_ptr(), b, new.as_ptr(), 0),
+                        None,
+                        "{old:?} -> {new:?}"
+                    );
+                }
+                // A fd that is not a directory handle, on either side.
+                assert_eq!(
+                    try_pinned_renameat(pipe, b"f\0".as_ptr(), b, b"g\0".as_ptr(), 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_renameat(a, b"f\0".as_ptr(), pipe, b"g\0".as_ptr(), 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_renameat(4242, b"f\0".as_ptr(), b, b"g\0".as_ptr(), 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_renameat(a, b"f\0".as_ptr(), 4242, b"g\0".as_ptr(), 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_renameat(a, core::ptr::null(), b, b"g\0".as_ptr(), 0),
+                    None
+                );
+                assert_eq!(
+                    try_pinned_renameat(a, b"f\0".as_ptr(), b, core::ptr::null(), 0),
                     None
                 );
             }

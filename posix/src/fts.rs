@@ -30,9 +30,16 @@
 //!
 //! - A traversal stack of up to [`MAX_FTS_DEPTH`] in-progress directory
 //!   frames.  Each frame caches the child listing of the directory it
-//!   represents so we can release the underlying `DIR*` handle (there
-//!   are only 8 [`crate::dirent::Dir`] slots system-wide) before
-//!   descending — otherwise deep traversals would exhaust them.
+//!   represents so we can release the underlying `DIR*` handle before
+//!   descending, rather than holding one open per level.  That was
+//!   originally forced on us — there were only 8
+//!   [`crate::dirent::Dir`] slots system-wide, so a traversal deeper
+//!   than that would have exhausted them.  The pool is
+//!   `dirent::MAX_OPEN_DIRS` = 64 now that a slot no longer
+//!   carries a 68 KiB inline buffer, which is deeper than
+//!   [`MAX_FTS_DEPTH`]; the eager read is kept anyway, because it is
+//!   also what makes a frame independent of a stream that could be
+//!   invalidated underneath it.
 //! - The currently-displayed [`FtsEnt`], whose `fts_path` is a
 //!   mutated-in-place buffer that grows as we descend and shrinks as
 //!   we ascend.  `fts_name` points into `fts_path` at the basename
@@ -75,9 +82,12 @@
 //! - [`MAX_FTS_INSTANCES`] = 2 concurrent open streams.
 //! - [`MAX_FTS_DEPTH`] = 8 levels deep.
 //! - [`MAX_FTS_CHILDREN`] = 64 entries per directory (anything beyond
-//!   is silently truncated — matches the same truncation behavior in
-//!   `SYS_FS_LIST_DIR`'s 256-entry cap when combined with our
-//!   per-frame buffer).
+//!   is silently truncated).  This used to be one truncation among
+//!   several: the listing itself stopped at `SYS_FS_LIST_DIR`'s
+//!   256-entry cap.  That cap is gone — streams read complete listings
+//!   via `SYS_FS_GETDENTS_PINNED` — so this per-frame buffer is now the
+//!   *only* place a traversal loses entries, which makes it the one
+//!   worth fixing.  Tracked in known-issues.md.
 //! - [`FTS_NAME_MAX`] = 64 bytes per component (longer names are
 //!   skipped with an [`FTS_ERR`] entry).
 //! - Path length capped at [`crate::unistd::PATH_MAX`] (4096).

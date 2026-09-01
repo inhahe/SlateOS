@@ -108,12 +108,28 @@
 //!   `target 'c': Not a directory`, and a bare `Invalid argument` where a
 //!   directory had been asked to become a subdirectory of itself.
 //!
+//! An eighteenth arrived long afterwards, from a case written while measuring
+//! `--strip-trailing-slashes` — the no-option half of one of §21's pairs, aimed
+//! at something else entirely. `mv f d/`, with `d` a regular file, said `cannot
+//! move 'f' to 'd/': Not a directory` where GNU says `cannot stat 'd/': Not a
+//! directory`. The destination's own `lstat` had its error discarded with
+//! `.ok()`, so what got printed was the errno left over from the *speculative*
+//! rename — a sentence claiming a rename was attempted and refused, when none
+//! had been attempted and the failure belonged to a lookup. It is the same
+//! structural mistake as the rest of the list, arriving through the one path
+//! nobody had aimed a case at, and it is the argument for the paragraph below:
+//! the harness finds these, reading does not. Pinned by §9's four
+//! destination-cannot-be-stat'd cases; see [`move_one`]'s destination stat.
+//!
 //! The harness is the artifact to keep, not the fix list: it is 300 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
-//! Eleven of its cases are marked as differing on purpose: four are `--help`
+//! Twelve of its cases are marked as differing on purpose: four are `--help`
 //! and `--version`, which name SlateOS rather than the GNU project and always
-//! will, and the other seven are options this file does not implement yet — so
-//! implementing one is expected to *promote* a case rather than to add one. `-v` was the first to be promoted
+//! will; six are options this file does not implement yet — so
+//! implementing one is expected to *promote* a case rather than to add one; and
+//! two are the cross-device defects in the section below, which are the first
+//! xfails here that name a `known-issues.md` entry rather than a missing option.
+//! `-v` was the first to be promoted
 //! that way; its five entries became §14 and gained four more, which is the
 //! shape the rest should follow. `-i`/`-f`/`-n` was the second: its twelve
 //! entries became §15 and gained twenty more, plus the `--no-cl` abbreviation
@@ -129,10 +145,16 @@
 //! a second file under a name this `mv` chooses — so every case has a name to
 //! check as well as a tree — and because the option *lifts* three of §13's
 //! refusals, each of which then has to be measured both ways round.
+//! `--strip-trailing-slashes` was the sixth, and the narrowest: two entries
+//! became §21 and gained twenty-two more. It has no policy of its own — it
+//! edits the operands and then everything else happens as it would have — so
+//! half of those cases are *pairs*, the same command line with the option and
+//! without, and nearly every one is about *when* the edit lands relative to the
+//! four checks that read the operands first. See [`strip_operands`].
 //!
 //! # Options this implementation does not have
 //!
-//! `-Z`/`--context`, `--debug`, `--no-copy` and `--strip-trailing-slashes` are
+//! `-Z`/`--context`, `--debug` and `--no-copy` are
 //! recognised and rejected with a message saying they are not implemented,
 //! rather than ignored. Silently ignoring an option that changes what happens
 //! to an existing destination would lose a file the user asked to be kept; for
@@ -147,16 +169,58 @@
 //! it needs a recursive copy that preserves modes, symlinks and hard links, and
 //! doing it wrong loses data quietly. It reports that it is not implemented
 //! rather than attempting a partial job. Logged in `known-issues.md`.
+//!
+//! # The cross-device fallback, and what §22 found in it
+//!
+//! §22 of the harness arrived long after the rest and is the one section not
+//! about an option: it moves files between two *filesystems*, which the other
+//! 300 cases never do because they all run inside one temporary directory. The
+//! section exists because of a claim that had been written down twice and never
+//! checked — that a second filesystem needed a mount and therefore a password.
+//! It did not. `$XDG_RUNTIME_DIR` and `/dev/shm` are already mounted, already
+//! writable, and already a different `st_dev` from `/tmp`.
+//!
+//! Its first run found four defects in a fallback that had been read carefully
+//! and looked right, and every one of them was invisible on a one-filesystem
+//! machine:
+//!
+//! - **The destination was written *through*, not replaced.** `fs::copy` opens
+//!   the destination with `O_TRUNC`, so `mv far/f g` rewrote the inode `g`
+//!   named — and every *other* name for it. A file the user never mentioned was
+//!   destroyed. GNU unlinks first, and its comment says why in one sentence:
+//!   *"so that a cross-device `mv' acts as if it were really using the rename
+//!   syscall"*. See [`clear_destination`].
+//! - **The times, the owner and the set-ID bits were all thrown away.**
+//!   `fs::copy` is documented to carry the permission bits and documented to
+//!   carry nothing else, so a moved file arrived stamped with the moment of the
+//!   move. A move is meant to be indistinguishable from a rename, and `mv` has
+//!   no option to turn any of that preservation off. See
+//!   [`copy_across_devices`] for the four ordered steps that replaced it.
+//! - **Failures named the operation rather than the step.** One `cannot move X
+//!   to Y` for a source that would not open and a destination that would not be
+//!   created — the same errno for both, with the half of the information that
+//!   says which file to go and look at discarded. See [`Failed`].
+//! - **A hard-linked group moved together arrives as separate files.** Still
+//!   true; it belongs with the recursive walk. Logged in `known-issues.md`.
+//!
+//! The first three are fixed and their cases are ordinary `run_case`s now. The
+//! general lesson is the one the eighteenth bug above already taught, in a
+//! sharper form: reading found none of these, and the reason the harness could
+//! not find them either was a sentence in its own header asserting the test was
+//! impossible.
 
 use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
+use coreutils::fsattr::{self, GroupRetry, Link, On, Ownership};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
-use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
+use coreutils::pathname::strip_trailing_slashes;
+use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Write};
@@ -318,6 +382,28 @@ struct Destination {
     /// `-T` / `--no-target-directory`: the last operand is a name to move
     /// *onto*, never a directory to move *into*.
     no_directory: bool,
+    /// `--strip-trailing-slashes`: remove trailing `/` from the operands before
+    /// they are moved. GNU's `remove_trailing_slashes` (`mv.c:319`).
+    ///
+    /// Here and not in [`MvFlags`] because it is not a policy applied to each
+    /// move — it rewrites the operand list once, and it does so at a point that
+    /// only [`move_all`] can see. See [`strip_operands`] for *which* operands,
+    /// which is the whole subtlety of the option.
+    ///
+    /// What it buys is `mv symlink-to-dir/ into-a-directory`. A trailing slash
+    /// makes the kernel resolve the symlink, so that command asks to move the
+    /// *directory* and fails `ENOTDIR`; strip it and the symlink itself moves.
+    /// Shells append the slash for you on tab-completion, so the option exists
+    /// for scripts that cannot control how their argument was spelled.
+    ///
+    /// It does *not* buy `mv --strip-trailing-slashes symlink-to-dir/ newname`,
+    /// where the destination does not exist — measured against GNU 9.4, that
+    /// still fails `Not a directory`. The speculative rename runs before the
+    /// strip and caches the `ENOTDIR` it got from the *unstripped* name, and
+    /// nothing afterwards retries. The option therefore helps in exactly the
+    /// three shapes that reach no speculative rename: a destination that is a
+    /// directory, `-t`, and `-T`. See [`strip_operands`].
+    strip_slashes: bool,
 }
 
 /// What the command line asked for.
@@ -419,6 +505,8 @@ Rename SOURCE to DEST, or move SOURCE(s) to DIRECTORY.
   -i, --interactive  prompt before overwrite
   -n, --no-clobber   do not overwrite an existing file
 If you specify more than one of -i, -f, -n, only the final one takes effect.
+      --strip-trailing-slashes  remove any trailing slashes from each SOURCE
+                       argument
   -S, --suffix=SUFFIX  override the usual backup suffix
   -t, --target-directory=DIRECTORY  move all SOURCE arguments into DIRECTORY
   -T, --no-target-directory  treat DEST as a normal file
@@ -615,6 +703,9 @@ fn parse_args(args: &[OsString]) -> Result<Request, getopt::Error> {
             Opt::Short(b'T', _) | Opt::Long("no-target-directory", _) => {
                 dest.no_directory = true;
             }
+            Opt::Long("strip-trailing-slashes", _) => {
+                dest.strip_slashes = true;
+            }
             // GNU `mv`'s remaining options, refused by name. Reaching them
             // means the parser recognised the option and, for `-S`, has already
             // taken its value out of argv — which is what keeps the *rest* of
@@ -803,6 +894,69 @@ fn target_in_directory(dir: &Path, src: &Path) -> (PathBuf, OsString) {
     (dir.join(&base), base)
 }
 
+/// `--strip-trailing-slashes` applied to the operands that are still operands.
+///
+/// GNU `mv.c:505`:
+///
+/// ```text
+/// if (remove_trailing_slashes)
+///   for (int i = 0; i < n_files; i++)
+///     strip_trailing_slashes (file[i]);
+/// ```
+///
+/// Two things about that loop decide everything this function has to get right,
+/// and neither is visible in the option's one-line help text.
+///
+/// **It runs late.** Every operand-shape question — the missing-operand
+/// diagnostic, `-T`'s extra operand, `-t`'s directory, the speculative
+/// `renameatu (…, RENAME_NOREPLACE)`, and the probe asking whether the last
+/// operand is a directory — is asked *before* it, on the unstripped words. All
+/// four diagnostics therefore quote the slash the user typed, and are measured
+/// doing so: `mv --strip-trailing-slashes -T a b c/` says `extra operand 'c/'`,
+/// and `mv --strip-trailing-slashes a b c/` says `target 'c/': Not a directory`.
+/// Only what happens *after* the shape is settled sees stripped names.
+///
+/// The speculative rename is the sharp one, because its errno outlives it:
+/// `mv --strip-trailing-slashes symlink-to-dir/ newname` fails
+/// `cannot move 'sym' to 'newname': Not a directory`, an `ENOTDIR` that could
+/// only have come from renaming `sym/` — the name in the message is stripped
+/// and the error in it is not. That is upstream's, and it is why this is not
+/// simply done to `paths` on the way in.
+///
+/// **It runs over `n_files`, which the directory probe may already have
+/// decremented.** So a destination that *is* a directory keeps its slashes and
+/// one that is not loses them, and `-t`'s directory — which never was one of
+/// `file[]` — always keeps them. That asymmetry is unobservable for the
+/// directory cases (a trailing slash on a name that must be a directory changes
+/// nothing) and observable for the other: `mv --strip-trailing-slashes -T a
+/// symlink-to-dir/` replaces the *symlink*, where without the option it reports
+/// that it cannot overwrite a directory with a non-directory.
+///
+/// Borrows when the option is off, so the common case allocates nothing and the
+/// operands stay the exact bytes the kernel was handed. An operand with nothing
+/// to strip is *cloned* rather than rebuilt from bytes for the same reason:
+/// [`os_bytes`] is lossy on a Windows development host, and a name that this
+/// option does not change should not be able to change anyway.
+fn strip_operands<'a>(dest: &Destination, paths: &'a [OsString]) -> Cow<'a, [OsString]> {
+    if !dest.strip_slashes {
+        return Cow::Borrowed(paths);
+    }
+    Cow::Owned(
+        paths
+            .iter()
+            .map(|p| {
+                let bytes = os_bytes(p);
+                let kept = strip_trailing_slashes(&bytes);
+                if kept.len() == bytes.len() {
+                    p.clone()
+                } else {
+                    os_from_bytes(kept)
+                }
+            })
+            .collect(),
+    )
+}
+
 /// Move every source onto the destination, reporting failures to `job.err`.
 ///
 /// Returns `true` if every source was moved. Takes both streams through [`Job`]
@@ -876,7 +1030,14 @@ fn move_all<O: Write, E: Write>(
             let _ = writeln!(job.err, "mv: target directory {}: {why}", quoteaf_os(dir));
             return false;
         }
-        return move_into_directory(job, Path::new(dir), paths);
+        // Every operand is a source under `-t`, so every operand is stripped —
+        // and the directory is not, because it came from the option and was
+        // never one of GNU's `file[]`. Both halves are unobservable here (the
+        // check above has already established it is a directory, and a trailing
+        // slash on a directory name changes nothing), so this matches upstream
+        // by construction rather than by measurement.
+        let sources = strip_operands(dest, paths);
+        return move_into_directory(job, Path::new(dir), &sources);
     }
 
     // Unreachable: the operand count was checked above.
@@ -898,11 +1059,22 @@ fn move_all<O: Write, E: Write>(
     // last-operand-is-a-directory probe, because under `-T` there is no such
     // probe for it to come before.
     if dest.no_directory {
+        // `-T` leaves `n_files` at two and `target_directory` unset, so *both*
+        // operands are stripped — the destination included, which is the one
+        // place stripping the destination is observable:
+        // `mv --strip-trailing-slashes -T a symlink-to-dir/` replaces the
+        // symlink, where without the option the slash resolves it and the move
+        // is refused as overwriting a directory with a non-directory.
+        let stripped = strip_operands(dest, paths);
+        // Unreachable: `split_last` above proves there are at least two.
+        let (Some(src), Some(target)) = (stripped.first(), stripped.get(1)) else {
+            return false;
+        };
         return move_one(
             job,
-            Path::new(&sources[0]),
-            last,
-            dest_operand,
+            Path::new(src),
+            Path::new(target),
+            target,
             Renamed::NotTried,
             true,
             &mut None,
@@ -942,20 +1114,44 @@ fn move_all<O: Write, E: Write>(
         }
     }
 
+    // Only now, with the shape settled, does `--strip-trailing-slashes` act —
+    // and on the operand list as it stands *after* the probe above, which is
+    // GNU's `n_files--`. See [`strip_operands`]: everything up to this line has
+    // read, and quoted, the words the user typed.
+    let stripped = strip_operands(dest, paths);
+
     let Some(dir) = into else {
         // Two operands, last operand not a directory: one move, to that name.
+        // Both are stripped, because the destination is still an operand.
+        //
+        // `state` is carried across the strip deliberately. It holds the errno
+        // of a speculative rename made on the *unstripped* pair, and upstream
+        // reports that errno against the stripped names —
+        // `mv --strip-trailing-slashes symlink-to-dir/ new` says
+        // `cannot move 'sym' to 'new': Not a directory`, an `ENOTDIR` no
+        // rename of `sym` could have produced.
+        let (Some(src), Some(target)) = (stripped.first(), stripped.get(1)) else {
+            return false;
+        };
         return move_one(
             job,
-            Path::new(&sources[0]),
-            last,
-            dest_operand,
+            Path::new(src),
+            Path::new(target),
+            target,
             state,
             true,
             &mut None,
         );
     };
 
-    move_into_directory(job, dir, sources)
+    // The destination *is* a directory, so `n_files--` took it out of the loop
+    // and only the sources are stripped. `dir` is still the unstripped word,
+    // which is upstream's `target_directory = lastfile` — a pointer taken
+    // before the strip, and to a name the strip would not have reached anyway.
+    let Some(stripped_sources) = stripped.split_last().map(|(_, rest)| rest) else {
+        return false;
+    };
+    move_into_directory(job, dir, stripped_sources)
 }
 
 /// Move every source in `sources` into `dir`, which the caller has already
@@ -1060,7 +1256,31 @@ fn move_one<O: Write, E: Write>(
     // "something is in the way" case (`copy.c:2322`) — so `mv a/. d`, which
     // fails `EBUSY`, is examined as an overwrite and only *then* fails `EBUSY`
     // for real.
-    let dst_meta = fs::symlink_metadata(target).ok();
+    //
+    // A stat that fails for a reason *other* than "not there" ends the move
+    // right here, naming the destination and nothing else (`copy.c:2330`):
+    // `mv f d/`, where `d` is a regular file, says `cannot stat 'd/': Not a
+    // directory` rather than `cannot move 'f' to 'd/': Not a directory`. The
+    // difference is not cosmetic. `cannot move A to B` says a rename was tried
+    // and refused; here none was — the errno in `failure` came from the
+    // *speculative* rename in [`move_all`], possibly on a differently-spelled
+    // pair (see [`strip_operands`]), and the thing that actually just went
+    // wrong is this stat. Discarding its error with `.ok()` reported the older,
+    // less relevant one and attributed it to an operation that never happened.
+    //
+    // Every errno but `ENOENT` lands here for this utility. Upstream lets
+    // `ELOOP` through when `unlink_dest_after_failed_open` is set, so that the
+    // destination can be unlinked later — and `mv` sets it false (`mv.c:128`),
+    // which leaves `ENOENT` as the only way past.
+    let dst_meta = match fs::symlink_metadata(target) {
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(job.err, "mv: cannot stat {}: {why}", quoteaf_os(target));
+            return false;
+        }
+    };
     if dst_meta.is_some() {
         failure = io::Error::from(io::ErrorKind::AlreadyExists);
     }
@@ -1148,6 +1368,58 @@ fn move_one<O: Write, E: Write>(
         return false;
     }
 
+    // The one shape this fallback cannot do, asked **before** the destination is
+    // cleared and not inside [`copy_across_devices`] with the rest of the kind
+    // analysis. GNU's order is clear-then-copy, and it can afford that because
+    // its copy handles a directory; ours does not, so clearing first would
+    // delete a destination that this command is then going to refuse to
+    // replace — losing a file to a move that did not happen, which is worse
+    // than either the refusal or the move.
+    //
+    // No `copied` line precedes it, matching GNU's `!S_ISDIR (src_mode)` guard
+    // and reading correctly besides: announcing a copy about to be declined
+    // would be a lie rather than an oddity.
+    if src_meta.is_dir() {
+        return give_up_cross_device(
+            job,
+            &no_directories(src, target),
+            target,
+            moved_aside.as_deref(),
+        );
+    }
+
+    // Clear the destination, so that the copy standing in for the rename ends
+    // with a *new* file at that name rather than the old one rewritten. GNU
+    // says why in as many words — "remove any existing destination file so that
+    // a cross-device `mv` acts as if it were really using the rename syscall"
+    // (`copy.c:2870`) — and the difference is not bookkeeping. Written through
+    // instead, the destination keeps its inode, and with it its mode, its owner
+    // and *its other hard links*: `mv /other/fs/f g`, where `g` is one of a
+    // linked pair, silently rewrote the pair's other name too, and `g` came out
+    // wearing a mode the source never had. A rename does none of that.
+    //
+    // Not conditional on the `dst_meta` taken further up: that stat and this
+    // unlink are two syscalls with a rename attempt between them, and the name
+    // may have been freed — or taken — since. `ENOENT` is therefore the
+    // ordinary answer rather than a failure, and it is the *only* one excused;
+    // GNU spells the test `errno != ENOENT` exactly.
+    if let Err(e) = clear_destination(target) {
+        let why = strerror(&e);
+        let _ = writeln!(
+            job.err,
+            "mv: inter-device move failed: {} to {}; unable to remove target: {why}",
+            quoteaf_os(src),
+            quoteaf_os(target)
+        );
+        // No `un_backup` here, deliberately, and that is upstream's shape:
+        // `copy.c:2884` returns straight out rather than jumping to its
+        // `un_backup` label. So a `-b` whose backup was made and whose target
+        // could not then be cleared leaves the backup standing with no
+        // destination — the same odd-but-measured outcome the rename failures
+        // above produce, for the same reason.
+        return false;
+    }
+
     // Announced *before* the copy is attempted, which is upstream's order and
     // not an accident of this file's shape: `copy.c:2887` prints `copied` in the
     // block that clears the destination, and only then falls through to the copy
@@ -1158,41 +1430,10 @@ fn move_one<O: Write, E: Write>(
     // like one; it is what the reference does, and `scripts/mv-diff.sh` compares
     // both streams byte-for-byte, so "fixing" it here would turn a passing case
     // red.
-    //
-    // The `is_dir` guard is GNU's `!S_ISDIR (src_mode)`. A directory gets no
-    // line, which is what this `mv` needs anyway — it refuses the recursive copy
-    // on the next line, and announcing a copy it is about to decline would be a
-    // lie rather than an oddity.
-    if !src_meta.is_dir() {
-        announce(job, "copied", src, target, moved_aside.as_deref());
-    }
+    announce(job, "copied", src, target, moved_aside.as_deref());
 
-    if let Err(e) = copy_across_devices(src, target, &src_meta) {
-        let why = strerror(&e);
-        let _ = writeln!(
-            job.err,
-            "mv: cannot move {} to {}: {why}",
-            quoteaf_os(src),
-            quoteaf_os(target)
-        );
-        // **The only place `mv` puts a backup back**, and that is upstream's
-        // shape rather than an omission here. Eleven `goto un_backup`s exist in
-        // `copy.c` and every one of them is in the *copying* machinery that a
-        // cross-device move falls through into; the move-mode rename failures
-        // above it all say `return false` outright (`copy.c:2866`). So
-        // `mv -b a b` whose rename fails leaves `b~` in place with no `b` —
-        // odd, measured, and deliberately reproduced, because `scripts/mv-diff.sh`
-        // compares the resulting tree and "fixing" it here would turn a passing
-        // case red.
-        backup::un_backup(
-            "mv",
-            moved_aside.as_deref(),
-            target,
-            job.flags.verbose,
-            &mut *job.out,
-            &mut *job.err,
-        );
-        return false;
+    if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut *job.err) {
+        return give_up_cross_device(job, &failure, target, moved_aside.as_deref());
     }
     // The second line of the pair, and it comes from somewhere else entirely in
     // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
@@ -1605,11 +1846,14 @@ fn make_backup<O: Write, E: Write>(
 /// stamps are already within two seconds of each other *and* the filesystems'
 /// resolutions differ.
 ///
-/// It is not implemented here, and the reason it is not yet reachable is
-/// separate: this `mv`'s cross-device fallback is `fs::copy`, which does not
-/// carry the source's mtime over at all, so there is no preserved timestamp for
-/// the truncation to be about. Both halves are logged in `known-issues.md`, and
-/// the truncation belongs with whichever of them is done first.
+/// It is not implemented here, and it is now **reachable**, which it was not
+/// before 2026-09-01: until then the cross-device fallback was `fs::copy` and
+/// carried no timestamp at all, so there was no preserved stamp for the
+/// truncation to be about. [`copy_across_devices`] carries both stamps now, so
+/// the second `mv -u` of the same pair across a boundary asks the question
+/// upstream asks — and answers it without the rounding. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`, whose fix
+/// is what made this the last unimplemented half.
 fn destination_is_older(src_meta: &fs::Metadata, dst_meta: &fs::Metadata) -> bool {
     match (dst_meta.modified(), src_meta.modified()) {
         (Ok(dst), Ok(src)) => dst < src,
@@ -1855,15 +2099,152 @@ fn is_cross_device(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::CrossesDevices
 }
 
+/// A step of the cross-device fallback that failed, and the sentence GNU prints
+/// for that step.
+///
+/// The sentence is carried rather than derived from the error, because the two
+/// steps that fail with the same errno say different things: an unreadable
+/// source and an unwritable destination directory both give `EACCES`, and GNU
+/// answers `cannot open 'f' for reading` for one and `cannot create regular file
+/// 'd/g'` for the other. Ours used to answer `cannot move 'f' to 'd/g'` for both
+/// — the same exit status and the same errno, with the half of the information
+/// that says where to go and look thrown away. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP`.
+///
+/// It is the whole diagnostic bar the errno and the `mv: ` prefix, already
+/// quoted, because the quoting style is not the same in all of them: GNU quotes
+/// with `quoteaf` almost everywhere and with `quotef` in the permissions
+/// sentence, and a helper that took the names and picked a style would have to
+/// know which sentence it was building anyway.
+#[cfg_attr(test, derive(Debug))]
+struct Failed {
+    /// e.g. `cannot open 'f' for reading`.
+    what: String,
+    /// The errno, appended after `: `.
+    err: io::Error,
+}
+
+impl Failed {
+    fn new(what: String, err: io::Error) -> Self {
+        Failed { what, err }
+    }
+}
+
+/// Say that a cross-device move failed, put back anything `-b` moved aside, and
+/// report the move as not done.
+///
+/// One function because the two callers must agree: upstream reaches its
+/// `un_backup` label from eleven places, all of them in the *copying* machinery
+/// that this fallback is, and both of ours are in it. What is **not** here is
+/// the destination-clearing failure above, which upstream returns from directly;
+/// keeping that one out of this helper is the point of having the helper.
+fn give_up_cross_device<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    failure: &Failed,
+    target: &Path,
+    moved_aside: Option<&Path>,
+) -> bool {
+    let why = strerror(&failure.err);
+    let what = &failure.what;
+    let _ = writeln!(job.err, "mv: {what}: {why}");
+    // **The only place `mv` puts a backup back**, and that is upstream's shape
+    // rather than an omission here: the move-mode rename failures above it all
+    // say `return false` outright (`copy.c:2866`). So `mv -b a b` whose rename
+    // fails leaves `b~` in place with no `b` — odd, measured, and deliberately
+    // reproduced, because `scripts/mv-diff.sh` compares the resulting tree and
+    // "fixing" it here would turn a passing case red.
+    backup::un_backup(
+        "mv",
+        moved_aside,
+        target,
+        job.flags.verbose,
+        &mut *job.out,
+        &mut *job.err,
+    );
+    false
+}
+
+/// What a cross-device move of a directory is refused with. See
+/// `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`, and
+/// `scripts/mv-diff.sh` §22 for the case that becomes an XPASS the moment a
+/// recursive fallback lands.
+///
+/// The one sentence in this fallback that is *not* GNU's, because GNU has no
+/// equivalent — it does the move. `cannot move X to Y` is what the whole
+/// fallback used to say and is the right shape for a refusal of the operation
+/// rather than of a step within it.
+fn no_directories(src: &Path, target: &Path) -> Failed {
+    Failed::new(
+        format!("cannot move {} to {}", quoteaf_os(src), quoteaf_os(target)),
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "moving a directory across filesystems is not implemented by this mv",
+        ),
+    )
+}
+
+/// Unlink whatever is at `target`, treating "nothing was there" as done.
+///
+/// The kind comes from the caller having already established that the source is
+/// not a directory, which is GNU's `S_ISDIR (src_mode) ? AT_REMOVEDIR : 0` with
+/// the directory arm unreachable: a directory source against a non-directory
+/// destination was refused much further up, so the two kinds agree, and the
+/// source is the one whose `stat` is already in hand.
+fn clear_destination(target: &Path) -> io::Result<()> {
+    match fs::remove_file(target) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
+}
+
 /// The `EXDEV` fallback: reproduce the source at `target`, then remove it.
+///
+/// `target` is a free name: [`clear_destination`] has just unlinked anything
+/// that was there, so every kind here creates rather than overwrites. That is
+/// also why nothing here is conditional on a `new_dst`: GNU's is set `true` by
+/// the block that does the unlinking (`copy.c:2890`), so every test of it in the
+/// machinery below that point is a test of a constant for this caller.
+///
+/// **A move is meant to be indistinguishable from a rename**, and that is not a
+/// figure of speech: `cp_option_init` (`mv.c:129`) turns on `preserve_mode`,
+/// `preserve_timestamps`, `preserve_ownership`, `preserve_links` and
+/// `preserve_xattr` unconditionally, with no option to turn any of them off.
+/// Everything a rename would have kept for free this function has to carry by
+/// hand, in an order that is not free either:
+///
+/// 1. **the bytes**, into a destination created with the group and other bits
+///    held back — see [`create_destination`];
+/// 2. **the times**, from the source's `stat` at whatever resolution it has;
+/// 3. **the owner**, which may be refused, and a refusal costs the set-ID bits;
+/// 4. **the mode**, last, because a `chown` clears `S_ISUID`/`S_ISGID` for a
+///    non-root process and a mode written before it would be silently undone.
+///
+/// GNU's comment at the top of that sequence is the whole of the argument:
+/// *"chown turns off set[ug]id bits for non-root, so do the chmod last"*
+/// (`copy.c:3245`).
+///
+/// None of steps 2–4 is fatal. `mv` leaves `require_preserve` false
+/// (`mv.c:142`), so a preservation that fails is *reported* on `err` and the
+/// move still counts as done — which is the right answer for the overwhelmingly
+/// common one, an ordinary user who may not give the copy away.
+///
+/// **Extended attributes are not carried yet**, though `preserve_xattr` is on
+/// upstream. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES`.
 ///
 /// # Errors
 ///
-/// Any failure of the copy or the removal, and the two cases this does not
-/// implement: a directory (which needs a recursive copy preserving modes,
-/// symlinks and hard links) and recreating a symlink on a host without
-/// `symlink(2)`.
-fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+/// The first step that failed, carrying [`Failed`]'s sentence for it. A
+/// directory never reaches here — [`move_one`] refuses it before the destination
+/// is cleared, because clearing first and refusing second would destroy a file
+/// for a move that then did not happen — but the arm is kept so that the
+/// function is safe to call directly, which is how it is tested.
+fn copy_across_devices<E: Write>(
+    src: &Path,
+    target: &Path,
+    metadata: &fs::Metadata,
+    err: &mut E,
+) -> Result<(), Failed> {
     let kind = metadata.file_type();
 
     if kind.is_symlink() {
@@ -1871,20 +2252,223 @@ fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io
         // link's *text* is reproduced verbatim, so a relative link keeps meaning
         // whatever it means relative to its new directory, exactly as `rename`
         // would have left it.
-        let points_at = fs::read_link(src)?;
-        symlink(&points_at, target)?;
-        return fs::remove_file(src);
+        let points_at = fs::read_link(src).map_err(|e| {
+            Failed::new(format!("cannot read symbolic link {}", quoteaf_os(src)), e)
+        })?;
+        symlink(&points_at, target).map_err(|e| {
+            Failed::new(
+                format!("cannot create symbolic link {}", quoteaf_os(target)),
+                e,
+            )
+        })?;
+        preserve_onto_link(target, metadata, err);
+        return remove_source(src);
     }
 
     if kind.is_dir() {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "moving a directory across filesystems is not implemented by this mv",
-        ));
+        return Err(no_directories(src, target));
     }
 
-    fs::copy(src, target)?;
-    fs::remove_file(src)
+    let mode = fsattr::permission_bits(metadata);
+    let mut source = fs::File::open(src)
+        .map_err(|e| Failed::new(format!("cannot open {} for reading", quoteaf_os(src)), e))?;
+    let mut dest = create_destination(target, mode).map_err(|e| {
+        Failed::new(
+            format!("cannot create regular file {}", quoteaf_os(target)),
+            e,
+        )
+    })?;
+
+    // `io::copy` and not a hand-written loop, because `std` specialises it to
+    // `copy_file_range` when both sides are files — the same kernel-side copy
+    // GNU reaches for, and the same reason: it moves the data without a trip
+    // through userspace and it reproduces a sparse file's holes instead of
+    // writing out the zeroes.
+    //
+    // **The price is that a read failure and a write failure arrive as one
+    // error**, where GNU distinguishes `error reading %s` from
+    // `error writing %s`. The destination's sentence is the one used, because
+    // that is the side that fails in practice — `ENOSPC`, `EDQUOT`, a full
+    // quota, a device going away mid-write — while a read error means the
+    // *source* medium is failing, which is rarer and louder. Telling them apart
+    // would mean giving up `copy_file_range`, which is a real loss for a real
+    // gain in a case nothing measures; it is logged rather than traded for.
+    // See `known-issues.md` →
+    // `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`
+    // for the recoverable version, and `design-decisions.md` §741 for the whole
+    // of the argument, including the two alternatives that were rejected.
+    io::copy(&mut source, &mut dest)
+        .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
+
+    preserve_onto_file(&source, &dest, target, metadata, mode, err);
+    remove_source(src)
+}
+
+/// Create `target` for writing, with the source's mode *narrowed* to the owner.
+///
+/// The withholding is GNU's `omitted_permissions`, which for a move is
+/// `dst_mode & (S_IRWXG | S_IRWXO)` — every group and other bit — because
+/// `preserve_ownership` is on (`copy.c:2892`). The bits come back in the final
+/// [`fsattr::copy_permissions`], and the window they are missing from is the one
+/// between the file existing and it having the right owner. Without the
+/// withholding, a file whose source is group- or world-readable is briefly
+/// readable by *this* process's group and by everyone, holding the source's
+/// contents, before the `chown` hands it to whoever should have had it.
+///
+/// `create_new` is GNU's `O_EXCL`, which it uses whenever `new_dst`
+/// (`copy.c:1457`) — and after the destination has been unlinked, `new_dst` is
+/// what this caller always is. It is not an optimisation: without it a name
+/// created between the unlink and the open would be opened and truncated, which
+/// is the very thing the unlink was there to prevent.
+///
+/// GNU also ORs in `S_IWUSR` here when it is about to copy extended attributes
+/// as a non-owner, "to allow copying xattrs on read-only files" — the kernel's
+/// `xattr_permission` wants write access to the inode. That bit is not added
+/// because this fallback does not carry extended attributes yet; it belongs
+/// with the change that does, and until then it would only widen a mode nobody
+/// reads.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode & !GROUP_AND_OTHER);
+    }
+    opts.open(target)
+}
+
+/// `S_IRWXG | S_IRWXO` — the bits [`create_destination`] holds back until the
+/// owner is settled.
+#[cfg_attr(not(unix), allow(dead_code))]
+const GROUP_AND_OTHER: u32 = 0o077;
+
+/// Carry the source's times, owner and mode onto the copy, reporting what would
+/// not go and failing at none of it.
+///
+/// Every write is aimed at the two *descriptors* rather than at the two names,
+/// which is [`fsattr::On`]'s reason and not a convenience: the mode being
+/// restored last includes the set-user-ID bit, and restoring it by name after
+/// the bytes are written leaves a window in which the name can be made to mean
+/// a different file. A descriptor names an inode and cannot be re-pointed.
+fn preserve_onto_file<E: Write>(
+    source: &fs::File,
+    dest: &fs::File,
+    target: &Path,
+    metadata: &fs::Metadata,
+    mode: u32,
+    err: &mut E,
+) {
+    let on = On::File(dest);
+    let mut mode = mode;
+
+    // `and_then` because a source whose stamps cannot even be read leaves the
+    // copy with the wrong times just as surely as one that cannot be stamped,
+    // and `preserving times for` is the sentence for that.
+    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
+        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
+    }
+
+    // GNU's `!SAME_OWNER_AND_GROUP (*src_sb, sb)` (`copy.c:1645`), and the skip
+    // is worth having rather than a `chown` that would be a no-op: it is still a
+    // write, it can still fail, and on most kernels it clears the set-ID bits —
+    // which the ordinary case, a user moving their own file, would then have to
+    // put back.
+    if fsattr::owner_differs(on, metadata) {
+        match fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::Yes) {
+            Ownership::Taken => {}
+            // Both of the other two drop the set-ID and sticky bits, which is
+            // GNU's single `case 0` for the reported and the silent refusal
+            // alike: a set-user-ID bit on a file that could not be given to its
+            // source's owner is a privilege granted to whoever holds it now.
+            Ownership::Denied => mode &= !SET_ID_AND_STICKY,
+            Ownership::Failed(e) => {
+                preserve_failed(
+                    err,
+                    "failed to preserve ownership for",
+                    quoteaf_os(target),
+                    &e,
+                );
+                mode &= !SET_ID_AND_STICKY;
+            }
+        }
+    }
+
+    // GNU's `copy_acl (src_name, source_desc, dst_name, dest_desc, src_mode)`,
+    // reached because `x->move_mode` is true — the mode *and* the access-control
+    // lists, because on this kernel an ACL entry grants access no mode bit shows
+    // and a move that carried only the bits would produce a file the kernel
+    // treats differently from the one that was moved.
+    //
+    // Its diagnostic is the one in this family that uses the unquoted `quotef`
+    // style. Matched rather than tidied, for `cp`'s reason: a utility that
+    // differs from GNU only in the punctuation of a diagnostic is still one
+    // whose output a script cannot match on.
+    if let Err(e) = fsattr::copy_permissions(On::File(source), on, mode) {
+        preserve_failed(err, "preserving permissions for", quotef_os(target), &e);
+    }
+}
+
+/// Carry the source link's owner and times onto the recreated link.
+///
+/// Two steps rather than three, and in the other order from
+/// [`preserve_onto_file`]'s, both of which are upstream's shape. A symbolic link
+/// has no mode of its own that any permission check consults, and Linux has no
+/// working `lchmod` to write one with, so `copy_internal` returns before its
+/// mode block whenever the destination is a link (`copy.c:3285`). The `lchown`
+/// comes first because it is done where the link is *made* (`copy.c:3178`),
+/// while the `utimensat` is in the shared tail below that.
+///
+/// The `lchown` gets no group-only retry, which is the same asymmetry `cp` has
+/// to reproduce: that call is a bare `lchownat` while `copy_reg`'s and the
+/// tail's both retry. It is visible in `ls -l` on the moved link.
+fn preserve_onto_link<E: Write>(target: &Path, metadata: &fs::Metadata, err: &mut E) {
+    let on = On::Path(target, Link::NoFollow);
+
+    if let Ownership::Failed(e) =
+        fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::No)
+    {
+        // GNU prints this one *unquoted* — `error (0, errno, _("failed to
+        // preserve ownership for %s"), dst_name)` with no `quoteaf` at all,
+        // unlike every other use of the same sentence. Reproduced as written;
+        // it is upstream's inconsistency and a script that matched on it would
+        // be matching on what upstream prints.
+        preserve_failed(
+            err,
+            "failed to preserve ownership for",
+            target.display().to_string(),
+            &e,
+        );
+    }
+
+    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
+        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
+    }
+}
+
+/// `S_ISUID | S_ISGID | S_ISVTX`, the bits a refused `chown` costs.
+const SET_ID_AND_STICKY: u32 = 0o7000;
+
+/// Report a preservation step that would not go, without failing the move.
+///
+/// A separate function so that the "and does not fail" half is stated once: the
+/// three call sites in [`preserve_onto_file`] and the two in
+/// [`preserve_onto_link`] all return `()`, and `mv` leaves `require_preserve`
+/// false (`mv.c:142`), so there is no arm anywhere that turns one of these into
+/// a non-zero exit.
+fn preserve_failed<E: Write>(err: &mut E, what: &str, name: String, e: &io::Error) {
+    let why = strerror(e);
+    let _ = writeln!(err, "mv: {what} {name}: {why}");
+}
+
+/// Unlink the source once the copy is complete, with GNU's `rm` sentence.
+///
+/// `mv` does this through `rm()` (`mv.c:238`) rather than in `copy.c`, which is
+/// why the wording is `rm`'s: `remove.c:352` reports a failed unlink as
+/// `cannot remove %s`.
+fn remove_source(src: &Path) -> Result<(), Failed> {
+    fs::remove_file(src).map_err(|e| Failed::new(format!("cannot remove {}", quoteaf_os(src)), e))
 }
 
 #[cfg(unix)]
@@ -1913,8 +2497,10 @@ fn symlink(_points_at: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    use coreutils::fsattr::Times;
     use coreutils::yesno::Canned;
     use scratchdir::ScratchDir;
+    use std::time::{Duration, SystemTime};
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -2173,12 +2759,7 @@ mod tests {
 
     #[test]
     fn unimplemented_long_options_are_rejected_by_name() {
-        for name in [
-            "--strip-trailing-slashes",
-            "--no-copy",
-            "--debug",
-            "--context",
-        ] {
+        for name in ["--no-copy", "--debug", "--context"] {
             let e = fail(&[name, "a", "b"]);
             assert!(
                 e.sentence.contains("not implemented"),
@@ -2227,6 +2808,72 @@ mod tests {
             assert!(!dest.no_directory, "{spelling:?}");
             assert_eq!(paths, ["a", "b"], "{spelling:?}");
         }
+    }
+
+    /// `--strip-trailing-slashes` has no short form and no value, so the only
+    /// thing the parse can get wrong is which field it writes — and it must
+    /// write *only* that one, since the option is otherwise inert.
+    ///
+    /// The abbreviation is included because [`LONG_OPTIONS`] is what decides
+    /// whether one is ambiguous, and `--str` has been unambiguous all along:
+    /// before this option was implemented it resolved to a refusal, which is
+    /// the one outcome that looks the same whether the table is right or wrong.
+    #[test]
+    fn strip_trailing_slashes_sets_only_its_own_field() {
+        for spelling in [
+            &["--strip-trailing-slashes", "a", "b"][..],
+            &["--str", "a", "b"][..],
+            &["a", "b", "--strip-trailing-slashes"][..],
+        ] {
+            let (flags, dest, paths) = run_parse_dest(spelling);
+            assert!(dest.strip_slashes, "{spelling:?}");
+            assert_eq!(dest.directory, None, "{spelling:?}");
+            assert!(!dest.no_directory, "{spelling:?}");
+            assert_eq!(paths, ["a", "b"], "{spelling:?}");
+            assert_eq!(flags, MvFlags::default(), "{spelling:?}");
+        }
+        // And it is off without the option, which is what makes every other
+        // test in this file a test of the unstripped path.
+        let (_, dest, _) = run_parse_dest(&["a", "b"]);
+        assert!(!dest.strip_slashes);
+    }
+
+    /// [`strip_operands`] itself: gnulib's `strip_trailing_slashes` semantics,
+    /// which are not "trim `/`".
+    ///
+    /// A filesystem root keeps one slash — `///` is `/`, not the empty name —
+    /// and an interior slash is never touched, so `a//b//` loses only the pair
+    /// at the end. Both are gnulib's, and both matter here rather than being
+    /// pathname trivia: the empty name would turn `mv --strip-trailing-slashes
+    /// / x` into a move of the current directory's unnamed sibling, and
+    /// trimming interior slashes would silently rename the operand.
+    #[test]
+    fn strip_operands_follows_gnulib_not_intuition() {
+        let on = Destination {
+            strip_slashes: true,
+            ..Destination::default()
+        };
+        let cases: &[(&str, &str)] = &[
+            ("a/", "a"),
+            ("a///", "a"),
+            ("a", "a"),
+            ("a//b//", "a//b"),
+            ("/", "/"),
+            ("///", "/"),
+            ("", ""),
+            (".", "."),
+            ("..//", ".."),
+        ];
+        let given: Vec<OsString> = cases.iter().map(|(g, _)| OsString::from(*g)).collect();
+        let want: Vec<OsString> = cases.iter().map(|(_, w)| OsString::from(*w)).collect();
+        assert_eq!(strip_operands(&on, &given).as_ref(), want.as_slice());
+
+        // Off, the operands are handed on untouched *and unallocated* — the
+        // bytes the kernel sees are the bytes argv held, which is what keeps a
+        // name this host cannot spell from being rewritten on its way through.
+        let off = Destination::default();
+        assert!(matches!(strip_operands(&off, &given), Cow::Borrowed(_)));
+        assert_eq!(strip_operands(&off, &given).as_ref(), given.as_slice());
     }
 
     /// GNU compares nothing here — it asks only whether one was given already —
@@ -2552,6 +3199,53 @@ mod tests {
         let (ok, out, err) = mv_flags(MvFlags::default(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, "");
+    }
+
+    /// `--strip-trailing-slashes` reaches the move itself, not just the parse.
+    ///
+    /// Asserted through `-v` because that is the one effect this option has
+    /// that does not need a symlink to see, and symlinks are what the
+    /// interesting cases are made of — a trailing slash changes what a *name*
+    /// resolves to only when the last component is a symlink, and the Windows
+    /// development host cannot create one without a privilege the test runner
+    /// does not have. The behaviour those cases pin lives in `mv-diff.sh` §21,
+    /// measured against GNU on Linux; what is checked here is the half that is
+    /// platform-independent: the stripped name is what gets moved and what gets
+    /// announced.
+    ///
+    /// Note that with the option on, the filesystem never sees the slash at
+    /// all — which is exactly why this test is safe on a host whose `rename`
+    /// treats a trailing separator differently from Linux's.
+    #[test]
+    fn strip_trailing_slashes_moves_the_stripped_name() {
+        let dir = scratch("v_strip");
+        let src = dir.path("s");
+        let into = dir.path("d");
+        fs::create_dir(&src).unwrap();
+        fs::create_dir(&into).unwrap();
+        let with_slash = PathBuf::from(format!("{}/", src.display()));
+        let landed = into.join("s");
+        let (ok, out, err, _) = mv_to(
+            MvFlags {
+                verbose: true,
+                ..MvFlags::default()
+            },
+            Destination {
+                strip_slashes: true,
+                ..Destination::default()
+            },
+            &[],
+            &[&with_slash, &into],
+        );
+        assert!(ok, "{err}");
+        assert_eq!(err, "");
+        // `shown(&src)` and not `shown(&with_slash)`: the announced source is
+        // the operand as the option left it.
+        assert_eq!(
+            out,
+            format!("renamed {} -> {}\n", shown(&src), shown(&landed))
+        );
+        assert!(landed.is_dir());
     }
 
     /// One line per source, in operand order, and each names the *target it
@@ -3070,6 +3764,7 @@ mod tests {
         Destination {
             directory: Some(dir.as_os_str().to_owned()),
             no_directory: false,
+            strip_slashes: false,
         }
     }
 
@@ -3079,6 +3774,7 @@ mod tests {
         Destination {
             directory: None,
             no_directory: true,
+            strip_slashes: false,
         }
     }
 
@@ -3234,6 +3930,7 @@ mod tests {
         let dest = Destination {
             directory: Some(dir.path("nosuchdir").into_os_string()),
             no_directory: true,
+            strip_slashes: false,
         };
         let (ok, err) = mv_dest(dest, &[&dir.path("a")]);
         assert!(!ok);
@@ -3340,7 +4037,7 @@ mod tests {
         let moved = dir.path("moved");
 
         let meta = fs::symlink_metadata(&link).unwrap();
-        copy_across_devices(&link, &moved, &meta).unwrap();
+        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
 
         let moved_meta = fs::symlink_metadata(&moved).unwrap();
         assert!(
@@ -3359,9 +4056,161 @@ mod tests {
         let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
+    }
+
+    /// A move is meant to be indistinguishable from a rename, and a rename does
+    /// not re-date the file. This is the unit `known-issues.md` →
+    /// `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER` asked
+    /// for: it pins the source's stamp, calls the function, and asserts the
+    /// destination's is the same one — which the differential harness can only
+    /// see through the whole program and only on a machine with two filesystems.
+    ///
+    /// The stamp is deliberately in the past. "Not now" is the only assertion
+    /// that distinguishes a preserved time from a fresh one, and a time set to
+    /// *now* would pass whether or not anything was preserved.
+    #[test]
+    fn the_cross_device_fallback_carries_the_times() {
+        let dir = scratch("xdev_times");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"bytes").unwrap();
+
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        fsattr::set_times(On::Path(&a, Link::Follow), Times::both(long_ago)).unwrap();
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        let want = meta.modified().unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&b).unwrap().modified().unwrap();
+        assert_eq!(got, want, "the copy must keep the source's stamp");
+    }
+
+    /// The mode, including the bits `fs::copy` used to carry and the set-user-ID
+    /// bit it did not. The `chmod` is written *after* the `chown`, so a run as
+    /// root — where the `chown` actually happens and clears `S_ISUID` — is the
+    /// case this pins; as an ordinary user the `chown` is skipped and the bit
+    /// would survive either ordering.
+    #[test]
+    #[cfg(unix)]
+    fn the_cross_device_fallback_carries_the_set_user_id_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("xdev_mode");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"bytes").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o4741)).unwrap();
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(got, 0o4741, "every bit, set-user-ID included");
+    }
+
+    /// A symlink has its own modification time, and `mv` carries it: the
+    /// `utimensat` in the shared tail is done with `AT_SYMLINK_NOFOLLOW`, so it
+    /// stamps the link and not what the link names. The target is checked too,
+    /// because stamping through the link would be the silent failure.
+    #[test]
+    #[cfg(unix)]
+    fn the_cross_device_fallback_carries_a_links_own_time() {
+        let dir = scratch("xdev_link_times");
+        let real = dir.path("real");
+        fs::write(&real, b"contents").unwrap();
+        let link = dir.path("link");
+        std::os::unix::fs::symlink("real", &link).unwrap();
+
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        fsattr::set_times(On::Path(&link, Link::NoFollow), Times::both(long_ago)).unwrap();
+        let target_stamp = fs::symlink_metadata(&real).unwrap().modified().unwrap();
+
+        let meta = fs::symlink_metadata(&link).unwrap();
+        let want = meta.modified().unwrap();
+        let moved = dir.path("moved");
+        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&moved).unwrap().modified().unwrap();
+        assert_eq!(got, want, "the link's own stamp must come across");
+        assert_eq!(
+            fs::symlink_metadata(&real).unwrap().modified().unwrap(),
+            target_stamp,
+            "and must not have been written through the link"
+        );
+    }
+
+    /// The destination is *replaced*, not written through, and this is the step
+    /// that makes that true. Without it the copy opens the existing name and
+    /// truncates it, so the file that comes out keeps the old one's inode — and
+    /// with it its mode and every other name linked to it.
+    ///
+    /// Measured against GNU 9.4 across a real filesystem boundary: `mv far/f g`,
+    /// with `g` one of a linked pair, left both `g` and `g2` rewritten and still
+    /// linked, where GNU leaves `g2` untouched at its old size. The harness case
+    /// is in `scripts/mv-diff.sh` §22; this is the unit underneath it.
+    #[test]
+    fn clearing_the_destination_breaks_its_other_links() {
+        let dir = scratch("xdev_clear");
+        let one = dir.path("one");
+        let two = dir.path("two");
+        fs::write(&one, b"original").unwrap();
+        fs::hard_link(&one, &two).unwrap();
+
+        clear_destination(&one).unwrap();
+
+        assert!(fs::symlink_metadata(&one).is_err(), "the name is free");
+        assert_eq!(
+            fs::read(&two).unwrap(),
+            b"original",
+            "the other name still reads what it always did"
+        );
+    }
+
+    /// `ENOENT` is the ordinary answer, not a failure: the usual cross-device
+    /// move is onto a name that was never there, and `-b` has just renamed away
+    /// any name that was. GNU spells the test `errno != ENOENT`.
+    #[test]
+    fn clearing_a_destination_that_is_not_there_succeeds() {
+        let dir = scratch("xdev_clear_absent");
+        clear_destination(&dir.path("never-existed")).unwrap();
+    }
+
+    /// A symlink at the destination is unlinked as itself. Following it would
+    /// clear whatever it names — a file in another directory entirely — and
+    /// leave the name being moved onto still occupied.
+    #[test]
+    #[cfg(unix)]
+    fn clearing_a_symlink_destination_does_not_follow_it() {
+        let dir = scratch("xdev_clear_link");
+        let real = dir.path("real");
+        let link = dir.path("link");
+        fs::write(&real, b"kept").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        clear_destination(&link).unwrap();
+
+        assert!(fs::symlink_metadata(&link).is_err(), "the link is gone");
+        assert_eq!(fs::read(&real).unwrap(), b"kept", "its target is not");
+    }
+
+    /// Anything else is reported, so that the caller can print
+    /// `inter-device move failed: … unable to remove target`. A directory is the
+    /// reachable shape: `unlink` refuses one, and this `mv` is holding a
+    /// non-directory source, so the two kinds disagreeing is exactly the case
+    /// that must not be silently skipped.
+    #[test]
+    fn clearing_a_destination_that_will_not_go_is_reported() {
+        let dir = scratch("xdev_clear_dir");
+        let sub = dir.path("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("inside"), b"x").unwrap();
+
+        clear_destination(&sub).unwrap_err();
+
+        assert!(sub.join("inside").is_file(), "nothing may be removed");
     }
 
     /// Not implemented, and it says so rather than moving part of the tree.
@@ -3372,8 +4221,9 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
         let meta = fs::symlink_metadata(&sub).unwrap();
-        let e = copy_across_devices(&sub, &dir.path("elsewhere"), &meta).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+        let e =
+            copy_across_devices(&sub, &dir.path("elsewhere"), &meta, &mut Vec::new()).unwrap_err();
+        assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);
         assert!(sub.join("inside").is_file(), "nothing may be moved");
     }
 

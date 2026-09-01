@@ -452,6 +452,18 @@ elif [ "$DIFF_XATTR_REF" != yes ]; then
 else
   echo "  xattr: $DIFF_XATTR, reference has USE_XATTR"
 fi
+# ACLs are compared by the same reader — on Linux an ACL *is* the extended
+# attribute `system.posix_acl_access` — so what is reported here is only what
+# section 17's ACL cases need: a tool to make one, and a reference that keeps
+# one. The two are independent, and the first is the one that can make a case
+# pass for the wrong reason.
+if [ -z "$DIFF_SETFACL" ]; then
+  echo "  acl:   NOT EXERCISED -- no working setfacl to build a fixture with"
+elif [ "$DIFF_ACL_REF" != yes ]; then
+  echo "  acl:   $DIFF_SETFACL, but the reference lacks USE_ACL"
+else
+  echo "  acl:   $DIFF_SETFACL, reference has USE_ACL"
+fi
 
 # =============================================================================
 # 1. Too few operands
@@ -1780,6 +1792,94 @@ run_case file.txt new.txt
 # word off. The source keeps its attribute; the copy must not get it.
 STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
 xattr_case -a --no-preserve=xattr file.txt new.txt
+
+# Access-control lists, which ride on `--preserve=mode` and not on
+# `--preserve=xattr`.
+#
+# An ACL is a permission list finer than the nine mode bits — "user 0 may write
+# this as well as the owner". GNU treats it as part of the *mode*: `copy_reg`
+# calls `set_acl`/`copy_acl` from the mode arm, and `copy_attr` explicitly skips
+# the attribute an ACL is stored in, so `--preserve=xattr` alone carries no ACL
+# and `--preserve=mode` carries one. Ours reaches the same place by a different
+# route — `fsattr::copy_permissions` sets the mode, clears the permission
+# attributes, then copies them — and these cases are what pin the two together.
+#
+# Two independent facts again. The harness must be able to *make* an ACL
+# (`DIFF_SETFACL`; without it the fixture sets nothing and every case below
+# would pass against a `cp` that dropped every ACL — the vacuous pass this whole
+# block exists to avoid), and the reference must have `USE_ACL`, since without
+# libacl gnulib compiles `copy_acl` down to a plain `chmod` and it drops the
+# entries while carrying the bits.
+#
+# The second fact fails differently from the xattr one and so is handled
+# differently: `--preserve=xattr` on a reference without libattr *refuses to
+# run*, which is loud, but a reference without libacl copies happily and is
+# merely wrong. That is why this is an `xfail_case` with the reason spelled out
+# rather than anything quieter.
+#
+# Measured rather than assumed: with the `copy_xattrs(.., Xattrs::Permissions)`
+# call in `fsattr::copy_permissions` short-circuited — leaving the `set_mode`
+# and the clearing in place, which is exactly the shape of a gnulib built
+# without libacl, carrying the bits and dropping the entries — this run goes
+# from 572/0 to 567/5. The five are the two that ask for the mode, the
+# two-entry one, the tree, and the ACL-plus-attribute one; the
+# `--preserve=xattr` and bare-`cp` cases below stay green, which is the half
+# that says the cases are about ACLs and not about copying generally. No other
+# case in the suite moved.
+NO_ACL_REF='the built reference has USE_ACL 0, so its copy_acl is a plain chmod'
+acl_case() {
+  if [ "$DIFF_ACL_REF" = yes ]; then run_case "$@"
+  else xfail_case "$NO_ACL_REF" "$@"; fi
+}
+if [ -z "$DIFF_SETFACL" ]; then
+  echo "SKIP section 17 (ACLs): no working setfacl, so the fixture cannot make"
+  echo "                        an ACL for the copy to carry -- and a case whose"
+  echo "                        fixture sets nothing passes against a cp that"
+  echo "                        drops everything"
+else
+  # The plain one: an extra named-user entry, carried by `-p`.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case -p file.txt new.txt
+  # `--preserve=mode` alone, which is the word that actually owns this.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case --preserve=mode file.txt new.txt
+  # `--preserve=xattr` alone, which must *not* carry it: GNU's `copy_attr` skips
+  # `system.posix_acl_access` by name, so the copy gets the source's mode bits
+  # and no entries. A subject that carried ACLs whenever it carried attributes
+  # passes every other case here and fails this one.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case --preserve=xattr file.txt new.txt
+  # And plain `cp`, which preserves nothing: the copy is a new file with the
+  # umask's mode and no ACL at all.
+  STAMPS=1 TREE='mkstamped; diff_setfacl file.txt u:0:rwx'
+  acl_case file.txt new.txt
+  # Several entries, including a group one and a mask, so that a copy carrying
+  # only the first entry is caught. `setfacl` recomputes the mask itself when a
+  # named entry is added, which is part of what is being compared: the copy has
+  # to arrive with the same mask, not a recomputed one.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl file.txt u:0:rwx
+                diff_setfacl file.txt g:0:r-x'
+  acl_case -p file.txt new.txt
+  # A directory's *default* ACL — `system.posix_acl_default`, a separate
+  # attribute that new children inherit. `-a` down a tree, so both the
+  # directory's own ACL and its default one have to cross, and the file inside
+  # keeps its own.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl tree u:0:rwx
+                diff_setfacl tree d:u:0:rwx
+                diff_setfacl tree/a.txt u:0:rw-'
+  acl_case -a tree dst
+  # An ACL and an extended attribute on the same file, which are two attributes
+  # in the same list and are carried by two different pieces of GNU's code. A
+  # subject that copied the whole attribute list in one pass would pass this and
+  # fail the `--preserve=xattr` case above; one that special-cased the ACL and
+  # forgot the rest would do the reverse.
+  STAMPS=1 TREE='mkstamped
+                diff_setfacl file.txt u:0:rwx
+                diff_setxattr file.txt user.tag v1'
+  acl_case -a file.txt new.txt
+fi
 # `--preserve=all` is every word GNU has, `context` included; on a host without
 # SELinux the security-context line is guarded by `if (selinux_enabled)` and so
 # asks for nothing. That is why `all` works here and `context` alone does not.

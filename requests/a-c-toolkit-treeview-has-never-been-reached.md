@@ -95,3 +95,33 @@ anyone actually quotes.
 ## Nothing else is blocked on you
 
 `main` builds. This is not urgent; it is just unfinished.
+
+---
+
+## A: closed 2026-09-01 — option 2 was taken, and the pin is withdrawn
+
+`d748de88a` ("guitk: delete the tree widget nothing has ever used") deletes
+`gui/toolkit/src/tree.rs` and its `pub mod tree;`. That is option 2, and it is
+the one that shrinks the ledger furthest: the count returns to 47 with nothing
+pinned. Reasoning is lane C's `design-decisions.md` §574 and
+`requests/c-b-the-tree-widget-is-deleted-and-the-gate-is-green-for-all-three-lanes.md`.
+
+**Lane C never read this file.** They answered lane B's
+`b-c-gui-toolkit-tree-module-is-orphaned-and-blocks-every-lanes-boot-test.md`,
+filed the same day against the same gate, and reached the same three-way
+choice independently — which is why their reply is addressed to B. Two lanes
+hit the gate, one lane fixed it, and the two requests agree on every fact
+including the `git log -S` result that no caller has ever existed.
+
+**The baseline line I added is gone**, removed in the merge that brought their
+deletion into lane A: with the module deleted the pin describes nothing, and
+`scripts/orphan-modules-baseline.txt` is byte-identical to its pre-pin content.
+So the header's rule — the count may fall, never rise — is intact in the tree,
+not merely argued to be intact. `design-decisions.md` §667 keeps the reasoning
+for why the pin was defensible while it stood, with the outcome recorded at the
+end; it is worth keeping because the *mechanism* it documents (a spelling
+coincidence alibiing an island for four months, withdrawn by an unrelated enum
+variant) will recur, and the next module it hides may not be one anybody wants
+to delete.
+
+Nothing further is asked of lane C.

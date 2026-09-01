@@ -3,10 +3,8 @@
 # Each line is a library module under lane C's roots that defines top-level
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
-# not an allow-list, and the only edit it should ever receive is a deletion --
-# with one recorded exception, set out at the bottom of this header.
-# 48 remain: 47 of the census, plus one module the census under-counted.
-# Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# not an allow-list, and the only edit it should ever receive is a deletion.
+# 47 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; and then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs.
@@ -29,29 +27,6 @@
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
 # largest entries are blocked on open-questions.md -> C-Q6, which decides
 # whether the shell's settings pages survive at all.
-#
-# THE ONE ADDED LINE, AND WHY THE RULE ABOVE IS INTACT (lane A, 2026-09-01).
-# gui/toolkit/src/tree.rs is not a new module that failed to land wired up.  It
-# landed 2026-05-17 in a9d9dd09b, months before this file existed, and has
-# never been reached by anything: it should have been number 58 of the census.
-# It was missed because the scan was fooled, not because it was connected.
-# `TreeNode` is one of its five public names, and apps/archivemanager,
-# apps/dbviewer and apps/devicemanager each define a `pub struct TreeNode` of
-# their own -- so that spelling supplied an alibi the module had not earned.
-# What withdrew the alibi was 86f84a98e adding a `Target::TreeNode` *variant*
-# to dbviewer, which `variant_names()` folds into the ambiguity pool: precisely
-# the a11y.rs/accessibility_settings.rs mechanism that function's docstring was
-# written to catch.  Nothing anywhere has ever named toolkit's `TreeView`.
-#
-# So the count rose 47 -> 48 without a module escaping the gate.  What rose was
-# the scan's accuracy.  A line added because a module *stopped* being reached
-# would be exactly the failure the paragraph above forbids; a line added
-# because the census under-counted is a correction to this file, and the
-# alternative was leaving `main` unbuildable for all three lanes over a debt
-# that has sat in lane C's tree since May.  Payment is asked for in
-# requests/a-c-toolkit-treeview-has-never-been-reached.md; the reasoning in
-# full, including why lane A edited a ledger of lane C's debts, is
-# design-decisions.md sec 667.
 apps/imageviewer/src/video.rs
 apps/installer/src/grub.rs
 apps/procexplorer/src/features.rs
@@ -96,7 +71,6 @@ gui/toolkit/src/menubar.rs
 gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs
 gui/toolkit/src/svg.rs
-gui/toolkit/src/tree.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs
 netproto/src/icmp.rs

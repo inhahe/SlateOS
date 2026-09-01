@@ -16,8 +16,8 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
 
-#[allow(unused_imports)]
 use guitk::color::Color;
+use guitk::frame::{Frame, Rect};
 // The shared civil-date arithmetic. This app's own copy was *correct* --
 // unlike the calendar's, whose ISO week number was wrong on 38.5% of all
 // dates -- but correct-and-duplicated is still two sources of truth for one
@@ -25,54 +25,42 @@ use guitk::color::Color;
 // agreeing. See `known-issues.md`
 // C-SIX-APPS-EACH-CARRIED-THEIR-OWN-CIVIL-DATE-ARITHMETIC.
 use guitk::date;
-#[allow(unused_imports)]
-use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
-#[allow(unused_imports)]
+use guitk::event::{Event, Key, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use guitk::probe::Probe;
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
+use oswindow::app::{self, App, Response};
 
 use std::collections::VecDeque;
+use std::process::ExitCode;
+use std::time::Duration;
 
 // ============================================================================
 // Catppuccin Mocha theme colors
 // ============================================================================
 
-#[allow(dead_code)]
+// Every one of these carried an `#[allow(dead_code)]`, and five of them --
+// CRUST, MAUVE, TEAL, PINK, ROSEWATER -- were never named anywhere but on
+// their own definition line. The `allow` is what let that be true for as long
+// as it was: it silences the one warning that would have said so. They are
+// deleted rather than kept "for later", because a palette entry no drawing
+// call reaches is not a palette entry, and the next reader would have had to
+// grep the file to find that out.
 const BASE: Color = Color::from_hex(0x1E1E2E);
-#[allow(dead_code)]
 const MANTLE: Color = Color::from_hex(0x181825);
-#[allow(dead_code)]
 const SURFACE0: Color = Color::from_hex(0x313244);
-#[allow(dead_code)]
 const SURFACE1: Color = Color::from_hex(0x45475A);
-#[allow(dead_code)]
 const TEXT_COLOR: Color = Color::from_hex(0xCDD6F4);
-#[allow(dead_code)]
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
-#[allow(dead_code)]
 const BLUE: Color = Color::from_hex(0x89B4FA);
-#[allow(dead_code)]
 const GREEN: Color = Color::from_hex(0xA6E3A1);
-#[allow(dead_code)]
 const RED: Color = Color::from_hex(0xF38BA8);
-#[allow(dead_code)]
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
-#[allow(dead_code)]
 const PEACH: Color = Color::from_hex(0xFAB387);
-#[allow(dead_code)]
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
-#[allow(dead_code)]
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
-#[allow(dead_code)]
 const CRUST: Color = Color::from_hex(0x11111B);
-#[allow(dead_code)]
-const MAUVE: Color = Color::from_hex(0xCBA6F7);
-#[allow(dead_code)]
-const TEAL: Color = Color::from_hex(0x94E2D5);
-#[allow(dead_code)]
-const PINK: Color = Color::from_hex(0xF5C2E7);
-#[allow(dead_code)]
-const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 
 // ============================================================================
 // Constants
@@ -1717,6 +1705,344 @@ impl Default for ContactStore {
 // App view state
 // ============================================================================
 
+// ============================================================================
+// Geometry
+// ============================================================================
+
+/// The size the window opens at, and the size the probe draws at.
+const WINDOW_WIDTH: f32 = 1024.0;
+/// The height the window opens at.
+const WINDOW_HEIGHT: f32 = 768.0;
+
+/// The narrowest detail panel worth drawing.
+///
+/// Below this the panel is an ellipsis where a name should be and a row of
+/// buttons cut off at the window edge. That is worse than no panel at all,
+/// because the list has paid for it in width.
+const MIN_PANEL_WIDTH: f32 = 260.0;
+
+/// The narrowest contact list worth putting an A-Z rail beside.
+const MIN_LIST_WIDTH: f32 = 160.0;
+
+/// The list keeps at least one whole row. Every piece of chrome above it --
+/// the search bar, the filter strip, the view strip -- is given up before the
+/// list is, because a window showing three controls and no contacts is not a
+/// contacts program.
+const MIN_LIST_HEIGHT: f32 = CONTACT_ROW_HEIGHT;
+
+/// Height of each of the two control strips under the search bar.
+const STRIP_HEIGHT: f32 = 22.0;
+
+/// Every rectangle the picture is built from, solved from the live window
+/// size on every frame.
+///
+/// Nothing here is a constant offset into a window of a size nobody checked:
+/// the old drawing pass wrote `SIDEBAR_WIDTH` and `self.window_height`
+/// straight into the commands, so at 400 points wide the detail panel was 96
+/// points of ellipses and at 200 it was off the right-hand edge entirely.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layout {
+    /// The whole window.
+    pub window: Rect,
+    /// The sidebar's title bar, holding the name, the count and `+`.
+    pub header: Rect,
+    /// The `+` button that starts a new contact.
+    pub add_button: Rect,
+    /// The search box. Zero-height when the window is too short for it.
+    pub search: Rect,
+    /// Filter on the left half, sort order on the right.
+    pub strip: Rect,
+    /// Groups on the left half, duplicates on the right.
+    pub views: Rect,
+    /// The scrolling contact list.
+    pub list: Rect,
+    /// The A-Z rail. Zero-width when the list is too narrow to spare it.
+    pub alphabet: Rect,
+    /// The detail panel. Zero-width when the window is too narrow for it.
+    pub panel: Rect,
+    /// The strip along the bottom saying what the last press did.
+    pub status: Rect,
+}
+
+impl Layout {
+    /// Solve the whole picture for a window of `w` by `h`.
+    #[must_use]
+    pub fn solve(w: f32, h: f32) -> Self {
+        // A size that is not a number is not a size. NaN survives every
+        // `max`, `min` and `clamp` below and comes out as a rectangle that
+        // contains no point and clips everything away -- a blank window that
+        // answers no press, with nothing in the picture to say why.
+        let w = if w.is_finite() { w.max(0.0) } else { 0.0 };
+        let h = if h.is_finite() { h.max(0.0) } else { 0.0 };
+        let window = Rect::new(0.0, 0.0, w, h);
+
+        // The sidebar takes at most 45% of the window, so wherever both are
+        // shown the detail panel is the wider of the two -- it holds a name,
+        // an address and a paragraph of notes, and the list holds one line.
+        let wanted_side = (w * 0.45).min(SIDEBAR_WIDTH + ALPHABET_BAR_WIDTH);
+        let (side_w, panel_w) = if w - wanted_side >= MIN_PANEL_WIDTH {
+            (wanted_side, w - wanted_side)
+        } else {
+            // Too narrow for both. The list is the program; the panel goes.
+            (w, 0.0)
+        };
+
+        let alpha_w = if side_w - ALPHABET_BAR_WIDTH >= MIN_LIST_WIDTH {
+            ALPHABET_BAR_WIDTH
+        } else {
+            0.0
+        };
+        let list_w = (side_w - alpha_w).max(0.0);
+
+        let header_h = HEADER_HEIGHT.min(h);
+        let header = Rect::new(0.0, 0.0, side_w, header_h);
+        // The status strip is the last thing drawn and the first thing given
+        // room: everything below stops at its top edge, so nothing can be
+        // painted under it and then answer a press through it.
+        let status_h = STRIP_HEIGHT.min(h);
+        let status = Rect::new(0.0, (h - status_h).max(header_h), w, status_h);
+        // The `+` sits at the right of the list column, not of the sidebar,
+        // so the A-Z rail never draws over it.
+        let add_side = 32.0_f32.min(header_h).min(list_w);
+        let add_button = Rect::new(
+            (list_w - add_side - 8.0).max(0.0),
+            ((header_h - add_side) / 2.0).max(0.0),
+            add_side,
+            add_side,
+        );
+
+        // Each strip below is taken only if the list still keeps a whole row
+        // after it. `take` is the one place that rule is written down.
+        let mut y = header_h;
+        let bottom = status.y;
+        let mut take = |wanted: f32, gap: f32| -> Rect {
+            let top = y + gap;
+            if top + wanted + MIN_LIST_HEIGHT > bottom {
+                return Rect::new(0.0, y, list_w, 0.0);
+            }
+            y = top + wanted;
+            Rect::new(0.0, top, list_w, wanted)
+        };
+        let search_outer = take(SEARCH_BAR_HEIGHT, 8.0);
+        let search = Rect::new(
+            8.0_f32.min(list_w),
+            search_outer.y,
+            (list_w - 16.0).max(0.0),
+            search_outer.h,
+        );
+        let strip = take(STRIP_HEIGHT, 6.0);
+        let views = take(STRIP_HEIGHT, 2.0);
+
+        let list = Rect::new(0.0, y, list_w, (status.y - y).max(0.0));
+        let alphabet = Rect::new(list_w, header_h, alpha_w, (status.y - header_h).max(0.0));
+        let panel = Rect::new(side_w, 0.0, panel_w, status.y);
+
+        Self {
+            window,
+            header,
+            add_button,
+            search,
+            strip,
+            views,
+            list,
+            alphabet,
+            panel,
+            status,
+        }
+    }
+
+    /// The left half of a two-cell strip.
+    #[must_use]
+    fn left_half(strip: Rect) -> Rect {
+        Rect::new(strip.x, strip.y, strip.w / 2.0, strip.h)
+    }
+
+    /// The right half of a two-cell strip.
+    #[must_use]
+    fn right_half(strip: Rect) -> Rect {
+        let half = strip.w / 2.0;
+        Rect::new(strip.x + half, strip.y, strip.w - half, strip.h)
+    }
+
+    /// The box the `i`th letter of the A-Z rail is drawn in.
+    #[must_use]
+    fn letter_cell(&self, i: usize) -> Rect {
+        let n = ALPHABET.len() as f32;
+        let pitch = self.alphabet.h / n;
+        Rect::new(
+            self.alphabet.x,
+            self.alphabet.y + (i as f32) * pitch,
+            self.alphabet.w,
+            pitch,
+        )
+    }
+}
+
+// ============================================================================
+// What a press can land on
+// ============================================================================
+
+/// One editable line of the add/edit form.
+///
+/// The form used to be an array of `(&str, &str)` pairs -- a label and a
+/// borrowed value -- which is enough to *draw* a field and not enough to put
+/// a character into one. Naming the fields is what lets a press choose one
+/// and a keystroke reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormField {
+    FirstName,
+    LastName,
+    Nickname,
+    Company,
+    JobTitle,
+    Department,
+    Phone,
+    Email,
+    Birthday,
+    Street,
+    City,
+    State,
+    Zip,
+    Country,
+    Notes,
+}
+
+impl FormField {
+    /// Every field, in the order they are drawn.
+    pub const ALL: [Self; 15] = [
+        Self::FirstName,
+        Self::LastName,
+        Self::Nickname,
+        Self::Company,
+        Self::JobTitle,
+        Self::Department,
+        Self::Phone,
+        Self::Email,
+        Self::Birthday,
+        Self::Street,
+        Self::City,
+        Self::State,
+        Self::Zip,
+        Self::Country,
+        Self::Notes,
+    ];
+
+    /// The words written above the field.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FirstName => "First Name",
+            Self::LastName => "Last Name",
+            Self::Nickname => "Nickname",
+            Self::Company => "Company",
+            Self::JobTitle => "Job Title",
+            Self::Department => "Department",
+            Self::Phone => "Phone",
+            Self::Email => "Email",
+            Self::Birthday => "Birthday (YYYY-MM-DD)",
+            Self::Street => "Street",
+            Self::City => "City",
+            Self::State => "State",
+            Self::Zip => "ZIP Code",
+            Self::Country => "Country",
+            Self::Notes => "Notes",
+        }
+    }
+
+    /// The next field `Tab` reaches, wrapping at the end.
+    #[must_use]
+    pub fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
+        // Wrap by falling back to `first()` rather than writing the last
+        // field's name into the wrap arm: the form grew from two fields to
+        // fifteen once already, and a cycle that stops short of the last
+        // field is a field nothing can type into.
+        Self::ALL
+            .get(i.saturating_add(1))
+            .or_else(|| Self::ALL.first())
+            .copied()
+            .unwrap_or(self)
+    }
+}
+
+/// Where typed characters go.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// Nothing has the keyboard; letters are shortcuts.
+    None,
+    /// The search box in the sidebar.
+    Search,
+    /// One line of the add/edit form.
+    Field(FormField),
+}
+
+/// One of the three quick actions on a contact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickAction {
+    /// Place a call, which is recorded as having contacted them.
+    Call,
+    /// Send mail, likewise recorded.
+    Email,
+    /// Show the address, which is a look and not a contact.
+    Map,
+}
+
+impl QuickAction {
+    /// The word on the button.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Call => "Call",
+            Self::Email => "Email",
+            Self::Map => "Map",
+        }
+    }
+}
+
+/// Everything a press can land on, recorded by the drawing pass at the
+/// coordinates it drew the control at.
+///
+/// Row-bearing variants carry a **contact or group id**, never a row index:
+/// the list re-sorts under the pointer whenever the sort order or the filter
+/// changes, and an index would then name whoever moved into that slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The `+` in the sidebar header.
+    AddContact,
+    /// The search box.
+    Search,
+    /// The filter cell, which cycles the filter.
+    CycleFilter,
+    /// The sort cell, which cycles the sort order.
+    CycleSort,
+    /// The groups cell.
+    ShowGroups,
+    /// The duplicates cell.
+    ShowDuplicates,
+    /// One letter of the A-Z rail.
+    Letter(char),
+    /// A contact's row in the list.
+    Contact(u64),
+    /// One of Call / Email / Map in the detail panel.
+    Action(QuickAction),
+    /// The Edit button.
+    EditContact,
+    /// The Star / Unstar button.
+    ToggleFavorite,
+    /// The Delete button.
+    DeleteContact,
+    /// One line of the add/edit form.
+    Field(FormField),
+    /// Save the form.
+    Save,
+    /// Abandon the form.
+    Cancel,
+    /// Merge one pair on the duplicates panel, named by the two contacts.
+    Merge(u64, u64),
+    /// A group row, which filters the list to that group.
+    Group(u64),
+}
+
 /// Which panel is shown on the right side.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetailView {
@@ -1765,7 +2091,19 @@ pub struct ContactsApp {
     pub edit_country: String,
     pub edit_address_type: AddressType,
 
-    // Window dimensions
+    /// Where typed characters go. Without this the name field was painted,
+    /// labelled, and impossible to put a character into.
+    pub focus: Focus,
+    /// What the last press did, drawn along the bottom of the sidebar so a
+    /// press that changed nothing visible still says so.
+    pub status: String,
+    /// A monotonic stand-in for the wall clock, so "recently contacted" has
+    /// something to order by. Pressing Call twice must put the second call
+    /// after the first.
+    pub clock: u64,
+
+    // Window dimensions, remembered so a press that arrives between a resize
+    // and the next frame is answered against the size the window really is.
     pub window_width: f32,
     pub window_height: f32,
 }
@@ -1801,8 +2139,14 @@ impl ContactsApp {
             edit_country: String::new(),
             edit_address_type: AddressType::Home,
 
-            window_width: 1024.0,
-            window_height: 768.0,
+            focus: Focus::None,
+            status: String::from("Ready"),
+            // Later than any timestamp the sample data carries, so a call
+            // placed now sorts above a call recorded in the fixture.
+            clock: 2_000_000_000,
+
+            window_width: WINDOW_WIDTH,
+            window_height: WINDOW_HEIGHT,
         }
     }
 
@@ -1914,1255 +2258,957 @@ impl ContactsApp {
         contact
     }
 
-    /// Render the full application UI.
+    // ── Drawing ─────────────────────────────────────────────────────────
+
+    /// The commands for one frame, at the size the app was last told about.
+    ///
+    /// Kept because it is what the older tests read, and because it is the
+    /// honest shape of "what does this program paint". Everything it knows
+    /// comes from [`ContactsApp::frame`].
+    #[must_use]
     pub fn render(&self) -> Vec<RenderCommand> {
-        let mut cmds = Vec::new();
-
-        // Full window background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: self.window_width,
-            height: self.window_height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        self.render_sidebar(&mut cmds);
-        self.render_detail_panel(&mut cmds);
-
-        cmds
+        self.frame(self.window_width, self.window_height)
+            .into_tree()
+            .commands
     }
 
-    /// Render the left sidebar: header, search, contact list, alphabet bar.
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
-        let sidebar_total = SIDEBAR_WIDTH + ALPHABET_BAR_WIDTH;
+    /// The picture, and the clickable boxes that painting it created.
+    ///
+    /// This is the only place a window size becomes a coordinate and the only
+    /// place a control's box is written down, which is what makes "drawn" and
+    /// "clickable" the same fact. The old pass wrote `SIDEBAR_WIDTH` and
+    /// `self.window_height` straight into the commands and recorded no boxes
+    /// at all, so every control in the program was a painted rectangle that
+    /// answered nothing.
+    #[must_use]
+    pub fn frame(&self, w: f32, h: f32) -> Frame<Target> {
+        let l = Layout::solve(w, h);
+        let mut f = Frame::new(l.window.w, l.window.h);
 
-        // Sidebar background
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: sidebar_total,
-            height: self.window_height,
-            color: MANTLE,
-            corner_radii: CornerRadii::ZERO,
-        });
+        // Edge to edge at every size. The old fill was `self.window_width` by
+        // `self.window_height` -- the size the app believed it was, which
+        // after a resize is the size it used to be.
+        f.push(fill(l.window, BASE, 0.0));
 
-        // Header
-        cmds.push(RenderCommand::FillRect {
-            x: 0.0,
-            y: 0.0,
-            width: sidebar_total,
-            height: HEADER_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::ZERO,
-        });
+        self.draw_sidebar(&mut f, &l);
+        self.draw_alphabet(&mut f, &l);
+        self.draw_panel(&mut f, &l);
+        self.draw_status(&mut f, &l);
+        f
+    }
 
-        // App title
-        cmds.push(RenderCommand::Text {
-            x: 16.0,
-            y: 18.0,
-            text: String::from("Contacts"),
-            font_size: 20.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(180.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+    /// The sidebar: title, count, `+`, search, the two strips and the list.
+    fn draw_sidebar(&self, f: &mut Frame<Target>, l: &Layout) {
+        let side = Rect::new(0.0, 0.0, l.list.w + l.alphabet.w, l.status.y);
+        f.push(fill(side, MANTLE, 0.0));
+        f.push(fill(l.header, SURFACE0, 0.0));
 
-        // Contact count
-        let count_text = format!("{}", self.store.contact_count());
-        cmds.push(RenderCommand::Text {
-            x: 16.0,
-            y: 38.0,
-            text: count_text,
-            font_size: 11.0,
-            color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(100.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // The title and the count share the header, and both stop short of
+        // the `+` rather than running under it.
+        let title_w = (l.add_button.x - 20.0).max(0.0);
+        let half = l.header.h / 2.0;
+        f.push(text_in(
+            Rect::new(12.0, l.header.y, title_w, half),
+            "Contacts",
+            18.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        ));
+        f.push(text_in(
+            Rect::new(12.0, l.header.y + half, title_w, l.header.h - half),
+            &format!("{} contacts", self.store.contact_count()),
+            11.0,
+            SUBTEXT0,
+            FontWeightHint::Regular,
+        ));
 
-        // Add contact button (+)
-        let btn_x = SIDEBAR_WIDTH - 40.0;
-        cmds.push(RenderCommand::FillRect {
-            x: btn_x,
-            y: 12.0,
-            width: 32.0,
-            height: 32.0,
-            color: BLUE,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: btn_x + 10.0,
-            y: 18.0,
-            text: String::from("+"),
-            font_size: 18.0,
-            color: BASE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+        if !l.add_button.is_empty() {
+            f.push(fill(l.add_button, BLUE, 6.0));
+            f.push(text_in(
+                inset(l.add_button, l.add_button.w / 3.0),
+                "+",
+                18.0,
+                BASE,
+                FontWeightHint::Bold,
+            ));
+            f.hit(Target::AddContact, l.add_button);
+        }
 
-        // Search icon / bar
-        let search_y = HEADER_HEIGHT + 8.0;
-        cmds.push(RenderCommand::FillRect {
-            x: 8.0,
-            y: search_y,
-            width: SIDEBAR_WIDTH - 16.0,
-            height: SEARCH_BAR_HEIGHT,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(8.0),
-        });
-        let search_text = if self.search_query.is_empty() {
-            String::from("Search contacts...")
+        self.draw_search(f, l);
+        self.draw_strips(f, l);
+        self.draw_list(f, l);
+
+        // The line that separates the sidebar from the panel, drawn only
+        // where there is a panel on the other side of it.
+        if !l.panel.is_empty() {
+            f.push(RenderCommand::Line {
+                x1: l.panel.x,
+                y1: 0.0,
+                x2: l.panel.x,
+                y2: l.status.y,
+                color: SURFACE1,
+                width: 1.0,
+            });
+        }
+    }
+
+    /// The search box, and the caret when it has the keyboard.
+    fn draw_search(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.search.is_empty() {
+            return;
+        }
+        let focused = self.focus == Focus::Search;
+        f.push(fill(
+            l.search,
+            if focused { SURFACE1 } else { SURFACE0 },
+            8.0,
+        ));
+        let inner = inset(l.search, 10.0);
+        let placeholder = self.search_query.is_empty() && !focused;
+        let shown = if placeholder {
+            "Search contacts..."
         } else {
-            self.search_query.clone()
+            &self.search_query
         };
-        let search_color = if self.search_query.is_empty() {
-            OVERLAY0
-        } else {
-            TEXT_COLOR
-        };
-        cmds.push(RenderCommand::Text {
-            x: 36.0,
-            y: search_y + 12.0,
-            text: search_text,
-            font_size: 13.0,
-            color: search_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 60.0),
-            overflow: TextOverflow::Ellipsis,
-        });
+        f.push(text_in(
+            inner,
+            shown,
+            13.0,
+            if placeholder { OVERLAY0 } else { TEXT_COLOR },
+            FontWeightHint::Regular,
+        ));
+        if focused {
+            // A caret rather than a character appended to the text: a box
+            // whose contents change when it is focused cannot be searched for
+            // by the words it shows.
+            let used = text::measure(&self.search_query, 13.0, FontWeightHint::Regular);
+            let caret_x = (inner.x + used).min(inner.right() - 2.0);
+            f.push(fill(
+                Rect::new(caret_x, inner.y + 4.0, 2.0, (inner.h - 8.0).max(0.0)),
+                BLUE,
+                0.0,
+            ));
+        }
+        f.hit(Target::Search, l.search);
+    }
 
-        // Search icon (magnifying glass placeholder)
-        cmds.push(RenderCommand::Text {
-            x: 16.0,
-            y: search_y + 12.0,
-            text: String::from("?"),
-            font_size: 14.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Regular,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
+    /// The two two-cell strips: filter / sort, and groups / duplicates.
+    fn draw_strips(&self, f: &mut Frame<Target>, l: &Layout) {
+        let cells = [
+            (
+                Layout::left_half(l.strip),
+                self.filter.label().to_string(),
+                Target::CycleFilter,
+            ),
+            (
+                Layout::right_half(l.strip),
+                self.sort_order.label().to_string(),
+                Target::CycleSort,
+            ),
+            (
+                Layout::left_half(l.views),
+                String::from("Groups"),
+                Target::ShowGroups,
+            ),
+            (
+                Layout::right_half(l.views),
+                String::from("Duplicates"),
+                Target::ShowDuplicates,
+            ),
+        ];
+        for (cell, label, target) in cells {
+            if cell.is_empty() {
+                continue;
+            }
+            let on = match target {
+                Target::ShowGroups => self.view == DetailView::Groups,
+                Target::ShowDuplicates => self.view == DetailView::Duplicates,
+                _ => false,
+            };
+            f.push(fill(
+                inset_x(cell, 4.0),
+                if on { BLUE } else { SURFACE0 },
+                4.0,
+            ));
+            f.push(text_in(
+                inset(cell, 8.0),
+                &label,
+                11.0,
+                if on { BASE } else { SUBTEXT0 },
+                FontWeightHint::Regular,
+            ));
+            f.hit(target, cell);
+        }
+    }
 
-        // Filter/sort indicators
-        let filter_y = search_y + SEARCH_BAR_HEIGHT + 8.0;
-        cmds.push(RenderCommand::Text {
-            x: 12.0,
-            y: filter_y,
-            text: format!("{} | {}", self.filter.label(), self.sort_order.label()),
-            font_size: 10.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(SIDEBAR_WIDTH - 24.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-
-        // Contact list
-        let list_y = filter_y + 20.0;
-        let list_height = self.window_height - list_y;
-        cmds.push(RenderCommand::PushClip {
-            x: 0.0,
-            y: list_y,
-            width: SIDEBAR_WIDTH,
-            height: list_height,
-        });
+    /// The scrolling contact list.
+    ///
+    /// Every row is drawn and hit-boxed inside the list's clip, so a row that
+    /// has scrolled out of sight stops being clickable in the same step that
+    /// stops it being visible. The old list did the opposite: it re-derived
+    /// the row under a press arithmetically, so a press was answered at
+    /// coordinates a scrolled-away row no longer occupied.
+    fn draw_list(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.list.is_empty() {
+            return;
+        }
+        f.clip(l.list);
 
         let contacts =
             self.store
                 .filtered_sorted(&self.filter, self.sort_order, &self.search_query);
 
-        let mut cy = list_y - self.scroll_offset;
-        let mut current_letter: Option<char> = None;
+        if contacts.is_empty() {
+            f.push(text_in(
+                inset(Rect::new(l.list.x, l.list.y, l.list.w, 24.0), 12.0),
+                "No contacts match",
+                12.0,
+                OVERLAY0,
+                FontWeightHint::Regular,
+            ));
+            f.unclip();
+            return;
+        }
 
+        let mut cy = l.list.y - self.scroll_offset;
+        let mut current_letter: Option<char> = None;
         for contact in &contacts {
             let letter = contact.first_letter();
-
-            // Letter divider
             if current_letter != Some(letter) && self.sort_order == SortOrder::Name {
-                if cy + LETTER_DIVIDER_HEIGHT > list_y && cy < self.window_height {
-                    cmds.push(RenderCommand::FillRect {
-                        x: 0.0,
-                        y: cy,
-                        width: SIDEBAR_WIDTH,
-                        height: LETTER_DIVIDER_HEIGHT,
-                        color: Color::rgba(49, 50, 68, 180),
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: 12.0,
-                        y: cy + 8.0,
-                        text: letter.to_string(),
-                        font_size: 12.0,
-                        color: BLUE,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                }
+                let row = Rect::new(l.list.x, cy, l.list.w, LETTER_DIVIDER_HEIGHT);
+                f.push(fill(row, Color::rgba(49, 50, 68, 180), 0.0));
+                f.push(text_in(
+                    inset(row, 12.0),
+                    &letter.to_string(),
+                    12.0,
+                    BLUE,
+                    FontWeightHint::Bold,
+                ));
                 cy += LETTER_DIVIDER_HEIGHT;
                 current_letter = Some(letter);
             }
-
-            // Contact row
-            if cy + CONTACT_ROW_HEIGHT > list_y && cy < self.window_height {
-                let is_selected = matches!(
-                    self.view,
-                    DetailView::ViewContact(id) | DetailView::EditContact(id)
-                    if id == contact.id
-                );
-
-                let row_bg = if is_selected {
-                    SURFACE0
-                } else {
-                    Color::TRANSPARENT
-                };
-                cmds.push(RenderCommand::FillRect {
-                    x: 0.0,
-                    y: cy,
-                    width: SIDEBAR_WIDTH,
-                    height: CONTACT_ROW_HEIGHT,
-                    color: row_bg,
-                    corner_radii: CornerRadii::ZERO,
-                });
-
-                // Avatar circle
-                let avatar_x = 12.0;
-                let avatar_y = cy + 6.0;
-                let avatar_r = 20.0;
-                let avatar_color = if contact.favorite { YELLOW } else { SURFACE1 };
-                cmds.push(RenderCommand::FillRect {
-                    x: avatar_x,
-                    y: avatar_y,
-                    width: avatar_r * 2.0,
-                    height: avatar_r * 2.0,
-                    color: avatar_color,
-                    corner_radii: CornerRadii::all(avatar_r),
-                });
-                cmds.push(RenderCommand::Text {
-                    x: avatar_x + 8.0,
-                    y: avatar_y + 12.0,
-                    text: contact.initials(),
-                    font_size: 14.0,
-                    color: if contact.favorite { BASE } else { TEXT_COLOR },
-                    font_weight: FontWeightHint::Bold,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-
-                // Name
-                cmds.push(RenderCommand::Text {
-                    x: 60.0,
-                    y: cy + 12.0,
-                    text: contact.computed_display_name(),
-                    font_size: 14.0,
-                    color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(SIDEBAR_WIDTH - 80.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-
-                // Subtitle (company or phone)
-                let subtitle = if !contact.company.is_empty() {
-                    contact.company.clone()
-                } else if let Some(phone) = contact.primary_phone() {
-                    phone.number.clone()
-                } else if let Some(email) = contact.primary_email() {
-                    email.email.clone()
-                } else {
-                    String::new()
-                };
-                if !subtitle.is_empty() {
-                    cmds.push(RenderCommand::Text {
-                        x: 60.0,
-                        y: cy + 30.0,
-                        text: subtitle,
-                        font_size: 11.0,
-                        color: SUBTEXT0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(SIDEBAR_WIDTH - 80.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                }
-
-                // Favorite star
-                if contact.favorite {
-                    cmds.push(RenderCommand::Text {
-                        x: SIDEBAR_WIDTH - 24.0,
-                        y: cy + 18.0,
-                        text: String::from("*"),
-                        font_size: 16.0,
-                        color: YELLOW,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    });
-                }
-            }
-
+            self.draw_contact_row(f, l, contact, cy);
             cy += CONTACT_ROW_HEIGHT;
         }
 
-        cmds.push(RenderCommand::PopClip);
-
-        // Alphabet sidebar
-        self.render_alphabet_bar(cmds);
-
-        // Sidebar divider line
-        cmds.push(RenderCommand::Line {
-            x1: sidebar_total,
-            y1: 0.0,
-            x2: sidebar_total,
-            y2: self.window_height,
-            color: SURFACE1,
-            width: 1.0,
-        });
+        f.unclip();
     }
 
-    /// Render the A-Z quick navigation bar.
-    fn render_alphabet_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let bar_x = SIDEBAR_WIDTH;
-        let bar_height = self.window_height - HEADER_HEIGHT;
-        let letter_height = bar_height / ALPHABET.len() as f32;
+    /// One row of the contact list, at `cy` before clipping.
+    fn draw_contact_row(&self, f: &mut Frame<Target>, l: &Layout, contact: &Contact, cy: f32) {
+        let row = Rect::new(l.list.x, cy, l.list.w, CONTACT_ROW_HEIGHT);
+        let selected = matches!(
+            self.view,
+            DetailView::ViewContact(id) | DetailView::EditContact(id) if id == contact.id
+        );
+        f.push(fill(
+            row,
+            if selected {
+                SURFACE0
+            } else {
+                Color::TRANSPARENT
+            },
+            0.0,
+        ));
 
-        cmds.push(RenderCommand::FillRect {
-            x: bar_x,
-            y: HEADER_HEIGHT,
-            width: ALPHABET_BAR_WIDTH,
-            height: bar_height,
-            color: Color::rgba(24, 24, 37, 200),
-            corner_radii: CornerRadii::ZERO,
-        });
+        let avatar = Rect::new(row.x + 10.0, row.y + 6.0, 40.0, 40.0);
+        f.push(fill(
+            avatar,
+            if contact.favorite { YELLOW } else { SURFACE1 },
+            20.0,
+        ));
+        f.push(text_in(
+            inset(avatar, 10.0),
+            &contact.initials(),
+            14.0,
+            if contact.favorite { BASE } else { TEXT_COLOR },
+            FontWeightHint::Bold,
+        ));
 
+        // The star is drawn first so the name's box can stop short of it. The
+        // name used to be given `SIDEBAR_WIDTH - 80` whatever the window was,
+        // which is a column width for a sidebar that is no longer that wide.
+        let star_w = if contact.favorite { 18.0 } else { 0.0 };
+        let text_x = avatar.right() + 8.0;
+        let text_w = (row.right() - star_w - 6.0 - text_x).max(0.0);
+        if contact.favorite {
+            f.push(text_in(
+                Rect::new(row.right() - star_w - 4.0, row.y, star_w, row.h),
+                "*",
+                16.0,
+                YELLOW,
+                FontWeightHint::Bold,
+            ));
+        }
+
+        let name_h = row.h * 0.55;
+        f.push(text_in(
+            Rect::new(text_x, row.y + 4.0, text_w, name_h - 4.0),
+            &contact.computed_display_name(),
+            14.0,
+            TEXT_COLOR,
+            FontWeightHint::Regular,
+        ));
+        let subtitle = if !contact.company.is_empty() {
+            contact.company.clone()
+        } else if let Some(phone) = contact.primary_phone() {
+            phone.number.clone()
+        } else if let Some(email) = contact.primary_email() {
+            email.email.clone()
+        } else {
+            String::new()
+        };
+        if !subtitle.is_empty() {
+            f.push(text_in(
+                Rect::new(text_x, row.y + name_h, text_w, row.h - name_h - 4.0),
+                &subtitle,
+                11.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            ));
+        }
+
+        f.hit(Target::Contact(contact.id), row);
+    }
+
+    /// The A-Z rail down the right edge of the sidebar.
+    fn draw_alphabet(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.alphabet.is_empty() {
+            return;
+        }
+        f.push(fill(l.alphabet, Color::rgba(24, 24, 37, 200), 0.0));
         for (i, &letter) in ALPHABET.iter().enumerate() {
-            let ly = HEADER_HEIGHT + (i as f32 * letter_height);
-            let is_selected = self.selected_letter == Some(letter);
-            let color = if is_selected { BLUE } else { SUBTEXT0 };
-            cmds.push(RenderCommand::Text {
-                x: bar_x + 6.0,
-                y: ly + 2.0,
-                text: letter.to_string(),
-                font_size: 9.0,
-                color,
-                font_weight: if is_selected {
+            let cell = l.letter_cell(i);
+            let on = self.selected_letter == Some(letter);
+            f.push(text_in(
+                inset_x(cell, 6.0),
+                &letter.to_string(),
+                9.0,
+                if on { BLUE } else { SUBTEXT0 },
+                if on {
                     FontWeightHint::Bold
                 } else {
                     FontWeightHint::Regular
                 },
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
+            ));
+            f.hit(Target::Letter(letter), cell);
         }
     }
 
-    /// Render the right detail panel.
-    fn render_detail_panel(&self, cmds: &mut Vec<RenderCommand>) {
-        let panel_x = SIDEBAR_WIDTH + ALPHABET_BAR_WIDTH;
-        let panel_width = self.window_width - panel_x;
-
-        // Panel background
-        cmds.push(RenderCommand::FillRect {
-            x: panel_x,
-            y: 0.0,
-            width: panel_width,
-            height: self.window_height,
-            color: BASE,
-            corner_radii: CornerRadii::ZERO,
-        });
-
-        match &self.view {
-            DetailView::Empty => {
-                self.render_empty_state(cmds, panel_x, panel_width);
-            }
-            DetailView::ViewContact(id) => {
-                let id_val = *id;
-                if let Some(contact) = self.store.get_contact(id_val) {
-                    let c = contact.clone();
-                    self.render_contact_detail(cmds, panel_x, panel_width, &c);
-                }
-            }
-            DetailView::EditContact(id) => {
-                let id_val = *id;
-                self.render_edit_form(cmds, panel_x, panel_width, Some(id_val));
-            }
-            DetailView::NewContact => {
-                self.render_edit_form(cmds, panel_x, panel_width, None);
-            }
-            DetailView::Duplicates => {
-                self.render_duplicates_panel(cmds, panel_x, panel_width);
-            }
-            DetailView::Groups => {
-                self.render_groups_panel(cmds, panel_x, panel_width);
-            }
-        }
-    }
-
-    /// Render empty state (no contact selected).
-    fn render_empty_state(&self, cmds: &mut Vec<RenderCommand>, panel_x: f32, panel_width: f32) {
-        let center_x = panel_x + panel_width / 2.0 - 80.0;
-        let center_y = self.window_height / 2.0 - 40.0;
-
-        // Large person icon placeholder
-        cmds.push(RenderCommand::FillRect {
-            x: center_x + 40.0,
-            y: center_y - 60.0,
-            width: 80.0,
-            height: 80.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(40.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: center_x + 62.0,
-            y: center_y - 30.0,
-            text: String::from("?"),
-            font_size: 32.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cmds.push(RenderCommand::Text {
-            x: center_x + 10.0,
-            y: center_y + 40.0,
-            text: String::from("Select a contact"),
-            font_size: 18.0,
-            color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(panel_width - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cmds.push(RenderCommand::Text {
-            x: center_x - 20.0,
-            y: center_y + 64.0,
-            text: String::from("or press + to add a new one"),
-            font_size: 13.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(panel_width - 40.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-    }
-
-    /// Render the contact detail view.
-    fn render_contact_detail(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        panel_width: f32,
-        contact: &Contact,
-    ) {
-        let pad = DETAIL_PADDING;
-        let cx = panel_x + pad;
-        let mut cy = pad;
-
-        // Header area with avatar
-        let avatar_center_x = panel_x + panel_width / 2.0;
-
-        // Avatar circle
-        cmds.push(RenderCommand::FillRect {
-            x: avatar_center_x - AVATAR_SIZE / 2.0,
-            y: cy,
-            width: AVATAR_SIZE,
-            height: AVATAR_SIZE,
-            color: if contact.favorite { YELLOW } else { BLUE },
-            corner_radii: CornerRadii::all(AVATAR_SIZE / 2.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: avatar_center_x - 16.0,
-            y: cy + 24.0,
-            text: contact.initials(),
-            font_size: 28.0,
-            color: BASE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-
-        cy += AVATAR_SIZE + 12.0;
-
-        // Display name
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: contact.computed_display_name(),
-            font_size: 22.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(panel_width - pad * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 28.0;
-
-        // Company / job title
-        if !contact.company.is_empty() || !contact.job_title.is_empty() {
-            let company_line = if !contact.job_title.is_empty() && !contact.company.is_empty() {
-                format!("{} at {}", contact.job_title, contact.company)
-            } else if !contact.company.is_empty() {
-                contact.company.clone()
-            } else {
-                contact.job_title.clone()
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: company_line,
-                font_size: 14.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 20.0;
-        }
-
-        // Department
-        if !contact.department.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: contact.department.clone(),
-                font_size: 12.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 18.0;
-        }
-
-        // Nickname
-        if !contact.nickname.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: format!("\"{}\"", contact.nickname),
-                font_size: 12.0,
-                color: LAVENDER,
-                font_weight: FontWeightHint::Light,
-                max_width: Some(panel_width - pad * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 18.0;
-        }
-
-        cy += 8.0;
-
-        // Quick action buttons (stubs)
-        let btn_w = 80.0;
-        let btn_h = 36.0;
-        let btn_gap = 12.0;
-        let actions = ["Call", "Email", "Map"];
-        let action_colors = [GREEN, BLUE, PEACH];
-        for (i, (label, color)) in actions.iter().zip(action_colors.iter()).enumerate() {
-            let bx = cx + (i as f32 * (btn_w + btn_gap));
-            cmds.push(RenderCommand::FillRect {
-                x: bx,
-                y: cy,
-                width: btn_w,
-                height: btn_h,
-                color: *color,
-                corner_radii: CornerRadii::all(6.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: bx + 20.0,
-                y: cy + 10.0,
-                text: (*label).to_string(),
-                font_size: 13.0,
-                color: BASE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-        }
-        cy += btn_h + 16.0;
-
-        // Divider
-        cmds.push(RenderCommand::Line {
-            x1: cx,
-            y1: cy,
-            x2: panel_x + panel_width - pad,
-            y2: cy,
-            color: SURFACE1,
-            width: 1.0,
-        });
-        cy += 12.0;
-
-        // Phone numbers
-        if !contact.phones.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Phone"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            for phone in &contact.phones {
-                let pref_marker = if phone.primary { " (primary)" } else { "" };
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy,
-                    text: format!(
-                        "{}: {}{pref_marker}",
-                        phone.phone_type.label(),
-                        phone.number
-                    ),
-                    font_size: 13.0,
-                    color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(panel_width - pad * 2.0 - 8.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 20.0;
-            }
-            cy += 8.0;
-        }
-
-        // Emails
-        if !contact.emails.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Email"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            for email in &contact.emails {
-                let pref_marker = if email.primary { " (primary)" } else { "" };
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy,
-                    text: format!("{}: {}{pref_marker}", email.email_type.label(), email.email),
-                    font_size: 13.0,
-                    color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(panel_width - pad * 2.0 - 8.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 20.0;
-            }
-            cy += 8.0;
-        }
-
-        // Addresses
-        if !contact.addresses.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Address"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            for addr in &contact.addresses {
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy,
-                    text: format!("{}: {}", addr.address_type.label(), addr.display_line()),
-                    font_size: 13.0,
-                    color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(panel_width - pad * 2.0 - 8.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 20.0;
-            }
-            cy += 8.0;
-        }
-
-        // Social accounts
-        if !contact.social_accounts.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Social"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            for social in &contact.social_accounts {
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy,
-                    text: format!("{}: {}", social.platform.label(), social.handle),
-                    font_size: 13.0,
-                    color: LAVENDER,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(panel_width - pad * 2.0 - 8.0),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += 20.0;
-            }
-            cy += 8.0;
-        }
-
-        // Birthday
-        if let Some(ref bday) = contact.birthday {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Birthday"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            cmds.push(RenderCommand::Text {
-                x: cx + 8.0,
-                y: cy,
-                text: bday.format_display(),
-                font_size: 13.0,
-                color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 24.0;
-        }
-
-        // Notes
-        if !contact.notes.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Notes"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            // `RenderCommand::Text` clips at `max_width` instead of wrapping,
-            // so the notes used to show only their first line's worth of
-            // characters — silently, with nothing to say the rest was there.
-            // They are broken into lines here and drawn one command each.
-            let notes_width = panel_width - pad * 2.0 - 16.0;
-            let notes = text::wrap(
-                &contact.notes,
-                notes_width,
-                NOTES_FONT_SIZE,
-                FontWeightHint::Regular,
-            );
-            for line in &notes {
-                cmds.push(RenderCommand::Text {
-                    x: cx + 8.0,
-                    y: cy,
-                    text: line.clone(),
-                    font_size: NOTES_FONT_SIZE,
-                    color: SUBTEXT0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(notes_width),
-                    overflow: TextOverflow::Ellipsis,
-                });
-                cy += NOTES_LINE_HEIGHT;
-            }
-            // The cursor advances over the lines actually drawn, so the groups
-            // chips below start under the notes rather than on top of them.
-            cy += 6.0;
-        }
-
-        // Groups chips
-        if !contact.groups.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("Groups"),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-            cy += 16.0;
-            let mut chip_x = cx;
-            for &gid in &contact.groups {
-                if let Some(group) = self.store.get_group(gid) {
-                    let chip_w = text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold);
-                    cmds.push(RenderCommand::FillRect {
-                        x: chip_x,
-                        y: cy,
-                        width: chip_w,
-                        height: GROUP_CHIP_HEIGHT,
-                        color: group.color,
-                        corner_radii: CornerRadii::all(GROUP_CHIP_HEIGHT / 2.0),
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: chip_x + 8.0,
-                        y: cy + 7.0,
-                        text: group.name.clone(),
-                        font_size: 11.0,
-                        color: BASE,
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(chip_w - 16.0),
-                        overflow: TextOverflow::Ellipsis,
-                    });
-                    chip_x += chip_w + 8.0;
-                }
-            }
-            cy += GROUP_CHIP_HEIGHT + 12.0;
-        }
-
-        // Edit / Delete buttons at bottom
-        let _ = cy; // mark used
-        let btn_y = self.window_height - 60.0;
-        // Edit button
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: btn_y,
-            width: 80.0,
-            height: 36.0,
-            color: BLUE,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: cx + 22.0,
-            y: btn_y + 10.0,
-            text: String::from("Edit"),
-            font_size: 13.0,
-            color: BASE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        // Favorite toggle
-        cmds.push(RenderCommand::FillRect {
-            x: cx + 96.0,
-            y: btn_y,
-            width: 80.0,
-            height: 36.0,
-            color: if contact.favorite { YELLOW } else { SURFACE1 },
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: cx + 114.0,
-            y: btn_y + 10.0,
-            text: if contact.favorite {
-                String::from("Unstar")
-            } else {
-                String::from("Star")
-            },
-            font_size: 13.0,
-            color: if contact.favorite { BASE } else { TEXT_COLOR },
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        // Delete button
-        cmds.push(RenderCommand::FillRect {
-            x: cx + 192.0,
-            y: btn_y,
-            width: 80.0,
-            height: 36.0,
-            color: RED,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: cx + 206.0,
-            y: btn_y + 10.0,
-            text: String::from("Delete"),
-            font_size: 13.0,
-            color: BASE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render the add/edit contact form.
-    fn render_edit_form(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        panel_width: f32,
-        editing_id: Option<u64>,
-    ) {
-        let pad = DETAIL_PADDING;
-        let cx = panel_x + pad;
-        let field_w = panel_width - pad * 2.0;
-        let mut cy = pad;
-
-        // Title
-        let title = if editing_id.is_some() {
-            "Edit Contact"
-        } else {
-            "New Contact"
-        };
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: title.to_string(),
-            font_size: 20.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(field_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 36.0;
-
-        // Helper closure-like function references
-        let fields: &[(&str, &str)] = &[
-            ("First Name", &self.edit_first_name),
-            ("Last Name", &self.edit_last_name),
-            ("Nickname", &self.edit_nickname),
-            ("Company", &self.edit_company),
-            ("Job Title", &self.edit_job_title),
-            ("Department", &self.edit_department),
-            ("Phone", &self.edit_phone),
-            ("Email", &self.edit_email),
-            ("Birthday (YYYY-MM-DD)", &self.edit_birthday),
-            ("Street", &self.edit_street),
-            ("City", &self.edit_city),
-            ("State", &self.edit_state),
-            ("ZIP Code", &self.edit_zip),
-            ("Country", &self.edit_country),
-        ];
-
-        for &(label, value) in fields {
-            // Label
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: label.to_string(),
-                font_size: 11.0,
-                color: OVERLAY0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(field_w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += 14.0;
-
-            // Input field background
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: field_w,
-                height: FIELD_HEIGHT,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(6.0),
-            });
-
-            // Value text
-            let display = if value.is_empty() {
-                label.to_string()
-            } else {
-                value.to_string()
-            };
-            let text_color = if value.is_empty() {
-                OVERLAY0
-            } else {
-                TEXT_COLOR
-            };
-            cmds.push(RenderCommand::Text {
-                x: cx + 10.0,
-                y: cy + 10.0,
-                text: display,
-                font_size: 13.0,
-                color: text_color,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(field_w - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cy += FIELD_HEIGHT + 6.0;
-        }
-
-        // Notes (taller field)
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: String::from("Notes"),
-            font_size: 11.0,
-            color: OVERLAY0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 14.0;
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: cy,
-            width: field_w,
-            height: 80.0,
-            color: SURFACE0,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        let notes_text = if self.edit_notes.is_empty() {
-            String::from("Notes")
-        } else {
-            self.edit_notes.clone()
-        };
-        let notes_color = if self.edit_notes.is_empty() {
-            OVERLAY0
-        } else {
-            TEXT_COLOR
-        };
-        cmds.push(RenderCommand::Text {
-            x: cx + 10.0,
-            y: cy + 10.0,
-            text: notes_text,
-            font_size: 13.0,
-            color: notes_color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(field_w - 20.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 92.0;
-
-        // Save / Cancel buttons
-        cmds.push(RenderCommand::FillRect {
-            x: cx,
-            y: cy,
-            width: 80.0,
-            height: 36.0,
-            color: GREEN,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: cx + 22.0,
-            y: cy + 10.0,
-            text: String::from("Save"),
-            font_size: 13.0,
-            color: BASE,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-        cmds.push(RenderCommand::FillRect {
-            x: cx + 96.0,
-            y: cy,
-            width: 80.0,
-            height: 36.0,
-            color: SURFACE1,
-            corner_radii: CornerRadii::all(6.0),
-        });
-        cmds.push(RenderCommand::Text {
-            x: cx + 108.0,
-            y: cy + 10.0,
-            text: String::from("Cancel"),
-            font_size: 13.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: None,
-            overflow: TextOverflow::Clip,
-        });
-    }
-
-    /// Render the duplicate detection results panel.
-    fn render_duplicates_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        panel_x: f32,
-        panel_width: f32,
-    ) {
-        let pad = DETAIL_PADDING;
-        let cx = panel_x + pad;
-        let mut cy = pad;
-
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: String::from("Duplicate Detection"),
-            font_size: 20.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(panel_width - pad * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 32.0;
-
-        let duplicates = self.store.find_duplicates();
-
-        if duplicates.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("No duplicates found."),
-                font_size: 14.0,
-                color: GREEN,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+    /// The detail panel on the right, whichever view is showing.
+    fn draw_panel(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.panel.is_empty() {
             return;
         }
+        f.push(fill(l.panel, BASE, 0.0));
+        f.clip(l.panel);
+        match &self.view {
+            DetailView::Empty => Self::draw_empty_state(f, l),
+            DetailView::ViewContact(id) => {
+                if let Some(contact) = self.store.get_contact(*id) {
+                    self.draw_contact_detail(f, l, contact);
+                } else {
+                    Self::draw_empty_state(f, l);
+                }
+            }
+            DetailView::EditContact(_) | DetailView::NewContact => self.draw_edit_form(f, l),
+            DetailView::Duplicates => self.draw_duplicates(f, l),
+            DetailView::Groups => self.draw_groups(f, l),
+        }
+        f.unclip();
+    }
 
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: format!("Found {} potential duplicate(s):", duplicates.len()),
-            font_size: 13.0,
-            color: PEACH,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(panel_width - pad * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 24.0;
+    /// What the panel says when nothing is selected.
+    fn draw_empty_state(f: &mut Frame<Target>, l: &Layout) {
+        let body = inset(l.panel, DETAIL_PADDING);
+        let mid = body.y + body.h / 2.0;
+        f.push(text_in(
+            Rect::new(body.x, mid - 30.0, body.w, 24.0),
+            "Select a contact",
+            18.0,
+            SUBTEXT0,
+            FontWeightHint::Regular,
+        ));
+        f.push(text_in(
+            Rect::new(body.x, mid, body.w, 18.0),
+            "or press + to add a new one",
+            13.0,
+            OVERLAY0,
+            FontWeightHint::Regular,
+        ));
+    }
 
+    /// A contact's details, with the three quick actions and the three
+    /// buttons along the bottom.
+    fn draw_contact_detail(&self, f: &mut Frame<Target>, l: &Layout, contact: &Contact) {
+        let body = inset(l.panel, DETAIL_PADDING);
+        // The buttons along the bottom are placed first, because everything
+        // above them scrolls into whatever room is left rather than over
+        // them. The old pass put them at `window_height - 60` and drew the
+        // details from the top, so on a short window the notes ran through
+        // them.
+        let btn_h = 36.0_f32.min(body.h);
+        let btn_y = (body.bottom() - btn_h).max(body.y);
+        let mut y = body.y;
+
+        let avatar = Rect::new(body.x, y, AVATAR_SIZE.min(body.w), AVATAR_SIZE);
+        f.push(fill(
+            avatar,
+            if contact.favorite { YELLOW } else { BLUE },
+            avatar.w / 2.0,
+        ));
+        f.push(text_in(
+            inset(avatar, avatar.w / 3.0),
+            &contact.initials(),
+            28.0,
+            BASE,
+            FontWeightHint::Bold,
+        ));
+        y += AVATAR_SIZE + 12.0;
+
+        f.push(text_in(
+            Rect::new(body.x, y, body.w, 26.0),
+            &contact.computed_display_name(),
+            22.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        ));
+        y += 30.0;
+
+        let company_line = match (contact.job_title.is_empty(), contact.company.is_empty()) {
+            (false, false) => format!("{} at {}", contact.job_title, contact.company),
+            (true, false) => contact.company.clone(),
+            (false, true) => contact.job_title.clone(),
+            (true, true) => String::new(),
+        };
+        for (line, size, color) in [
+            (company_line, 14.0, SUBTEXT0),
+            (contact.department.clone(), 12.0, OVERLAY0),
+            (
+                if contact.nickname.is_empty() {
+                    String::new()
+                } else {
+                    format!("\"{}\"", contact.nickname)
+                },
+                12.0,
+                LAVENDER,
+            ),
+        ] {
+            if line.is_empty() {
+                continue;
+            }
+            f.push(text_in(
+                Rect::new(body.x, y, body.w, size + 4.0),
+                &line,
+                size,
+                color,
+                FontWeightHint::Regular,
+            ));
+            y += size + 6.0;
+        }
+        y += 8.0;
+
+        // Quick actions. Their width comes from the panel, not from a
+        // constant 80: three 80-point buttons need 264 points and the panel
+        // can be 260.
+        let gap = 10.0;
+        let action_w = ((body.w - gap * 2.0) / 3.0).max(0.0);
+        let action_h = 32.0_f32.min((btn_y - y).max(0.0));
+        for (i, action) in [QuickAction::Call, QuickAction::Email, QuickAction::Map]
+            .into_iter()
+            .enumerate()
+        {
+            let r = Rect::new(
+                body.x + (i as f32) * (action_w + gap),
+                y,
+                action_w,
+                action_h,
+            );
+            if r.is_empty() {
+                continue;
+            }
+            let color = match action {
+                QuickAction::Call => GREEN,
+                QuickAction::Email => BLUE,
+                QuickAction::Map => PEACH,
+            };
+            f.push(fill(r, color, 6.0));
+            f.push(text_in(
+                inset(r, 8.0),
+                action.label(),
+                13.0,
+                BASE,
+                FontWeightHint::Bold,
+            ));
+            f.hit(Target::Action(action), r);
+        }
+        y += action_h + 14.0;
+
+        // The fields, in a box that stops at the buttons.
+        let fields = Rect::new(body.x, y, body.w, (btn_y - 12.0 - y).max(0.0));
+        if !fields.is_empty() {
+            f.clip(fields);
+            self.draw_contact_fields(f, fields, contact);
+            f.unclip();
+        }
+
+        // Edit / Star / Delete, sharing the panel's width.
+        let three_w = ((body.w - gap * 2.0) / 3.0).max(0.0);
+        let buttons = [
+            (Target::EditContact, String::from("Edit"), BLUE, BASE),
+            (
+                Target::ToggleFavorite,
+                String::from(if contact.favorite { "Unstar" } else { "Star" }),
+                if contact.favorite { YELLOW } else { SURFACE1 },
+                if contact.favorite { BASE } else { TEXT_COLOR },
+            ),
+            (Target::DeleteContact, String::from("Delete"), RED, BASE),
+        ];
+        for (i, (target, label, bg, fg)) in buttons.into_iter().enumerate() {
+            let r = Rect::new(body.x + (i as f32) * (three_w + gap), btn_y, three_w, btn_h);
+            if r.is_empty() {
+                continue;
+            }
+            f.push(fill(r, bg, 6.0));
+            f.push(text_in(
+                inset(r, 8.0),
+                &label,
+                13.0,
+                fg,
+                FontWeightHint::Bold,
+            ));
+            f.hit(target, r);
+        }
+    }
+
+    /// Phones, emails, addresses, social, birthday, notes and group chips.
+    fn draw_contact_fields(&self, f: &mut Frame<Target>, area: Rect, contact: &Contact) {
+        let mut y = area.y;
+        let section = |f: &mut Frame<Target>, y: &mut f32, title: &str| {
+            f.push(text_in(
+                Rect::new(area.x, *y, area.w, 14.0),
+                title,
+                11.0,
+                OVERLAY0,
+                FontWeightHint::Bold,
+            ));
+            *y += 16.0;
+        };
+        let line_box = |y: f32| Rect::new(area.x + 8.0, y, (area.w - 8.0).max(0.0), 18.0);
+
+        if !contact.phones.is_empty() {
+            section(f, &mut y, "Phone");
+            for phone in &contact.phones {
+                let primary = if phone.primary { " (primary)" } else { "" };
+                let s = format!("{}: {}{primary}", phone.phone_type.label(), phone.number);
+                f.push(text_in(
+                    line_box(y),
+                    &s,
+                    13.0,
+                    TEXT_COLOR,
+                    FontWeightHint::Regular,
+                ));
+                y += 20.0;
+            }
+            y += 6.0;
+        }
+        if !contact.emails.is_empty() {
+            section(f, &mut y, "Email");
+            for email in &contact.emails {
+                let primary = if email.primary { " (primary)" } else { "" };
+                let s = format!("{}: {}{primary}", email.email_type.label(), email.email);
+                f.push(text_in(
+                    line_box(y),
+                    &s,
+                    13.0,
+                    TEXT_COLOR,
+                    FontWeightHint::Regular,
+                ));
+                y += 20.0;
+            }
+            y += 6.0;
+        }
+        if !contact.addresses.is_empty() {
+            section(f, &mut y, "Address");
+            for addr in &contact.addresses {
+                let s = format!("{}: {}", addr.address_type.label(), addr.display_line());
+                f.push(text_in(
+                    line_box(y),
+                    &s,
+                    13.0,
+                    TEXT_COLOR,
+                    FontWeightHint::Regular,
+                ));
+                y += 20.0;
+            }
+            y += 6.0;
+        }
+        if !contact.social_accounts.is_empty() {
+            section(f, &mut y, "Social");
+            for social in &contact.social_accounts {
+                let s = format!("{}: {}", social.platform.label(), social.handle);
+                f.push(text_in(
+                    line_box(y),
+                    &s,
+                    13.0,
+                    LAVENDER,
+                    FontWeightHint::Regular,
+                ));
+                y += 20.0;
+            }
+            y += 6.0;
+        }
+        if let Some(ref bday) = contact.birthday {
+            section(f, &mut y, "Birthday");
+            f.push(text_in(
+                line_box(y),
+                &bday.format_display(),
+                13.0,
+                TEXT_COLOR,
+                FontWeightHint::Regular,
+            ));
+            y += 24.0;
+        }
+        if !contact.notes.is_empty() {
+            section(f, &mut y, "Notes");
+            // `RenderCommand::Text` clips at `max_width` instead of wrapping,
+            // so the notes used to show only their first line's worth of
+            // characters -- silently, with nothing to say the rest was there.
+            let notes_w = (area.w - 8.0).max(1.0);
+            for line in &text::wrap(
+                &contact.notes,
+                notes_w,
+                NOTES_FONT_SIZE,
+                FontWeightHint::Regular,
+            ) {
+                f.push(text_in(
+                    Rect::new(area.x + 8.0, y, notes_w, NOTES_LINE_HEIGHT),
+                    line,
+                    NOTES_FONT_SIZE,
+                    SUBTEXT0,
+                    FontWeightHint::Regular,
+                ));
+                y += NOTES_LINE_HEIGHT;
+            }
+            y += 6.0;
+        }
+        if !contact.groups.is_empty() {
+            section(f, &mut y, "Groups");
+            let mut chip_x = area.x;
+            for &gid in &contact.groups {
+                let Some(group) = self.store.get_group(gid) else {
+                    continue;
+                };
+                let chip_w =
+                    text::padded_width(&group.name, 8.0, 11.0, FontWeightHint::Bold).min(area.w);
+                if chip_x + chip_w > area.right() {
+                    // A chip that would run off the right edge starts a new
+                    // line instead of being drawn outside its own box.
+                    chip_x = area.x;
+                    y += GROUP_CHIP_HEIGHT + 4.0;
+                }
+                let chip = Rect::new(chip_x, y, chip_w, GROUP_CHIP_HEIGHT);
+                f.push(fill(chip, group.color, GROUP_CHIP_HEIGHT / 2.0));
+                f.push(text_in(
+                    inset(chip, 8.0),
+                    &group.name,
+                    11.0,
+                    BASE,
+                    FontWeightHint::Bold,
+                ));
+                f.hit(Target::Group(gid), chip);
+                chip_x += chip_w + 8.0;
+            }
+        }
+    }
+
+    /// The add/edit form.
+    fn draw_edit_form(&self, f: &mut Frame<Target>, l: &Layout) {
+        let body = inset(l.panel, DETAIL_PADDING);
+        let btn_h = 36.0_f32.min(body.h);
+        let btn_y = (body.bottom() - btn_h).max(body.y);
+        let mut y = body.y;
+
+        f.push(text_in(
+            Rect::new(body.x, y, body.w, 24.0),
+            if matches!(self.view, DetailView::NewContact) {
+                "New Contact"
+            } else {
+                "Edit Contact"
+            },
+            20.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        ));
+        y += 32.0;
+
+        let form = Rect::new(body.x, y, body.w, (btn_y - 10.0 - y).max(0.0));
+        if !form.is_empty() {
+            f.clip(form);
+            let mut fy = form.y - self.scroll_offset;
+            for field in FormField::ALL {
+                let tall = field == FormField::Notes;
+                let h = if tall { 72.0 } else { FIELD_HEIGHT };
+                f.push(text_in(
+                    Rect::new(form.x, fy, form.w, 12.0),
+                    field.label(),
+                    11.0,
+                    OVERLAY0,
+                    FontWeightHint::Regular,
+                ));
+                fy += 14.0;
+                let box_r = Rect::new(form.x, fy, form.w, h);
+                let focused = self.focus == Focus::Field(field);
+                f.push(fill(box_r, if focused { SURFACE1 } else { SURFACE0 }, 6.0));
+                let value = self.field_value(field);
+                let inner = inset(box_r, 10.0);
+                let inner = Rect::new(inner.x, inner.y, inner.w, 20.0_f32.min(inner.h));
+                if value.is_empty() {
+                    f.push(text_in(
+                        inner,
+                        field.label(),
+                        13.0,
+                        OVERLAY0,
+                        FontWeightHint::Regular,
+                    ));
+                } else {
+                    f.push(text_in(
+                        inner,
+                        value,
+                        13.0,
+                        TEXT_COLOR,
+                        FontWeightHint::Regular,
+                    ));
+                }
+                if focused {
+                    let used = text::measure(value, 13.0, FontWeightHint::Regular);
+                    let caret_x = (inner.x + used).min(inner.right() - 2.0);
+                    f.push(fill(
+                        Rect::new(caret_x, inner.y + 2.0, 2.0, (inner.h - 4.0).max(0.0)),
+                        BLUE,
+                        0.0,
+                    ));
+                }
+                f.hit(Target::Field(field), box_r);
+                fy += h + 6.0;
+            }
+            f.unclip();
+        }
+
+        let gap = 10.0;
+        let half = ((body.w - gap) / 2.0).max(0.0);
+        for (i, (target, label, bg, fg)) in [
+            (Target::Save, "Save", GREEN, BASE),
+            (Target::Cancel, "Cancel", SURFACE1, TEXT_COLOR),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let r = Rect::new(body.x + (i as f32) * (half + gap), btn_y, half, btn_h);
+            if r.is_empty() {
+                continue;
+            }
+            f.push(fill(r, bg, 6.0));
+            f.push(text_in(
+                inset(r, 8.0),
+                label,
+                13.0,
+                fg,
+                FontWeightHint::Bold,
+            ));
+            f.hit(target, r);
+        }
+    }
+
+    /// The duplicate-detection panel.
+    fn draw_duplicates(&self, f: &mut Frame<Target>, l: &Layout) {
+        let body = inset(l.panel, DETAIL_PADDING);
+        let mut y = body.y;
+        f.push(text_in(
+            Rect::new(body.x, y, body.w, 24.0),
+            "Duplicate Detection",
+            20.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        ));
+        y += 32.0;
+
+        let duplicates = self.store.find_duplicates();
+        if duplicates.is_empty() {
+            f.push(text_in(
+                Rect::new(body.x, y, body.w, 20.0),
+                "No duplicates found.",
+                14.0,
+                GREEN,
+                FontWeightHint::Regular,
+            ));
+            return;
+        }
+        f.push(text_in(
+            Rect::new(body.x, y, body.w, 18.0),
+            &format!("Found {} potential duplicate(s):", duplicates.len()),
+            13.0,
+            PEACH,
+            FontWeightHint::Regular,
+        ));
+        y += 24.0;
+
+        let merge_w = 64.0_f32.min(body.w / 3.0);
         for dup in &duplicates {
+            let card = Rect::new(body.x, y, body.w, 60.0);
+            f.push(fill(card, SURFACE0, 8.0));
             let name_a = self
                 .store
                 .get_contact(dup.contact_a_id)
-                .map_or(String::from("?"), |c| c.computed_display_name());
+                .map_or_else(|| String::from("?"), Contact::computed_display_name);
             let name_b = self
                 .store
                 .get_contact(dup.contact_b_id)
-                .map_or(String::from("?"), |c| c.computed_display_name());
-
-            // Duplicate card
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: panel_width - pad * 2.0,
-                height: 60.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(8.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: cx + 12.0,
-                y: cy + 10.0,
-                text: format!("{name_a}  <->  {name_b}"),
-                font_size: 13.0,
-                color: TEXT_COLOR,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(panel_width - pad * 2.0 - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: cx + 12.0,
-                y: cy + 30.0,
-                text: format!(
+                .map_or_else(|| String::from("?"), Contact::computed_display_name);
+            let text_w = (card.w - merge_w - 24.0).max(0.0);
+            f.push(text_in(
+                Rect::new(card.x + 12.0, card.y + 8.0, text_w, 18.0),
+                &format!("{name_a}  <->  {name_b}"),
+                13.0,
+                TEXT_COLOR,
+                FontWeightHint::Bold,
+            ));
+            f.push(text_in(
+                Rect::new(card.x + 12.0, card.y + 30.0, text_w, 16.0),
+                &format!(
                     "{} (confidence: {:.0}%)",
                     dup.reason.label(),
                     dup.confidence * 100.0
                 ),
-                font_size: 11.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0 - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-
-            // Merge button
-            let merge_x = panel_x + panel_width - pad - 72.0;
-            cmds.push(RenderCommand::FillRect {
-                x: merge_x,
-                y: cy + 14.0,
-                width: 60.0,
-                height: 28.0,
-                color: BLUE,
-                corner_radii: CornerRadii::all(4.0),
-            });
-            cmds.push(RenderCommand::Text {
-                x: merge_x + 10.0,
-                y: cy + 20.0,
-                text: String::from("Merge"),
-                font_size: 11.0,
-                color: BASE,
-                font_weight: FontWeightHint::Bold,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            cy += 72.0;
+                11.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            ));
+            let merge = Rect::new(card.right() - merge_w - 8.0, card.y + 16.0, merge_w, 28.0);
+            if !merge.is_empty() {
+                f.push(fill(merge, BLUE, 4.0));
+                f.push(text_in(
+                    inset(merge, 6.0),
+                    "Merge",
+                    11.0,
+                    BASE,
+                    FontWeightHint::Bold,
+                ));
+                f.hit(Target::Merge(dup.contact_a_id, dup.contact_b_id), merge);
+            }
+            y += 72.0;
         }
     }
 
-    /// Render the groups management panel.
-    fn render_groups_panel(&self, cmds: &mut Vec<RenderCommand>, panel_x: f32, panel_width: f32) {
-        let pad = DETAIL_PADDING;
-        let cx = panel_x + pad;
-        let mut cy = pad;
-
-        cmds.push(RenderCommand::Text {
-            x: cx,
-            y: cy,
-            text: String::from("Groups"),
-            font_size: 20.0,
-            color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold,
-            max_width: Some(panel_width - pad * 2.0),
-            overflow: TextOverflow::Ellipsis,
-        });
-        cy += 32.0;
+    /// The groups panel, whose rows filter the list.
+    fn draw_groups(&self, f: &mut Frame<Target>, l: &Layout) {
+        let body = inset(l.panel, DETAIL_PADDING);
+        let mut y = body.y;
+        f.push(text_in(
+            Rect::new(body.x, y, body.w, 24.0),
+            "Groups",
+            20.0,
+            TEXT_COLOR,
+            FontWeightHint::Bold,
+        ));
+        y += 32.0;
 
         let stats = self.store.group_stats();
-
         if stats.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: cx,
-                y: cy,
-                text: String::from("No groups yet. Create one to organize contacts."),
-                font_size: 14.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(panel_width - pad * 2.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+            f.push(text_in(
+                Rect::new(body.x, y, body.w, 20.0),
+                "No groups yet. Create one to organize contacts.",
+                14.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            ));
             return;
         }
-
         for (gid, name, count) in &stats {
-            let group_color = self.store.get_group(*gid).map_or(BLUE, |g| g.color);
+            let row = Rect::new(body.x, y, body.w, 48.0);
+            f.push(fill(row, SURFACE0, 8.0));
+            let dot = Rect::new(row.x + 12.0, row.y + 16.0, 16.0, 16.0);
+            f.push(fill(
+                dot,
+                self.store.get_group(*gid).map_or(BLUE, |g| g.color),
+                8.0,
+            ));
+            let text_x = dot.right() + 8.0;
+            let text_w = (row.right() - 12.0 - text_x).max(0.0);
+            f.push(text_in(
+                Rect::new(text_x, row.y + 8.0, text_w, 18.0),
+                name,
+                14.0,
+                TEXT_COLOR,
+                FontWeightHint::Bold,
+            ));
+            f.push(text_in(
+                Rect::new(text_x, row.y + 26.0, text_w, 16.0),
+                &format!("{count} contact(s)"),
+                11.0,
+                SUBTEXT0,
+                FontWeightHint::Regular,
+            ));
+            f.hit(Target::Group(*gid), row);
+            y += 56.0;
+        }
+    }
 
-            cmds.push(RenderCommand::FillRect {
-                x: cx,
-                y: cy,
-                width: panel_width - pad * 2.0,
-                height: 48.0,
-                color: SURFACE0,
-                corner_radii: CornerRadii::all(8.0),
-            });
+    /// The strip along the bottom, drawn last so nothing can cover it.
+    fn draw_status(&self, f: &mut Frame<Target>, l: &Layout) {
+        if l.status.is_empty() {
+            return;
+        }
+        f.push(fill(l.status, CRUST, 0.0));
+        f.push(text_in(
+            inset(l.status, 8.0),
+            &self.status,
+            11.0,
+            SUBTEXT0,
+            FontWeightHint::Regular,
+        ));
+    }
 
-            // Color dot
-            cmds.push(RenderCommand::FillRect {
-                x: cx + 12.0,
-                y: cy + 16.0,
-                width: 16.0,
-                height: 16.0,
-                color: group_color,
-                corner_radii: CornerRadii::all(8.0),
-            });
+    /// The text currently in one form field.
+    #[must_use]
+    pub fn field_value(&self, field: FormField) -> &str {
+        match field {
+            FormField::FirstName => &self.edit_first_name,
+            FormField::LastName => &self.edit_last_name,
+            FormField::Nickname => &self.edit_nickname,
+            FormField::Company => &self.edit_company,
+            FormField::JobTitle => &self.edit_job_title,
+            FormField::Department => &self.edit_department,
+            FormField::Phone => &self.edit_phone,
+            FormField::Email => &self.edit_email,
+            FormField::Birthday => &self.edit_birthday,
+            FormField::Street => &self.edit_street,
+            FormField::City => &self.edit_city,
+            FormField::State => &self.edit_state,
+            FormField::Zip => &self.edit_zip,
+            FormField::Country => &self.edit_country,
+            FormField::Notes => &self.edit_notes,
+        }
+    }
 
-            cmds.push(RenderCommand::Text {
-                x: cx + 36.0,
-                y: cy + 10.0,
-                text: name.clone(),
-                font_size: 14.0,
-                color: TEXT_COLOR,
-                font_weight: FontWeightHint::Bold,
-                max_width: Some(panel_width - pad * 2.0 - 100.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-            cmds.push(RenderCommand::Text {
-                x: cx + 36.0,
-                y: cy + 28.0,
-                text: format!("{count} contact(s)"),
-                font_size: 11.0,
-                color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular,
-                max_width: None,
-                overflow: TextOverflow::Clip,
-            });
-
-            cy += 56.0;
+    /// The same field, to write into.
+    fn field_mut(&mut self, field: FormField) -> &mut String {
+        match field {
+            FormField::FirstName => &mut self.edit_first_name,
+            FormField::LastName => &mut self.edit_last_name,
+            FormField::Nickname => &mut self.edit_nickname,
+            FormField::Company => &mut self.edit_company,
+            FormField::JobTitle => &mut self.edit_job_title,
+            FormField::Department => &mut self.edit_department,
+            FormField::Phone => &mut self.edit_phone,
+            FormField::Email => &mut self.edit_email,
+            FormField::Birthday => &mut self.edit_birthday,
+            FormField::Street => &mut self.edit_street,
+            FormField::City => &mut self.edit_city,
+            FormField::State => &mut self.edit_state,
+            FormField::Zip => &mut self.edit_zip,
+            FormField::Country => &mut self.edit_country,
+            FormField::Notes => &mut self.edit_notes,
         }
     }
 
@@ -3271,15 +3317,504 @@ impl Default for ContactsApp {
 }
 
 // ============================================================================
-// Main entry point
+// Drawing helpers
 // ============================================================================
 
-fn main() {
+/// A filled, optionally rounded rectangle.
+fn fill(r: Rect, color: Color, radius: f32) -> RenderCommand {
+    RenderCommand::FillRect {
+        x: r.x,
+        y: r.y,
+        width: r.w,
+        height: r.h,
+        color,
+        corner_radii: CornerRadii::all(radius),
+    }
+}
+
+/// `r` shrunk by `pad` on every side, never below nothing.
+fn inset(r: Rect, pad: f32) -> Rect {
+    Rect::new(
+        r.x + pad,
+        r.y + pad,
+        (r.w - pad * 2.0).max(0.0),
+        (r.h - pad * 2.0).max(0.0),
+    )
+}
+
+/// `r` shrunk by `pad` on the left and right only.
+fn inset_x(r: Rect, pad: f32) -> Rect {
+    Rect::new(r.x + pad, r.y, (r.w - pad * 2.0).max(0.0), r.h)
+}
+
+/// A run of text bounded by the box it is drawn in, on both axes.
+///
+/// Two things here are the whole point. `max_width` is always `Some`, so a
+/// long name cannot walk across the column beside it -- the old pass left it
+/// `None` on nineteen of its runs. And the size is clamped to the box's
+/// height, because a run taller than its box sticks out of *both* ends of it
+/// once it is centred, and no caller can prevent that from where it stands:
+/// that is how a status line came to be drawn below the bottom edge of a
+/// short window.
+fn text_in(r: Rect, s: &str, size: f32, color: Color, weight: FontWeightHint) -> RenderCommand {
+    let size = size.min(r.h);
+    RenderCommand::Text {
+        x: r.x,
+        y: r.y + (r.h - size) / 2.0,
+        text: s.to_string(),
+        font_size: size,
+        color,
+        font_weight: weight,
+        max_width: Some(r.w),
+        overflow: TextOverflow::Ellipsis,
+    }
+}
+
+// ============================================================================
+// What a press and a keystroke do
+// ============================================================================
+
+impl ContactsApp {
+    /// Route an event to whatever the drawing pass put under it.
+    fn handle_event(&mut self, event: &Event, size: (f32, f32)) {
+        match event {
+            Event::Key(ke) => self.handle_key(ke),
+            Event::Mouse(me) => self.handle_mouse(me, size),
+            _ => {}
+        }
+    }
+
+    /// Route a press to the control the last frame drew at that point.
+    ///
+    /// The hit boxes come from a frame drawn at the same size, so a control
+    /// the window was too small to draw is a control that cannot be pressed.
+    fn handle_mouse(&mut self, event: &MouseEvent, size: (f32, f32)) {
+        let MouseEventKind::Press(MouseButton::Left) = event.kind else {
+            return;
+        };
+        let frame = self.frame(size.0, size.1);
+        let Some(target) = frame.hit_test(event.x, event.y) else {
+            return;
+        };
+        self.activate(target);
+    }
+
+    /// Do what pressing `target` means.
+    fn activate(&mut self, target: Target) {
+        match target {
+            Target::AddContact => self.start_new_contact(),
+            Target::Search => {
+                self.focus = Focus::Search;
+                self.status = String::from("Type to search");
+            }
+            Target::CycleFilter => {
+                self.filter = match self.filter {
+                    ContactFilter::All => ContactFilter::Favorites,
+                    ContactFilter::Favorites => ContactFilter::HasPhone,
+                    ContactFilter::HasPhone => ContactFilter::HasEmail,
+                    _ => ContactFilter::All,
+                };
+                self.scroll_offset = 0.0;
+                self.status = format!("Filter: {}", self.filter.label());
+            }
+            Target::CycleSort => {
+                self.sort_order = match self.sort_order {
+                    SortOrder::Name => SortOrder::Company,
+                    SortOrder::Company => SortOrder::RecentlyAdded,
+                    SortOrder::RecentlyAdded => SortOrder::RecentlyContacted,
+                    SortOrder::RecentlyContacted => SortOrder::Name,
+                };
+                self.scroll_offset = 0.0;
+                self.status = format!("Sort: {}", self.sort_order.label());
+            }
+            Target::ShowGroups => {
+                self.view = DetailView::Groups;
+                self.focus = Focus::None;
+                self.status = String::from("Groups");
+            }
+            Target::ShowDuplicates => {
+                self.view = DetailView::Duplicates;
+                self.focus = Focus::None;
+                self.status = String::from("Duplicate detection");
+            }
+            Target::Letter(letter) => self.jump_to_letter(letter),
+            Target::Contact(id) => self.select_contact(id),
+            Target::Action(action) => self.quick_action(action),
+            Target::EditContact => self.start_editing(),
+            Target::ToggleFavorite => self.toggle_selected_favorite(),
+            Target::DeleteContact => self.delete_selected(),
+            Target::Field(field) => {
+                self.focus = Focus::Field(field);
+                self.status = format!("Editing {}", field.label());
+            }
+            Target::Save => self.save_form(),
+            Target::Cancel => self.cancel_form(),
+            Target::Merge(a, b) => self.merge_pair(a, b),
+            Target::Group(gid) => self.filter_to_group(gid),
+        }
+    }
+
+    /// Open the form on a blank contact.
+    fn start_new_contact(&mut self) {
+        self.clear_edit_form();
+        self.view = DetailView::NewContact;
+        // The first field takes the keyboard, so the form can be typed into
+        // without first finding somewhere to click.
+        self.focus = Focus::Field(FormField::FirstName);
+        self.scroll_offset = 0.0;
+        self.status = String::from("New contact");
+    }
+
+    /// Show a contact, and record that it was looked at.
+    fn select_contact(&mut self, id: u64) {
+        if self.store.get_contact(id).is_none() {
+            return;
+        }
+        self.store.record_view(id);
+        self.view = DetailView::ViewContact(id);
+        self.focus = Focus::None;
+        self.status = self
+            .store
+            .get_contact(id)
+            .map_or_else(String::new, Contact::computed_display_name);
+    }
+
+    /// The contact the panel is showing, if it is showing one.
+    #[must_use]
+    pub fn selected_id(&self) -> Option<u64> {
+        match self.view {
+            DetailView::ViewContact(id) | DetailView::EditContact(id) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Call, mail or map the selected contact.
+    fn quick_action(&mut self, action: QuickAction) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let name = self
+            .store
+            .get_contact(id)
+            .map_or_else(String::new, Contact::computed_display_name);
+        match action {
+            QuickAction::Call | QuickAction::Email => {
+                // Reaching someone is what "recently contacted" orders by, so
+                // the two buttons that reach them move the contact to the top
+                // of that order. The clock advances so a second call lands
+                // after the first rather than tying with it.
+                self.clock = self.clock.saturating_add(1);
+                let now = self.clock;
+                self.store.mark_contacted(id, now);
+            }
+            QuickAction::Map => {}
+        }
+        self.status = format!("{}: {name}", action.label());
+    }
+
+    /// Open the form on the selected contact.
+    fn start_editing(&mut self) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let Some(contact) = self.store.get_contact(id).cloned() else {
+            return;
+        };
+        self.load_edit_form(&contact);
+        self.view = DetailView::EditContact(id);
+        self.focus = Focus::Field(FormField::FirstName);
+        self.scroll_offset = 0.0;
+        self.status = format!("Editing {}", contact.computed_display_name());
+    }
+
+    /// Star or unstar the selected contact.
+    fn toggle_selected_favorite(&mut self) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        if let Some(now_favorite) = self.store.toggle_favorite(id) {
+            self.status = String::from(if now_favorite { "Starred" } else { "Unstarred" });
+        }
+    }
+
+    /// Delete the selected contact and go back to the empty panel.
+    fn delete_selected(&mut self) {
+        let Some(id) = self.selected_id() else {
+            return;
+        };
+        let name = self
+            .store
+            .get_contact(id)
+            .map_or_else(String::new, Contact::computed_display_name);
+        if self.store.delete_contact(id) {
+            self.view = DetailView::Empty;
+            self.focus = Focus::None;
+            self.status = format!("Deleted {name}");
+        }
+    }
+
+    /// Write the form back, either onto the contact being edited or as a new
+    /// one.
+    fn save_form(&mut self) {
+        let built = self.build_contact_from_form();
+        match self.view {
+            DetailView::EditContact(id) => {
+                let mut updated = built;
+                updated.id = id;
+                if let Some(existing) = self.store.get_contact(id) {
+                    // Everything the form does not carry -- groups, extra
+                    // phone numbers, the favourite flag, when it was created
+                    // -- belongs to the contact and not to the form, and
+                    // saving must not quietly drop it.
+                    updated.groups.clone_from(&existing.groups);
+                    updated.favorite = existing.favorite;
+                    updated.created_at = existing.created_at;
+                    updated.last_contacted = existing.last_contacted;
+                }
+                if self.store.update_contact(updated) {
+                    self.view = DetailView::ViewContact(id);
+                    self.status = String::from("Saved");
+                }
+            }
+            DetailView::NewContact => {
+                let id = self.store.add_contact(built);
+                self.view = DetailView::ViewContact(id);
+                self.status = String::from("Added");
+            }
+            _ => return,
+        }
+        self.focus = Focus::None;
+        self.scroll_offset = 0.0;
+    }
+
+    /// Abandon the form without writing anything.
+    fn cancel_form(&mut self) {
+        self.view = match self.view {
+            DetailView::EditContact(id) => DetailView::ViewContact(id),
+            _ => DetailView::Empty,
+        };
+        self.clear_edit_form();
+        self.focus = Focus::None;
+        self.scroll_offset = 0.0;
+        self.status = String::from("Cancelled");
+    }
+
+    /// Merge a pair the duplicate panel found.
+    fn merge_pair(&mut self, a: u64, b: u64) {
+        if let Some(kept) = self.store.merge_contacts(a, b) {
+            self.status = format!("Merged into #{kept}");
+        }
+    }
+
+    /// Narrow the list to one group.
+    fn filter_to_group(&mut self, gid: u64) {
+        self.filter = ContactFilter::Group(gid);
+        self.scroll_offset = 0.0;
+        self.status = self
+            .store
+            .get_group(gid)
+            .map_or_else(|| String::from("Group"), |g| format!("Group: {}", g.name));
+    }
+
+    /// Scroll the list so the first contact filed under `letter` is at the
+    /// top of it.
+    ///
+    /// The offset is measured by walking the same rows the drawing pass
+    /// walks, dividers included, rather than multiplying an index by a row
+    /// height -- the dividers only appear when the sort is by name, so the
+    /// arithmetic version is wrong under every other sort.
+    fn jump_to_letter(&mut self, letter: char) {
+        self.selected_letter = Some(letter);
+        let contacts =
+            self.store
+                .filtered_sorted(&self.filter, self.sort_order, &self.search_query);
+        let mut offset = 0.0_f32;
+        let mut current: Option<char> = None;
+        for contact in &contacts {
+            let first = contact.first_letter();
+            if current != Some(first) && self.sort_order == SortOrder::Name {
+                if first == letter {
+                    self.scroll_offset = offset;
+                    self.status = format!("Jumped to {letter}");
+                    return;
+                }
+                offset += LETTER_DIVIDER_HEIGHT;
+                current = Some(first);
+            } else if first == letter {
+                self.scroll_offset = offset;
+                self.status = format!("Jumped to {letter}");
+                return;
+            }
+            offset += CONTACT_ROW_HEIGHT;
+        }
+        self.status = format!("Nothing filed under {letter}");
+    }
+
+    /// A keystroke: text into whatever has the keyboard, otherwise a
+    /// shortcut.
+    fn handle_key(&mut self, event: &KeyEvent) {
+        if !event.pressed {
+            return;
+        }
+        match event.key {
+            Key::Escape => {
+                if self.focus == Focus::None {
+                    self.view = DetailView::Empty;
+                    self.status = String::from("Closed");
+                } else {
+                    self.focus = Focus::None;
+                    self.status = String::from("Keyboard released");
+                }
+                return;
+            }
+            Key::Tab => {
+                self.focus = match self.focus {
+                    Focus::Field(field) => Focus::Field(field.next()),
+                    _ => Focus::Field(FormField::FirstName),
+                };
+                return;
+            }
+            Key::Backspace => {
+                match self.focus {
+                    Focus::Search => {
+                        self.search_query.pop();
+                        self.scroll_offset = 0.0;
+                    }
+                    Focus::Field(field) => {
+                        self.field_mut(field).pop();
+                    }
+                    Focus::None => {}
+                }
+                return;
+            }
+            Key::Enter => {
+                match self.focus {
+                    Focus::Field(_) => self.save_form(),
+                    _ => self.focus = Focus::None,
+                }
+                return;
+            }
+            _ => {}
+        }
+
+        // Printable text. `KeyEvent::text` is what the platform's keyboard
+        // layout produced, shift and dead keys included; deriving a character
+        // from the key code instead is what made a `+` impossible to type on
+        // any layout but the one the table was written for.
+        let typed = event.text.clone();
+        if !typed.is_empty() && !typed.chars().any(char::is_control) {
+            match self.focus {
+                Focus::Search => {
+                    self.search_query.push_str(&typed);
+                    self.scroll_offset = 0.0;
+                    return;
+                }
+                Focus::Field(field) => {
+                    self.field_mut(field).push_str(&typed);
+                    return;
+                }
+                Focus::None => {}
+            }
+        }
+
+        // Nothing has the keyboard, so letters are shortcuts.
+        match event.key {
+            Key::N => self.start_new_contact(),
+            Key::S => self.activate(Target::Search),
+            Key::G => self.activate(Target::ShowGroups),
+            Key::D => self.activate(Target::ShowDuplicates),
+            Key::F => self.activate(Target::CycleFilter),
+            Key::O => self.activate(Target::CycleSort),
+            Key::E => self.start_editing(),
+            Key::Delete => self.delete_selected(),
+            _ => {}
+        }
+    }
+}
+
+// ============================================================================
+// The window
+// ============================================================================
+
+impl App for ContactsApp {
+    fn title(&self) -> String {
+        String::from("Contacts")
+    }
+
+    fn app_id(&self) -> String {
+        String::from("contacts")
+    }
+
+    fn initial_size(&self) -> (u32, u32) {
+        (WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32)
+    }
+
+    fn tick_interval(&self) -> Option<Duration> {
+        // An address book changes when someone edits it and at no other time.
+        None
+    }
+
+    fn on_event(&mut self, event: &Event) -> Response {
+        match event {
+            Event::CloseRequested => Response::Exit,
+            Event::Resize { width, height } => {
+                // Remembered here as well as in `render`, because a press can
+                // arrive after a resize and before the next frame, and it has
+                // to be answered against the window's real size.
+                self.window_width = *width as f32;
+                self.window_height = *height as f32;
+                Response::Redraw
+            }
+            _ => {
+                self.handle_event(event, (self.window_width, self.window_height));
+                Response::Redraw
+            }
+        }
+    }
+
+    fn render(&mut self, width: f32, height: f32) -> RenderTree {
+        self.window_width = width;
+        self.window_height = height;
+        self.frame(width, height).into_tree()
+    }
+}
+
+impl Probe for ContactsApp {
+    type Target = Target;
+    type Outcome = ();
+    const SIZE: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    fn draw(&self, size: (f32, f32)) -> Frame<Target> {
+        self.frame(size.0, size.1)
+    }
+
+    fn click_at(&mut self, x: f32, y: f32, button: MouseButton, size: (f32, f32)) {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.handle_event(
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Press(button),
+            }),
+            size,
+        );
+    }
+
+    fn key_at(&mut self, key: &KeyEvent, size: (f32, f32)) {
+        self.window_width = size.0;
+        self.window_height = size.1;
+        self.handle_event(&Event::Key(key.clone()), size);
+    }
+}
+
+fn main() -> ExitCode {
+    // The previous `main` was three lines: build the store, load the sample
+    // data, render one frame into a `Vec` and drop it. It exercised the
+    // drawing code and showed nobody the result.
     let mut app = ContactsApp::new();
     app.load_sample_data();
-
-    // Render one frame to validate the rendering pipeline
-    let _commands = app.render();
+    app::launch("contacts", &mut app)
 }
 
 // ============================================================================
@@ -5052,14 +5587,37 @@ mod tests {
             .iter()
             .map(|(y, _)| y + NOTES_LINE_HEIGHT)
             .fold(f32::MIN, f32::max);
-        let groups_heading_y = app
+        // The sidebar now carries a `Groups` *button* as well, so matching on
+        // the word alone would find that button -- which sits at the top of
+        // the window and would fail this test no matter where the panel drew
+        // its heading. The heading is the bold OVERLAY0 run; the button is a
+        // regular-weight one. Assert there is exactly one of each shape so
+        // that a future third `Groups` run cannot quietly be picked instead.
+        let headings: Vec<f32> = app
             .render()
             .into_iter()
-            .find_map(|c| match c {
-                RenderCommand::Text { y, ref text, .. } if text == "Groups" => Some(y),
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    y,
+                    ref text,
+                    color,
+                    font_weight,
+                    ..
+                } if text == "Groups"
+                    && font_weight == FontWeightHint::Bold
+                    && color == OVERLAY0 =>
+                {
+                    Some(y)
+                }
                 _ => None,
             })
-            .expect("the detail panel drew no groups heading");
+            .collect();
+        assert_eq!(
+            headings.len(),
+            1,
+            "expected exactly one groups section heading, found {headings:?}"
+        );
+        let groups_heading_y = headings.first().copied().unwrap();
         assert!(
             groups_heading_y >= notes_bottom,
             "the groups heading at {groups_heading_y} sits inside the notes, \

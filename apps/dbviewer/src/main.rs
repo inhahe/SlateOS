@@ -5360,13 +5360,15 @@ fn main() -> ExitCode {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing
-)]
 mod tests {
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // --- LIKE pattern matching ---
@@ -7051,5 +7053,991 @@ mod tests {
     #[test]
     fn test_bottom_panel_all() {
         assert_eq!(BottomPanel::all().len(), 4);
+    }
+
+    // -----------------------------------------------------------------------
+    // The window: geometry
+    //
+    // Everything below this line exists because the database browser had no
+    // window. `main` built a sample database, drew one frame into a `Vec`,
+    // asserted the `Vec` was not empty and dropped it, so the picture was
+    // never wrong about anything -- nobody looked at it and nothing could be
+    // pressed. These tests ask the picture the questions a user would ask it
+    // with a mouse.
+    // -----------------------------------------------------------------------
+
+    /// The window sizes every geometry sweep is run at.
+    ///
+    /// Not a grid for its own sake: each entry breaks a different assumption --
+    /// too narrow for the 220-point sidebar, too short for the 140-point bottom
+    /// panel, too narrow for six toolbar buttons, wider than it is tall and the
+    /// other way round, and three that are not really windows at all.
+    const GRID: [(f32, f32); 12] = [
+        (1200.0, 800.0),
+        (1920.0, 1080.0),
+        (1024.0, 768.0),
+        (640.0, 480.0),
+        (420.0, 900.0),
+        (1600.0, 200.0),
+        (380.0, 320.0),
+        (300.0, 240.0),
+        (200.0, 160.0),
+        (120.0, 90.0),
+        (40.0, 30.0),
+        (2.0, 2.0),
+    ];
+
+    /// The browser as the window opens it, with a table chosen -- which is the
+    /// state nearly every control in the program needs to have anything to act
+    /// on. `DbViewerApp::new` selects one already; this says so out loud so a
+    /// change to `new` does not quietly empty half the sweeps below.
+    fn wired() -> DbViewerApp {
+        let mut app = DbViewerApp::new();
+        app.select_table("users");
+        assert!(
+            app.active_db_tab()
+                .and_then(|t| t.selected_table.clone())
+                .is_some(),
+            "the sample database has no `users` table to select"
+        );
+        app
+    }
+
+    /// The states every geometry sweep is run over.
+    ///
+    /// A window is only as right as its worst state. Sweeping the default state
+    /// proves the default state: it is the pane showing a paragraph of error,
+    /// the grid sorted so screen order and table order disagree, the sidebar
+    /// carrying a filter builder as tall as the tree, and the tab strip holding
+    /// more tabs than fit that have somewhere to go wrong.
+    fn states() -> Vec<(&'static str, DbViewerApp)> {
+        let mut out: Vec<(&'static str, DbViewerApp)> = Vec::new();
+
+        out.push(("as opened", DbViewerApp::new()));
+        out.push(("a table selected", wired()));
+
+        let mut empty = DbViewerApp::new();
+        empty.add_tab("empty");
+        out.push(("an empty database", empty));
+
+        let mut sorted = wired();
+        sorted.toggle_sort(3);
+        sorted.toggle_sort(3);
+        out.push(("sorted descending", sorted));
+
+        let mut filtered = wired();
+        filtered.filter_column_idx = 1;
+        filtered.filter_op_idx = 0;
+        filtered.filter_value = String::from("nobody at all");
+        filtered.add_filter();
+        filtered.show_filter_builder = true;
+        out.push(("filtered down to nothing", filtered));
+
+        let mut many_filters = wired();
+        many_filters.show_filter_builder = true;
+        for _ in 0..8 {
+            many_filters.filter_value = String::from("x");
+            many_filters.add_filter();
+        }
+        out.push(("the filter builder, eight filters deep", many_filters));
+
+        let mut results = wired();
+        results.sql_input = String::from("SELECT * FROM users");
+        results.execute_query();
+        out.push(("a result showing", results));
+
+        let mut wordy = wired();
+        wordy.query_result = Some(QueryResult::error(&"word ".repeat(400)));
+        wordy.bottom_panel = BottomPanel::Results;
+        out.push(("a result whose message will not stop", wordy));
+
+        let mut schema = wired();
+        schema.bottom_panel = BottomPanel::Schema;
+        out.push(("the schema panel", schema));
+
+        let mut diagram = wired();
+        diagram.bottom_panel = BottomPanel::Diagram;
+        out.push(("the diagram panel", diagram));
+
+        let mut tabs = wired();
+        for i in 0..8 {
+            tabs.add_tab(&format!("a database with a very long name {i}"));
+        }
+        out.push(("more tabs than fit", tabs));
+
+        let mut history = wired();
+        for i in 0..20 {
+            history.sql_input = format!("SELECT {i} FROM users WHERE name LIKE '%{i}%'");
+            history.execute_query();
+        }
+        history.bottom_panel = BottomPanel::SqlEditor;
+        history.toggle_favorite(0);
+        out.push(("a long history", history));
+
+        let mut paged = wired();
+        for i in 0..300 {
+            if let Some(tab) = paged.active_db_tab_mut()
+                && let Some(table) = tab.db.find_table_mut("users")
+            {
+                let row: Vec<CellValue> = table
+                    .columns
+                    .iter()
+                    .map(|c| CellValue::parse_as(&format!("{i}"), &c.data_type))
+                    .collect();
+                table.rows.push(row);
+            }
+        }
+        paged.next_page();
+        out.push(("three hundred rows, on the second page", paged));
+
+        out
+    }
+
+    /// Every run of text the frame drew, as `(text, x, y, size, max_width)`.
+    fn text_runs(frame: &Frame<Target>) -> Vec<(String, f32, f32, f32, Option<f32>)> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    max_width,
+                    ..
+                } => Some((text.clone(), *x, *y, *font_size, *max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every clip the frame pushed, as a rectangle.
+    fn clips(frame: &Frame<Target>) -> Vec<Rect> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => Some(Rect::new(*x, *y, *width, *height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The clip that was in force at each command: the intersection of the
+    /// whole stack, or the window if nothing was clipped.
+    ///
+    /// The intersection matters and an "innermost clip wins" reading would be
+    /// wrong: clips nest, and a pass that pushed a second, wider clip inside a
+    /// narrow one would otherwise be measured against the wider of the two.
+    /// An unclipped command is measured against the window itself, because
+    /// something drawn outside a window nobody clipped is just as lost as
+    /// something that escaped a clip.
+    fn walk_clips<T>(
+        frame: &Frame<Target>,
+        size: (f32, f32),
+        mut pick: impl FnMut(&RenderCommand, Rect) -> Option<T>,
+    ) -> Vec<T> {
+        let window = Rect::new(0.0, 0.0, size.0, size.1);
+        let mut stack: Vec<Rect> = Vec::new();
+        let mut out = Vec::new();
+        for c in frame.commands() {
+            match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let next = Rect::new(*x, *y, *width, *height);
+                    let merged = stack
+                        .last()
+                        .map_or(next, |outer| outer.intersect(next).unwrap_or(Rect::EMPTY));
+                    stack.push(merged);
+                }
+                RenderCommand::PopClip => {
+                    stack.pop();
+                }
+                other => {
+                    if let Some(v) = pick(other, stack.last().copied().unwrap_or(window)) {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every run of text, paired with the clip that was in force when it was
+    /// drawn.
+    fn text_runs_clipped(
+        frame: &Frame<Target>,
+        size: (f32, f32),
+    ) -> Vec<(String, f32, f32, f32, Option<f32>, Rect)> {
+        walk_clips(frame, size, |c, clip| match c {
+            RenderCommand::Text {
+                x,
+                y,
+                text,
+                font_size,
+                max_width,
+                ..
+            } => Some((text.clone(), *x, *y, *font_size, *max_width, clip)),
+            _ => None,
+        })
+    }
+
+    /// Every filled box, paired with the clip that was in force when it was
+    /// drawn -- the same rule `text_runs_clipped` applies to text.
+    fn fills_clipped(frame: &Frame<Target>, size: (f32, f32)) -> Vec<(Rect, Rect)> {
+        walk_clips(frame, size, |c, clip| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => Some((Rect::new(*x, *y, *width, *height), clip)),
+            _ => None,
+        })
+    }
+
+    /// Where the picture drew a given run of text, as a point inside it.
+    ///
+    /// This is how a control is found when the point of the test is *which*
+    /// control the press reaches. Asking the frame for the rectangle of a
+    /// `Target` asks the drawing pass where it thinks its own controls are, and
+    /// a pass that recorded every row one row off would answer with the same
+    /// offset it made the mistake with -- finding and clicking would cancel out,
+    /// and the test would pass over a grid where every row deleted its
+    /// neighbour. The words are the only thing a user can read.
+    fn text_point(app: &DbViewerApp, size: (f32, f32), wanted: &str) -> Option<(f32, f32)> {
+        let frame = app.frame(size.0, size.1);
+        let found: Vec<(f32, f32)> = text_runs(&frame)
+            .into_iter()
+            .filter(|(text, ..)| text == wanted)
+            .map(|(_, x, y, font_size, max_width)| {
+                (
+                    x + max_width.unwrap_or(font_size) * 0.5,
+                    y + font_size * 0.5,
+                )
+            })
+            .collect();
+        // Two runs reading the same words make "press the thing that says X"
+        // ambiguous, and the caller would silently get whichever came first.
+        assert!(
+            found.len() <= 1,
+            "{} runs of text read {wanted:?}",
+            found.len()
+        );
+        found.first().copied()
+    }
+
+    /// `text_point`, insisting the words are there.
+    fn point(app: &DbViewerApp, size: (f32, f32), wanted: &str) -> (f32, f32) {
+        text_point(app, size, wanted)
+            .unwrap_or_else(|| panic!("nothing in the picture reads {wanted:?}"))
+    }
+
+    /// Whether the picture says something.
+    fn shows(app: &DbViewerApp, size: (f32, f32), wanted: &str) -> bool {
+        text_runs(&app.frame(size.0, size.1))
+            .iter()
+            .any(|(text, ..)| text == wanted)
+    }
+
+    /// A left press at a point, answered against a window of `size`.
+    ///
+    /// Named `click` rather than `press` because `guitk::probe::press` builds a
+    /// *key* press, and both are used constantly here.
+    fn click(app: &mut DbViewerApp, at: (f32, f32), size: (f32, f32)) {
+        app.click_at(at.0, at.1, MouseButton::Left, size);
+    }
+
+    /// Press the control whose words the picture shows.
+    ///
+    /// The two steps are one function because splitting them borrows the app
+    /// immutably to find the point and mutably to press it.
+    fn click_text(app: &mut DbViewerApp, size: (f32, f32), wanted: &str) {
+        let at = point(app, size, wanted);
+        click(app, at, size);
+    }
+
+    /// The default window size, which most wiring tests use.
+    const FULL: (f32, f32) = (WINDOW_WIDTH, WINDOW_HEIGHT);
+
+    /// Press the middle of the box the drawing pass recorded for a target.
+    ///
+    /// Used only where the control has no words of its own to aim at -- a
+    /// close box, a delete box, a star -- and never where the words exist,
+    /// because then the picture, not the pass, is the thing under test.
+    fn click_target(app: &mut DbViewerApp, size: (f32, f32), target: Target) {
+        let rect = app
+            .frame(size.0, size.1)
+            .rect_of(|t| *t == target)
+            .unwrap_or_else(|| panic!("{target:?} has no box in the picture"));
+        click(app, rect.centre(), size);
+    }
+
+    #[test]
+    fn the_window_is_painted_edge_to_edge_at_every_size() {
+        for (w, h) in GRID {
+            let frame = wired().frame(w, h);
+            let first = frame.commands().first().expect("a frame draws something");
+            match first {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => {
+                    assert!(
+                        x.abs() < 0.01 && y.abs() < 0.01,
+                        "{w}x{h}: the background starts at ({x}, {y}), not the corner"
+                    );
+                    assert!(
+                        (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01,
+                        "{w}x{h}: the background is {width}x{height} -- the compositor \
+                         would show whatever was in the window before us in the rest"
+                    );
+                }
+                other => panic!("{w}x{h}: the frame opens with {other:?}, not a background"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_is_balanced_at_every_size_and_state() {
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                assert!(
+                    app.frame(w, h).is_balanced(),
+                    "{name} at {w}x{h}: a clip was pushed and not popped, so every \
+                     later hit box is measured against the wrong rectangle"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_control_lies_inside_the_window() {
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                for (target, rect) in frame.hits() {
+                    assert!(
+                        rect.x >= -0.01
+                            && rect.y >= -0.01
+                            && rect.right() <= w + 0.01
+                            && rect.bottom() <= h + 0.01,
+                        "{name} at {w}x{h}: {target:?} answers presses at {rect:?}, \
+                         which is partly outside the window"
+                    );
+                    assert!(
+                        !rect.is_empty(),
+                        "{name} at {w}x{h}: {target:?} has an empty hit box"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_clip_lies_inside_the_window() {
+        // Bounding a run to its clip is only worth anything if the clip is
+        // itself inside the window: a clip that reached past the bottom edge
+        // would let every run in it do the same.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                for clip in clips(&app.frame(w, h)) {
+                    assert!(
+                        clip.x >= -0.01
+                            && clip.y >= -0.01
+                            && clip.right() <= w + 0.01
+                            && clip.bottom() <= h + 0.01,
+                        "{name} at {w}x{h}: a clip of {clip:?} reaches outside the window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_run_of_text_is_bounded_and_inside_the_window() {
+        // The old drawing pass bounded most of its runs to constants -- a
+        // schema column to 180, a status reading to 200, a pagination caption
+        // to `width - 200` -- which is not a bound related to the box the run
+        // is in, and in a narrow window is not a bound at all.
+        //
+        // Sideways a run must fit its clip outright: nothing here scrolls
+        // sideways, so a run hanging over the edge is a run cut in half.
+        // Vertically it need only be *partly* inside, because a grid row at the
+        // bottom edge is meant to be half drawn. What is forbidden is a run
+        // wholly outside -- ink nobody can ever see.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                for (text, x, y, size, max_width, clip) in text_runs_clipped(&frame, (w, h)) {
+                    let Some(bound) = max_width else {
+                        panic!(
+                            "{name} at {w}x{h}: {text:?} is drawn with no max_width, so it \
+                             runs as far as the string is long and over whatever is beside it"
+                        );
+                    };
+                    assert!(
+                        bound.is_finite() && bound > 0.0,
+                        "{name} at {w}x{h}: {text:?} is bounded to {bound}"
+                    );
+                    assert!(
+                        x >= clip.x - 0.01 && x + bound <= clip.right() + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {x}..{} across {clip:?}",
+                        x + bound
+                    );
+                    assert!(
+                        y + size > clip.y - 0.01 && y < clip.bottom() + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {y}..{} down {clip:?}, \
+                         which it misses entirely -- it is drawn where nothing can see it",
+                        y + size
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_over_the_status_line() {
+        // The status line is drawn last, so it cannot be painted over -- but a
+        // control reaching under it would still take the press, and the user
+        // would be clicking a button they cannot see.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let l = Layout::solve(w, h);
+                if l.status.is_empty() {
+                    continue;
+                }
+                let frame = app.frame(w, h);
+                for (target, rect) in frame.hits() {
+                    // The *bottom* edge, not the top. Asking only where a
+                    // control starts lets one through that starts above the
+                    // line and ends below it, which is the whole shape of the
+                    // bug: the visible half is what the user aims at and the
+                    // hidden half is what takes the press.
+                    assert!(
+                        rect.bottom() < l.status.y + 0.01,
+                        "{name} at {w}x{h}: {target:?} at {rect:?} reaches under the \
+                         status line, which is drawn after it"
+                    );
+                }
+                // Paint too, and not only controls. The grid's row cursor used
+                // to run down past the pagination bar and paint a 26-point band
+                // of row colour over it; the same cursor unchecked reaches the
+                // status strip.
+                for (rect, clip) in fills_clipped(&frame, (w, h)) {
+                    let Some(seen) = clip.intersect(rect) else {
+                        continue;
+                    };
+                    // The window background is the one fill allowed to reach
+                    // the bottom edge: it is what the strip is drawn *on*. So is
+                    // anything drawn inside the strip itself.
+                    if seen.contains(l.window.w / 2.0, 0.5)
+                        || l.status.intersect(seen) == Some(seen)
+                    {
+                        continue;
+                    }
+                    assert!(
+                        seen.bottom() < l.status.y + 0.01,
+                        "{name} at {w}x{h}: a filled box at {seen:?} is painted under the \
+                         status line at {:?}",
+                        l.status
+                    );
+                }
+                // And the clips, which are where the rule is actually kept. A
+                // box drawn under the strip is a symptom; a *clip* reaching
+                // under it is the permission.
+                for clip in clips(&frame) {
+                    assert!(
+                        clip.bottom() <= l.status.y + 0.01,
+                        "{name} at {w}x{h}: a clip of {clip:?} reaches under the status \
+                         line at {:?}, so whatever is drawn in it may too",
+                        l.status
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_painted_entirely_outside_the_clip_in_force() {
+        // A clip makes what is outside it invisible; it does not make it free,
+        // and it does not make a picture that claims to have painted a grid row
+        // three hundred points below the grid into an honest picture. Every
+        // cursor in this program -- the tree's, the filter list's, the grid's,
+        // the history's, the schema's -- runs down over its items whether or not
+        // the pane has room left, so this is the rule that stops them.
+        //
+        // *Entirely* outside, not partly: a row at the bottom edge is rightly
+        // half drawn and half cut.
+        //
+        // With one exemption, which is the rule rather than a hole in it: the
+        // unit of "do not draw this" is the *item*, and an item is drawn whole
+        // or not at all. A row whose last sliver is visible draws its delete box
+        // in full below the cut, and that is correct. So a fill wholly outside
+        // the clip is excused exactly when some other fill drawn *under the same
+        // clip* encloses it and is itself partly visible.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                let fills = fills_clipped(&frame, (w, h));
+                for (i, (rect, clip)) in fills.iter().enumerate() {
+                    if rect.is_empty() || clip.intersect(*rect).is_some() {
+                        continue;
+                    }
+                    let carried = fills.iter().enumerate().any(|(j, (outer, outer_clip))| {
+                        j != i
+                            && outer_clip == clip
+                            && outer_clip.intersect(*outer).is_some()
+                            && outer.intersect(*rect) == Some(*rect)
+                    });
+                    assert!(
+                        carried,
+                        "{name} at {w}x{h}: a filled box at {rect:?} is painted \
+                         entirely outside the clip {clip:?} that was in force, and \
+                         no item drawn under that clip carries it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_run_of_text_is_never_inked_outside_the_box_it_was_given() {
+        // Every run in the program is centred in a box by `ink_box`, and a run
+        // taller than its box centres to *outside* it at both ends -- which is
+        // how a 12-point title comes to be drawn above and below an 8-point
+        // panel tab in a window too short to have one.
+        for (bw, bh) in [
+            (100.0, 20.0),
+            (100.0, 4.0),
+            (100.0, 0.0),
+            (0.0, 20.0),
+            (3.0, 3.0),
+        ] {
+            for size in [1.0, 8.0, 10.0, 12.0, 20.0, 36.0] {
+                let r = Rect::new(10.0, 20.0, bw, bh);
+                let ink = ink_box(r, size);
+                assert!(
+                    ink.y >= r.y - 0.01 && ink.bottom() <= r.bottom() + 0.01,
+                    "a {size}-point run in a {bw}x{bh} box inks {}..{}, \
+                     outside the box's {}..{}",
+                    ink.y,
+                    ink.bottom(),
+                    r.y,
+                    r.bottom()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_layout_never_gives_a_region_a_negative_size() {
+        // `content_height`, `grid_height` and `main_width` were all computed by
+        // subtraction from constants -- `height - TOOLBAR_HEIGHT - TAB_HEIGHT -
+        // STATUS_BAR_HEIGHT`, `width - SIDEBAR_WIDTH` -- with nothing between
+        // the arithmetic and a window smaller than the constants. A 200-point
+        // window handed the data grid a width of -20.
+        //
+        // Every width, not `GRID`'s twelve: the rule is a pure function of the
+        // two numbers, and the sizes where a fault can hide are the *knees* --
+        // where a region is given up -- not a dozen scattered points.
+        for step in 0..=300_u32 {
+            let v = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 7.0;
+            for (w, h) in [(v, 600.0), (900.0, v), (v, v)] {
+                let l = Layout::solve(w, h);
+                for (what, r) in [
+                    ("toolbar", l.toolbar),
+                    ("tabs", l.tabs),
+                    ("sidebar", l.sidebar),
+                    ("grid", l.grid),
+                    ("panel", l.panel),
+                    ("status", l.status),
+                    ("grid header", l.grid_header()),
+                    ("grid rows", l.grid_rows()),
+                    ("page bar", l.page_bar()),
+                    ("panel tabs", l.panel_tabs()),
+                    ("panel body", l.panel_body()),
+                ] {
+                    assert!(
+                        r.w >= 0.0 && r.h >= 0.0,
+                        "{w}x{h}: the {what} is {}x{}",
+                        r.w,
+                        r.h
+                    );
+                    assert!(
+                        r.x >= -0.01
+                            && r.y >= -0.01
+                            && r.right() <= w + 0.01
+                            && r.bottom() <= h + 0.01,
+                        "{w}x{h}: the {what} at {r:?} is outside the window"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_regions_of_the_layout_never_overlap() {
+        // The toolbar, the tab strip, the sidebar, the grid, the panel and the
+        // status strip are six places, not six offsets that happen not to
+        // collide at 1200x800. Any pair that meets is a pair where one is drawn
+        // over the other and the later one takes the presses.
+        for step in 0..=200_u32 {
+            let v = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 9.0;
+            for (w, h) in [(v, 700.0), (1000.0, v), (v, v)] {
+                let l = Layout::solve(w, h);
+                let named = [
+                    ("toolbar", l.toolbar),
+                    ("tabs", l.tabs),
+                    ("sidebar", l.sidebar),
+                    ("grid", l.grid),
+                    ("panel", l.panel),
+                    ("status", l.status),
+                ];
+                for (i, (an, a)) in named.iter().enumerate() {
+                    for (bn, b) in named.iter().skip(i + 1) {
+                        let Some(shared) = a.intersect(*b) else {
+                            continue;
+                        };
+                        assert!(
+                            shared.is_empty(),
+                            "{w}x{h}: the {an} at {a:?} and the {bn} at {b:?} share {shared:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_window_of_no_size_and_a_window_of_nonsense_size_draw_without_panicking() {
+        // `Layout::solve` is handed whatever the compositor says the window
+        // measures. A zero comes from a window being minimised; the infinities
+        // and the NaN come from nowhere in particular, which is exactly why the
+        // arithmetic must not depend on them not arriving.
+        for (w, h) in [
+            (0.0, 0.0),
+            (0.0, 800.0),
+            (1200.0, 0.0),
+            (-50.0, -50.0),
+            (f32::INFINITY, 800.0),
+            (1200.0, f32::NEG_INFINITY),
+            (f32::NAN, f32::NAN),
+        ] {
+            for (name, app) in states() {
+                let frame = app.frame(w, h);
+                assert!(
+                    frame.is_balanced(),
+                    "{name} at {w}x{h}: the frame is unbalanced"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // What each control does
+    //
+    // Every test below finds its control by the words the picture shows and
+    // presses those words, so a drawing pass that recorded its boxes one row
+    // off cannot pass by making the same mistake twice.
+    // ------------------------------------------------------------------
+
+    /// The users table with three hundred more rows in it, so the grid has
+    /// pages to turn.
+    fn many_rows() -> DbViewerApp {
+        let mut app = wired();
+        for i in 0..300 {
+            if let Some(tab) = app.active_db_tab_mut()
+                && let Some(table) = tab.db.find_table_mut("users")
+            {
+                let row: Vec<CellValue> = table
+                    .columns
+                    .iter()
+                    .map(|c| CellValue::parse_as(&format!("{i}"), &c.data_type))
+                    .collect();
+                table.rows.push(row);
+            }
+        }
+        app
+    }
+
+    /// The `name` column of every row the grid would show, in screen order.
+    fn shown_names(app: &DbViewerApp) -> Vec<String> {
+        app.active_db_tab()
+            .and_then(DbTab::current_table_data)
+            .map(|(_, rows)| {
+                rows.iter()
+                    .filter_map(|(_, cells)| cells.get(1).map(CellValue::display))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn execute_runs_the_query_the_editor_holds() {
+        let mut app = wired();
+        assert!(app.query_result.is_none(), "nothing has been run yet");
+        click_text(&mut app, FULL, "Execute");
+        let result = app.query_result.as_ref().expect("Execute ran nothing");
+        assert!(
+            !result.is_error,
+            "the sample query failed: {}",
+            result.message
+        );
+        assert_eq!(app.history.len(), 1, "the query was not remembered");
+        assert_eq!(
+            app.bottom_panel,
+            BottomPanel::Results,
+            "running a query did not show its result"
+        );
+    }
+
+    #[test]
+    fn a_query_that_does_not_parse_is_reported_and_still_remembered() {
+        let mut app = wired();
+        app.sql_input = String::from("this is not a query");
+        click_text(&mut app, FULL, "Execute");
+        assert!(
+            app.query_result.as_ref().is_some_and(|r| r.is_error),
+            "a query that cannot be parsed was reported as a success"
+        );
+        assert_eq!(
+            app.history.first().map(|e| e.success),
+            Some(false),
+            "the history remembers a failed query as having worked"
+        );
+    }
+
+    #[test]
+    fn the_plus_opens_a_database_and_the_strip_selects_between_them() {
+        let mut app = wired();
+        click_text(&mut app, FULL, "+");
+        assert_eq!(app.tabs.len(), 2, "the + opened nothing");
+        assert_eq!(app.active_tab, 1, "the new database was not switched to");
+
+        // The sidebar names whichever database is active, so the *inactive*
+        // one's name appears exactly once -- in the strip -- and is the one
+        // safe to aim at.
+        click_text(&mut app, FULL, "sample.db");
+        assert_eq!(app.active_tab, 0, "the strip did not switch back");
+    }
+
+    #[test]
+    fn the_last_database_tab_stays_open() {
+        let mut app = wired();
+        assert_eq!(app.tabs.len(), 1);
+        click_target(&mut app, FULL, Target::CloseTab(0));
+        assert_eq!(
+            app.tabs.len(),
+            1,
+            "closing the only database left the window with nothing to show"
+        );
+        assert!(
+            app.status.contains("last"),
+            "the refusal was silent: status reads {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn closing_a_tab_closes_the_one_pointed_at_not_the_active_one() {
+        let mut app = wired();
+        app.add_tab("second");
+        app.add_tab("third");
+        assert_eq!(app.active_tab, 2, "the newest database is the active one");
+
+        click_target(&mut app, FULL, Target::CloseTab(1));
+
+        let names: Vec<String> = app.tabs.iter().map(|t| t.db.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec![String::from("sample.db"), String::from("third")],
+            "closing the second database closed something else"
+        );
+    }
+
+    #[test]
+    fn a_tree_row_selects_the_table_it_names() {
+        let mut app = wired();
+        // Not `users`: the editor opens holding `SELECT * FROM users`, so those
+        // words are on the screen twice and pressing "the one that says users"
+        // would be a coin toss.
+        click_text(&mut app, FULL, "products");
+        assert_eq!(
+            app.active_db_tab()
+                .and_then(|t| t.selected_table.as_deref()),
+            Some("products"),
+            "pressing a table in the tree selected something else"
+        );
+        assert!(
+            shown_names(&app).contains(&String::from("Laptop")),
+            "the grid is still showing the previous table"
+        );
+    }
+
+    #[test]
+    fn an_index_a_view_and_a_trigger_say_what_they_are() {
+        for (label, expected) in [
+            ("idx_users_email", "Index idx_users_email"),
+            ("user_orders_view", "View user_orders_view"),
+            ("update_stock", "Trigger update_stock"),
+        ] {
+            let mut app = wired();
+            click_text(&mut app, FULL, label);
+            assert_eq!(
+                app.status, expected,
+                "pressing {label} in the tree said nothing useful"
+            );
+            assert_eq!(
+                app.active_db_tab()
+                    .and_then(|t| t.selected_table.as_deref()),
+                Some("users"),
+                "pressing {label} changed which table the grid shows"
+            );
+        }
+    }
+
+    #[test]
+    fn a_heading_names_a_category_and_is_not_a_control() {
+        let mut app = wired();
+        let before = app.status.clone();
+        click_text(&mut app, FULL, "Tables");
+        assert_eq!(
+            app.status, before,
+            "pressing the `Tables` heading did something"
+        );
+    }
+
+    #[test]
+    fn a_column_header_sorts_then_reverses_then_the_arrow_says_which() {
+        let mut app = wired();
+        assert!(
+            app.active_db_tab()
+                .and_then(|t| t.sort_state.as_ref())
+                .is_none(),
+            "the grid opens unsorted"
+        );
+
+        click_text(&mut app, FULL, "email");
+        assert_eq!(
+            app.active_db_tab()
+                .and_then(|t| t.sort_state.as_ref())
+                .map(|s| (s.column_idx, s.direction)),
+            Some((2, SortDir::Ascending)),
+            "pressing the `email` header did not sort by email"
+        );
+        assert!(shows(&app, FULL, "email ^"), "the header shows no arrow");
+
+        click_text(&mut app, FULL, "email ^");
+        assert_eq!(
+            app.active_db_tab()
+                .and_then(|t| t.sort_state.as_ref())
+                .map(|s| s.direction),
+            Some(SortDir::Descending),
+            "pressing a sorted header did not reverse it"
+        );
+        assert!(
+            shows(&app, FULL, "email v"),
+            "the arrow still points the old way"
+        );
+    }
+
+    #[test]
+    fn deleting_a_row_with_a_sort_in_force_removes_the_row_pointed_at() {
+        let mut app = wired();
+        // Descending, so screen order and table order disagree: ascending by
+        // name happens to be the order the rows were inserted in, and a grid
+        // that deleted by screen position would pass over it.
+        click_text(&mut app, FULL, "name");
+        click_text(&mut app, FULL, "name ^");
+        assert_eq!(
+            shown_names(&app).first().map(String::as_str),
+            Some("Jack"),
+            "the sort did not put Jack at the top"
+        );
+
+        // Aim at the delete box of the row the words `Jack` are drawn in: its
+        // height is the row's, and the box is the last 20 points of the grid.
+        let (_, jack_y) = point(&app, FULL, "Jack");
+        let grid = Layout::solve(FULL.0, FULL.1).grid;
+        click(&mut app, (grid.right() - 10.0, jack_y), FULL);
+
+        let after = shown_names(&app);
+        assert!(
+            !after.contains(&String::from("Jack")),
+            "the row the user pointed at survived: {after:?}"
+        );
+        assert_eq!(after.len(), 9, "the wrong number of rows was removed");
+        assert!(
+            after.contains(&String::from("Ivy")) && after.contains(&String::from("Alice")),
+            "a row nobody pointed at was deleted: {after:?}"
+        );
+    }
+
+    #[test]
+    fn the_pagination_bar_turns_pages_and_stops_at_both_ends() {
+        let mut app = many_rows();
+        assert_eq!(app.active_db_tab().map(|t| t.page), Some(0));
+
+        click_text(&mut app, FULL, "< Prev");
+        assert_eq!(
+            app.active_db_tab().map(|t| t.page),
+            Some(0),
+            "the first page has a page before it"
+        );
+
+        click_text(&mut app, FULL, "Next >");
+        assert_eq!(
+            app.active_db_tab().map(|t| t.page),
+            Some(1),
+            "`Next` turned no page"
+        );
+        assert!(
+            shows(&app, FULL, "Page 2 of 7 (310 rows)"),
+            "the caption does not say which page is showing"
+        );
+
+        for _ in 0..20 {
+            click_text(&mut app, FULL, "Next >");
+        }
+        assert_eq!(
+            app.active_db_tab().map(|t| t.page),
+            Some(6),
+            "the last page has a page after it"
+        );
+
+        click_text(&mut app, FULL, "< Prev");
+        assert_eq!(
+            app.active_db_tab().map(|t| t.page),
+            Some(5),
+            "`Prev` went nowhere"
+        );
+    }
+
+    #[test]
+    fn the_four_panel_tabs_each_show_their_own_panel() {
+        let mut app = wired();
+        for panel in BottomPanel::all() {
+            click_text(&mut app, FULL, panel.label());
+            assert_eq!(
+                app.bottom_panel, *panel,
+                "pressing the {:?} tab showed something else",
+                panel
+            );
+        }
     }
 }

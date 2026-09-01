@@ -8494,4 +8494,119 @@ mod tests {
             "the heading apologises for hiding something it is showing"
         );
     }
+
+    // ------------------------------------------------------------------
+    // The window itself
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn the_window_says_what_it_is() {
+        let app = DbViewerApp::new();
+        assert_eq!(app.title(), "DB Viewer");
+        assert_eq!(app.app_id(), "dbviewer");
+        assert_eq!(app.initial_size(), (1200, 800));
+        assert!(
+            app.tick_interval().is_none(),
+            "a database browser that redraws on a timer is a database browser \
+             burning a core to show a picture that did not change"
+        );
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window_and_nothing_else_does() {
+        let mut app = DbViewerApp::new();
+        assert_eq!(app.on_event(&Event::CloseRequested), Response::Exit);
+        assert_eq!(
+            app.on_event(&Event::Resize {
+                width: 800,
+                height: 600
+            }),
+            Response::Redraw
+        );
+        assert_eq!(
+            app.on_event(&Event::Key(probe::press(Key::Escape))),
+            Response::Redraw
+        );
+    }
+
+    #[test]
+    fn a_resize_moves_where_the_controls_answer() {
+        let app = DbViewerApp::new();
+        let wide = app.frame(1200.0, 800.0);
+        let narrow = app.frame(700.0, 800.0);
+
+        let of = |frame: &Frame<Target>, target: Target| {
+            frame
+                .rect_of(move |t| *t == target)
+                .unwrap_or_else(|| panic!("{target:?} is not drawn"))
+        };
+
+        assert_eq!(
+            of(&wide, Target::Execute),
+            of(&narrow, Target::Execute),
+            "the toolbar is laid from the left, so its first button does not move"
+        );
+        assert!(
+            of(&narrow, Target::NextPage).x < of(&wide, Target::NextPage).x,
+            "the pagination bar ends at the window's right-hand edge, and did \
+             not follow it in"
+        );
+    }
+
+    #[test]
+    fn a_press_is_answered_against_the_size_the_last_frame_was_drawn_at() {
+        let mut app = DbViewerApp::new();
+        // The window is told it is 700 wide by a resize, with no frame drawn
+        // in between. A press has to be answered against 700 and not against
+        // the 1200 the app was built believing in.
+        assert_eq!(
+            app.on_event(&Event::Resize {
+                width: 700,
+                height: 800
+            }),
+            Response::Redraw
+        );
+
+        let bar = Layout::solve(700.0, 800.0).page_bar();
+        let next = app
+            .frame(700.0, 800.0)
+            .rect_of(|t| *t == Target::NextPage)
+            .expect("the pagination bar is drawn at 700 points across");
+        assert!(
+            bar.contains(next.centre().0, next.centre().1),
+            "the test is aiming outside the bar it means to press"
+        );
+        let (x, y) = next.centre();
+        app.on_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(
+            app.status.starts_with("Page "),
+            "the press was answered against the old window size: status reads \
+             {:?}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn render_remembers_the_size_it_was_asked_for() {
+        let mut app = DbViewerApp::new();
+        // Spelled out rather than `app.render(...)`: there is an inherent
+        // `render` that draws a frame and remembers nothing, and an inherent
+        // method wins over a trait one. Written the short way this test drove
+        // the drawing pass and never touched the window's own entry point --
+        // which is the thing it exists to check.
+        let tree = App::render(&mut app, 640.0, 480.0);
+        assert!(
+            !tree.is_empty(),
+            "the window was drawn and nothing came out"
+        );
+        assert!(
+            (app.window_width - 640.0).abs() < f32::EPSILON
+                && (app.window_height - 480.0).abs() < f32::EPSILON,
+            "the frame was drawn at one size and the app remembers another"
+        );
+    }
 }

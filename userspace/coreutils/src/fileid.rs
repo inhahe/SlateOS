@@ -22,6 +22,17 @@
 //! `mv` asks the first to refuse `mv link file` (which would destroy the file
 //! the link points at) and the second to allow `mv link other-link`.
 //!
+//! # The third thing here, which is a consequence of the first
+//!
+//! [`Copied`] is a table keyed on [`FileId`]: "have I already written this inode
+//! somewhere, and where?" It is here rather than in `cp` — which is where it was
+//! written and is still its only caller — because the question it answers is the
+//! *same* question the pair above answers, asked about a file that has already
+//! been dealt with rather than one about to be. Any utility that writes a copy
+//! of each operand in turn needs it, and a second, separately-grown copy of it
+//! is how two such utilities would come to disagree about what a repeated inode
+//! means.
+//!
 //! # Why the byte split rather than `Path::file_name`
 //!
 //! [`split_entry`] works on the bytes because `Path::file_name` answers `None`
@@ -42,6 +53,7 @@
 //! stated on the `#[cfg(unix)]` arm, which is the arm the target OS uses:
 //! `toolchain/x86_64-slateos.json` sets `"target-family": ["unix"]`.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -116,6 +128,98 @@ pub fn nlink(meta: &fs::Metadata) -> u64 {
 #[must_use]
 pub fn nlink(_meta: &fs::Metadata) -> u64 {
     1
+}
+
+/// "Have I copied this inode already, and where to?" — GNU's one `src_to_dest`
+/// table (`copy.c:1997`), with its `remember_copied` and `src_to_dest_lookup`.
+///
+/// Two rules read it, and they look unrelated until you notice that both are
+/// asking what a *second* appearance of one inode should become:
+///
+/// * **`--preserve=links`** answers "a hard link to where the first appearance
+///   landed", which is why the value has to be a nameable destination.
+/// * **The directory rule** answers "nothing — a directory cannot appear twice
+///   except by being hard-linked, and hard-linked directories are what GNU
+///   refuses", with its comment naming Netapp snapshot trees as where they turn
+///   up. That refusal quotes the earlier destination too.
+///
+/// One table for both, as GNU has, and one for the whole command rather than
+/// one per operand: `cp --preserve=links a b d` has to notice at `b` that it
+/// already wrote `a`'s inode to `d/a`, so `hash_init` is called once in `main`
+/// (`cp.c:1284`). Its comment "in this command line argument" is about which
+/// *arguments can share* an inode, not about the table's lifetime.
+///
+/// The two rules were split once — the directory half lived on `cp`'s `Seen`,
+/// which only its `copy_one` can reach — and the split was a bug, not a
+/// simplification: a directory found by *walking* was then checked against
+/// nothing at all. Measured before the merge, with `parent/child` a directory:
+/// `cp -r parent/child parent d` copied that subtree twice and exited 0, where
+/// GNU refuses the repeat with `will not create hard link 'd/parent/child' to
+/// directory 'd/child'` and exits 1. See design-decisions.md 736.
+///
+/// # Why it is in the library rather than in `cp`
+///
+/// `cp` is still the only caller, and this is not tidying ahead of a caller that
+/// might never come. `mv`'s cross-device fallback needs this exact table and
+/// does not have it: a move that has to copy currently writes each of a file's
+/// names into a separate file, so `mv a b d` across a mount arrives as two
+/// files where it left one
+/// (`known-issues.md` `B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS`).
+/// The fix is to consult this, and growing a second table there is how the two
+/// would come to disagree about what a repeated inode means — the same mistake
+/// the `Seen`/`Copied` split above already was, one utility further out.
+#[derive(Default)]
+pub struct Copied(HashMap<FileId, PathBuf>);
+
+impl Copied {
+    /// GNU's `remember_copied`: note that `id` is being copied to `target`, and
+    /// answer with where it went *last* time if there was a last time.
+    ///
+    /// Recording and looking up in one call is GNU's shape and not a
+    /// convenience: the two must not be separable, because a source that was
+    /// looked up and then not recorded would let a third operand link to a
+    /// destination the second one never made.
+    ///
+    /// By reference, and so are the two below, because a caller that has to
+    /// [`Copied::forget`] a failed copy needs the same id afterwards. Taking it
+    /// by value costs nothing on a host with inode numbers — [`FileId`] is two
+    /// words there and `Copy` — but the portable stand-in is a `PathBuf`, which
+    /// is not, so the caller could not use the id again and the whole
+    /// `cfg(not(unix))` build stopped compiling. Nobody noticed for a while:
+    /// this crate's gate is the `x86_64-slateos` target, whose `target-family`
+    /// is `unix`.
+    pub fn remember(&mut self, id: &FileId, target: &Path) -> Option<PathBuf> {
+        if let Some(earlier) = self.0.get(id) {
+            return Some(earlier.clone());
+        }
+        self.0.insert(id.to_owned(), target.to_path_buf());
+        None
+    }
+
+    /// GNU's `src_to_dest_lookup` (`copy.c:2670`): where did this inode go —
+    /// *without* claiming it is going here.
+    ///
+    /// The difference from [`Copied::remember`] is load-bearing and is GNU's.
+    /// A directory reached by walking is looked up and never recorded, because
+    /// only a directory *named on the command line* can be named twice;
+    /// recording walked ones instead would make the second half of a `cp -r p d
+    /// p` accuse the first half's entries of repeating themselves.
+    #[must_use]
+    pub fn lookup(&self, id: &FileId) -> Option<&Path> {
+        self.0.get(id).map(PathBuf::as_path)
+    }
+
+    /// GNU's `forget_created`, called from its `un_backup` label
+    /// (`copy.c:3362`) when a copy that had just been recorded failed.
+    ///
+    /// Without it a later hard link would be made to a destination that does
+    /// not exist, and the second operand would report `cannot create hard link`
+    /// instead of the failure the first one actually had. Measured: GNU's
+    /// `cp --preserve=links a b d` with `a` unreadable reports the *same*
+    /// `cannot open … for reading` twice.
+    pub fn forget(&mut self, id: &FileId) {
+        self.0.remove(id);
+    }
 }
 
 /// What tells one *directory entry* from another: which directory it is in, and

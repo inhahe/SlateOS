@@ -249,18 +249,19 @@ use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
-    EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
+    Copied, EntryId, FileId, entry_id, file_id, is_same_file, nlink, same_entry, split_entry,
 };
 use coreutils::fsattr::{
     self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
     owner_of, permission_bits, times_of,
 };
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -1501,85 +1502,6 @@ impl Seen {
     }
 }
 
-/// "Have I copied this inode already, and where to?" — GNU's one `src_to_dest`
-/// table (`copy.c:1997`), with its `remember_copied` and `src_to_dest_lookup`.
-///
-/// Two rules read it, and they look unrelated until you notice that both are
-/// asking what a *second* appearance of one inode should become:
-///
-/// * **`--preserve=links`** answers "a hard link to where the first appearance
-///   landed", which is why the value has to be a nameable destination.
-/// * **The directory rule** answers "nothing — a directory cannot appear twice
-///   except by being hard-linked, and hard-linked directories are what GNU
-///   refuses", with its comment naming Netapp snapshot trees as where they turn
-///   up. That refusal quotes the earlier destination too.
-///
-/// One table for both, as GNU has, and one for the whole command rather than
-/// one per operand: `cp --preserve=links a b d` has to notice at `b` that it
-/// already wrote `a`'s inode to `d/a`, so `hash_init` is called once in `main`
-/// (`cp.c:1284`). Its comment "in this command line argument" is about which
-/// *arguments can share* an inode, not about the table's lifetime.
-///
-/// The two rules were split here once — the directory half lived on [`Seen`],
-/// which only [`copy_one`] can reach — and the split was a bug, not a
-/// simplification: a directory found by *walking* was then checked against
-/// nothing at all. Measured before the merge, with `parent/child` a directory:
-/// `cp -r parent/child parent d` copied that subtree twice and exited 0, where
-/// GNU refuses the repeat with `will not create hard link 'd/parent/child' to
-/// directory 'd/child'` and exits 1. See design-decisions.md 736.
-#[derive(Default)]
-struct Copied(HashMap<FileId, PathBuf>);
-
-impl Copied {
-    /// GNU's `remember_copied`: note that `id` is being copied to `target`, and
-    /// answer with where it went *last* time if there was a last time.
-    ///
-    /// Recording and looking up in one call is GNU's shape and not a
-    /// convenience: the two must not be separable, because a source that was
-    /// looked up and then not recorded would let a third operand link to a
-    /// destination the second one never made.
-    ///
-    /// By reference, and so are the two below, because a caller that has to
-    /// [`Copied::forget`] a failed copy needs the same id afterwards. Taking it
-    /// by value costs nothing on a host with inode numbers — [`FileId`] is two
-    /// words there and `Copy` — but the portable stand-in is a `PathBuf`, which
-    /// is not, so the caller could not use the id again and the whole
-    /// `cfg(not(unix))` build stopped compiling. Nobody noticed for a while:
-    /// this crate's gate is the `x86_64-slateos` target, whose `target-family`
-    /// is `unix`.
-    fn remember(&mut self, id: &FileId, target: &Path) -> Option<PathBuf> {
-        if let Some(earlier) = self.0.get(id) {
-            return Some(earlier.clone());
-        }
-        self.0.insert(id.to_owned(), target.to_path_buf());
-        None
-    }
-
-    /// GNU's `src_to_dest_lookup` (`copy.c:2670`): where did this inode go —
-    /// *without* claiming it is going here.
-    ///
-    /// The difference from [`Copied::remember`] is load-bearing and is GNU's.
-    /// A directory reached by walking is looked up and never recorded, because
-    /// only a directory *named on the command line* can be named twice;
-    /// recording walked ones instead would make the second half of a `cp -r p d
-    /// p` accuse the first half's entries of repeating themselves.
-    fn lookup(&self, id: &FileId) -> Option<&Path> {
-        self.0.get(id).map(PathBuf::as_path)
-    }
-
-    /// GNU's `forget_created`, called from its `un_backup` label
-    /// (`copy.c:3362`) when a copy that had just been recorded failed.
-    ///
-    /// Without it a later hard link would be made to a destination that does
-    /// not exist, and the second operand would report `cannot create hard link`
-    /// instead of the failure the first one actually had. Measured: GNU's
-    /// `cp --preserve=links a b d` with `a` unreadable reports the *same*
-    /// `cannot open … for reading` twice.
-    fn forget(&mut self, id: &FileId) {
-        self.0.remove(id);
-    }
-}
-
 /// What is at the destination path, as far as `cp` needs to know.
 ///
 /// GNU carries the same three states in two variables — `new_dst` and whether
@@ -2318,139 +2240,6 @@ impl Placed {
     }
 }
 
-/// How many names the file has. GNU's `st_nlink`.
-#[cfg(unix)]
-fn hard_links(meta: &fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.nlink()
-}
-
-/// A host without hard links answers 1 to everything, which switches
-/// `--preserve=links` off by exactly the amount that host cannot honour it: the
-/// `st_nlink > 1` half of the condition never fires, and the dereference half
-/// still does, so `cp --preserve=links -L la lb d` is the only spelling that
-/// reaches [`create_hard_link`] — and there it fails with whatever the platform
-/// says about [`fs::hard_link`], which is the honest answer.
-#[cfg(not(unix))]
-fn hard_links(_meta: &fs::Metadata) -> u64 {
-    1
-}
-
-/// Link `earlier` to `target`, replacing whatever is at `target`. GNU's
-/// `create_hard_link` (`copy.c:2122`) over gnulib's `force_linkat`.
-///
-/// "Replacing" is why this is not one `fs::hard_link` call. `link(2)` fails with
-/// `EEXIST` and has no force flag, so gnulib links to a fresh name in the
-/// destination's own directory and `rename`s that over the destination — which
-/// is atomic, and is what makes `cp --preserve=links a b d` work when `d/b` was
-/// already something else. The temporary must be in the *same* directory or the
-/// rename would cross a filesystem and fail.
-///
-/// The unlink of the temporary is unconditional in gnulib, and its comment says
-/// why: if `dsttmp` and `target` were already the same link, `renameat` is a
-/// no-op that leaves both names, so the cleanup cannot be skipped on success.
-///
-/// `-v` prints `removed 'target'` *here*, after the arrow line rather than
-/// before it, because this replacement happens after `emit_verbose` rather than
-/// in the pre-copy unlink. Measured, with `d/b` a dangling symlink:
-///
-/// ```text
-/// 'a' -> 'd/a'
-/// 'b' -> 'd/b'
-/// removed 'd/b'
-/// ```
-///
-/// # Following
-///
-/// GNU passes `AT_SYMLINK_FOLLOW` when `should_dereference`; [`fs::hard_link`]
-/// is `linkat` with no flags and cannot. The difference is unreachable rather
-/// than unimplemented: the thing being linked *from* is a destination this same
-/// command created, and a command that dereferences creates no symlinks — under
-/// `-L`, and under `-H` for an operand, every source is stat'd through, so every
-/// destination is a regular file. The reachable case is the opposite one and
-/// needs the flag *off*: `cp -P --preserve=links l1 l2 d`, where `l1` and `l2`
-/// are two hard links to one symlink, must give `d/l1` and `d/l2` one inode that
-/// is still a symlink — measured, and what this produces.
-fn create_hard_link<O: Write, E: Write>(
-    earlier: &Path,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let existed = match fs::hard_link(earlier, target) {
-        Ok(()) => false,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match link_over(earlier, target) {
-            Ok(()) => true,
-            Err(e) => return report_link_failure(&e, earlier, target, job),
-        },
-        Err(e) => return report_link_failure(&e, earlier, target, job),
-    };
-    if existed && job.flags.verbose {
-        let _ = writeln!(job.out, "removed {}", quoteaf_os(target));
-    }
-    true
-}
-
-/// gnulib's `cannot create hard link %s to %s`, destination first.
-fn report_link_failure<O: Write, E: Write>(
-    e: &io::Error,
-    earlier: &Path,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let why = strerror(e);
-    let _ = writeln!(
-        job.err,
-        "cp: cannot create hard link {} to {}: {why}",
-        quoteaf_os(target),
-        quoteaf_os(earlier)
-    );
-    false
-}
-
-/// The replace half of `force_linkat`: link into a temporary name beside
-/// `target`, rename it over, and remove the temporary either way.
-///
-/// The name is gnulib's `CuXXXXXX` pattern with the random part supplied by the
-/// only two things available without a dependency — the process id and a
-/// counter — and retried, because a collision must not be reported as the
-/// caller's failure. `O_EXCL` semantics come free: `link(2)` fails with
-/// `EEXIST` rather than clobbering, so a name that loses the race is simply
-/// tried again.
-fn link_over(earlier: &Path, target: &Path) -> io::Result<()> {
-    let (dir, base) = split_entry(target);
-    for attempt in 0..PLACE_TEMP_TRIES {
-        let mut name = OsString::from("Cu");
-        name.push(format!("{:x}{attempt:x}", std::process::id()));
-        // Beside the destination and not in `/tmp`: `rename` cannot cross a
-        // filesystem, and the destination's directory is the only place
-        // guaranteed to be on the same one.
-        let tmp = dir.join(&name);
-        match fs::hard_link(earlier, &tmp) {
-            Ok(()) => {
-                let result = fs::rename(&tmp, target);
-                // Even when the rename worked: if `tmp` and `target` were
-                // already one link, the rename was a no-op and left both names
-                // (gnulib's own comment at `force-link.c:117`).
-                let _ = fs::remove_file(&tmp);
-                return result;
-            }
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    // Every candidate name was taken, which needs `PLACE_TEMP_TRIES`
-    // simultaneous `cp`s in one directory. Reported as the errno the last
-    // attempt earned rather than as a panic.
-    let _ = base;
-    Err(io::Error::from(io::ErrorKind::AlreadyExists))
-}
-
-/// How many temporary names [`link_over`] tries before giving up. gnulib's
-/// `try_tempname_len` uses six random characters and the whole space; this
-/// walks a counter instead, and the bound is what stops an unlucky directory
-/// from spinning.
-const PLACE_TEMP_TRIES: u32 = 64;
-
 /// Copy one source of a known kind onto a settled destination path: the symlink,
 /// the directory and the regular file, and nothing else.
 ///
@@ -2512,7 +2301,7 @@ fn place_entity<O: Write, E: Write>(
     // points at it.
     let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
     let dest_multiply_linked =
-        job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
+        job.flags.preserve.links && dest.metadata().is_some_and(|m| nlink(m) > 1);
 
     // `-b`: the destination is moved aside rather than written over, and this is
     // GNU's block at `copy.c:2517`. It is the `if` whose `else if` is the unlink
@@ -2597,14 +2386,29 @@ fn place_entity<O: Write, E: Write>(
     // Directories are excluded: their branch of `earlier_file` is the
     // hard-linked-directory refusal, which lives in [`copy_one`] because only
     // an operand can reach it.
+    //
+    // On a host without hard links [`nlink`] answers 1 to everything, which
+    // switches `--preserve=links` off by exactly the amount that host cannot
+    // honour it: the first half of the condition never fires and the dereference
+    // half still does, so `cp --preserve=links -L la lb d` is the only spelling
+    // that reaches [`hardlink::force_link`] there — and it then fails with
+    // whatever the platform says about [`fs::hard_link`], which is the honest
+    // answer.
     let mut recorded = None;
     if !metadata.is_dir()
         && job.flags.preserve.links
-        && (hard_links(metadata) > 1 || job.flags.should_dereference(command_line_arg))
+        && (nlink(metadata) > 1 || job.flags.should_dereference(command_line_arg))
         && let Some(id) = file_id(src_path, metadata)
     {
         if let Some(earlier) = job.copied.remember(&id, target) {
-            return if create_hard_link(&earlier, target, job) {
+            return if hardlink::force_link(
+                "cp",
+                &earlier,
+                target,
+                job.flags.verbose,
+                &mut *job.out,
+                &mut *job.err,
+            ) {
                 Placed::Linked
             } else {
                 // GNU reaches its `un_backup` label from here too (`copy.c:2705`
@@ -7536,7 +7340,7 @@ mod tests {
             d.join("lb").symlink_metadata().unwrap().is_symlink(),
             "the link is to the symlink, not through it"
         );
-        assert_eq!(hard_links(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
+        assert_eq!(nlink(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
     }
 
     /// A source that fails to copy is *forgotten*, so the next name for it is

@@ -106311,15 +106311,67 @@ regardless of the fix:
   report names the freeing call site. Resolve the printed addresses with
   `python scripts/symbolize.py --log build/serial-test.txt`.
 
-### If the frames are not enough
+### What the frames said (2026-09-01)
 
-Escalate to recording the **first** free's return addresses in the slot's own
-poison payload (bytes 12..44, which currently hold `FREE_POISON`), and print them
-on detection. "Who freed it the first time?" is the harder and more useful half,
-and the slot is already being written at exactly that moment. Note that
-`check_poison` verifies the `FREE_POISON` fill on allocation, so it must be
-taught to skip whatever range the provenance record occupies — otherwise the
-provenance itself reads as a use-after-free.
+Sixteen frames (`a9599b35e`) resolved it. **Neither event is `/proc/version`.**
+Both are the same drop, in the same function, at the same instruction:
+
+```
+0..7   poison_free / slab_dealloc / dealloc / __rust_dealloc /
+       Global::deallocate / RawVecInner::deallocate / RawVec::drop /
+       drop_in_place<RawVec<sched::TaskInfo>>
+8      drop_in_place<Vec<sched::TaskInfo>>
+9      procfs::gen_loadavg+0x3e6          <-- both events, same offset
+10     procfs::generate
+11     ProcFs::readdir::{{closure}}   (event 1)
+       ProcFs::stat                   (event 2)
+```
+
+Two consequences that overturn the sections above:
+
+- **The `/proc/version` label was a red herring.** `HeapWatch` names whichever
+  path was under inspection when the global counter moved; the counter moved
+  because `readdir` walks the whole directory and calls `generate` for
+  *`loadavg`* while `version` happened to be the entry being sampled. There is
+  one bug, not two, and `gen_version` is not involved at all.
+- **The doubly-freed block is the `Vec<TaskInfo>` from `sched::task_list()`**,
+  not any generated text — which is why 256 bytes never fitted the 61-byte
+  version string. `TaskInfo` is ~160 bytes, so a 256-byte class is a `Vec` of
+  capacity 1: the buffer `collect()` allocates first and frees again when it
+  grows to capacity 2.
+
+`gen_loadavg` therefore double-frees **on every call**, which also explains why
+twelve prior boots were green: nothing read `/proc/loadavg` during boot until
+`fs::conformance` walked `/proc`. The harness exposes the bug; it does not
+create it.
+
+`sched::task_list()` and `gen_loadavg` both read clean, and every slab
+alloc/dealloc path has now been audited (including both `slab_dealloc` call
+sites in `GlobalAlloc::dealloc`, the quarantine-eviction one being default-off).
+Since `POISON_MAGIC` survives to the second free, and `poison_alloc` would have
+destroyed it, no allocation of that slot intervened: the `Vec` that
+`gen_loadavg` drops points at memory freed earlier and never handed back out.
+
+### Recording the first free
+
+Done in `3ac226bfa`, along the lines sketched below. `poison_free` writes 8
+return addresses into bytes 12..76 of every freed slot in a class large enough
+to hold them, and prints them as `first-free frame N` on detection;
+`check_poison` scans for `FREE_POISON` from byte 76 instead of 12 on those
+classes. `gen_loadavg` also prints its `Vec`'s pointer/len/capacity, which says
+directly whether the `Vec` was born over already-freed memory. Both are
+temporary and come out with the fix.
+
+The original sketch is kept because the constraint in its last sentence is the
+part that is easy to get wrong:
+
+> Escalate to recording the **first** free's return addresses in the slot's own
+> poison payload (bytes 12..44, which currently hold `FREE_POISON`), and print
+> them on detection. "Who freed it the first time?" is the harder and more
+> useful half, and the slot is already being written at exactly that moment.
+> Note that `check_poison` verifies the `FREE_POISON` fill on allocation, so it
+> must be taught to skip whatever range the provenance record occupies —
+> otherwise the provenance itself reads as a use-after-free.
 
 **Trigger for closing:** a boot whose `syshealth` "Heap safety" line reads
 `[PASS]` with `fs::conformance` running, and where `/proc/heapinfo` no longer

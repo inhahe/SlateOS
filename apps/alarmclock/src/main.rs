@@ -1646,15 +1646,17 @@ impl Stopwatch {
         let stats = self.lap_stats();
         for (i, lap) in self.laps.iter().rev().enumerate() {
             let row_y = pane.y + (i as f32) * LAP_ROW_H;
-            // A clip hides an overrun from the eye, but not from the frame.
-            // This app draws its runs through its own `text` helper, which
-            // pushes a `RenderCommand::Text` whether or not the clip in force
-            // could show it -- so without this test a lap four hundred points
-            // below the table still enters the picture, claiming to be a label
-            // that is on screen, and a reader of the picture is told a lie.
-            // A row is drawn whole or not at all, so the comparison is against
-            // the row's own edges in the scrolled space; `i` only increases, so
-            // the first row past the bottom ends the walk.
+            // Unlike the alarm and timer panes, this one is a *work* bound and
+            // not a correctness bound, and the distinction is worth stating
+            // because it is the reason no test can catch its removal. A lap row
+            // is three runs of text and nothing else -- no fill, no hit box --
+            // and `text` refuses a run the clip in force cannot show, so a walk
+            // of the whole list would produce exactly the frame this one does.
+            // What it would also do is format three strings for every lap on
+            // every frame, and nothing bounds the number of laps. A row is
+            // drawn whole or not at all, so the comparison is against the row's
+            // own edges in the scrolled space; `i` only increases, so the first
+            // row past the bottom ends the walk.
             if row_y - scroll >= pane.bottom() {
                 break;
             }
@@ -4699,6 +4701,26 @@ mod tests {
             Some(TimerState::Running)
         );
 
+        // Reset is the third button, and it is not a second Pause: it must put
+        // the timer back to its whole duration and to `Idle`. Pausing does
+        // neither, so a Reset wired to `toggle` would leave a half-spent timer
+        // reading whatever was left when it was pressed, which looks enough
+        // like working that only the numbers give it away.
+        app.find_timer_mut(b).unwrap().tick();
+        app.find_timer_mut(b).unwrap().tick();
+        probe::click(&mut app, Target::TimerReset(b));
+        let timer = app.find_timer(b).unwrap();
+        assert_eq!(
+            timer.state,
+            TimerState::Idle,
+            "Reset left the timer in {:?}",
+            timer.state
+        );
+        assert_eq!(
+            timer.remaining_seconds, timer.total_seconds,
+            "Reset kept the two spent seconds"
+        );
+
         probe::click(&mut app, Target::TimerDelete(a));
         assert!(app.find_timer(a).is_none());
         assert!(
@@ -4771,8 +4793,13 @@ mod tests {
         app.stopwatch.start();
         let id = app.create_timer(60);
         app.start_timer(id);
-        // One tick standing in for three seconds of a stalled machine.
-        app.tick(3_000);
+        // One tick standing in for three seconds of a stalled machine, and
+        // delivered as the *event*, not by calling `tick` directly: the number
+        // the window manager measured has to survive the trip through
+        // `handle_event`. A router that passed its own nominal interval on
+        // instead would look right here and lose a second per stall in the
+        // field.
+        app.handle_event(&Event::Tick { elapsed_ms: 3_000 }, AlarmClockApp::SIZE);
         assert_eq!(app.stopwatch.elapsed_ms, 3_000);
         assert_eq!(app.find_timer(id).map(|t| t.remaining_seconds), Some(57));
     }
@@ -4950,6 +4977,42 @@ mod tests {
             Action::None,
             "the editor covers the list; scrolling it would move something unseen"
         );
+
+        // And the wheel belongs to the pane under the *pointer*, not to the
+        // pane the tab happens to own. Above the list is the clock band, which
+        // does not scroll; a wheel there that moved the list would drag content
+        // the pointer is nowhere near, which is the whole reason the pane is
+        // asked whether it contains the point at all.
+        let mut app = AlarmClockApp::new();
+        for i in 0..40u8 {
+            app.create_alarm(i % 24, (i.wrapping_mul(7)) % 60);
+        }
+        let content = AlarmClockApp::content_rect(size.0, size.1);
+        let list = AlarmClockApp::alarm_list_rect(content);
+        assert!(
+            list.y > content.y,
+            "the clock band should sit above the list: {content:?} {list:?}"
+        );
+        let above = (list.x + list.w / 2.0, content.y.midpoint(list.y));
+        assert_eq!(
+            app.scroll(above.0, above.1, -1.0, size),
+            Action::None,
+            "a wheel over the clock band was answered as a scroll"
+        );
+        assert!(
+            app.alarm_scroll.abs() < f32::EPSILON,
+            "a wheel over the clock band moved the alarm list to {}",
+            app.alarm_scroll
+        );
+        // The same wheel inside the list does move it, so the assertion above
+        // is about where the pointer was and not about a list that cannot
+        // scroll at all.
+        assert_eq!(
+            app.scroll(list.x + list.w / 2.0, list.y + list.h / 2.0, -1.0, size),
+            Action::Redraw,
+            "the list did not scroll even under the pointer"
+        );
+        assert!(app.alarm_scroll > 0.0);
     }
 
     // ---- Clock ----

@@ -103649,7 +103649,30 @@ it here.
 
 ## C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE (lane C)
 
-**Status:** OPEN 2026-09-01
+**Status:** FIXED 2026-09-01 (`cd35986ac`)
+
+**Fix.** Both parts of the proper fix below were done, and the sweeps then found
+two more faults in the same file that no part of this entry predicted:
+
+* Each of the three loops now tests the *item's* own edges against the pane and
+  `break`s at the first item past the bottom.
+* `text` (`:337`) asks `Frame::is_visible` before pushing, exactly as
+  `guitk::put_text` does — so ink and hit boxes are governed by one rule again.
+* `text_centred` declared its `max_width` from where the run *starts* rather
+  than from the box it was told to centre in, so every centred run in the file
+  was declared to overhang its box by half the slack. "Stopwatch" in a
+  120-point tab was declared to run to 385 in a 360-point window, and the
+  renderer trims at the bound it is given, so there was no ellipsis either.
+* The alarm editor laid its stack out at a fixed 308 points against a content
+  area that is 248 points tall at this app's own minimum window size, so Save
+  and Cancel were painted below the panel — hidden by the clip and with their
+  hit boxes dropped by `Frame::hit`. The editor covers the alarm tab, so with
+  neither button reachable it was a trap the pointer could not leave. The stack
+  is now solved for the height it was given.
+
+All three geometry sweeps are in the suite, which is 180 tests, and
+`the_editor_can_always_be_left_by_pointer` asks through `frame` at ten window
+sizes and clicks Cancel at each.
 
 **In short:** the alarm clock has three scrolling panes — the alarms, the timers
 and the stopwatch's lap table. Each one draws *every* item it holds, however

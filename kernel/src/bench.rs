@@ -7324,6 +7324,11 @@ const READDIR_MOUNT_ENTRIES: usize = 8;
 /// | `vfs_readdir_mp_parent` | +5 | yes |
 /// | `vfs_readdir_fsroot` | +1 | — (the listed dir *is* a mount) |
 ///
+/// plus `vfs_readdir_mp_submount_stat`, which is not a listing at all: it is one
+/// call to the thing `finish_listing` does per submount, run inside arm 3's
+/// configuration. See the comment at that arm for why the two possible answers
+/// point at two different files.
+///
 /// - `base` -> `elsewhere` differs **only in mount-table size**, and prices the
 ///   scan.
 /// - `elsewhere` -> `parent` differs **only in whether the listed directory is
@@ -7353,6 +7358,10 @@ fn bench_vfs_readdir_root_cost() {
     let dir = "/tmp/_rdm/d";
     let sibling = "/tmp/_rdm/s";
     let fsroot = "/tmp/_rdm/m";
+    // The first of the five mounts arm 3 puts under `dir`; see arm 3b. Spelled
+    // out rather than built with `format!` so the measured closure allocates
+    // nothing that `readdir` would not.
+    let stat_target = "/tmp/_rdm/d/m0";
 
     // A previous boot that died mid-benchmark can have left mounts registered,
     // and a leftover mount is worse than a leftover directory: it would sit in
@@ -7420,6 +7429,26 @@ fn bench_vfs_readdir_root_cost() {
     let parent = run("vfs_readdir_mp_parent", 200, || {
         let _ = core::hint::black_box(Vfs::readdir(dir));
     });
+
+    // Arm 3b, measured while arm 3's mounts are still registered because that
+    // is the only configuration in which it means anything: one call to what
+    // `finish_listing` does per submount.
+    //
+    // `submount_root_ino` is `metadata_resolved(dir_path.join(name))`, and
+    // `metadata_resolved` is public, so this is that body minus the `PathBuf`
+    // join -- against a target that IS a mount point, which is the case the
+    // suite has never priced. `vfs_stat_breakdown_resolved` stats an ordinary
+    // file at ~2000ns; if statting a mount root costs the ~16000ns the first
+    // run implied per submount, then the whole of arm 3's delta is these five
+    // calls and the question becomes what inside one of them is expensive. If
+    // it costs ~2000ns like any other stat, then the five stats are NOT arm 3's
+    // delta and the expense is in `finish_listing`'s own loop -- a different
+    // bug in a different place. The two outcomes point at different files,
+    // which is the whole reason to spend an arm on it.
+    let submount_stat = run("vfs_readdir_mp_submount_stat", 200, || {
+        let _ = core::hint::black_box(Vfs::metadata_resolved(stat_target));
+    });
+
     readdir_unmount_many(dir);
 
     // Arm 4: a directory that IS a filesystem's root, holding the same eight
@@ -7441,6 +7470,7 @@ fn bench_vfs_readdir_root_cost() {
     track("vfs_readdir_mp_base", &base);
     track("vfs_readdir_mp_elsewhere", &elsewhere);
     track("vfs_readdir_mp_parent", &parent);
+    track("vfs_readdir_mp_submount_stat", &submount_stat);
     if let Some(r) = fsroot_result.as_ref() {
         track("vfs_readdir_fsroot", r);
     }
@@ -7471,6 +7501,23 @@ fn bench_vfs_readdir_root_cost() {
         elsewhere.min_ns,
         parent.min_ns,
         d_parent / READDIR_MOUNT_ARM as i64
+    );
+    // Printed next to the per-submount figure it is meant to be compared with,
+    // because the comparison is the finding and a reader who has to hunt for
+    // the second number will not make it.
+    serial_println!(
+        "[bench]   vfs_readdir_root_cost: ONE stat of a mount root costs {}ns, against ~{}ns per \
+         submount implied above and a ~2000ns stat of an ordinary file \
+         (vfs_stat_breakdown_resolved). {}% of the per-submount cost is this call.",
+        submount_stat.min_ns,
+        d_parent / READDIR_MOUNT_ARM as i64,
+        if d_parent > 0 {
+            // Percent of the per-submount cost that one such stat accounts for.
+            i64::from(submount_stat.min_ns as i32) * 100
+                / (d_parent / READDIR_MOUNT_ARM as i64).max(1)
+        } else {
+            0
+        }
     );
 
     match fsroot_result {

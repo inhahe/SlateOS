@@ -4447,6 +4447,7 @@ mod tests {
     /// The canned answer queue is shared with `rm`'s prompt tests; see
     /// [`coreutils::yesno`].
     use coreutils::yesno::Canned;
+    use scratchdir::ScratchDir;
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -5440,15 +5441,24 @@ mod tests {
 
     // ------------------------------------------------------------ copying --
 
-    fn scratch(stem: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU32, Ordering};
-        static N: AtomicU32 = AtomicU32::new(0);
-        let n = N.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("cp_test_{stem}_{pid}_{n}"));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    /// A private directory for one test, removed when the binding drops.
+    ///
+    /// This used to be a hand-rolled pid-and-counter helper — another copy of
+    /// the thing `scratchdir` exists to replace, and the copy in which a second
+    /// bug was still live. Its child paths came from `Path::join`, which uses
+    /// the *host's* separator: `\` on this development box. Every path handed to
+    /// the subject was therefore one component containing backslashes, which is
+    /// not an input the target can produce — `/` is this OS's only separator and
+    /// `\` is an ordinary byte in a filename.
+    ///
+    /// `cp -b`'s numbered-backup scan is what noticed. It derives the directory
+    /// to read from the last separator in the name it is given, found none, and
+    /// so scanned the process's current directory instead of the scratch one:
+    /// it saw no `c.~1~` there and answered `c~` where `c.~2~` was correct. Two
+    /// tests red on Windows and green on Linux, for a disagreement that was
+    /// entirely the fixture's. See [`ScratchDir::path`], which appends `/`.
+    fn scratch(stem: &str) -> ScratchDir {
+        ScratchDir::new(&format!("cp_test_{stem}"))
     }
 
     /// Every option off — `cp a b` with nothing else given.
@@ -5644,28 +5654,26 @@ mod tests {
     #[test]
     fn copies_a_file() {
         let dir = scratch("file");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"hello").unwrap();
         let (ok, err) = cp(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(fs::read(&a).unwrap(), b"hello", "the source stays");
         assert_eq!(fs::read(&b).unwrap(), b"hello");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn copies_a_file_into_a_directory() {
         let dir = scratch("into_dir");
-        let a = dir.join("a");
-        let sub = dir.join("sub");
+        let a = dir.path("a");
+        let sub = dir.path("sub");
         fs::write(&a, b"x").unwrap();
         fs::create_dir(&sub).unwrap();
         let (ok, err) = cp(&plain(), &[&a, &sub]);
         assert!(ok, "{err}");
         assert!(sub.join("a").is_file());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // --------------------------------------------- which failure it reports --
@@ -5676,14 +5684,14 @@ mod tests {
     #[test]
     fn the_target_diagnostic_names_the_reason() {
         let dir = scratch("target_why");
-        let a = dir.join("a");
-        let b = dir.join("b");
-        let file = dir.join("plain");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        let file = dir.path("plain");
         fs::write(&a, b"1").unwrap();
         fs::write(&b, b"2").unwrap();
         fs::write(&file, b"3").unwrap();
 
-        let missing = dir.join("nosuch");
+        let missing = dir.path("nosuch");
         let (ok, e) = cp(&plain(), &[&a, &b, &missing]);
         assert!(!ok);
         assert!(
@@ -5697,7 +5705,6 @@ mod tests {
             e.ends_with(": Not a directory\n"),
             "a name that is something else: {e}"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A destination whose *parent* is not a directory is a failed `stat`, not
@@ -5708,8 +5715,8 @@ mod tests {
     #[test]
     fn a_destination_under_a_plain_file_fails_at_the_stat() {
         let dir = scratch("dst_stat");
-        let a = dir.join("a");
-        let blocking = dir.join("blocking");
+        let a = dir.path("a");
+        let blocking = dir.path("blocking");
         fs::write(&a, b"1").unwrap();
         fs::write(&blocking, b"2").unwrap();
 
@@ -5718,7 +5725,6 @@ mod tests {
         assert!(!ok);
         assert!(e.starts_with("cp: cannot stat "), "{e}");
         assert!(e.ends_with(": Not a directory\n"), "{e}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Under `-r` a symlink operand is copied as a link, so its own inode is
@@ -5729,8 +5735,8 @@ mod tests {
     #[test]
     fn a_symlink_operand_resolving_to_the_destination_is_refused() {
         let dir = scratch("link_same");
-        let file = dir.join("file");
-        let link = dir.join("link");
+        let file = dir.path("file");
+        let link = dir.path("link");
         fs::write(&file, b"kept").unwrap();
         std::os::unix::fs::symlink("file", &link).unwrap();
 
@@ -5744,7 +5750,6 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The other half of that rule: two *distinct* links to one file are not
@@ -5754,9 +5759,9 @@ mod tests {
     #[test]
     fn two_symlinks_to_one_file_are_not_the_same_file() {
         let dir = scratch("two_links");
-        let file = dir.join("file");
-        let one = dir.join("one");
-        let two = dir.join("two");
+        let file = dir.path("file");
+        let one = dir.path("one");
+        let two = dir.path("two");
         fs::write(&file, b"kept").unwrap();
         std::os::unix::fs::symlink("file", &one).unwrap();
         std::os::unix::fs::symlink("file", &two).unwrap();
@@ -5764,7 +5769,6 @@ mod tests {
         let (ok, e) = cp(&recursive(), &[&one, &two]);
         assert!(ok, "{e}");
         assert_eq!(fs::read(&file).unwrap(), b"kept", "the target is untouched");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------- one operand against another --
@@ -5778,11 +5782,11 @@ mod tests {
     #[test]
     fn a_second_source_will_not_overwrite_the_copy_the_first_just_made() {
         let dir = scratch("just_created");
-        let other = dir.join("other");
-        let dest = dir.join("dest");
+        let other = dir.path("other");
+        let dest = dir.path("dest");
         fs::create_dir(&other).unwrap();
         fs::create_dir(&dest).unwrap();
-        let first = dir.join("f");
+        let first = dir.path("f");
         let second = other.join("f");
         fs::write(&first, b"first").unwrap();
         fs::write(&second, b"second").unwrap();
@@ -5797,7 +5801,6 @@ mod tests {
             b"first",
             "the copy that was asked for first survives"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same guard, for the case the first cannot see. A regular source
@@ -5808,13 +5811,13 @@ mod tests {
     #[test]
     fn a_second_source_will_not_be_written_through_a_just_created_symlink() {
         let dir = scratch("through_link");
-        let other = dir.join("other");
-        let dest = dir.join("dest");
+        let other = dir.path("other");
+        let dest = dir.path("dest");
         fs::create_dir(&other).unwrap();
         fs::create_dir(&dest).unwrap();
-        let pointee = dir.join("pointee");
+        let pointee = dir.path("pointee");
         fs::write(&pointee, b"untouched").unwrap();
-        let link = dir.join("l");
+        let link = dir.path("l");
         std::os::unix::fs::symlink(&pointee, &link).unwrap();
         let plain = other.join("l");
         fs::write(&plain, b"second").unwrap();
@@ -5827,23 +5830,21 @@ mod tests {
             b"untouched",
             "what the link points at is not written to"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn one_source_named_twice_is_a_warning_and_not_a_failure() {
         let dir = scratch("named_twice");
-        let dest = dir.join("dest");
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
-        let f = dir.join("f");
+        let f = dir.path("f");
         fs::write(&f, b"body").unwrap();
-        let dotted = dir.join(".").join("f");
+        let dotted = dir.path(".").join("f");
 
         let (ok, e) = cp(&plain(), &[&f, &dotted, &dest]);
         assert!(ok, "a repeat is not an error: {e}");
         assert!(e.contains("specified more than once"), "{e}");
         assert_eq!(fs::read(dest.join("f")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// One directory named twice but landing in *two* places. The user has
@@ -5856,8 +5857,8 @@ mod tests {
     #[test]
     fn one_directory_going_to_two_places_will_not_be_hard_linked() {
         let dir = scratch("two_places");
-        let dest = dir.join("dest");
-        let src = dir.join("src");
+        let dest = dir.path("dest");
+        let src = dir.path("src");
         fs::create_dir_all(src.join("sub")).unwrap();
         fs::create_dir(&dest).unwrap();
 
@@ -5867,7 +5868,6 @@ mod tests {
         // The first spelling was copied; only the second is refused.
         assert!(dest.join("sub").is_dir(), "{e}");
         assert!(!dest.join("src").exists(), "{e}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same two destinations are *not* refused when a dereference option
@@ -5877,24 +5877,23 @@ mod tests {
     #[cfg(unix)]
     fn following_links_makes_two_copies_of_one_directory_instead() {
         let dir = scratch("two_copies");
-        let dest = dir.join("dest");
-        let real = dir.join("real");
+        let dest = dir.path("dest");
+        let real = dir.path("real");
         fs::create_dir(&dest).unwrap();
         fs::create_dir(&real).unwrap();
         fs::write(real.join("f"), b"body").unwrap();
-        std::os::unix::fs::symlink(&real, dir.join("a")).unwrap();
-        std::os::unix::fs::symlink(&real, dir.join("b")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path("a")).unwrap();
+        std::os::unix::fs::symlink(&real, dir.path("b")).unwrap();
 
         let flags = CpFlags {
             recursive: true,
             dereference: Deref::Always,
             ..CpFlags::default()
         };
-        let (ok, e) = cp(&flags, &[&dir.join("a"), &dir.join("b"), &dest]);
+        let (ok, e) = cp(&flags, &[&dir.path("a"), &dir.path("b"), &dest]);
         assert!(ok, "{e}");
         assert_eq!(fs::read(dest.join("a").join("f")).unwrap(), b"body");
         assert_eq!(fs::read(dest.join("b").join("f")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Builds `parent/{child/{f},top}` under a fresh scratch directory with an
@@ -5902,14 +5901,17 @@ mod tests {
     /// name. The shape is the smallest one where an operand and a *walk* reach
     /// one directory: `parent/child` is copied by name, and then `parent` is
     /// walked into and offers the same directory a second time.
-    fn nested_pair(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
+    /// The scratch directory comes back first because it is a *guard*: dropping
+    /// it removes the tree, so a caller that discarded it would be left holding
+    /// three paths into a directory that no longer exists.
+    fn nested_pair(tag: &str) -> (ScratchDir, PathBuf, PathBuf) {
         let dir = scratch(tag);
-        let parent = dir.join("parent");
-        let child = parent.join("child");
+        let parent = dir.path("parent");
+        let child = dir.path("parent/child");
         fs::create_dir_all(&child).unwrap();
-        fs::write(child.join("f"), b"body").unwrap();
-        fs::write(parent.join("top"), b"top").unwrap();
-        let dest = dir.join("dest");
+        fs::write(dir.path("parent/child/f"), b"body").unwrap();
+        fs::write(dir.path("parent/top"), b"top").unwrap();
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
         (dir, parent, dest)
     }
@@ -5921,7 +5923,7 @@ mod tests {
     /// refuses the repeat and exits 1. See [`Copied`].
     #[test]
     fn a_directory_reached_by_walking_is_refused_a_second_time() {
-        let (dir, parent, dest) = nested_pair("walked_repeat");
+        let (_dir, parent, dest) = nested_pair("walked_repeat");
 
         let (ok, e) = cp(&recursive(), &[&parent.join("child"), &parent, &dest]);
         assert!(!ok, "{e}");
@@ -5943,7 +5945,6 @@ mod tests {
             b"top",
             "the walk carries on past the refusal: {e}"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-L` is the one answer that makes the same two paths legitimate: it asks
@@ -5952,7 +5953,7 @@ mod tests {
     /// (`copy.c:2723`) with `command_line_arg` false.
     #[test]
     fn following_links_lets_the_walk_copy_a_directory_twice() {
-        let (dir, parent, dest) = nested_pair("walked_repeat_L");
+        let (_dir, parent, dest) = nested_pair("walked_repeat_L");
 
         let flags = CpFlags {
             dereference: Deref::Always,
@@ -5965,7 +5966,6 @@ mod tests {
             fs::read(dest.join("parent").join("child").join("f")).unwrap(),
             b"body"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same two operands the other way round, which is *not* a repeat: the
@@ -5977,7 +5977,7 @@ mod tests {
     /// the status is 0.
     #[test]
     fn a_walk_that_arrives_first_does_not_refuse_the_operand() {
-        let (dir, parent, dest) = nested_pair("walk_then_operand");
+        let (_dir, parent, dest) = nested_pair("walk_then_operand");
 
         let (ok, e) = cp(&recursive(), &[&parent, &parent.join("child"), &dest]);
         assert!(ok, "{e}");
@@ -5986,7 +5986,6 @@ mod tests {
             b"body"
         );
         assert_eq!(fs::read(dest.join("child").join("f")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------- where the destination is --
@@ -5997,9 +5996,9 @@ mod tests {
     #[test]
     fn a_target_directory_takes_every_operand_as_a_source() {
         let dir = scratch("t_dest");
-        let dest = dir.join("dest");
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
 
         let flags = CpFlags {
@@ -6010,7 +6009,6 @@ mod tests {
         assert!(ok, "{e}");
         assert_eq!(e, "");
         assert_eq!(fs::read(dest.join("a")).unwrap(), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The wording is `target directory`, not the bare `target` the last
@@ -6019,9 +6017,9 @@ mod tests {
     #[test]
     fn a_target_directory_that_is_not_one_says_so() {
         let dir = scratch("t_notdir");
-        let not_a_dir = dir.join("plain");
+        let not_a_dir = dir.path("plain");
         fs::write(&not_a_dir, b"x").unwrap();
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
 
         let flags = CpFlags {
@@ -6032,7 +6030,6 @@ mod tests {
         assert!(!ok);
         assert!(e.starts_with("cp: target directory "), "{e}");
         assert!(e.contains("Not a directory"), "{e}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Checked before `-t`'s directory is looked at, which is GNU's order and
@@ -6072,16 +6069,15 @@ mod tests {
     #[test]
     fn no_target_directory_will_not_copy_into_a_directory() {
         let dir = scratch("cap_T");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
 
         let (ok, e) = cp(&as_name(), &[&a, &d]);
         assert!(!ok);
         assert!(e.contains("cannot overwrite directory"), "{e}");
         assert!(!d.join("a").exists(), "nothing went inside it");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// And the same destination without `-T`, so the test above is pinning the
@@ -6089,15 +6085,14 @@ mod tests {
     #[test]
     fn without_it_the_same_destination_is_copied_into() {
         let dir = scratch("no_cap_T");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
 
         let (ok, e) = cp(&plain(), &[&a, &d]);
         assert!(ok, "{e}");
         assert_eq!(fs::read(d.join("a")).unwrap(), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `cp -rT src dst` is how a tree is copied *onto* another rather than
@@ -6106,10 +6101,10 @@ mod tests {
     #[test]
     fn recursive_no_target_directory_copies_a_tree_onto_the_destination() {
         let dir = scratch("rT");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("x"), b"X").unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         fs::create_dir(&dst).unwrap();
         fs::write(dst.join("keep"), b"K").unwrap();
 
@@ -6126,7 +6121,6 @@ mod tests {
             b"K",
             "a merge, not a replacement"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The repeat tables count *sources*, and under `-t` every operand is one —
@@ -6134,11 +6128,11 @@ mod tests {
     #[test]
     fn a_target_directory_still_notices_a_source_named_twice() {
         let dir = scratch("t_twice");
-        let dest = dir.join("dest");
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
-        let f = dir.join("f");
+        let f = dir.path("f");
         fs::write(&f, b"body").unwrap();
-        let dotted = dir.join(".").join("f");
+        let dotted = dir.path(".").join("f");
 
         let flags = CpFlags {
             target_directory: Some(dest.clone().into_os_string()),
@@ -6147,7 +6141,6 @@ mod tests {
         let (ok, e) = cp(&flags, &[&f, &dotted]);
         assert!(ok, "{e}");
         assert!(e.contains("specified more than once"), "{e}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------- --verbose says --
@@ -6159,15 +6152,14 @@ mod tests {
     #[test]
     fn verbose_names_the_copy_on_stdout() {
         let dir = scratch("v_one");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"hello").unwrap();
 
         let (ok, out, err) = cp_out(&verbose(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "", "a report of work done is not a diagnostic");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// And without it, silence — so the test above is pinning the option and
@@ -6175,15 +6167,14 @@ mod tests {
     #[test]
     fn without_verbose_a_copy_says_nothing() {
         let dir = scratch("v_off");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"hello").unwrap();
 
         let (ok, out, err) = cp_out(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, "");
         assert_eq!(err, "");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// GNU announces *before* it opens the source, so a copy that fails is
@@ -6192,8 +6183,8 @@ mod tests {
     #[test]
     fn verbose_announces_a_copy_that_then_fails() {
         let dir = scratch("v_fail");
-        let missing = dir.join("nosuch").join("a");
-        let b = dir.join("b");
+        let missing = dir.path("nosuch").join("a");
+        let b = dir.path("b");
 
         // The failure is `cannot stat`, from before the announcement — so this
         // one is *not* announced, which is the other half of the rule.
@@ -6206,9 +6197,9 @@ mod tests {
         // destination here is a directory that `cp` without `-r` will not
         // overwrite, and the refusal comes from `copy_one`, still before the
         // announcement.
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"x").unwrap();
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
         let onto = d.join("a");
         fs::create_dir(&onto).unwrap();
@@ -6216,7 +6207,6 @@ mod tests {
         assert!(!ok);
         assert!(err.contains("cannot overwrite directory"), "{err}");
         assert_eq!(out, "");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A tree names the directory and then everything in it, and the directory
@@ -6224,10 +6214,10 @@ mod tests {
     #[test]
     fn verbose_names_a_created_directory_and_then_its_contents() {
         let dir = scratch("v_tree");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"F").unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
 
         let (ok, out, err) = cp_out(&verbose_recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
@@ -6245,7 +6235,6 @@ mod tests {
             ],
             "{out}"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The rule GNU wrote a comment to explain: a directory is announced only
@@ -6254,10 +6243,10 @@ mod tests {
     #[test]
     fn verbose_is_silent_about_a_directory_that_was_already_there() {
         let dir = scratch("v_again");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"F").unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         fs::create_dir(&dst).unwrap();
         fs::create_dir(dst.join("src")).unwrap();
 
@@ -6273,7 +6262,6 @@ mod tests {
             ),
             "the directory was reused, so only the file was copied"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A name with a space in it is quoted, which is the reason the line uses
@@ -6289,8 +6277,8 @@ mod tests {
     #[test]
     fn verbose_quotes_a_name_that_needs_it() {
         let dir = scratch("v_quote");
-        let a = dir.join("a b");
-        let c = dir.join("c");
+        let a = dir.path("a b");
+        let c = dir.path("c");
         fs::write(&a, b"x").unwrap();
 
         let (ok, out, err) = cp_out(&verbose(), &[&a, &c]);
@@ -6299,7 +6287,6 @@ mod tests {
         let (rendered_src, _) = line.rsplit_once(" -> ").unwrap_or((line, ""));
         assert!(rendered_src.starts_with('\''), "{rendered_src}");
         assert!(rendered_src.ends_with("a b'"), "{rendered_src}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // -------------------------------------- -P / -H / -L: links or targets --
@@ -6344,17 +6331,16 @@ mod tests {
     #[test]
     fn no_dereference_copies_the_link_without_r() {
         let dir = scratch("P_link");
-        fs::write(dir.join("file"), b"BODY").unwrap();
-        let link = dir.join("link");
+        fs::write(dir.path("file"), b"BODY").unwrap();
+        let link = dir.path("link");
         std::os::unix::fs::symlink("file", &link).unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
 
         let (ok, e) = cp(&no_deref(), &[&link, &dst]);
         assert!(ok, "{e}");
         let meta = fs::symlink_metadata(&dst).unwrap();
         assert!(meta.file_type().is_symlink(), "a link, not its target");
         assert_eq!(fs::read_link(&dst).unwrap(), PathBuf::from("file"));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same-file guard keys on the policy and not on `-r`, which is what
@@ -6366,8 +6352,8 @@ mod tests {
     #[test]
     fn no_dereference_lets_one_link_replace_another_without_r() {
         let dir = scratch("P_two_links");
-        fs::write(dir.join("file"), b"BODY").unwrap();
-        let (one, two) = (dir.join("one"), dir.join("two"));
+        fs::write(dir.path("file"), b"BODY").unwrap();
+        let (one, two) = (dir.path("one"), dir.path("two"));
         std::os::unix::fs::symlink("file", &one).unwrap();
         std::os::unix::fs::symlink("file", &two).unwrap();
 
@@ -6377,7 +6363,6 @@ mod tests {
         let (ok, e) = cp(&plain(), &[&one, &two]);
         assert!(!ok, "followed, they are one file");
         assert!(e.contains("are the same file"), "{e}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-L` reaches *inside* the tree, which is the half no option could
@@ -6388,14 +6373,14 @@ mod tests {
     #[test]
     fn dereference_follows_links_found_by_the_walk() {
         let dir = scratch("L_walk");
-        let src = dir.join("t");
+        let src = dir.path("t");
         fs::create_dir(&src).unwrap();
         fs::create_dir(src.join("sub")).unwrap();
         fs::write(src.join("a.txt"), b"A").unwrap();
         fs::write(src.join("sub/s.txt"), b"S").unwrap();
         std::os::unix::fs::symlink("a.txt", src.join("flink")).unwrap();
         std::os::unix::fs::symlink("sub", src.join("dlink")).unwrap();
-        let dst = dir.join("d");
+        let dst = dir.path("d");
 
         let (ok, e) = cp(&deref_all_r(), &[&src, &dst]);
         assert!(ok, "{e}");
@@ -6416,7 +6401,6 @@ mod tests {
             "the link to a directory became a directory"
         );
         assert_eq!(fs::read(dst.join("dlink/s.txt")).unwrap(), b"S");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A link that points at nothing has no target to copy, so `-L` fails on
@@ -6426,11 +6410,11 @@ mod tests {
     #[test]
     fn dereference_fails_on_a_dangling_link_in_the_tree() {
         let dir = scratch("L_dangle");
-        let src = dir.join("t");
+        let src = dir.path("t");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("a.txt"), b"A").unwrap();
         std::os::unix::fs::symlink("nowhere", src.join("dangle")).unwrap();
-        let dst = dir.join("d");
+        let dst = dir.path("d");
 
         let (ok, e) = cp(&deref_all_r(), &[&src, &dst]);
         assert!(!ok, "one entry failed, so the copy failed");
@@ -6439,7 +6423,6 @@ mod tests {
         // The rest of the directory is still copied: one bad entry ends that
         // entry, not the walk.
         assert_eq!(fs::read(dst.join("a.txt")).unwrap(), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-H` is the split one: the operand is followed, so a link to a
@@ -6450,14 +6433,14 @@ mod tests {
     #[test]
     fn command_line_dereference_follows_only_the_operand() {
         let dir = scratch("H_split");
-        let src = dir.join("t");
+        let src = dir.path("t");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("a.txt"), b"A").unwrap();
         std::os::unix::fs::symlink("a.txt", src.join("flink")).unwrap();
         std::os::unix::fs::symlink("nowhere", src.join("dangle")).unwrap();
-        let dlink = dir.join("dlink");
+        let dlink = dir.path("dlink");
         std::os::unix::fs::symlink("t", &dlink).unwrap();
-        let dst = dir.join("d");
+        let dst = dir.path("d");
 
         let (ok, e) = cp(&deref_cmd_r(), &[&dlink, &dst]);
         assert!(ok, "{e}");
@@ -6475,7 +6458,6 @@ mod tests {
                 "{name} was found by the walk, so it stays a link"
             );
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Replacing a link says two things, in this order: the removal and then
@@ -6486,8 +6468,8 @@ mod tests {
     #[test]
     fn verbose_names_the_link_it_removed_first() {
         let dir = scratch("P_removed");
-        fs::write(dir.join("file"), b"BODY").unwrap();
-        let (one, two) = (dir.join("one"), dir.join("two"));
+        fs::write(dir.path("file"), b"BODY").unwrap();
+        let (one, two) = (dir.path("one"), dir.path("two"));
         std::os::unix::fs::symlink("file", &one).unwrap();
         std::os::unix::fs::symlink("file", &two).unwrap();
 
@@ -6505,11 +6487,10 @@ mod tests {
         assert!(lines[1].contains(" -> "), "{out}");
 
         // Nothing to remove, nothing said.
-        let three = dir.join("three");
+        let three = dir.path("three");
         let (ok, out, err) = cp_out(&flags, &[&one, &three]);
         assert!(ok, "{err}");
         assert_eq!(out.lines().count(), 1, "{out}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Three options that set one field, so the last one given wins and there
@@ -6575,9 +6556,9 @@ mod tests {
     /// proof of replacement and, in the `-f` direction, as a proof of
     /// non-replacement. A second link cannot be faked either way.
     #[cfg(unix)]
-    fn linked_destination(dir: &Path) -> (PathBuf, PathBuf) {
-        let dst = dir.join("b");
-        let witness = dir.join("witness");
+    fn linked_destination(dir: &ScratchDir) -> (PathBuf, PathBuf) {
+        let dst = dir.path("b");
+        let witness = dir.path("witness");
         fs::write(&dst, b"BBBB").unwrap();
         fs::hard_link(&dst, &witness).unwrap();
         (dst, witness)
@@ -6589,7 +6570,7 @@ mod tests {
     #[test]
     fn force_does_not_unlink_a_destination_that_opens() {
         let dir = scratch("force_noop");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
         let (b, witness) = linked_destination(&dir);
 
@@ -6603,7 +6584,6 @@ mod tests {
             b"A",
             "-f must not replace a destination it could simply write to"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `--remove-destination` on that same destination *does* unlink it, which
@@ -6612,7 +6592,7 @@ mod tests {
     #[test]
     fn remove_destination_unlinks_a_destination_that_opens() {
         let dir = scratch("rmdest_noop");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
         let (b, witness) = linked_destination(&dir);
 
@@ -6633,7 +6613,6 @@ mod tests {
                 quoteaf_os(&b)
             )
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The two verbose lines in the order `-f` puts them, on the one
@@ -6652,7 +6631,7 @@ mod tests {
         }
 
         let dir = scratch("force_ro");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
         let (ro, witness) = linked_destination(&dir);
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o400)).unwrap();
@@ -6682,7 +6661,6 @@ mod tests {
             b"BBBB",
             "the 0400 file was unlinked, not somehow written to"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// "Force" does not mean force: a dangling symlink is refused with `-f`
@@ -6692,8 +6670,8 @@ mod tests {
     #[test]
     fn force_does_not_write_through_a_dangling_symlink() {
         let dir = scratch("force_dangling");
-        let a = dir.join("a");
-        let dang = dir.join("dang");
+        let a = dir.path("a");
+        let dang = dir.path("dang");
         fs::write(&a, b"A").unwrap();
         std::os::unix::fs::symlink("nowhere", &dang).unwrap();
 
@@ -6718,7 +6696,7 @@ mod tests {
                     .is_symlink(),
                 "the link is still a link"
             );
-            assert!(!dir.join("nowhere").exists(), "and still points at nothing");
+            assert!(!dir.path("nowhere").exists(), "and still points at nothing");
         }
 
         // `--remove-destination` is the option that gets past it, because it
@@ -6733,7 +6711,6 @@ mod tests {
                 .file_type()
                 .is_symlink()
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A link that *does* resolve is written through, not replaced — and
@@ -6744,9 +6721,9 @@ mod tests {
     #[test]
     fn only_remove_destination_replaces_a_working_symlink() {
         let dir = scratch("through_link");
-        let a = dir.join("a");
-        let t = dir.join("target");
-        let lnk = dir.join("lnk");
+        let a = dir.path("a");
+        let t = dir.path("target");
+        let lnk = dir.path("lnk");
 
         fs::write(&a, b"A").unwrap();
         fs::write(&t, b"OLD").unwrap();
@@ -6765,7 +6742,6 @@ mod tests {
             !fs::symlink_metadata(&lnk).unwrap().file_type().is_symlink(),
             "the link itself was replaced by a file"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `cp a self` where `self` is a link to `a` is "the same file" — except
@@ -6775,8 +6751,8 @@ mod tests {
     #[test]
     fn remove_destination_is_excused_from_the_same_file_check() {
         let dir = scratch("same_link");
-        let a = dir.join("a");
-        let me = dir.join("self");
+        let a = dir.path("a");
+        let me = dir.path("self");
         fs::write(&a, b"A").unwrap();
         std::os::unix::fs::symlink("a", &me).unwrap();
 
@@ -6788,7 +6764,6 @@ mod tests {
         assert!(ok, "{err}");
         assert_eq!(body(&me), b"A");
         assert_eq!(body(&a), b"A", "the source survived");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-n` refuses on stderr and reports failure — it is not a quiet skip.
@@ -6797,8 +6772,8 @@ mod tests {
     #[test]
     fn no_clobber_refuses_and_fails() {
         let dir = scratch("noclobber");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
@@ -6807,7 +6782,6 @@ mod tests {
         assert_eq!(err, format!("cp: not replacing {}\n", quoteaf_os(&b)));
         assert_eq!(out, "", "and no verbose line, because nothing was copied");
         assert_eq!(body(&b), b"BBBB");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// With nothing in the way it copies and succeeds, so the refusal is about
@@ -6815,15 +6789,14 @@ mod tests {
     #[test]
     fn no_clobber_copies_when_there_is_nothing_to_clobber() {
         let dir = scratch("noclobber_new");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
 
         let (ok, out, err) = cp_out(&no_clobber_v(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
         assert_eq!(body(&b), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// One refusal must not abandon the sources after it, and must still be
@@ -6831,16 +6804,16 @@ mod tests {
     #[test]
     fn a_refusal_does_not_stop_the_other_sources() {
         let dir = scratch("noclobber_many");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
         for name in ["1", "2", "3"] {
-            fs::write(dir.join(name), name.as_bytes()).unwrap();
+            fs::write(dir.path(name), name.as_bytes()).unwrap();
         }
         fs::write(d.join("2"), b"kept").unwrap();
 
         let (ok, out, err) = cp_out(
             &no_clobber_v(),
-            &[&dir.join("1"), &dir.join("2"), &dir.join("3"), &d],
+            &[&dir.path("1"), &dir.path("2"), &dir.path("3"), &d],
         );
         assert!(!ok);
         assert_eq!(
@@ -6851,7 +6824,6 @@ mod tests {
         assert_eq!(body(&d.join("2")), b"kept");
         assert_eq!(body(&d.join("3")), b"3", "the source after the refusal");
         assert_eq!(out.lines().count(), 2, "two copies announced, not three");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-n` is checked per *entry*, not once per operand, so a recursive copy
@@ -6861,8 +6833,8 @@ mod tests {
     #[test]
     fn no_clobber_applies_inside_a_recursive_copy() {
         let dir = scratch("noclobber_r");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("keep"), b"new").unwrap();
         fs::write(src.join("add"), b"new").unwrap();
@@ -6886,7 +6858,6 @@ mod tests {
             b"new",
             "descending happened despite the refusal"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The question's exact text, and that a `y` gets on with it.
@@ -6899,8 +6870,8 @@ mod tests {
     #[test]
     fn a_yes_overwrites_and_the_question_is_the_whole_of_stderr() {
         let dir = scratch("ask_yes");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
@@ -6910,7 +6881,6 @@ mod tests {
         assert_eq!(out, "", "and nothing on stdout without -v");
         assert_eq!(asked, 1);
         assert_eq!(body(&b), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Declining is a **silent** exit 1: the question is the only thing
@@ -6920,8 +6890,8 @@ mod tests {
     #[test]
     fn a_no_and_an_empty_queue_both_decline_silently() {
         let dir = scratch("ask_no");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
@@ -6936,7 +6906,6 @@ mod tests {
             );
             assert_eq!(body(&b), b"BBBB");
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// With nothing in the way there is nothing to ask about, and the queue is
@@ -6945,8 +6914,8 @@ mod tests {
     #[test]
     fn nothing_to_clobber_is_not_worth_asking_about() {
         let dir = scratch("ask_new");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
 
         let (ok, _out, err, asked) = cp_answering(&ask(), &[&a, &b], &["n"]);
@@ -6954,7 +6923,6 @@ mod tests {
         assert_eq!(err, "");
         assert_eq!(asked, 0);
         assert_eq!(body(&b), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// One question per operand that needs one, answers taken in order, and a
@@ -6963,16 +6931,16 @@ mod tests {
     #[test]
     fn each_operand_gets_its_own_question_answered_in_order() {
         let dir = scratch("ask_many");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
         for name in ["1", "2", "3"] {
-            fs::write(dir.join(name), name.as_bytes()).unwrap();
+            fs::write(dir.path(name), name.as_bytes()).unwrap();
             fs::write(d.join(name), b"old").unwrap();
         }
 
         let (ok, _out, err, asked) = cp_answering(
             &ask(),
-            &[&dir.join("1"), &dir.join("2"), &dir.join("3"), &d],
+            &[&dir.path("1"), &dir.path("2"), &dir.path("3"), &d],
             &["y", "n", "y"],
         );
         assert!(!ok, "the middle decline is still a failure");
@@ -6991,7 +6959,6 @@ mod tests {
         assert_eq!(body(&d.join("1")), b"1");
         assert_eq!(body(&d.join("2")), b"old", "the declined one");
         assert_eq!(body(&d.join("3")), b"3", "the source after the decline");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-i` is asked per *entry* found by the walk, not once per operand, and
@@ -7000,8 +6967,8 @@ mod tests {
     #[test]
     fn interactive_asks_per_entry_inside_a_recursive_copy() {
         let dir = scratch("ask_r");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("keep"), b"new").unwrap();
         fs::write(src.join("add"), b"new").unwrap();
@@ -7035,7 +7002,6 @@ mod tests {
             b"new",
             "descending happened despite the decline"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The one place `-i` and `-n` see the world differently rather than merely
@@ -7046,7 +7012,7 @@ mod tests {
     #[test]
     fn interactive_reports_the_same_file_where_no_clobber_refuses() {
         let dir = scratch("ask_same");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"A").unwrap();
 
         let (ok, _out, err, asked) = cp_answering(&ask(), &[&a, &a], &["y"]);
@@ -7058,7 +7024,6 @@ mod tests {
         assert!(!ok);
         assert!(err.contains("not replacing"), "{err}");
         assert_eq!(body(&a), b"A");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The other two wordings. A destination the effective uid cannot write
@@ -7073,8 +7038,8 @@ mod tests {
             return;
         }
         let dir = scratch("ask_mode");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
         set_test_mode(&b, 0o444);
@@ -7114,7 +7079,6 @@ mod tests {
             assert_eq!(asked, 1);
         }
         assert_eq!(body(&b), b"BBBB", "every one of the three was declined");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-iv` writes to both streams, and which text goes to which is the point:
@@ -7123,8 +7087,8 @@ mod tests {
     #[test]
     fn the_question_is_on_stderr_and_the_verbose_line_on_stdout() {
         let dir = scratch("ask_verbose");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"A").unwrap();
         fs::write(&b, b"BBBB").unwrap();
 
@@ -7141,7 +7105,6 @@ mod tests {
         assert_eq!(err, format!("cp: overwrite {}? ", quoteaf_os(&b)));
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
         assert_eq!(asked, 1);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The regression this change also fixed: `cp -r` over a tree that already
@@ -7152,8 +7115,8 @@ mod tests {
     #[test]
     fn a_recursive_copy_replaces_an_existing_symlink() {
         let dir = scratch("r_relink");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"F").unwrap();
         std::os::unix::fs::symlink("f", src.join("link")).unwrap();
@@ -7168,7 +7131,6 @@ mod tests {
             Path::new("f"),
             "the stale link was replaced, not left alone"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// None of the three removes a directory. `-T` is what aims them at one:
@@ -7177,8 +7139,8 @@ mod tests {
     #[test]
     fn none_of_the_three_removes_a_directory() {
         let dir = scratch("vs_dir");
-        let a = dir.join("a");
-        let d = dir.join("d");
+        let a = dir.path("a");
+        let d = dir.path("d");
         fs::write(&a, b"A").unwrap();
         fs::create_dir(&d).unwrap();
         fs::write(d.join("witness"), b"w").unwrap();
@@ -7205,7 +7167,6 @@ mod tests {
             assert!(d.is_dir(), "still a directory");
             assert!(d.join("witness").is_file(), "and still has its contents");
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------- -b, --backup and -S --
@@ -7231,8 +7192,8 @@ mod tests {
     #[test]
     fn backup_moves_the_destination_aside_and_keeps_its_bytes() {
         let dir = scratch("backup_simple");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"NEW").unwrap();
         fs::write(&b, b"OLD").unwrap();
 
@@ -7245,28 +7206,26 @@ mod tests {
                 "{} -> {} (backup: {})\n",
                 quoteaf_os(&a),
                 quoteaf_os(&b),
-                quoteaf_os(dir.join("b~"))
+                quoteaf_os(dir.path("b~"))
             )
         );
         assert_eq!(body(&b), b"NEW");
-        assert_eq!(body(&dir.join("b~")), b"OLD");
-        let _ = fs::remove_dir_all(&dir);
+        assert_eq!(body(&dir.path("b~")), b"OLD");
     }
 
     /// Nothing to move aside is not an error, and prints no `(backup: …)`.
     #[test]
     fn a_destination_that_is_not_there_is_not_backed_up() {
         let dir = scratch("backup_absent");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"NEW").unwrap();
 
         let (ok, out, err) = cp_out(&backup_bv(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(out, format!("{} -> {}\n", quoteaf_os(&a), quoteaf_os(&b)));
-        assert!(!dir.join("b~").exists());
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir.path("b~").exists());
     }
 
     /// `-S` turns backups **on** by itself, and is not merely a name for the
@@ -7282,16 +7241,15 @@ mod tests {
             assert!(f.backup.enabled(), "{spelling:?}: -S must turn backups on");
 
             let dir = scratch("suffix");
-            let a = dir.join("a");
-            let b = dir.join("b");
+            let a = dir.path("a");
+            let b = dir.path("b");
             fs::write(&a, b"NEW").unwrap();
             fs::write(&b, b"OLD").unwrap();
             let (ok, err) = cp(&f, &[&a, &b]);
             assert!(ok, "{err}");
             assert_eq!(body(&b), b"NEW");
-            assert_eq!(body(&dir.join("b.bak")), b"OLD", "{spelling:?}");
-            assert!(!dir.join("b~").exists(), "{spelling:?}: the suffix is -S's");
-            let _ = fs::remove_dir_all(&dir);
+            assert_eq!(body(&dir.path("b.bak")), b"OLD", "{spelling:?}");
+            assert!(!dir.path("b~").exists(), "{spelling:?}: the suffix is -S's");
         }
     }
 
@@ -7300,18 +7258,17 @@ mod tests {
     fn numbered_backups_count_up() {
         let (f, _) = run_parse(&["--backup=numbered", "a", "b"]);
         let dir = scratch("backup_numbered");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&b, b"OLD1").unwrap();
         fs::write(&a, b"NEW1").unwrap();
         assert!(cp(&f, &[&a, &b]).0);
         fs::write(&a, b"NEW2").unwrap();
         assert!(cp(&f, &[&a, &b]).0);
 
-        assert_eq!(body(&dir.join("b.~1~")), b"OLD1");
-        assert_eq!(body(&dir.join("b.~2~")), b"NEW1");
+        assert_eq!(body(&dir.path("b.~1~")), b"OLD1");
+        assert_eq!(body(&dir.path("b.~2~")), b"NEW1");
         assert_eq!(body(&b), b"NEW2");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `existing` — which bare `-b` selects — is numbered only where numbered
@@ -7320,25 +7277,24 @@ mod tests {
     #[test]
     fn existing_follows_what_the_directory_already_has() {
         let dir = scratch("backup_existing");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"NEW").unwrap();
 
-        let plain_dst = dir.join("b");
+        let plain_dst = dir.path("b");
         fs::write(&plain_dst, b"OLD").unwrap();
         assert!(cp(&backup_b(), &[&a, &plain_dst]).0);
-        assert_eq!(body(&dir.join("b~")), b"OLD", "no numbers here, so simple");
+        assert_eq!(body(&dir.path("b~")), b"OLD", "no numbers here, so simple");
 
-        let numbered_dst = dir.join("c");
+        let numbered_dst = dir.path("c");
         fs::write(&numbered_dst, b"OLD").unwrap();
-        fs::write(dir.join("c.~1~"), b"ANCIENT").unwrap();
+        fs::write(dir.path("c.~1~"), b"ANCIENT").unwrap();
         assert!(cp(&backup_b(), &[&a, &numbered_dst]).0);
         assert_eq!(
-            body(&dir.join("c.~2~")),
+            body(&dir.path("c.~2~")),
             b"OLD",
             "numbers here, so numbered"
         );
-        assert!(!dir.join("c~").exists());
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir.path("c~").exists());
     }
 
     /// `--backup` and `--no-clobber` are refused together, and — unlike every
@@ -7401,8 +7357,8 @@ mod tests {
     #[test]
     fn a_backup_that_would_be_the_source_is_refused() {
         let dir = scratch("backup_eats_src");
-        let a = dir.join("a");
-        let a_tilde = dir.join("a~");
+        let a = dir.path("a");
+        let a_tilde = dir.path("a~");
         fs::write(&a, b"EMPTYISH").unwrap();
         fs::write(&a_tilde, b"THE ONLY COPY").unwrap();
 
@@ -7415,7 +7371,6 @@ mod tests {
         assert!(err.contains("might destroy source"), "{err}");
         assert_eq!(body(&a_tilde), b"THE ONLY COPY", "left where it was");
         assert_eq!(body(&a), b"EMPTYISH", "and not written over");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The numbered type is exempt from that refusal, because the name it picks
@@ -7423,8 +7378,8 @@ mod tests {
     #[test]
     fn a_numbered_backup_of_the_sources_own_name_is_made() {
         let dir = scratch("backup_numbered_src");
-        let a = dir.join("a");
-        let a_tilde = dir.join("a~");
+        let a = dir.path("a");
+        let a_tilde = dir.path("a~");
         fs::write(&a, b"OLD").unwrap();
         fs::write(&a_tilde, b"NEW").unwrap();
 
@@ -7434,9 +7389,8 @@ mod tests {
         };
         let (ok, err) = cp(&f, &[&a_tilde, &a]);
         assert!(ok, "{err}");
-        assert_eq!(body(&dir.join("a.~1~")), b"OLD");
+        assert_eq!(body(&dir.path("a.~1~")), b"OLD");
         assert_eq!(body(&a), b"NEW");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `--remove-destination` and `--backup` are upstream's `if` and `else if`
@@ -7448,7 +7402,7 @@ mod tests {
     #[test]
     fn remove_destination_gives_way_to_a_backup() {
         let dir = scratch("backup_vs_rmdest");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"NEW").unwrap();
         let (b, witness) = linked_destination(&dir);
 
@@ -7462,9 +7416,8 @@ mod tests {
         assert!(!out.contains("removed"), "must not unlink as well: {out}");
         assert!(out.contains("(backup: "), "{out}");
         assert_eq!(body(&b), b"NEW");
-        assert_eq!(body(&dir.join("b~")), b"BBBB", "the backup, not a deletion");
+        assert_eq!(body(&dir.path("b~")), b"BBBB", "the backup, not a deletion");
         assert_eq!(body(&witness), b"BBBB", "renamed aside, so the link holds");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A destination directory is not moved aside, so `cp -rb` merges into an
@@ -7474,10 +7427,10 @@ mod tests {
     #[test]
     fn a_destination_directory_is_merged_into_and_its_files_backed_up() {
         let dir = scratch("backup_tree");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"NEW").unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         fs::create_dir_all(dst.join("src")).unwrap();
         fs::write(dst.join("src/f"), b"OLD").unwrap();
 
@@ -7491,7 +7444,6 @@ mod tests {
         assert!(!dst.join("src~").exists());
         assert_eq!(body(&dst.join("src/f")), b"NEW");
         assert_eq!(body(&dst.join("src/f~")), b"OLD");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A source whose last component is `.` copies the *contents* into the
@@ -7500,10 +7452,10 @@ mod tests {
     #[test]
     fn a_dot_source_does_not_back_up_the_destination() {
         let dir = scratch("backup_dot");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"NEW").unwrap();
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         fs::create_dir(&dst).unwrap();
 
         let f = CpFlags {
@@ -7513,8 +7465,7 @@ mod tests {
         let (ok, err) = cp(&f, &[&src.join("."), &dst]);
         assert!(ok, "{err}");
         assert_eq!(body(&dst.join("f")), b"NEW");
-        assert!(!dir.join("dst~").exists());
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir.path("dst~").exists());
     }
 
     /// A backup made for a copy that then failed is put back, which is
@@ -7527,8 +7478,8 @@ mod tests {
             return; // 0000 denies nobody here, so the copy would succeed.
         }
         let dir = scratch("backup_un");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"NEW").unwrap();
         fs::write(&b, b"OLD").unwrap();
         set_test_mode(&a, 0o000);
@@ -7537,9 +7488,8 @@ mod tests {
         assert!(!ok, "an unreadable source cannot be copied");
         assert!(err.contains("cannot open"), "{err}");
         assert_eq!(body(&b), b"OLD", "put back under its own name");
-        assert!(!dir.join("b~").exists(), "and not left as the backup");
+        assert!(!dir.path("b~").exists(), "and not left as the backup");
         set_test_mode(&a, 0o600);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---------------------------------------- the order a directory is read --
@@ -7551,18 +7501,17 @@ mod tests {
     fn the_directory_read_returns_every_entry_once() {
         let dir = scratch("read_all");
         for name in ["a", "b", "c", "d"] {
-            fs::write(dir.join(name), b"x").unwrap();
+            fs::write(dir.path(name), b"x").unwrap();
         }
-        fs::create_dir(dir.join("sub")).unwrap();
+        fs::create_dir(dir.path("sub")).unwrap();
 
-        let mut got: Vec<String> = read_dir_fastread(&dir)
+        let mut got: Vec<String> = read_dir_fastread(dir.dir())
             .unwrap()
             .iter()
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         got.sort();
         assert_eq!(got, ["a", "b", "c", "d", "sub"]);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// And on Unix the order is inode-ascending, which is gnulib's
@@ -7583,10 +7532,10 @@ mod tests {
         // Names deliberately anti-correlated with creation order, so that a
         // sort by *name* would produce a different answer and be caught.
         for name in ["e", "d", "c", "b", "a"] {
-            fs::write(dir.join(name), b"x").unwrap();
+            fs::write(dir.path(name), b"x").unwrap();
         }
 
-        let inodes: Vec<u64> = read_dir_fastread(&dir)
+        let inodes: Vec<u64> = read_dir_fastread(dir.dir())
             .unwrap()
             .iter()
             .map(fs::DirEntry::ino)
@@ -7596,7 +7545,6 @@ mod tests {
             inodes.windows(2).all(|w| w[0] <= w[1]),
             "not ascending: {inodes:?}"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The line the repeat rule draws. Two hard links share an inode but are
@@ -7606,10 +7554,10 @@ mod tests {
     #[test]
     fn two_hard_links_to_one_file_are_not_one_source_named_twice() {
         let dir = scratch("two_hard");
-        let dest = dir.join("dest");
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
-        let one = dir.join("one");
-        let two = dir.join("two");
+        let one = dir.path("one");
+        let two = dir.path("two");
         fs::write(&one, b"body").unwrap();
         fs::hard_link(&one, &two).unwrap();
 
@@ -7618,7 +7566,6 @@ mod tests {
         assert_eq!(e, "", "nothing to warn about");
         assert_eq!(fs::read(dest.join("one")).unwrap(), b"body");
         assert_eq!(fs::read(dest.join("two")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// With one source there is no pair, so the tables are never built. This
@@ -7627,16 +7574,15 @@ mod tests {
     #[test]
     fn a_lone_source_is_never_a_repeat_of_itself() {
         let dir = scratch("lone");
-        let dest = dir.join("dest");
+        let dest = dir.path("dest");
         fs::create_dir(&dest).unwrap();
-        let f = dir.join("f");
+        let f = dir.path("f");
         fs::write(&f, b"body").unwrap();
 
         assert!(cp(&plain(), &[&f, &dest]).0);
         let (ok, e) = cp(&plain(), &[&f, &dest]);
         assert!(ok, "{e}");
         assert_eq!(e, "");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------- --preserve=links --
@@ -7705,9 +7651,9 @@ mod tests {
     #[test]
     fn preserve_links_makes_the_second_destination_a_link() {
         let dir = scratch("links_pair");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
 
@@ -7728,7 +7674,6 @@ mod tests {
         );
         assert_eq!(ino(&d.join("a")), ino(&d.join("b")));
         assert_eq!(fs::read(d.join("b")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// And without the option, two files — so the test above pins the option
@@ -7737,16 +7682,15 @@ mod tests {
     #[test]
     fn without_it_one_source_named_twice_lands_twice() {
         let dir = scratch("links_off");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
 
         let (ok, err) = cp(&plain(), &[&a, &b, &d]);
         assert!(ok, "{err}");
         assert_ne!(ino(&d.join("a")), ino(&d.join("b")));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The table spans the whole invocation, not one operand: a pair found by
@@ -7757,18 +7701,17 @@ mod tests {
     #[test]
     fn preserve_links_spans_a_recursive_walk() {
         let dir = scratch("links_walk");
-        let s = dir.join("s");
+        let s = dir.path("s");
         fs::create_dir(&s).unwrap();
         fs::write(s.join("x"), b"body").unwrap();
         fs::hard_link(s.join("x"), s.join("y")).unwrap();
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
 
         let (ok, err) = cp(&links_rv(), &[&s, &d]);
         assert!(ok, "{err}");
         let out = d.join("s");
         assert_eq!(ino(&out.join("x")), ino(&out.join("y")));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A destination that already exists and has a second link of its own is
@@ -7782,11 +7725,11 @@ mod tests {
     #[test]
     fn a_multiply_linked_destination_is_removed_before_the_announce() {
         let dir = scratch("links_dst_nlink");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"new").unwrap();
-        let (dst, witness) = (d.join("a"), dir.join("witness"));
+        let (dst, witness) = (d.join("a"), dir.path("witness"));
         fs::write(&dst, b"OLD").unwrap();
         fs::hard_link(&dst, &witness).unwrap();
 
@@ -7803,7 +7746,6 @@ mod tests {
             b"OLD",
             "the other link was left alone, which is the point of unlinking"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The other ordering. When the destination has only its own link, nothing
@@ -7814,9 +7756,9 @@ mod tests {
     #[test]
     fn a_replaced_destination_is_removed_after_the_announce() {
         let dir = scratch("links_replace");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
         fs::write(d.join("b"), b"OLD").unwrap();
@@ -7830,7 +7772,6 @@ mod tests {
         assert!(lines[2].starts_with("removed "), "{out}");
         assert!(lines[2].contains("b'"), "{out}");
         assert_eq!(ino(&d.join("a")), ino(&d.join("b")));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Two *symlinks* to one file, followed. Neither the links nor the file
@@ -7851,10 +7792,10 @@ mod tests {
             },
         ] {
             let dir = scratch("links_deref");
-            let d = dir.join("d");
+            let d = dir.path("d");
             fs::create_dir(&d).unwrap();
-            fs::write(dir.join("real"), b"body").unwrap();
-            let (la, lb) = (dir.join("la"), dir.join("lb"));
+            fs::write(dir.path("real"), b"body").unwrap();
+            let (la, lb) = (dir.path("la"), dir.path("lb"));
             std::os::unix::fs::symlink("real", &la).unwrap();
             std::os::unix::fs::symlink("real", &lb).unwrap();
 
@@ -7862,7 +7803,6 @@ mod tests {
             assert!(ok, "{err}");
             assert_eq!(ino(&d.join("la")), ino(&d.join("lb")), "{flags:?}");
             assert!(!d.join("lb").symlink_metadata().unwrap().is_symlink());
-            let _ = fs::remove_dir_all(&dir);
         }
     }
 
@@ -7873,10 +7813,10 @@ mod tests {
     #[test]
     fn no_dereference_does_not_link_two_separate_symlinks() {
         let dir = scratch("links_P_two");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        fs::write(dir.join("real"), b"body").unwrap();
-        let (la, lb) = (dir.join("la"), dir.join("lb"));
+        fs::write(dir.path("real"), b"body").unwrap();
+        let (la, lb) = (dir.path("la"), dir.path("lb"));
         std::os::unix::fs::symlink("real", &la).unwrap();
         std::os::unix::fs::symlink("real", &lb).unwrap();
 
@@ -7887,7 +7827,6 @@ mod tests {
         let (ok, err) = cp(&flags, &[&la, &lb, &d]);
         assert!(ok, "{err}");
         assert_ne!(ino(&d.join("la")), ino(&d.join("lb")));
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Two hard links to one *symlink*, with `-P`. The operands are one file
@@ -7899,10 +7838,10 @@ mod tests {
     #[test]
     fn no_dereference_links_two_names_for_one_symlink() {
         let dir = scratch("links_P_one");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        fs::write(dir.join("real"), b"body").unwrap();
-        let (la, lb) = (dir.join("la"), dir.join("lb"));
+        fs::write(dir.path("real"), b"body").unwrap();
+        let (la, lb) = (dir.path("la"), dir.path("lb"));
         std::os::unix::fs::symlink("real", &la).unwrap();
         fs::hard_link(&la, &lb).unwrap();
 
@@ -7918,7 +7857,6 @@ mod tests {
             "the link is to the symlink, not through it"
         );
         assert_eq!(hard_links(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A source that fails to copy is *forgotten*, so the next name for it is
@@ -7938,9 +7876,9 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
 
         let dir = scratch("links_forget");
-        let d = dir.join("d");
+        let d = dir.path("d");
         fs::create_dir(&d).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
         fs::set_permissions(&a, fs::Permissions::from_mode(0o000)).unwrap();
@@ -7954,7 +7892,6 @@ mod tests {
             "the second failure is its own, not a link failure: {err}"
         );
         assert!(!d.join("a").exists() && !d.join("b").exists());
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A destination reached by *linking* is not recorded as one this command
@@ -7969,11 +7906,11 @@ mod tests {
     #[test]
     fn a_linked_destination_is_not_recorded_as_created() {
         let dir = scratch("links_dest_info");
-        let d = dir.join("d");
-        let o = dir.join("o");
+        let d = dir.path("d");
+        let o = dir.path("o");
         fs::create_dir(&d).unwrap();
         fs::create_dir(&o).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
         fs::write(o.join("b"), b"other").unwrap();
@@ -7987,11 +7924,11 @@ mod tests {
         // Without the option, `d/b` *is* recorded, and the third operand is
         // refused. The two halves are the same command but for the option.
         let dir = scratch("links_dest_info_off");
-        let d = dir.join("d");
-        let o = dir.join("o");
+        let d = dir.path("d");
+        let o = dir.path("o");
         fs::create_dir(&d).unwrap();
         fs::create_dir(&o).unwrap();
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         fs::hard_link(&a, &b).unwrap();
         fs::write(o.join("b"), b"other").unwrap();
@@ -8001,18 +7938,6 @@ mod tests {
         assert!(!ok);
         assert!(err.contains("will not overwrite just-created"), "{err}");
         assert_eq!(fs::read(d.join("b")).unwrap(), b"body");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn split_entry_keeps_dot_and_dotdot_apart() {
-        assert_eq!(split_entry(Path::new("a/.")).1, OsString::from("."));
-        assert_eq!(split_entry(Path::new("a/..")).1, OsString::from(".."));
-        assert_eq!(split_entry(Path::new("a/b/")).1, OsString::from("b"));
-        assert_eq!(
-            split_entry(Path::new("b")),
-            (PathBuf::from("."), "b".into())
-        );
     }
 
     // ------------------------------------------------- modes, module docs 8 --
@@ -8100,15 +8025,14 @@ mod tests {
         ];
         let dir = scratch("file_mode");
         for (i, &(mask, src_mode, want)) in rows.iter().enumerate() {
-            let a = dir.join(format!("a{i}"));
-            let b = dir.join(format!("b{i}"));
+            let a = dir.path(&format!("a{i}"));
+            let b = dir.path(&format!("b{i}"));
             fs::write(&a, b"x").unwrap();
             set_test_mode(&a, src_mode);
             let (ok, err) = with_umask(mask, || cp(&plain(), &[&a, &b]));
             assert!(ok, "{err}");
             assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The security half of module docs, bug 8: copying a wide file over a
@@ -8118,8 +8042,8 @@ mod tests {
     #[test]
     fn an_existing_destination_keeps_its_own_mode() {
         let dir = scratch("keep_mode");
-        let a = dir.join("public");
-        let b = dir.join("private");
+        let a = dir.path("public");
+        let b = dir.path("private");
         fs::write(&a, b"wide").unwrap();
         set_test_mode(&a, 0o777);
         fs::write(&b, b"narrow").unwrap();
@@ -8129,7 +8053,6 @@ mod tests {
         assert!(ok, "{err}");
         assert_eq!(fs::read(&b).unwrap(), b"wide", "contents are copied");
         assert_eq!(mode_of(&b), 0o600, "permissions are not");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A copied directory ends at `src & 07777 & ~umask`, sticky bit included
@@ -8147,8 +8070,8 @@ mod tests {
         ];
         let dir = scratch("dir_mode");
         for (i, &(mask, src_mode, want)) in rows.iter().enumerate() {
-            let a = dir.join(format!("s{i}"));
-            let b = dir.join(format!("d{i}"));
+            let a = dir.path(&format!("s{i}"));
+            let b = dir.path(&format!("d{i}"));
             fs::create_dir(&a).unwrap();
             fs::write(a.join("inner"), b"x").unwrap();
             set_test_mode(&a, src_mode);
@@ -8157,7 +8080,6 @@ mod tests {
             assert_eq!(mode_of(&b), want, "umask {mask:04o}, source {src_mode:04o}");
             assert!(b.join("inner").is_file(), "and it was actually filled");
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A source directory the copy cannot write into must still be filled: the
@@ -8168,8 +8090,8 @@ mod tests {
     #[test]
     fn a_read_only_source_directory_is_copied_whole_and_ends_read_only() {
         let dir = scratch("ro_dir");
-        let a = dir.join("src");
-        let b = dir.join("dst");
+        let a = dir.path("src");
+        let b = dir.path("dst");
         fs::create_dir(&a).unwrap();
         fs::write(a.join("inner"), b"x").unwrap();
         set_test_mode(&a, 0o500);
@@ -8182,7 +8104,6 @@ mod tests {
         // Leave both writable again so the scratch directory can be removed.
         set_test_mode(&a, 0o700);
         set_test_mode(&b, 0o700);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ----------------------------------------------------- -p on the disk --
@@ -8300,8 +8221,8 @@ mod tests {
     #[test]
     fn preserve_keeps_the_mode_and_the_time_against_the_umask() {
         let dir = scratch("p_file");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o741);
         let want = stamp(&a, 1_000_000_000);
@@ -8311,7 +8232,6 @@ mod tests {
         assert_eq!(err, "");
         assert_eq!(mode_of(&b), 0o741, "the umask does not apply to -p");
         assert_eq!(mtime_of(&b), want);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The set-user-ID bit specifically, because it is the one attribute whose
@@ -8321,15 +8241,14 @@ mod tests {
     #[test]
     fn preserve_keeps_the_setuid_bit() {
         let dir = scratch("p_suid");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o4755);
 
         let (ok, err) = cp(&preserve(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(mode_of(&b), 0o4755);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// One attribute at a time. Each row asks for exactly one word and asserts
@@ -8356,24 +8275,22 @@ mod tests {
         };
         let dir = scratch("p_alone");
 
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o741);
         let then = stamp(&a, 1_000_000_000);
 
-        let m = dir.join("m");
+        let m = dir.path("m");
         let (ok, err) = with_umask(0o022, || cp(&only_mode, &[&a, &m]));
         assert!(ok, "{err}");
         assert_eq!(mode_of(&m), 0o741, "the mode is the source's");
         assert_ne!(mtime_of(&m), then, "and the time is not");
 
-        let t = dir.join("t");
+        let t = dir.path("t");
         let (ok, err) = with_umask(0o022, || cp(&only_times, &[&a, &t]));
         assert!(ok, "{err}");
         assert_eq!(mtime_of(&t), then, "the time is the source's");
         assert_eq!(mode_of(&t), 0o741 & !0o022, "and the mode is a new file's");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A directory destination is never unlinked to clear the way, whichever
@@ -8401,13 +8318,13 @@ mod tests {
             ..off()
         };
         let dir = scratch("d_keep");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"x").unwrap();
-        let l = dir.join("l");
+        let l = dir.path("l");
         std::os::unix::fs::symlink("a", &l).unwrap();
 
         for (what, flags) in [(&a, links_t), (&l, symlink_t)] {
-            let d = dir.join("d");
+            let d = dir.path("d");
             fs::create_dir(&d).unwrap();
             let (ok, err) = cp(&flags, &[what, &d]);
             assert!(!ok, "{}: {err}", what.display());
@@ -8418,7 +8335,6 @@ mod tests {
             assert!(d.is_dir(), "and the directory is still there");
             fs::remove_dir(&d).unwrap();
         }
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ------------------------------------------------ extended attributes --
@@ -8454,10 +8370,9 @@ mod tests {
         ];
         for (spelling, flags) in asked {
             let dir = scratch("x_cross");
-            let (a, b) = (dir.join("a"), dir.join("b"));
+            let (a, b) = (dir.path("a"), dir.path("b"));
             fs::write(&a, b"body").unwrap();
             if !seed_xattr(&a, b"user.tag", VALUE) {
-                let _ = fs::remove_dir_all(&dir);
                 return;
             }
 
@@ -8469,7 +8384,6 @@ mod tests {
                 Some(VALUE),
                 "{spelling} did not carry the attribute"
             );
-            let _ = fs::remove_dir_all(&dir);
         }
     }
 
@@ -8481,10 +8395,9 @@ mod tests {
     #[test]
     fn an_extended_attribute_stays_behind_when_it_was_not_asked_for() {
         let dir = scratch("x_nocross");
-        let (a, b) = (dir.join("a"), dir.join("b"));
+        let (a, b) = (dir.path("a"), dir.path("b"));
         fs::write(&a, b"body").unwrap();
         if !seed_xattr(&a, b"user.tag", b"v") {
-            let _ = fs::remove_dir_all(&dir);
             return;
         }
 
@@ -8495,7 +8408,6 @@ mod tests {
             None,
             "-p is not --preserve=xattr"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The three levels of loudness, on a failure that is neither hypothetical
@@ -8522,11 +8434,10 @@ mod tests {
         ];
         for (spelling, flags, speaks, succeeds) in rows {
             let dir = scratch("x_loud");
-            let (a, b) = (dir.join("a"), dir.join("b"));
+            let (a, b) = (dir.path("a"), dir.path("b"));
             fs::create_dir(&a).unwrap();
             fs::create_dir(&b).unwrap();
             if !seed_xattr(&a, b"user.tag", b"v") {
-                let _ = fs::remove_dir_all(&dir);
                 return;
             }
             set_test_mode(&b, 0o555);
@@ -8543,7 +8454,6 @@ mod tests {
             } else {
                 assert_eq!(err, "", "{spelling} is the quiet one");
             }
-            let _ = fs::remove_dir_all(&dir);
         }
     }
 
@@ -8564,15 +8474,14 @@ mod tests {
             ..off()
         };
         let dir = scratch("p_own");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o741);
 
         let (ok, err) = with_umask(0o000, || cp(&flags, &[&a, &b]));
         assert!(ok, "{err}");
         assert_eq!(mode_of(&b), 0o741);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-p` over an *existing* destination replaces its mode, where a plain
@@ -8582,8 +8491,8 @@ mod tests {
     #[test]
     fn preserve_replaces_an_existing_destinations_mode_and_time() {
         let dir = scratch("p_over");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"new").unwrap();
         set_test_mode(&a, 0o741);
         let want = stamp(&a, 1_000_000_000);
@@ -8596,7 +8505,6 @@ mod tests {
         assert_eq!(fs::read(&b).unwrap(), b"new");
         assert_eq!(mode_of(&b), 0o741);
         assert_eq!(mtime_of(&b), want);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A whole tree. The directory's own time is stamped *after* it is filled,
@@ -8607,8 +8515,8 @@ mod tests {
     #[test]
     fn preserve_stamps_a_directory_after_filling_it() {
         let dir = scratch("p_tree");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         let sub = src.join("sub");
         fs::create_dir(&src).unwrap();
         fs::create_dir(&sub).unwrap();
@@ -8632,7 +8540,6 @@ mod tests {
             0o741,
             "the umask does not apply to -p, at any depth"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A 0500 source directory under `-p`: it has no owner-write, so the copy
@@ -8643,8 +8550,8 @@ mod tests {
     #[test]
     fn preserve_restores_a_read_only_directory_last() {
         let dir = scratch("p_ro");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"x").unwrap();
         set_test_mode(&src, 0o500);
@@ -8656,7 +8563,6 @@ mod tests {
 
         set_test_mode(&src, 0o700);
         set_test_mode(&dst, 0o700);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `-P -p` on a symbolic link keeps the *link's* own times and does not try
@@ -8672,9 +8578,9 @@ mod tests {
             ..off()
         };
         let dir = scratch("p_link");
-        let target = dir.join("target");
-        let link = dir.join("link");
-        let copy = dir.join("copy");
+        let target = dir.path("target");
+        let link = dir.path("link");
+        let copy = dir.path("copy");
         fs::write(&target, b"x").unwrap();
         std::os::unix::fs::symlink("target", &link).unwrap();
         let want = stamp(&link, 1_000_000_000);
@@ -8684,7 +8590,6 @@ mod tests {
         assert_eq!(err, "", "and nothing was said about the mode");
         assert!(fs::symlink_metadata(&copy).unwrap().is_symlink());
         assert_eq!(mtime_of(&copy), want);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// `--no-preserve=mode` on a destination this run created is not the same
@@ -8705,24 +8610,22 @@ mod tests {
         };
         let dir = scratch("no_p_mode");
 
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"x").unwrap();
         set_test_mode(&a, 0o700);
         let (ok, err) = with_umask(0o022, || cp(&flags, &[&a, &b]));
         assert!(ok, "{err}");
         assert_eq!(mode_of(&b), 0o644, "0666 & ~022, not the source's 0700");
 
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"x").unwrap();
         set_test_mode(&src, 0o700);
         let (ok, err) = with_umask(0o022, || cp(&flags_r, &[&src, &dst]));
         assert!(ok, "{err}");
         assert_eq!(mode_of(&dst), 0o755, "0777 & ~022 for a directory");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// …but only on a destination this run created. An existing one keeps its
@@ -8736,8 +8639,8 @@ mod tests {
             ..off()
         };
         let dir = scratch("no_p_over");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"new").unwrap();
         set_test_mode(&a, 0o700);
         fs::write(&b, b"old").unwrap();
@@ -8747,7 +8650,6 @@ mod tests {
         assert!(ok, "{err}");
         assert_eq!(fs::read(&b).unwrap(), b"new");
         assert_eq!(mode_of(&b), 0o600);
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Module docs, bug 7. The assertion that matters is not the message but
@@ -8756,13 +8658,12 @@ mod tests {
     #[test]
     fn copying_a_file_onto_itself_is_refused_and_leaves_it_whole() {
         let dir = scratch("same_file");
-        let a = dir.join("a");
+        let a = dir.path("a");
         fs::write(&a, b"contents").unwrap();
         let (ok, err) = cp(&plain(), &[&a, &a]);
         assert!(!ok, "should have been refused");
         assert!(err.contains("are the same file"), "{err}");
         assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The same file reached by a second spelling. A string comparison of the
@@ -8770,8 +8671,8 @@ mod tests {
     #[test]
     fn a_file_onto_itself_by_another_path_is_refused() {
         let dir = scratch("same_file_dotted");
-        let a = dir.join("a");
-        let sub = dir.join("sub");
+        let a = dir.path("a");
+        let sub = dir.path("sub");
         fs::write(&a, b"contents").unwrap();
         fs::create_dir(&sub).unwrap();
         let dotted = sub.join("..").join("a");
@@ -8779,7 +8680,6 @@ mod tests {
         assert!(!ok, "should have been refused: {err}");
         assert!(err.contains("are the same file"), "{err}");
         assert_eq!(fs::read(&a).unwrap(), b"contents", "the file must survive");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A destination that merely *exists* is not the same file, and must still
@@ -8788,15 +8688,14 @@ mod tests {
     #[test]
     fn an_existing_different_destination_is_still_overwritten() {
         let dir = scratch("same_file_neg");
-        let a = dir.join("a");
-        let b = dir.join("b");
+        let a = dir.path("a");
+        let b = dir.path("b");
         fs::write(&a, b"new").unwrap();
         fs::write(&b, b"old").unwrap();
         let (ok, err) = cp(&plain(), &[&a, &b]);
         assert!(ok, "{err}");
         assert_eq!(err, "");
         assert_eq!(fs::read(&b).unwrap(), b"new");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -8817,43 +8716,41 @@ mod tests {
     #[test]
     fn a_directory_needs_recursive() {
         let dir = scratch("needs_r");
-        let sub = dir.join("sub");
+        let sub = dir.path("sub");
         fs::create_dir(&sub).unwrap();
-        let (ok, err) = cp(&plain(), &[&sub, &dir.join("copy")]);
+        let (ok, err) = cp(&plain(), &[&sub, &dir.path("copy")]);
         assert!(!ok);
         assert!(err.contains("omitting directory"), "{err}");
-        assert!(!dir.join("copy").exists());
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!dir.path("copy").exists());
     }
 
     #[test]
     fn copies_a_tree() {
         let dir = scratch("tree");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir_all(src.join("deep/deeper")).unwrap();
         fs::write(src.join("top"), b"1").unwrap();
         fs::write(src.join("deep/mid"), b"2").unwrap();
         fs::write(src.join("deep/deeper/bottom"), b"3").unwrap();
 
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(dst.join("top")).unwrap(), b"1");
         assert_eq!(fs::read(dst.join("deep/mid")).unwrap(), b"2");
         assert_eq!(fs::read(dst.join("deep/deeper/bottom")).unwrap(), b"3");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_failure_does_not_abort_the_rest() {
         let dir = scratch("partial");
-        let sub = dir.join("sub");
+        let sub = dir.path("sub");
         fs::create_dir(&sub).unwrap();
-        let a = dir.join("a");
-        let c = dir.join("c");
+        let a = dir.path("a");
+        let c = dir.path("c");
         fs::write(&a, b"a").unwrap();
         fs::write(&c, b"c").unwrap();
-        let (ok, err) = cp(&plain(), &[&a, &dir.join("gone"), &c, &sub]);
+        let (ok, err) = cp(&plain(), &[&a, &dir.path("gone"), &c, &sub]);
         assert!(!ok, "the missing source must count against the status");
         assert!(err.contains("gone"), "{err}");
         assert!(sub.join("a").is_file(), "the first source must still copy");
@@ -8861,14 +8758,13 @@ mod tests {
             sub.join("c").is_file(),
             "and so must the one after the error"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 2 in the module docs. Before the fix this filled the disk.
     #[test]
     fn refuses_to_copy_a_directory_into_itself() {
         let dir = scratch("into_itself");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("f"), b"x").unwrap();
 
@@ -8882,7 +8778,6 @@ mod tests {
         let (ok, err) = cp(&recursive(), &[&src, &src.join("nested")]);
         assert!(!ok, "{err}");
         assert!(err.contains("into itself"), "{err}");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 5, end to end. `inner/..` is the scratch directory itself and the
@@ -8893,11 +8788,11 @@ mod tests {
     #[test]
     fn a_dotdot_source_targets_the_destination_and_not_its_parent() {
         let dir = scratch("dotdot");
-        let inner = dir.join("inner");
-        let dst = dir.join("dst");
+        let inner = dir.path("inner");
+        let dst = dir.path("dst");
         fs::create_dir(&inner).unwrap();
         fs::create_dir(&dst).unwrap();
-        fs::write(dir.join("sibling"), b"x").unwrap();
+        fs::write(dir.path("sibling"), b"x").unwrap();
 
         let (ok, err) = cp(&recursive(), &[&inner.join(".."), &dst]);
         assert!(!ok);
@@ -8907,10 +8802,9 @@ mod tests {
             "the target is the destination itself, not its parent: {err}"
         );
         assert!(
-            !dir.parent().unwrap().join("sibling").exists(),
+            !dir.dir().parent().unwrap().join("sibling").exists(),
             "nothing may be written beside the destination's parent"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// The idiom the first fix for bug 5 broke: `cp -r a/. dst` fills `dst`
@@ -8918,8 +8812,8 @@ mod tests {
     #[test]
     fn a_dot_source_copies_the_contents_into_the_destination() {
         let dir = scratch("dotsrc");
-        let src = dir.join("src");
-        let dst = dir.join("dst");
+        let src = dir.path("src");
+        let dst = dir.path("dst");
         fs::create_dir_all(src.join("sub")).unwrap();
         fs::create_dir(&dst).unwrap();
         fs::write(src.join("sub").join("f"), b"x").unwrap();
@@ -8931,7 +8825,6 @@ mod tests {
             !dst.join("src").exists(),
             "the source's own name must not appear inside the destination"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 1 in the module docs, the non-terminating half. `loop` points at its
@@ -8941,12 +8834,12 @@ mod tests {
     #[cfg(unix)]
     fn a_symlink_loop_in_the_tree_does_not_recurse_for_ever() {
         let dir = scratch("loop");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir_all(src.join("sub")).unwrap();
         fs::write(src.join("sub/f"), b"x").unwrap();
         std::os::unix::fs::symlink("..", src.join("sub/loop")).unwrap();
 
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         assert_eq!(fs::read(dst.join("sub/f")).unwrap(), b"x");
@@ -8959,7 +8852,6 @@ mod tests {
             fs::read_link(dst.join("sub/loop")).unwrap(),
             Path::new("..")
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 1's other half: a link in the tree used to become a full copy of its
@@ -8968,12 +8860,12 @@ mod tests {
     #[cfg(unix)]
     fn a_symlink_in_the_tree_is_copied_as_a_symlink() {
         let dir = scratch("tree_link");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("real"), b"contents").unwrap();
         std::os::unix::fs::symlink("real", src.join("link")).unwrap();
 
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         let meta = fs::symlink_metadata(dst.join("link")).unwrap();
@@ -8981,7 +8873,6 @@ mod tests {
         assert_eq!(fs::read_link(dst.join("link")).unwrap(), Path::new("real"));
         // And the relative link still resolves, in its new directory.
         assert_eq!(fs::read(dst.join("link")).unwrap(), b"contents");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Without `-r`, a symlink operand is followed — that is GNU's behaviour and
@@ -8990,12 +8881,12 @@ mod tests {
     #[cfg(unix)]
     fn without_recursive_a_symlink_operand_is_still_followed() {
         let dir = scratch("deref");
-        let real = dir.join("real");
+        let real = dir.path("real");
         fs::write(&real, b"contents").unwrap();
-        let link = dir.join("link");
+        let link = dir.path("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
 
-        let out = dir.join("out");
+        let out = dir.path("out");
         let (ok, err) = cp(&plain(), &[&link, &out]);
         assert!(ok, "{err}");
         let meta = fs::symlink_metadata(&out).unwrap();
@@ -9004,7 +8895,6 @@ mod tests {
             "plain cp copies what the link points at"
         );
         assert_eq!(fs::read(&out).unwrap(), b"contents");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// Bug 3 in the module docs: a 0700 source used to produce a 0755 copy,
@@ -9014,17 +8904,16 @@ mod tests {
     fn a_copied_directory_keeps_the_source_mode() {
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("modes");
-        let src = dir.join("private");
+        let src = dir.path("private");
         fs::create_dir(&src).unwrap();
         fs::write(src.join("secret"), b"x").unwrap();
         fs::set_permissions(&src, fs::Permissions::from_mode(0o700)).unwrap();
 
-        let dst = dir.join("copy");
+        let dst = dir.path("copy");
         let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
         let mode = fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "a private directory must stay private");
-        let _ = fs::remove_dir_all(&dir);
     }
 
     /// A file whose name is not valid UTF-8 — the case the whole rewrite is
@@ -9034,7 +8923,7 @@ mod tests {
     fn copies_a_tree_holding_a_name_that_is_not_utf8() {
         use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let dir = scratch("nonutf8");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
 
         let mut name = src.clone().into_os_string().into_vec();
@@ -9042,7 +8931,7 @@ mod tests {
         let odd = PathBuf::from(OsString::from_vec(name));
         fs::write(&odd, b"x").unwrap();
 
-        let dst = dir.join("dst");
+        let dst = dir.path("dst");
         let (ok, err) = cp(&recursive(), &[&src, &dst]);
         assert!(ok, "{err}");
 
@@ -9054,7 +8943,6 @@ mod tests {
             copied.as_os_str().as_bytes().ends_with(b"\x80bad"),
             "the name must survive byte for byte"
         );
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ---------------------------------------------------------- is_inside --
@@ -9062,26 +8950,24 @@ mod tests {
     #[test]
     fn is_inside_sees_through_a_different_spelling() {
         let dir = scratch("inside");
-        let src = dir.join("src");
+        let src = dir.path("src");
         fs::create_dir(&src).unwrap();
 
         assert!(is_inside(&src.join("child"), &src));
         assert!(is_inside(&src.join("a/b/c"), &src));
         // `src/./` and `src` are the same directory.
         assert!(is_inside(&src.join(".").join("child"), &src));
-        assert!(!is_inside(&dir.join("sibling"), &src));
+        assert!(!is_inside(&dir.path("sibling"), &src));
         // A sibling whose name merely starts with the source's is not inside it.
-        assert!(!is_inside(&dir.join("srcery"), &src));
-        let _ = fs::remove_dir_all(&dir);
+        assert!(!is_inside(&dir.path("srcery"), &src));
     }
 
     #[test]
     fn resolve_as_far_as_exists_handles_a_path_that_is_not_there_yet() {
         let dir = scratch("resolve");
-        let deep = dir.join("nope/not/here");
+        let deep = dir.path("nope/not/here");
         let resolved = resolve_as_far_as_exists(&deep).unwrap();
         assert!(resolved.ends_with("nope/not/here"), "{resolved:?}");
         assert!(resolved.is_absolute(), "{resolved:?}");
-        let _ = fs::remove_dir_all(&dir);
     }
 }

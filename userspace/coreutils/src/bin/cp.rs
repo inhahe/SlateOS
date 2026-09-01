@@ -251,7 +251,9 @@ use coreutils::errmsg::strerror;
 use coreutils::fileid::{
     EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
 };
-use coreutils::fsattr::{self, Link, On, Owner, When};
+use coreutils::fsattr::{
+    self, Link, On, chown_privileges, is_denied_ownership, owner_of, permission_bits, times_of,
+};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
 use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
@@ -3414,7 +3416,7 @@ fn preserve_attributes<O: Write, E: Write>(
         // the same failure to the user as one whose copy cannot be stamped:
         // the destination has the wrong times either way, and `preserving
         // times for` is the sentence for that.
-        if let Err(e) = source_times(src.meta).and_then(|times| fsattr::set_times(on, times)) {
+        if let Err(e) = times_of(src.meta).and_then(|times| fsattr::set_times(on, times)) {
             let why = strerror(&e);
             let _ = writeln!(
                 job.err,
@@ -3578,24 +3580,6 @@ const fn libc_enotsup() -> i32 {
 /// `ENODATA` on Linux — "the attribute you named is not there".
 const fn libc_enodata() -> i32 {
     61
-}
-
-/// The source's two timestamps, in the form [`fsattr::set_times`] takes.
-///
-/// GNU reads these out of the `struct stat` it is already holding, where they
-/// cannot fail. `std` hands them back as a `Result` because a platform can
-/// genuinely lack one, so the failure is reported rather than turned into
-/// [`When::Omit`] — a copy silently keeping *its own* modification time is
-/// exactly the wrong answer `-p` was given to prevent.
-///
-/// # Errors
-///
-/// Whatever `std` said about reading either stamp.
-fn source_times(meta: &fs::Metadata) -> io::Result<fsattr::Times> {
-    Ok(fsattr::Times {
-        accessed: When::Set(meta.accessed()?),
-        modified: When::Set(meta.modified()?),
-    })
 }
 
 /// GNU's `set_owner` (`copy.c:889`), whose three outcomes are three different
@@ -3913,74 +3897,6 @@ fn current_mode(on: On<'_>) -> io::Result<u32> {
     Ok(permission_bits(&meta))
 }
 
-/// Whether an ownership change was refused for want of privilege rather than
-/// for a reason worth reporting.
-///
-/// GNU tests `errno == EPERM || errno == EINVAL` in both `chown_failure_ok` and
-/// `owner_failure_ok`. `EINVAL` is there because some systems answer a request
-/// to set an unsupported owner that way rather than with `EPERM`.
-///
-/// Deliberately not [`io::ErrorKind::PermissionDenied`], which also covers
-/// `EACCES` — and `EACCES` from a `chown` means a directory on the path is not
-/// searchable, which is a real fault and must be reported.
-fn is_denied_ownership(e: &io::Error) -> bool {
-    /// `EPERM`.
-    const OPERATION_NOT_PERMITTED: i32 = 1;
-    /// `EINVAL`.
-    const INVALID_ARGUMENT: i32 = 22;
-    matches!(
-        e.raw_os_error(),
-        Some(OPERATION_NOT_PERMITTED | INVALID_ARGUMENT)
-    )
-}
-
-/// GNU's `chown_privileges` and `owner_privileges`, which on anything but
-/// Solaris are one question: is this root?
-///
-/// It decides whether a refused `chown` is reported. As root it is a real
-/// failure — root's `chown` does not fail for want of permission — and for
-/// everyone else it is the ordinary state of affairs.
-///
-/// Its own `geteuid` binding, rather than a call to
-/// [`coreutils::overwrite::can_write_any_file`], because upstream keeps them
-/// apart too — this is `copy.c:3018` and that is `lib/write-any-file.c`, each
-/// with its own `geteuid () == ROOT_UID`. The expressions coincide; the
-/// questions do not, and folding them would make a future divergence in either
-/// one silently change the other.
-#[cfg(unix)]
-fn chown_privileges() -> bool {
-    unsafe extern "C" {
-        fn geteuid() -> u32;
-    }
-
-    // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
-    // fail — POSIX gives it no error return.
-    unsafe { geteuid() == 0 }
-}
-
-/// Windows has no `chown` for [`fsattr::set_owner`] to fail at, so nothing
-/// consults this. Answering "not privileged" keeps any future caller on the
-/// quiet path rather than the reporting one.
-#[cfg(not(unix))]
-fn chown_privileges() -> bool {
-    false
-}
-
-/// The source's owner and group, as [`fsattr::set_owner`] wants them.
-#[cfg(unix)]
-fn owner_of(meta: &fs::Metadata) -> Owner {
-    use std::os::unix::fs::MetadataExt;
-    Owner::of(meta.uid(), meta.gid())
-}
-
-/// Windows files have no numeric owner. An empty [`Owner`] is one
-/// [`fsattr::set_owner`] returns from without a syscall, which is the honest
-/// answer on a host where there is nothing to set.
-#[cfg(not(unix))]
-fn owner_of(_meta: &fs::Metadata) -> Owner {
-    Owner::default()
-}
-
 /// Whether the destination's owner or group is not already the source's.
 ///
 /// GNU's `SAME_OWNER_AND_GROUP`, negated, and it is an optimisation with teeth:
@@ -4143,23 +4059,7 @@ fn open_new(dst: &Path, _mode: u32) -> io::Result<fs::File> {
         .open(dst)
 }
 
-/// The permission and special bits — `07777` — of `meta`.
-#[cfg(unix)]
-fn permission_bits(meta: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::MetadataExt;
-    meta.mode() & 0o7777
-}
-
-/// Windows has no mode bits. `0o777` rather than `0` so that the arithmetic in
-/// [`copy_tree`] — withhold group/other write, put it back if the directory did
-/// not get it — cancels out to no change at all, which is the right answer on a
-/// host where every `chmod` is a no-op anyway.
-#[cfg(not(unix))]
-fn permission_bits(_meta: &fs::Metadata) -> u32 {
-    0o777
-}
-
-/// `permission_bits` of the name `path`, without following a final symlink.
+/// [`permission_bits`] of the name `path`, without following a final symlink.
 fn permission_bits_of(path: &Path) -> io::Result<u32> {
     fs::symlink_metadata(path).map(|m| permission_bits(&m))
 }

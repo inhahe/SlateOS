@@ -1,5 +1,6 @@
-//! Writing a file's metadata *by path*: its timestamps, its mode, its owner and
-//! its extended attributes.
+//! Writing a file's metadata *by path* — its timestamps, its mode, its owner and
+//! its extended attributes — and reading the same four off the source they are
+//! being copied from.
 //!
 //! `std` can read all three and write almost none of them. [`fs::set_permissions`]
 //! is the one exception, and even it takes the mode through an opaque
@@ -29,6 +30,26 @@
 //! symbolic link rather than on what it names, because `cp -P -p` stamps the
 //! link it just made. One enum answers that question for all of them rather
 //! than four booleans spelled four ways.
+//!
+//! # The read half is here because it is the write half's argument
+//!
+//! [`times_of`], [`owner_of`] and [`permission_bits`] read a source's
+//! attributes; the rest of the module writes them. They belong together because
+//! each exists solely to produce what one of the writes consumes, and because
+//! each is a *portability* question with the same two answers as its write:
+//! `MetadataExt::mode` and `MetadataExt::uid` do not exist off unix, so both
+//! come in a `#[cfg]` pair whose non-unix arm has to agree with the non-unix arm
+//! of [`set_mode`] and [`set_owner`] about what a host with no modes and no uids
+//! should do. Splitting them would put the two halves of that agreement in two
+//! files. [`is_denied_ownership`] and [`chown_privileges`] are here for the same
+//! reason from the other end: they interpret [`set_owner`]'s failure, and an
+//! `EPERM` from a `chown` means "you are not root", which is a fact about the
+//! syscall rather than about any one caller.
+//!
+//! They were `cp`'s private functions until `mv` needed them: its cross-device
+//! fallback is a copy, so it preserves exactly what `cp -p` does and must get
+//! the same ordering and the same non-unix answers. Copying five functions into
+//! a second binary would have been five more chances for the two to drift.
 //!
 //! The one asymmetry is that the mode is written *twice* where ACLs are
 //! involved, and deliberately: [`Xattrs::Permissions`] carries the access ACL,
@@ -178,6 +199,24 @@ impl Times {
         }
         times
     }
+}
+
+/// The two timestamps of `meta`, in the form [`set_times`] takes.
+///
+/// GNU reads these out of the `struct stat` it is already holding, where they
+/// cannot fail. `std` hands them back as a `Result` because a platform can
+/// genuinely lack one, so the failure is reported rather than turned into
+/// [`When::Omit`] — a copy silently keeping *its own* modification time is
+/// exactly the wrong answer `-p` was given to prevent.
+///
+/// # Errors
+///
+/// Whatever `std` said about reading either stamp.
+pub fn times_of(meta: &std::fs::Metadata) -> io::Result<Times> {
+    Ok(Times {
+        accessed: When::Set(meta.accessed()?),
+        modified: When::Set(meta.modified()?),
+    })
 }
 
 /// Write a file's timestamps.
@@ -382,6 +421,97 @@ pub fn set_owner(on: On<'_>, owner: Owner) -> io::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 pub fn set_owner(_on: On<'_>, _owner: Owner) -> io::Result<()> {
     Ok(())
+}
+
+/// The owner and group of `meta`, as [`set_owner`] wants them.
+#[cfg(unix)]
+#[must_use]
+pub fn owner_of(meta: &std::fs::Metadata) -> Owner {
+    use std::os::unix::fs::MetadataExt;
+    Owner::of(meta.uid(), meta.gid())
+}
+
+/// Windows files have no numeric owner. An empty [`Owner`] is one [`set_owner`]
+/// returns from without a syscall, which is the honest answer on a host where
+/// there is nothing to set.
+#[cfg(not(unix))]
+#[must_use]
+pub fn owner_of(_meta: &std::fs::Metadata) -> Owner {
+    Owner::default()
+}
+
+/// Whether a [`set_owner`] was refused for want of privilege rather than for a
+/// reason worth reporting.
+///
+/// GNU tests `errno == EPERM || errno == EINVAL` in both `chown_failure_ok` and
+/// `owner_failure_ok`. `EINVAL` is there because some systems answer a request
+/// to set an unsupported owner that way rather than with `EPERM`.
+///
+/// Deliberately not [`io::ErrorKind::PermissionDenied`], which also covers
+/// `EACCES` — and `EACCES` from a `chown` means a directory on the path is not
+/// searchable, which is a real fault and must be reported.
+#[must_use]
+pub fn is_denied_ownership(e: &io::Error) -> bool {
+    /// `EPERM`.
+    const OPERATION_NOT_PERMITTED: i32 = 1;
+    /// `EINVAL`.
+    const INVALID_ARGUMENT: i32 = 22;
+    matches!(
+        e.raw_os_error(),
+        Some(OPERATION_NOT_PERMITTED | INVALID_ARGUMENT)
+    )
+}
+
+/// GNU's `chown_privileges` and `owner_privileges`, which on anything but
+/// Solaris are one question: is this root?
+///
+/// It decides whether a refused [`set_owner`] is reported. As root it is a real
+/// failure — root's `chown` does not fail for want of permission — and for
+/// everyone else it is the ordinary state of affairs.
+///
+/// Its own `geteuid` binding, rather than a call to
+/// [`can_write_any_file`](crate::overwrite::can_write_any_file), because
+/// upstream keeps them apart too — this is `copy.c:3018` and that is
+/// `lib/write-any-file.c`, each with its own `geteuid () == ROOT_UID`. The
+/// expressions coincide; the questions do not, and folding them would make a
+/// future divergence in either one silently change the other.
+#[cfg(unix)]
+#[must_use]
+pub fn chown_privileges() -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
+    // fail — POSIX gives it no error return.
+    unsafe { geteuid() == 0 }
+}
+
+/// Windows has no `chown` for [`set_owner`] to fail at, so nothing consults
+/// this. Answering "not privileged" keeps any future caller on the quiet path
+/// rather than the reporting one.
+#[cfg(not(unix))]
+#[must_use]
+pub fn chown_privileges() -> bool {
+    false
+}
+
+/// The permission and special bits — `07777` — of `meta`.
+#[cfg(unix)]
+#[must_use]
+pub fn permission_bits(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode() & 0o7777
+}
+
+/// Windows has no mode bits. `0o777` rather than `0` so that the arithmetic in
+/// `cp`'s directory walk — withhold group/other write, put it back if the
+/// directory did not get it — cancels out to no change at all, which is the
+/// right answer on a host where every `chmod` is a no-op anyway.
+#[cfg(not(unix))]
+#[must_use]
+pub fn permission_bits(_meta: &std::fs::Metadata) -> u32 {
+    0o777
 }
 
 /// Write a file's permission and setuid/setgid/sticky bits — `chmod(2)`'s

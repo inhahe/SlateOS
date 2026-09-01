@@ -1,0 +1,57 @@
+# Declared renames of benchmark series in bench/history.jsonl.
+#
+# Format: `old_name -> new_name`, one per line; `#` starts a comment.
+#
+# WHY THIS FILE EXISTS
+#
+# A series in bench/history.jsonl is keyed by its name and nothing else.  There
+# is no field that says "same benchmark, new definition", and there cannot
+# usefully be one: the records are ~9-minute QEMU boots that cannot be
+# regenerated, so an old record measured whatever the code did on that commit,
+# for ever.  When a benchmark's definition changes -- a different directory, a
+# different iteration count, a different unit of work -- diffing the new number
+# against the old ones is comparing two different measurements under one name,
+# and the only honest move is a NEW NAME.  kernel/src/bench.rs enforces exactly
+# that for vfs_readdir_32, with a `const _` assertion that fires if anyone
+# changes the entry count without changing the series name.
+#
+# scripts/test-bench-history.py's `no benchmark vanished between consecutive
+# records` guard is the other half, and it is right too: a name that disappears
+# with nothing said is coverage lost silently -- the benchmark stops being
+# measured, its regression cover goes with it, and its history is orphaned.
+# The guard cannot tell that case from a rename, because on the wire they are
+# the same thing.
+#
+# So this file is the difference between them.  It is a declaration, not a
+# suppression, and it is weaker than an allow-list in the way that matters:
+#
+#   * An UNDECLARED disappearance still fails the build.  Nothing here changes
+#     the default.
+#   * A declared one is excused only while its successor is present in the
+#     latest record.  The entry asserts "this series continues under that
+#     name" -- if the successor is not being measured either, the coverage is
+#     genuinely gone and the guard fires anyway, naming the successor.
+#   * Chains are followed (`a -> b` then `b -> c` resolves a to c), so an entry
+#     stays true and stays checkable across a later redefinition.  Nothing here
+#     needs pruning; entries go stale only in the sense that the old name stops
+#     appearing in any record, after which the entry is never consulted.
+#
+# An entry is only consulted for the ONE run that straddles the rename: the
+# guard compares the last two records, so by the run after, neither record
+# holds the old name.  Keep the entries anyway -- they are the record of why a
+# name in the older history has no continuation, which is a question a reader
+# of history.jsonl will otherwise have to answer from `git log`.
+#
+# Add an entry in the SAME commit as the rename, with the date and the reason.
+# A rename declared afterwards, once the build has already gone red, is
+# indistinguishable from a rename excused afterwards.
+
+# 2026-09-01, baaa63472: `vfs_readdir` timed a listing of `/` -- whose entry
+# count is whatever the boot image happens to mount, and which turned out to
+# cost ~4x per entry more than an ordinary directory (see known-issues.md ->
+# A-READDIR-OF-ROOT-COSTS-4X-PER-ENTRY).  The benchmark now builds its own
+# 32-entry directory, so the number means a fixed amount of work on a plain
+# directory.  Same operation, different subject: not comparable with the old
+# records, hence a new name rather than a redefinition.  Root is still measured,
+# unscored, as `vfs_readdir_root`.
+vfs_readdir -> vfs_readdir_32

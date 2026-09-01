@@ -1097,16 +1097,33 @@ Measured 125508ns — only 1.6x inside the budget, where the read is 15x \
 inside it.  Same nominal budget, wildly different headroom: the write \
 path is the one that actually needs a measured target."""
 
-[vfs_readdir]
-description = "VFS readdir of the root directory"
+[vfs_readdir_32]
+description = "VFS readdir of a memfs directory holding exactly 32 entries, built by the benchmark"
 tcg_target_ns = 50000
 source      = "bench.rs literal; no hardware reference recorded"
 notes       = """
-No published figure was cited for this one.  Linux getdents on a small \
-cached directory is single-digit microseconds, so 50us is a TCG-scale \
-budget by construction.  Measured 19019ns min but 230395ns mean — a 12x \
-mean/min spread that the dispersion check flags, so this benchmark \
-stalls during its own run and its movement should not be trusted."""
+Replaces `vfs_readdir`, which listed `/` and therefore measured whatever the \
+boot had left there.  That workload was not fixed: six of the twenty-one \
+entries in `/` turned out to be self-test litter from other lanes, and at \
+~0.44us/entry a root that gains ~70 entries reproduces the entire 16.3us -> \
+84.3us step the old series showed, with no performance change at all.  See \
+known-issues.md A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.
+
+The rename is deliberate rather than an in-place redefinition: history.jsonl \
+keys a series by name, and the old name's runs each measured a different, \
+unrecorded workload.  Silently reusing the name would republish a workload \
+change as a regression, which is exactly what it did.
+
+No published figure was cited for the target.  Linux getdents on a small \
+cached directory is single-digit microseconds, so 50us is a TCG-scale budget \
+by construction.  It is carried over unchanged from `vfs_readdir` because \
+nothing measured since justifies tightening it; the breakdown benchmark's \
+~10us-fixed + ~0.44us/entry model predicts ~24us at 32 entries, so the \
+headroom is roughly 2x.
+
+The root listing survives as the unscored `vfs_readdir_root`, which has no \
+entry here on purpose: it is tracked, not graded, because its workload still \
+is not ours to pin."""
 
 # --- Synchronisation primitives ---
 

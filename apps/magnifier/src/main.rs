@@ -2050,13 +2050,20 @@ impl Magnifier {
         // strip by construction (16..=30px against a single font), so the room
         // it actually has is horizontal.
         //
-        // `.min(size)` is not decoration: the `.max(7.0)` legibility floor
-        // makes the status *taller* than the reading once `size` drops under
-        // 7.6, and centring a taller run inside a shorter one's line box lifts
-        // it out through the top of the band — this campaign's own fault
-        // shape. Capping at `size` makes `status_h <= line_h` hold by
-        // construction, which is what leaves the offset below non-negative.
-        let status_size = (size * 0.92).max(7.0).min(size);
+        // A bare factor, where this had a `.max(7.0)` legibility floor. The
+        // floor cannot bite: it needs `size` under 7.6, and `size` is
+        // `font.min(info.h * 0.7)` with `font` at least 8 and `shows` refusing
+        // any band under 11 tall, so `size >= min(8, 7.7) = 7.7` — inert, and
+        // inert by a tenth of a pixel, which is a coincidence rather than a
+        // margin. It is worth losing rather than keeping, because a floor is
+        // the one shape that can make the status *taller* than the reading it
+        // sits in, and centring a taller run inside a shorter one's line box
+        // lifts it out through the top of the band. Without the floor
+        // `status_size <= size` is arithmetic, so `status_h <= line_h` holds by
+        // monotonicity and the offset below is non-negative with nothing to
+        // prove about reachability. Legibility survives on the same bound that
+        // killed the floor: 0.92 x 7.7 is 7.08px at the very worst.
+        let status_size = size * 0.92;
         let status_h = text::line_height(status_size, FontWeightHint::Regular);
         let Some(top) = centre_line(l.info, line_h) else {
             return;
@@ -5216,13 +5223,30 @@ mod tests {
                     "{w}x{h}: the status went outside the info band: {r:?} vs {:?}",
                     l.info
                 );
-                for (text_str, other) in &runs {
-                    assert!(
-                        text_str == &a.status || other.intersect(*r).is_none(),
-                        "{w}x{h}: the status overlaps the reading beside it: \
-                         {r:?} vs {other:?}"
-                    );
-                }
+                let reading = runs
+                    .iter()
+                    .find(|(t, _)| t == &a.info_line())
+                    .expect("the reading is drawn whenever the band is shown");
+                // Not merely `intersect().is_none()`. Two runs that abut
+                // exactly do not intersect and still read as one word, so the
+                // contract is a *gap*, and it has to be asserted as one or the
+                // padding that separates them is free to go to zero unnoticed.
+                assert!(
+                    reading.1.right() <= r.x - l.pad + 0.01,
+                    "{w}x{h}: only {} of clear space between the reading and the \
+                     status, which is under the {} padding that should separate them",
+                    r.x - reading.1.right(),
+                    l.pad
+                );
+                // The status is the smaller of the two runs, and it is centred
+                // in the taller one's line box rather than hung from its top:
+                // sharing a row means sharing a centre.
+                assert!(
+                    (reading.1.y + reading.1.h / 2.0 - (r.y + r.h / 2.0)).abs() < 0.01,
+                    "{w}x{h}: the status is not centred on the reading it shares \
+                     the row with: {r:?} vs {:?}",
+                    reading.1
+                );
             }
             shown += 1;
         }

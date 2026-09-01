@@ -771,29 +771,51 @@ MUTATIONS = [
         "        let swatch = 18.0;",
         ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
     ),
+    # `centre_line(l.info, swatch).unwrap_or(l.info.y)` carries no row, and
+    # deliberately.  `swatch` is `(info.h * 0.6).clamp(0.0, 18.0).min(info.h)`,
+    # so `swatch <= info.h` is arithmetic and the `None` arm cannot be reached
+    # by any band; a mutation replacing the call with the bare offset is an
+    # identity, and would sit in the table for ever as a survivor that means
+    # nothing.  The precedent is this app's colour-matrix clamp, dropped for
+    # the same reason.  What guards the site is the `.min(l.info.h)` above,
+    # which has its own row.
+    #
+    # The three rows that used to live here -- against `stack`, `two_rows` and
+    # `centre_line(l.info, stack)` -- are gone with the code they broke.  All
+    # three survived the sweep, and the reason was not a missing test: the
+    # status was stacked *under* the reading behind a guard that no window size
+    # satisfies, so the entire second row was unreachable.  See the commit
+    # "the status line was never once drawn".  The status now shares the
+    # reading's row, and these are the bounds that arrangement actually has.
     (
-        "the readout's swatch is centred without asking whether it fits",
-        "            centre_line(l.info, swatch).unwrap_or(l.info.y),",
-        "            l.info.y + (l.info.h - swatch) / 2.0,",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+        "the status takes the whole row instead of its own half of it",
+        "        let mid = left + ((run_right - left) * 0.5).max(0.0);",
+        "        let mid = left;",
+        ["a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row"],
     ),
     (
-        "the readout centres one row and hangs the status line below it",
-        "        let stack = if two_rows { line_h + status_h } else { line_h };",
-        "        let stack = line_h;",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+        "the status is measured but never cut to the room it has",
+        "        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular)\n            .min((run_right - mid - l.pad).max(0.0));",
+        "        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular);",
+        ["a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row"],
     ),
     (
-        "the readout admits a second row a band has no room for",
-        "        let two_rows = !self.status.is_empty() && line_h + status_h <= l.info.h;",
-        "        let two_rows = !self.status.is_empty() && l.info.h >= line_h * 2.0 + 2.0;",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+        "the status is set against the reading with no gap between them",
+        "        let gap = if status_w > 0.0 { l.pad } else { 0.0 };",
+        "        let gap = 0.0;",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
     ),
     (
-        "the readout draws in a band too short for even one row",
-        "        let Some(top) = centre_line(l.info, stack) else {\n            return;\n        };",
-        "        let top = l.info.y + (l.info.h - stack) / 2.0;",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+        "the status hangs from the reading's line top rather than its centre",
+        "            top + (line_h - status_h) / 2.0,",
+        "            top,",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
+    ),
+    (
+        "the status is drawn only when a band could have stacked it",
+        "        push_text(\n            f,\n            status_x,",
+        "        if line_h + status_h > l.info.h {\n            return;\n        }\n        push_text(\n            f,\n            status_x,",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
     ),
     (
         "the sheet's inner column is not checked before it is divided",

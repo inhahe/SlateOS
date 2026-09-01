@@ -103198,7 +103198,7 @@ for short ones. Historical readings near 0.98 were *under*-stating a
 correctly-applied load, not over-stating it, so no past grading verdict flips;
 but do not mine pre-2026-08-31 occupancy figures for precision.
 
-## B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE (lane B, 2026-08-31) — OPEN
+## B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE (lane B, 2026-08-31) — FIXED 2026-08-31
 
 **In short.** `cp -b` (and, shortly, `mv -b`, `ln -b`, `install -b`) picks the
 name for a backup by reading the directory — `f.~1~`, `f.~2~`, … — and then
@@ -103243,6 +103243,18 @@ on lane B's list, so the request will be filed with both callers named.
 caller bakes it in — every caller goes through `backup.rs`'s one function. It
 is a genuine data-loss window rather than a wrong message, which is the only
 reason it is above "cosmetic".
+
+**Fixed 2026-08-31.** Lane A's `6ea052654` made `sys_fs_rename` read `arg4` and
+decode it into `Vfs::rename` / `rename_noreplace` / `rename_exchange`
+(`requests/a-b-rename-flags-word-landed.md`); `posix::file::renameat2` now
+forwards the flags word instead of short-circuiting to `EINVAL`. The prediction
+above — that `backup.rs` "needs no change at all" — held for `backup.rs` and was
+wrong about the tree: `mv`'s speculative rename had its *own* copy of the
+emulation that never called `renameat2` at all, so closing the window in one
+place would have left it open in the other. Both now go through
+`crate::rename::noreplace`. The `lstat` fallback survives for the Windows
+development host, which has no `renameat2` to call; the race is a host-test
+artefact there rather than something a user can reach.
 
 ## B-MV-DECIDED-BY-LOOKING-AT-THE-DESTINATION-WHERE-GNU-LOOKS-AT-THE-RENAME (lane B, 2026-08-31) — FIXED
 

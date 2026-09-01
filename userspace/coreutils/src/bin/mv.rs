@@ -529,29 +529,22 @@ enum Renamed {
 /// onto a free name — then costs one syscall and skips every check, and the
 /// checks are only reached when there is something to check.
 ///
-/// `RENAME_NOREPLACE` is a `renameat2` flag that `std` does not expose, so this
-/// is gnulib's own fallback for a host that lacks the syscall
-/// (`lib/renameatu.c:134`): look first, then rename. That has a race, and
-/// gnulib's comment says so — between the look and the rename someone else may
-/// create the destination, and it is then overwritten. Upstream accepts the
-/// race on such hosts, and the alternative here would be to guess at a raw
-/// syscall number.
+/// [`coreutils::rename::noreplace`] is the call, shared with [`backup`] because
+/// both are saying "I checked that this name was free" and a plain `rename(2)`
+/// cannot say it. This used to be a private copy that only ever emulated the
+/// flag with an `lstat`, which kept gnulib's race after the kernel had stopped
+/// having one; see that module.
+///
+/// [`backup`]: coreutils::backup
 fn rename_noreplace(src: &Path, dst: &Path) -> io::Result<()> {
-    // `symlink_metadata`: a *dangling* symlink at the destination still occupies
-    // the name, so it is "exists" for this question.
-    match fs::symlink_metadata(dst) {
-        Ok(_) => return Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-        Err(_) => {}
-    }
-    fs::rename(src, dst)
+    coreutils::rename::noreplace(src, dst)
 }
 
 /// Is this the errno that means "the destination is already there"?
 ///
 /// Compared as a *kind* rather than as a number because [`rename_noreplace`]
-/// synthesises it rather than receiving it from the kernel, and the two must
-/// answer alike.
+/// may synthesise it rather than receive it from the kernel — the emulated path
+/// does — and the two must answer alike.
 fn is_exists(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::AlreadyExists
 }

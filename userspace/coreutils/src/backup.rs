@@ -67,9 +67,11 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::errmsg::strerror;
+use crate::fileid::file_id;
 use crate::getopt::{Error, Program};
-use crate::pathname::{base_len, last_component_offset};
-use crate::quote::{os_bytes, os_from_bytes};
+use crate::pathname::{base_len, last_component, last_component_offset};
+use crate::quote::{os_bytes, os_from_bytes, quoteaf_os};
 
 /// When to make a backup, and of what shape.
 ///
@@ -371,6 +373,138 @@ impl Backup {
             }
         }
     }
+}
+
+/// GNU's `source_is_dst_backup` (`copy.c:2161`): would backing the destination
+/// up rename the source on top of itself?
+///
+/// The recipe upstream's own comment carries is `cd /tmp; rm -f a a~; : > a;
+/// echo A > a~; cp --backup=simple a~ a` — the backup of `a` is named exactly
+/// `a~`, which is the source, so the rename moves the source onto itself and
+/// leaves two empty files where there had been one empty and one full. `mv -b
+/// a~ a` loses the same file for the same reason, which is why this is here
+/// rather than in either program: the two callers are `cp` and `mv`, they ask
+/// the identical question, and a check that protected only one of them would be
+/// worse than none, because it would teach that the option is safe.
+///
+/// Two tests, and both are needed. The names must line up — the source's last
+/// component must be the destination's plus the simple suffix — *and* the file
+/// that would be created must actually be this source, which only a `stat` can
+/// say. Names alone would refuse `cp -b other/a~ a`, where `other/a~` has
+/// nothing to do with `a`; a `stat` alone would be asking about a file that does
+/// not exist yet.
+///
+/// Callers must skip this for [`BackupType::Numbered`], as upstream does: the
+/// name a numbered backup chooses is never one the user typed, so it cannot be
+/// the source.
+///
+/// The `stat` follows symlinks, as upstream's `fstatat (…, 0)` does.
+#[must_use]
+pub fn source_is_dst_backup(
+    src: &Path,
+    src_meta: &fs::Metadata,
+    target: &Path,
+    suffix: &[u8],
+) -> bool {
+    let src_raw = os_bytes(src.as_os_str());
+    let src_base = last_component(&src_raw);
+    let target_raw = os_bytes(target.as_os_str());
+    let Some(stem) = src_base.strip_suffix(suffix) else {
+        return false;
+    };
+    if stem != last_component(&target_raw) {
+        return false;
+    }
+    // The name the backup *would* take, which for a simple or existing backup
+    // of an untaken name is the destination with the suffix stuck on.
+    let mut would_be = target_raw.into_owned();
+    would_be.extend_from_slice(suffix);
+    let would_be = PathBuf::from(os_from_bytes(&would_be));
+    match fs::metadata(&would_be) {
+        Ok(m) => file_id(&would_be, &m) == file_id(src, src_meta),
+        Err(_) => false,
+    }
+}
+
+/// GNU's `un_backup` label (`copy.c:3364`): an operation that failed *after* its
+/// destination had been renamed away must put the destination back.
+///
+/// Without it a failed `cp -b a b` leaves no `b` at all — the copy did not
+/// happen, and the file that *was* `b` now sits under a name the user did not
+/// ask for and may not think to look under. That is the option losing a file,
+/// which is the one thing the option exists to prevent. `mv -b` has the identical
+/// exposure and a larger one, since more of its failure paths come after the
+/// backup, which is why this is shared rather than written twice.
+///
+/// A failure to restore is reported and nothing more: the caller's answer is
+/// already "this operand failed", and there is no second thing to try. GNU says
+/// the same and also carries on.
+///
+/// The verbose line has **no verb** in front of it, unlike the `renamed`/`copied`
+/// ones — upstream prints it from its own `printf` rather than through
+/// `emit_verbose`, so `'b~' -> 'b' (unbackup)` starts at the quote.
+///
+/// `backup` is an `Option` because upstream's null check is inside the label
+/// (`if (dst_backup)`) rather than at each of the eleven `goto`s that reach it:
+/// a caller that failed before making a backup jumps there just the same. Asking
+/// the question once here rather than at every call site is both upstream's
+/// shape and one fewer thing for a new failure path to forget.
+///
+/// `out` and `err` are `dyn` rather than generic because the two callers have
+/// different writer types and this needs to be one function to be worth having.
+pub fn un_backup(
+    program: &str,
+    backup: Option<&Path>,
+    target: &Path,
+    verbose: bool,
+    out: &mut dyn io::Write,
+    err: &mut dyn io::Write,
+) {
+    let Some(backup) = backup else {
+        return;
+    };
+    match fs::rename(backup, target) {
+        Ok(()) => {
+            if verbose {
+                let _ = writeln!(
+                    out,
+                    "{} -> {} (unbackup)",
+                    quoteaf_os(backup),
+                    quoteaf_os(target)
+                );
+            }
+        }
+        Err(e) => {
+            let why = strerror(&e);
+            let _ = writeln!(
+                err,
+                "{program}: cannot un-backup {}: {why}",
+                quoteaf_os(target)
+            );
+        }
+    }
+}
+
+/// Whether the source's last component is `.` or `..`, which upstream's
+/// `dot_or_dotdot` asks before it backs anything up (`copy.c:2516`).
+///
+/// `cp -rb a/. d` copies `a`'s *contents* into an existing `d`, so backing up
+/// `d` would move away the very directory the copy is about to fill. `mv` asks
+/// the same question in the same place, although its own operand checks refuse
+/// a `.`-suffixed source earlier, so for `mv` this is a guard on an unreachable
+/// case kept because it is upstream's condition and because those operand checks
+/// are not the reason it is safe.
+///
+/// Deliberately *not* the same as "resolves to the current or parent directory":
+/// upstream compares the last component's bytes, so `a/./` has last component
+/// `"./"`, which is neither `.` nor `..`. Faithful rather than tidy — the two
+/// differ only for a source spelled with a trailing slash after a dot, and
+/// diverging there would be a divergence nobody had measured.
+#[must_use]
+pub fn src_base_is_dot_or_dotdot(src: &Path) -> bool {
+    let raw = os_bytes(src.as_os_str());
+    let base = last_component(&raw);
+    base == b"." || base == b".."
 }
 
 /// What [`numbered_backup`] found, which decides whether the name it built

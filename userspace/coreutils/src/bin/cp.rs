@@ -245,7 +245,7 @@
 //! and the five behaviours a collapsed version could not produce — is
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
-use coreutils::backup::{self, BackupType};
+use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
@@ -254,8 +254,7 @@ use coreutils::fileid::{
 use coreutils::fsattr::{self, Link, On, Owner, When};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
-use coreutils::pathname;
-use coreutils::quote::{os_bytes, os_from_bytes, quoteaf, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
 use std::collections::{HashMap, HashSet};
@@ -2610,7 +2609,14 @@ fn place_entity<O: Write, E: Write>(
                 // `forget_created` half — `earlier_file` is non-null on this
                 // path, which is exactly the `recorded == None` this branch
                 // leaves behind. See the tail below.
-                un_backup(moved_aside.as_deref(), target, job);
+                backup::un_backup(
+                    "cp",
+                    moved_aside.as_deref(),
+                    target,
+                    job.flags.verbose,
+                    &mut *job.out,
+                    &mut *job.err,
+                );
                 Placed::Failed
             };
         }
@@ -2631,65 +2637,19 @@ fn place_entity<O: Write, E: Write>(
         }
         // And the half the label is named for. In upstream's order: forget
         // first, then put the backup back.
-        un_backup(moved_aside.as_deref(), target, job);
+        backup::un_backup(
+            "cp",
+            moved_aside.as_deref(),
+            target,
+            job.flags.verbose,
+            &mut *job.out,
+            &mut *job.err,
+        );
     }
 
     if ok { Placed::Copied } else { Placed::Failed }
 }
 
-/// GNU's `un_backup` label (`copy.c:3364`): a copy that failed after its
-/// destination had been renamed away must put the destination back.
-///
-/// Without it a failed `cp -b a b` would leave no `b` at all — the copy did not
-/// happen, and the file that *was* `b` is now sitting under a name the user did
-/// not ask for and may not think to look under. That is `-b` losing a file,
-/// which is the one thing `-b` exists to prevent.
-///
-/// A failure to restore is reported and nothing more: the return value is
-/// already "this operand failed", and there is no second thing to try. GNU says
-/// the same and also carries on.
-fn un_backup<O: Write, E: Write>(
-    moved_aside: Option<&Path>,
-    target: &Path,
-    job: &mut Job<'_, O, E>,
-) {
-    let Some(backup) = moved_aside else {
-        return;
-    };
-    match fs::rename(backup, target) {
-        Ok(()) => {
-            if job.flags.verbose {
-                let _ = writeln!(
-                    job.out,
-                    "{} -> {} (unbackup)",
-                    quoteaf_os(backup),
-                    quoteaf_os(target)
-                );
-            }
-        }
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: cannot un-backup {}: {why}",
-                quoteaf_os(target)
-            );
-        }
-    }
-}
-
-/// gnulib's `dot_or_dotdot (last_component (src_name))`: whether the source
-/// names a directory's own entry for itself or for its parent.
-///
-/// Textual, not resolved — `a/.` answers yes and `a/b` answers no even when `b`
-/// is a link to `a`. That is upstream's question and it is the right one here:
-/// what it guards is `cp -rb a/. d`, where the destination about to be backed
-/// up is the very directory the copy is going to fill.
-///
-/// Trailing slashes count, as they do in gnulib: `last_component("a/./")` is
-/// `"./"`, which is neither `.` nor `..`. Faithful rather than tidy — the two
-/// differ only for a source spelled with a trailing slash after a dot, and
-/// diverging there would be a divergence nobody had measured.
 /// Whether [`place_entity`]'s backup block will move this destination aside —
 /// the `if` at `copy.c:2517`, written once because two places need it.
 ///
@@ -2722,44 +2682,6 @@ fn backup_takes_destination(src: &Path, dest: &Dest, flags: &CpFlags) -> bool {
         && dest.exists()
         && !dest.metadata().is_some_and(fs::Metadata::is_dir)
         && !src_base_is_dot_or_dotdot(src)
-}
-
-fn src_base_is_dot_or_dotdot(src: &Path) -> bool {
-    let raw = os_bytes(src.as_os_str());
-    let base = pathname::last_component(&raw);
-    base == b"." || base == b".."
-}
-
-/// GNU's `source_is_dst_backup` (`copy.c:2161`): would backing the destination
-/// up rename the source on top of itself?
-///
-/// Two tests, and both are needed. The names must line up — the source's last
-/// component must be the destination's plus the simple suffix — *and* the file
-/// that would be created must actually be this source, which only a `stat` can
-/// say. Names alone would refuse `cp -b other/a~ a`, where `other/a~` has
-/// nothing to do with `a`; a `stat` alone would be asking about a file that
-/// does not exist yet.
-///
-/// The `stat` follows symlinks, as upstream's `fstatat(…, 0)` does.
-fn source_is_dst_backup(src: &Path, src_meta: &fs::Metadata, target: &Path, suffix: &[u8]) -> bool {
-    let src_raw = os_bytes(src.as_os_str());
-    let src_base = pathname::last_component(&src_raw);
-    let target_raw = os_bytes(target.as_os_str());
-    let Some(stem) = src_base.strip_suffix(suffix) else {
-        return false;
-    };
-    if stem != pathname::last_component(&target_raw) {
-        return false;
-    }
-    // The name the backup *would* take, which for a simple or existing backup
-    // of an untaken name is the destination with the suffix stuck on.
-    let mut would_be = target_raw.into_owned();
-    would_be.extend_from_slice(suffix);
-    let would_be = PathBuf::from(os_from_bytes(&would_be));
-    match fs::metadata(&would_be) {
-        Ok(m) => file_id(&would_be, &m) == file_id(src, src_meta),
-        Err(_) => false,
-    }
 }
 
 /// The three kinds, dispatched. Split from [`place_entity`] only so that the

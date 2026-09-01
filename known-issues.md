@@ -103231,6 +103231,60 @@ first sweep's eight survivors, one of shape 1, three of shape 2, four of shape
    a control given an empty box draws nothing at all, since a zero-sized fill
    is inside every region there is.
 
+**hangman** (2026-09-01) — done: 160 tests, 48/48 mutation rows caught. The
+grep said 9 sites; the app had four unclamped-centring faults and five more that
+only the sweeps found. taskscheduler's three survivor shapes all recurred, so
+treat them as the standing budget rather than that app's peculiarity. Four
+things this app added to the recipe:
+
+4. **The squeeze has to reach the pass, and a `Layout` field is how.** A band
+   computed inline inside the pass that paints it cannot be handed a smaller
+   box, so every bound below it is unverified — `draw_result`'s region was
+   `Rect::new(gallows.x, gallows.y, gallows.w.max(word.w), word.bottom() -
+   gallows.y)`, four lines into the drawing code, and its card-height clamp and
+   its button-fit check both survived because nothing could squeeze it. Naming
+   it `Layout::overlay` is what made both rows die. **Sort the passes into those
+   whose band is an *input* and those whose band is *derived*, squeeze the
+   first group and say in the test why the second is excluded** — hangman's
+   keyboard band is computed from `key` and `key_gap`, so a keyboard band shrunk
+   on its own is a band the keys were never sized for and the resulting overrun
+   would be the test's fault, not the program's.
+5. **Squeeze to fractions of the band, not only to absolute slivers.** A fixed
+   12-point band is below every font size in the app and so only ever reaches
+   the outermost refusal. The interesting failures live in the gap between "the
+   type fits" and "the type *and what hangs below it* fits", which is a fraction
+   of the band and not a constant: leaving `RULE_WIDTH / 2.0` out of a rule-fit
+   check is wrong for one narrow range of heights and right on either side of
+   it. `squeezes()` now yields sixteenths of `r.h` and `r.w` as well as
+   `[0, 1, 3, 6, 12]`.
+6. **Measure a stroke's thickness on both axes, or the check is blind to any
+   pass made of strokes.** A vertical or zero-length line has no extent on one
+   axis; an empty rectangle is inside everything; so hangman's gallows — four
+   strokes and a twelve-sided head, no fills at all — was measured as painting
+   nothing and could be drawn anywhere. Widen a line's bounding box by its
+   thickness across the line, and on *both* axes when it runs along neither.
+   Then expect a real finding to fall out, because a stroke straddles the line
+   it is drawn on and thicknesses usually have a floor of one point that does
+   not scale: the gallows had to be inset by a whole stroke width before the
+   6-point band stopped drawing the beam above its own top edge.
+7. **"Drew something" is too weak a converse.** Shape 3's reachability
+   assertion has to name a run from the pass's *far end* — the alphabet's last
+   key, the statistics column's list of wrong letters, the result card's second
+   button — because a column that stops after its heading has drawn something.
+   And the empty-band half should assert **no command at all**, not merely no
+   ink and no hit box: a degenerate fill is how a pass says it never looked at
+   the band it was given, and it is invisible to containment.
+
+One more, which is really shape 2 wearing a comment: **a guard whose answer is
+recomputed downstream is dominated even when the downstream copy is inside a
+shared helper.** `draw_word` said "one `centre_line` for the row rather than one
+per letter" while its loop called `run_in`, which asks `centre_line` again for
+every cell — so the row's answer placed nothing but the rule, and replacing the
+row's guard with the bare centring it exists to prevent changed no test's
+answer. The fix was to make the code true rather than to delete either copy:
+the letters are placed on the row's single baseline now, through `span` for the
+horizontal half. If a comment claims a guard is the only one, mutate it.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

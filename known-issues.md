@@ -106245,7 +106245,49 @@ on the magnitude, only on the direction, and the direction is unchanged.
 ## A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT
 
 **Found:** 2026-09-01, by `fs::conformance` on its first live boots.
-**Status:** OPEN. Currently the only thing keeping lane A's tree red.
+**Status:** ROOT-CAUSED and fixed in `e24ce4ad6`; awaiting the confirming green
+boot. **It was not a double-free at all** — it was a false positive in the
+allocator's own detector. Everything below the "What it actually was" section is
+the diagnosis as it stood *before* the cause was found, kept because the wrong
+turns are the useful part; where it contradicts that section, that section wins.
+
+### What it actually was (2026-09-01, final)
+
+`POISON_MAGIC` was a **fixed constant**, so the allocator leaves a copy of it on
+the kernel stack every time `poison_free` or `check_poison` runs. `TaskInfo` —
+DWARF says size 176 — puts `stack_used: Option<usize>` at offset 0 with its
+payload at bytes **8..16**, which is exactly where the signature lives. That
+field is `None` for the idle task, so those 8 bytes are *never written*, and the
+struct was `memcpy`'d into the heap still carrying `FE ED FA CE FE ED FA CE` —
+the allocator's own magic — off the stack. `gen_loadavg`'s single free then read
+it back as proof of a previous one.
+
+Corroborated by every other byte in the slot: `id=0`, `name="idle"`,
+`name_len=4`, and `len=1 cap=1` (one task exists at that point in boot, so
+`collect()` allocates once and never grows).
+
+Nothing in `procfs`, `sched`, or the slab allocator was wrong. The fix is in the
+detector: the signature is now `POISON_MAGIC_BASE ^ slot_addr`, 8 bytes at
+offsets 8..16, so a leaked copy can only match the slot it came from — see
+`design-decisions.md` §672 and `poison_self_test` Test 5, which reproduces this
+exact shape. The free-trace instrumentation is removed: it was built to identify
+the *first* free, and there was only ever one.
+
+Two corrections to what is written below:
+
+- **"Two files double-free" was one bug, not two, and now zero.** `/proc/version`
+  was a `HeapWatch` labelling artefact — it names whichever path is under
+  inspection when the global counter moves, and `readdir` generates every
+  entry's content.
+- **The unexplained 61-byte-string-in-a-256-byte-class mismatch is explained.**
+  The block was never the version string; it is a capacity-1 `Vec<TaskInfo>`,
+  and `TaskInfo` is 176 bytes.
+
+The `/proc/heapinfo` readdir-vs-stat size disagreement is a **separate, real**
+bug and is not fixed by this — it persisted in a boot with zero heap violations.
+Cause: `gen_heapinfo` prints `slab_allocs`/`total_allocs`/etc., which the
+harness's own allocations increment between the `readdir` and the `stat`, moving
+a decimal digit and changing the byte length. Tracked separately.
 
 **In short:** reading two files under `/proc` — `version` and `loadavg` — each
 hands the same 256-byte block of memory back to the allocator twice. The
@@ -106416,3 +106458,12 @@ two variables:
 instrumentation compiled in**, and where `/proc/heapinfo` no longer disagrees
 with itself about its size. A green boot that still carries the free-trace does
 not count — the instrument is itself a suspect.
+
+**Resolution of that trigger (2026-09-01):** the discriminating boot ran and the
+double-free returned, which settled the table above on the first row — the print
+*was* the perturbation. What the trace then showed was not a first freer but
+live object data, and decoding it against DWARF gave the cause recorded at the
+top of this entry. The free-trace has since been deleted, so the "no diagnostic
+instrumentation compiled in" half of the trigger is now satisfied by
+construction; what remains is one green boot on `e24ce4ad6`, and the separate
+`/proc/heapinfo` size bug.

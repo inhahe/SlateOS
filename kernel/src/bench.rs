@@ -6728,13 +6728,54 @@ fn bench_vfs_read_write() {
 ///
 /// Measures the cost of listing all entries in the root directory.
 /// This exercises the VFS directory iteration path.
+///
+/// # The workload is not a constant, and that is now instrumented
+///
+/// This benchmark lists `/`, whose contents are whatever the boot happened to
+/// put there — mounts, service directories, anything an earlier benchmark
+/// left behind. Nothing pins the entry count, so it can change with a commit
+/// that never touches the filesystem at all.
+///
+/// That matters because the series has stepped between binaries without a
+/// plausible cause: 16.3us -> 50.2us -> 84.3us -> 50.9us across four builds
+/// (`known-issues.md` A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER). Two
+/// mechanisms were proposed and both were then measured and refuted — inode
+/// table size moves a 64-entry listing by 1%, heap warmth by 0.4%, where the
+/// series moved by 200%. Meanwhile `bench_vfs_readdir_breakdown` prices a
+/// listing at roughly 10us fixed plus 0.46us per entry, so a root that gained
+/// ~70 entries would account for the entire step on its own.
+///
+/// So the count and the names are logged before the timing. If they move with
+/// the number, the "regression" is a workload change and the fix is to list a
+/// directory this benchmark builds itself; if they are identical across the
+/// binaries that disagree, that is ruled out and the cause is elsewhere. This
+/// is deliberately printed rather than asserted: one boot's count means
+/// nothing, and the comparison is against the *next* boot's log.
 fn bench_vfs_readdir() {
     use crate::fs::vfs::Vfs;
 
-    if Vfs::readdir("/").is_err() {
+    let Ok(entries) = Vfs::readdir("/") else {
         serial_println!("[bench] vfs_readdir: SKIP (VFS not initialized)");
         return;
+    };
+
+    // One line, not one per entry: this has to be eyeball-diffable against
+    // another boot's log, and a 90-line block is not.
+    let mut names = alloc::string::String::new();
+    for e in &entries {
+        if !names.is_empty() {
+            names.push(' ');
+        }
+        // `Path::display`, never `from_utf8_lossy`: a name is arbitrary bytes.
+        let _ = core::fmt::Write::write_fmt(&mut names, format_args!("{}", e.name.display()));
     }
+    serial_println!(
+        "[bench]   vfs_readdir_root: workload = {} entries in / [{}]",
+        entries.len(),
+        names
+    );
+    drop(names);
+    drop(entries);
 
     let result = run("vfs_readdir_root", 200, || {
         let _ = core::hint::black_box(Vfs::readdir("/"));
@@ -6757,6 +6798,28 @@ fn bench_vfs_readdir() {
 /// and after within one another's noise; a much larger one would spend real
 /// boot time creating files nothing ever reads.
 const READDIR_BALLAST: usize = 2048;
+
+/// How large a delta must be, as a percentage of the window it perturbs,
+/// before [`bench_vfs_readdir_breakdown`] will call it an effect at all.
+///
+/// Both of that benchmark's arms came in under 1.5% on the run that settled
+/// the question — the inode table moved a 64-entry listing by 456ns out of
+/// 39473, heap warmth by 149ns out of 39324. A difference that small between
+/// two 200-iteration minima is not a mechanism; it is the floor of what this
+/// timer resolves. Five percent sits well above that floor and well below the
+/// ~8x the hypothesis predicted, so nothing real is being suppressed.
+const READDIR_MATERIAL_PCT: i64 = 5;
+
+/// `delta` as a signed percentage of `base`, for the breakdown's log lines.
+///
+/// Absolute nanoseconds are what misled the first two attempts at this
+/// benchmark: `+456ns` reads as an effect right up until it is set against the
+/// 39473ns window it perturbs, where it is 1%. Printing both makes the
+/// judgement the reader has to make impossible to skip.
+fn readdir_signed_pct(delta: i64, base: u64) -> i64 {
+    let base = i64::from(base as i32);
+    if base <= 0 { 0 } else { delta * 100 / base }
+}
 
 /// Separate the two things that were suspected of making `vfs_readdir` slow:
 /// the size of the memfs inode table, and the state of the kernel heap.
@@ -6812,6 +6875,31 @@ const READDIR_BALLAST: usize = 2048;
 /// `+0ns` and let it print a conclusion — "inode-table size does not scale the
 /// per-entry cost" — that was true only by accident, since the data said
 /// something considerably stronger that the arithmetic could not represent.
+///
+/// # What the 2x2 found: both suspects are innocent
+///
+/// | comparison | isolates | result |
+/// |---|---|---|
+/// | `n64_cold` 39324ns -> `n64` 39473ns | heap warmth | **+0.4%** |
+/// | `n64` 39473ns -> `n64_ballasted` 39929ns | table size, +2048 inodes | **+1.2%** |
+///
+/// Neither is a mechanism. The series they were invoked to explain moved by
+/// **200%**, and a hypothesis that predicts a dominating per-child cost is not
+/// supported by an effect at 1% — that is its absence, not a weak form of it.
+/// The first version's dramatic "the ballast made it *faster*" result was
+/// simply the heap warm-up it had not yet controlled for; with the warm-up in
+/// place the table arm collapses to nearly nothing.
+///
+/// The controlled decomposition that *did* come out of this is the useful part,
+/// and it is stable: a listing costs about **10us fixed plus 0.46us per entry**
+/// (`n0` 10013ns; `n8` and `n64` and their ballasted twins all sit on that
+/// line, with `n8`'s un-ballasted window the one outlier at 25206ns).
+///
+/// That number is what redirects the search. The scored `vfs_readdir` lists
+/// `/`, whose entry count nothing pins — so ~70 extra root entries would move
+/// it by the full 16.3us -> 84.3us the history shows, without any code in
+/// memfs changing at all. [`bench_vfs_readdir`] now logs that count and those
+/// names for exactly this comparison.
 fn bench_vfs_readdir_breakdown() {
     use crate::fs::vfs::Vfs;
 
@@ -6916,12 +7004,18 @@ fn bench_vfs_readdir_breakdown() {
     // the one the first version of this benchmark mistook for the table.
     let heap_delta = i64::from(n64.min_ns as i32) - i64::from(n64_cold.min_ns as i32);
     serial_println!(
-        "[bench]   vfs_readdir_breakdown: heap state alone moves n64 by {}ns \
-         (cold {}ns -> after {} alloc/free {}ns)",
+        "[bench]   vfs_readdir_breakdown: heap state alone moves n64 by {}ns = {}% \
+         (cold {}ns -> after {} alloc/free {}ns){}",
         heap_delta,
+        readdir_signed_pct(heap_delta, n64_cold.min_ns),
         n64_cold.min_ns,
         READDIR_BALLAST,
-        n64.min_ns
+        n64.min_ns,
+        if readdir_signed_pct(heap_delta, n64_cold.min_ns).abs() < READDIR_MATERIAL_PCT {
+            " -- REFUTED: allocator warmth is not what moved this series"
+        } else {
+            ""
+        }
     );
 
     // Slope over the 56-entry gap, in picoseconds so integer division does not
@@ -6969,24 +7063,41 @@ fn bench_vfs_readdir_breakdown() {
     let d8 = i64::from(n8_b.min_ns as i32) - i64::from(n8.min_ns as i32);
     let d64 = i64::from(n64_b.min_ns as i32) - i64::from(n64.min_ns as i32);
     serial_println!(
-        "[bench]   vfs_readdir_breakdown: +{} inodes elsewhere moves n8 by {}ns, n64 by {}ns \
-         (both arms post-warm-up, so this is table size and not heap state)",
+        "[bench]   vfs_readdir_breakdown: +{} inodes elsewhere moves n8 by {}ns ({}%), \
+         n64 by {}ns ({}%) (both arms post-warm-up, so this is table size and not heap state)",
         READDIR_BALLAST,
         d8,
-        d64
+        readdir_signed_pct(d8, n8.min_ns),
+        d64,
+        readdir_signed_pct(d64, n64.min_ns)
     );
 
     // The verdict, stated in the log so the next reader does not have to
-    // re-derive it from four numbers. The test is the *ratio*: a per-child
-    // table search must scale with the number of children, so 64 entries
-    // should pay about 8x what 8 entries pay. A fixed cost that happens to
-    // land on both would show d64 ~= d8 and would not support the fix.
-    if d64 > 0 && d64 > d8.saturating_mul(3) {
+    // re-derive it from four numbers.
+    //
+    // Materiality is tested *before* sign or ratio, and that ordering is the
+    // fix for a real bug this ladder had: the previous test was
+    // `d64 > 0 && d64 > d8 * 3`, which a negative `d8` makes vacuously true —
+    // every positive `d64`, however tiny, beats a negative threshold. On the
+    // run that settled the question it duly printed "CONFIRMED ... 456x from 8
+    // to 64 entries" from `d8 = -10116ns` and `d64 = +456ns`, which is not a
+    // ratio of anything. A 1% delta is not evidence for a mechanism that
+    // predicts 800%, whichever way it points.
+    //
+    // Only once the delta is known to be material does the *ratio* matter: a
+    // per-child table search must scale with the number of children, so 64
+    // entries should pay about 8x what 8 entries pay. A fixed cost landing on
+    // both arms would show d64 ~= d8 and would not support the fix.
+    if readdir_signed_pct(d64, n64.min_ns).abs() < READDIR_MATERIAL_PCT {
         serial_println!(
-            "[bench]   vfs_readdir_breakdown: CONFIRMED per-child inode-table lookup dominates \
-             — the penalty scales with entry count ({}x from 8 to 64 entries). \
-             See known-issues.md A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.",
-            d64 / d8.max(1)
+            "[bench]   vfs_readdir_breakdown: REFUTED — a {}x larger inode table moves a \
+             64-entry listing by {}ns, under {}% of the {}ns window. The hypothesis predicts \
+             the per-child lookup DOMINATES; a 1%-scale effect is not a smaller version of \
+             that, it is its absence. Boxing the node would buy nothing.",
+            READDIR_BALLAST / 64,
+            d64,
+            READDIR_MATERIAL_PCT,
+            n64.min_ns
         );
     } else if d64 < 0 {
         // A bigger table cannot make a per-child search of it cheaper, so this
@@ -6994,19 +7105,30 @@ fn bench_vfs_readdir_breakdown() {
         // warm-up above did not fully equalise the two arms, and the residual
         // is still allocator state rather than anything to do with memfs.
         serial_println!(
-            "[bench]   vfs_readdir_breakdown: REFUTED — a 10x larger inode table made the \
+            "[bench]   vfs_readdir_breakdown: REFUTED — a {}x larger inode table made the \
              listing FASTER ({}ns at 64 entries). A per-child search cannot get cheaper as \
              the tree grows, so the remaining difference is heap state the warm-up did not \
              equalise, not the table.",
+            READDIR_BALLAST / 64,
+            d64
+        );
+    } else if d8 > 0 && d64 > d8.saturating_mul(3) {
+        serial_println!(
+            "[bench]   vfs_readdir_breakdown: CONFIRMED per-child inode-table lookup dominates \
+             — the penalty scales with entry count ({}x from 8 to 64 entries, {}ns -> {}ns). \
+             See known-issues.md A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.",
+            d64 / d8,
+            d8,
             d64
         );
     } else {
         serial_println!(
-            "[bench]   vfs_readdir_breakdown: NOT CONFIRMED — inode-table size does not scale \
-             the per-entry cost (n8 {}ns vs n64 {}ns). The per-entry cost is elsewhere; \
-             boxing the node would not fix it.",
-            d8,
-            d64
+            "[bench]   vfs_readdir_breakdown: NOT CONFIRMED — the table costs a material \
+             {}ns at 64 entries, but it does not scale with entry count (8 entries pay \
+             {}ns, and a per-child search would pay ~8x less, not this). The cost is fixed, \
+             so boxing the node would not remove it.",
+            d64,
+            d8
         );
     }
 }

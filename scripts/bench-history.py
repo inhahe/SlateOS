@@ -386,6 +386,7 @@ CANARY_MIN_RESOLVABLE_CENTI = math.ceil(100 / CANARY_TOLERANCE_PCT)
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
 DEFAULT_HISTORY = os.path.join(REPO_ROOT, "bench", "history.jsonl")
+DEFAULT_RENAMES = os.path.join(REPO_ROOT, "bench", "renamed-series.txt")
 
 # Imported by path rather than by a plain `import` because this file is itself
 # routinely loaded via importlib -- by its own test suite and by ad-hoc
@@ -1470,6 +1471,121 @@ def append_record(path, record):
         print(f"bench-history: cannot write {path}: {exc}", file=sys.stderr)
         return False
     return True
+
+
+RENAME_ARROW = "->"
+
+
+def load_renames(path=DEFAULT_RENAMES):
+    """Read `bench/renamed-series.txt`: `old -> new`, one per line.
+
+    A benchmark series is keyed in `bench/history.jsonl` by its name and
+    nothing else, so when a benchmark's *definition* changes -- a different
+    directory, a different iteration count, a different unit of work -- the
+    honest response is a new name, because the old records measure something
+    the new code no longer does. `kernel/src/bench.rs` enforces that
+    mechanically for `vfs_readdir_32` with a `const _` assertion.
+
+    That collides with `test_history_still_loads`, which fails the build when a
+    name present in the previous record is absent from the latest one. It is
+    right to: a name that vanishes with nothing said is coverage silently lost.
+    This file is how something *is* said. It does not weaken the check -- an
+    undeclared disappearance still fails, and a declared one is only excused
+    while its successor is actually being measured (see `resolve_rename`), so
+    the entry asserts "the series continues under this name", not "stop
+    looking at this name".
+
+    Raises `ValueError` naming file:line on a malformed line. Deliberately not
+    the per-line recovery `load_history` uses: that file is machine-appended
+    and irreplaceable, so partial recovery beats an exception; this one is
+    hand-written, version-controlled, and regenerable from `git log` -- and a
+    silently-dropped line here would either fail a gate for a reason that is
+    not the reason given, or, worse, leave a rename looking declared when it
+    is not.
+    """
+    renames = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for lineno, raw in enumerate(handle, 1):
+                line = raw.split("#", 1)[0].strip()
+                if not line:
+                    continue
+                if line.count(RENAME_ARROW) != 1:
+                    raise ValueError(
+                        f"{path}:{lineno}: expected exactly one "
+                        f"'{RENAME_ARROW}' in {line!r}"
+                    )
+                old, new = (part.strip()
+                            for part in line.split(RENAME_ARROW))
+                if not old or not new:
+                    raise ValueError(
+                        f"{path}:{lineno}: both sides of "
+                        f"'{RENAME_ARROW}' must be benchmark names"
+                    )
+                if old == new:
+                    raise ValueError(
+                        f"{path}:{lineno}: {old!r} renamed to itself"
+                    )
+                if old in renames:
+                    raise ValueError(
+                        f"{path}:{lineno}: {old!r} already renamed to "
+                        f"{renames[old]!r}"
+                    )
+                renames[old] = new
+    except FileNotFoundError:
+        return {}
+    except OSError as exc:
+        print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
+        return {}
+    return renames
+
+
+def resolve_rename(name, renames):
+    """Follow `name` through the rename chain to the name in use today.
+
+    Returns the final name, or `None` if the chain loops -- a loop is a broken
+    ledger, and returning some arbitrary member of it would excuse a removal on
+    the strength of a declaration that does not say anything.
+
+    Chains exist because a series can be redefined twice. Following them is
+    what keeps the ledger from needing maintenance: the entry that renamed
+    `a -> b` stays true and stays checkable after `b -> c` lands, because the
+    question asked of it is "is the series still measured?", and the answer is
+    found at the end of the chain rather than one step along it.
+    """
+    seen = {name}
+    while name in renames:
+        name = renames[name]
+        if name in seen:
+            return None
+        seen.add(name)
+    return name
+
+
+def unexplained_removals(removed, current, renames):
+    """Split vanished benchmark names into the two ways they can be wrong.
+
+    Returns `(undeclared, misdeclared)`: names with no entry in the rename
+    ledger at all, and names whose entry does not land anywhere in `current`
+    (a broken chain, or a successor that is not being measured either).
+
+    Both are failures; they are separated because they need different fixes,
+    and a gate that reports "a benchmark vanished" for a rename whose successor
+    was itself later dropped sends the reader to the wrong file.
+
+    The asymmetry with the excusing direction is the point: a name is excused
+    only on *positive* evidence that the series continues -- a declaration plus
+    a successor present in this very record. Absence of evidence excuses
+    nothing, which is what keeps the ledger from decaying into an allow-list.
+    """
+    undeclared, misdeclared = [], []
+    for name in sorted(removed):
+        successor = resolve_rename(name, renames)
+        if successor == name:
+            undeclared.append(name)
+        elif successor is None or successor not in current:
+            misdeclared.append((name, successor))
+    return undeclared, misdeclared
 
 
 #: `mean/min` at or above which a benchmark's own number is called unreliable.
@@ -4897,9 +5013,23 @@ def report(previous, current_entries, threshold_pct,
         for name, measured in added:
             print(f"    {name}: {measured}ns")
     if removed:
+        # A declared rename is annotated rather than hidden. The reader of a
+        # bench run wants to know that a name they were tracking has a
+        # continuation, and under what; suppressing the line would leave them
+        # to notice the absence themselves, which is the thing this block
+        # exists to spare them.
+        try:
+            renames = load_renames()
+        except ValueError as exc:
+            print(f"bench-history: {exc}", file=sys.stderr)
+            renames = {}
         print("  GONE (present last run, absent now):")
         for name in removed:
-            print(f"    {name}")
+            successor = resolve_rename(name, renames)
+            if successor is None or successor == name:
+                print(f"    {name}")
+            else:
+                print(f"    {name} -> renamed to {successor}")
     # Every "nothing found" line below is qualified by `not shifts`. An
     # unqualified all-clear printed alongside a SUSTAINED SHIFT block would be
     # the original bug wearing a new hat: the reader takes the summary line as

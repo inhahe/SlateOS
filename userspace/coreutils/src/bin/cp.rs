@@ -258,7 +258,7 @@ use coreutils::fsattr::{
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
-use coreutils::quote::{os_bytes, quoteaf, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
 use std::collections::HashSet;
@@ -3323,9 +3323,9 @@ fn copy_xattrs<O: Write, E: Write>(
     let all_errors = job.flags.require_preserve_xattr;
     let some_errors = !all_errors && !job.flags.reduce_diagnostics;
     for failure in &failures {
-        if all_errors || (some_errors && !errno_unsupported(&failure.err)) {
+        if all_errors || (some_errors && !fsattr::errno_unsupported(&failure.err)) {
             let why = strerror(&failure.err);
-            let what = xattr_sentence(&failure.at, src.name, dst);
+            let what = failure.at.sentence(src.name, dst);
             let _ = writeln!(job.err, "cp: {what}: {why}");
         }
     }
@@ -3339,52 +3339,6 @@ fn nofollow(on: On<'_>) -> On<'_> {
         On::Path(path, _) => On::Path(path, Link::NoFollow),
         On::File(file) => On::File(file),
     }
-}
-
-/// libattr's four sentences, filled in. They are not interchangeable: two name
-/// the attribute and two do not, and two blame the source while two blame the
-/// destination.
-fn xattr_sentence(at: &fsattr::XattrStep, src: &Path, dst: &Path) -> String {
-    // The attribute name goes through `quoteaf` for the same reason the file
-    // names do — coreutils gives libattr `copy_attr_quote`, which is `quoteaf`,
-    // and libattr quotes the name with it as well as the path.
-    match at {
-        fsattr::XattrStep::List => format!("listing attributes of {}", quoteaf_os(src)),
-        fsattr::XattrStep::Get(name) => {
-            format!("getting attribute {} of {}", quoteaf(name), quoteaf_os(src))
-        }
-        fsattr::XattrStep::Set(name) => format!(
-            "setting attribute {} for {}",
-            quoteaf(name),
-            quoteaf_os(dst)
-        ),
-        fsattr::XattrStep::SetAll => format!("setting attributes for {}", quoteaf_os(dst)),
-    }
-}
-
-/// gnulib's `errno_unsupported` (`copy.c:700`): the two errors that mean the
-/// filesystem has nothing to say rather than that something went wrong.
-///
-/// `ENODATA` is in it and is not in [`fsattr`]'s equivalent, which is the
-/// difference between the two tests. It cannot come from the initial
-/// `listxattr` — a filesystem does not answer "no such attribute" to a request
-/// for the list — but it can come from a `getxattr` for a name that was removed
-/// between the listing and the read, and a copy losing a race with `setfattr -x`
-/// is not a failure worth a diagnostic.
-fn errno_unsupported(e: &io::Error) -> bool {
-    e.raw_os_error()
-        .is_some_and(|n| n == libc_enotsup() || n == libc_enodata())
-}
-
-/// `ENOTSUP` (== `EOPNOTSUPP`) on Linux. Named here rather than pulled from a
-/// `libc` crate for the same reason [`libc_eloop`] is.
-const fn libc_enotsup() -> i32 {
-    95
-}
-
-/// `ENODATA` on Linux — "the attribute you named is not there".
-const fn libc_enodata() -> i32 {
-    61
 }
 
 /// GNU's `set_owner` (`copy.c:889`), whose three outcomes are three different

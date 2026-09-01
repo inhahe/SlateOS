@@ -104537,7 +104537,7 @@ the §22 case believe it was already dealt with.
 
 ---
 
-## B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS — FIXED 2026-09-01
 
 **In short:** `mv /other/fs/a /other/fs/b dir/` moves two names for one inode
 and produces two independent files. A rename would have kept them one file, and
@@ -104575,6 +104575,108 @@ two would come to disagree.
 entry: `mv -v @FAR@/a @FAR@/b d` with the fixture `printf hello > a; ln a b`. The
 `links{...}` column is the whole case — the tree and the bytes agree either way,
 which is exactly why the harness grew that column.
+
+**FIXED 2026-09-01.** `mv` now carries GNU's one `src_to_dest` table, as
+`coreutils::fileid::Copied` on the `Job`, and links a repeat inode to where the
+first name landed with `coreutils::hardlink::force_link` — gnulib's
+`force_linkat`, moved out of `cp.rs` so that the two utilities cannot disagree
+about what "replace" means. `scripts/mv-diff.sh` goes from 334/0/12 to **339
+passed, 0 differed, 11 differ on purpose**; the `xfail_case` above is now a
+`run_case`, and four more cases joined it.
+
+**Two things this entry got wrong, corrected here rather than silently.** Both
+were found by reading `copy.c` and measuring GNU 9.4, not by reasoning:
+
+1. *"only consulted for a source with `nlink > 1`"* — **no.** GNU consults it for
+   every non-directory source, `remember_copied` when the count is above one and
+   a bare `src_to_dest_lookup` when it is exactly one (`copy.c:2673`). The
+   lookup arm is not an optimisation and leaving it out is fatal: by the time the
+   *last* of a set of links is reached the earlier ones have been removed and its
+   count is back down to 1, so a rule spelled the way this entry spelled it would
+   never fire on the operand that needs it most. `mv far/a far/b far/c d` is the
+   case; it is in §22 now.
+2. *"it should land with the recursive directory fallback rather than before
+   it"* — the dependency runs the other way round. The table is a prerequisite of
+   the walk, not a co-requisite: it now exists, is exercised, and is in the
+   library where the walk will find it. Landing them together would have meant
+   writing both at once with only the walk's cases to measure the table by.
+
+**And one thing nobody had noticed.** The table is consulted *before* the rename
+that is allowed to replace (`copy.c:2662`), not down beside the copy — so it
+changes what a move that never leaves the disk **says**. Measured, GNU 9.4, one
+filesystem, with `d/a` and `d/b` already present and `a`/`b` two names for one
+inode:
+
+```text
+$ mv -v a b d
+renamed 'a' -> 'd/a'
+removed 'd/b'
+removed 'b'
+```
+
+The second operand is linked and then unlinked, where this `mv` renamed it and
+said `renamed` twice. The resulting tree is identical either way — only the `-v`
+transcript can tell — which is why it survived every same-filesystem case in the
+harness until the table was put in GNU's position rather than the obvious one.
+Two `run_case`s now pin it: that transcript, and the free-destination twin where
+the rename succeeds, nothing is recorded, and both lines really are `renamed`.
+
+**Still not covered, and deliberately.** Directories stay out of the table.
+Upstream's first arm handles them under `x->recursive` and produces `warning:
+source directory %s specified more than once`; this `mv` refuses a cross-device
+directory move outright, so the arm has nothing to protect yet. It belongs with
+`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`. So does the `--update` skip
+path (`copy.c:2380`), which records and links a skipped destination —
+"we currently replace DST_NAME unconditionally, even if it was a newer separate
+file", in upstream's own words — and is tracked separately as
+`B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE`.
+
+---
+
+## B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE — OPEN 2026-09-01
+
+**In short:** `mv --update a b dir/`, where `a` and `b` are two names for one
+file and `dir/a` and `dir/b` already exist and are newer, leaves `dir/a` and
+`dir/b` as the two separate files they were. GNU leaves them as one file — it
+hard-links `dir/b` to `dir/a` even though it just decided to skip both. That is
+as odd as it sounds, and upstream says so itself; it is nonetheless what the
+reference does, and this `mv` is measured against the reference.
+
+**Jargon, once.** *Hard link* — two directory entries naming one file, so writing
+through either changes both. *`--update`* — skip a destination that is not older
+than the source. *Skip* — leave the destination exactly as it was found.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `move_one`. The `earlier_file`
+block that consults `Job::copied` sits *after* `refuse_overwrite_checks`, so a
+`Verdict::Skipped` returns before it is reached. GNU's equivalent is inside the
+`--update` comparison itself (`copy.c:2380`), above the skip.
+
+**What GNU does**, verbatim from `copy.c:2375`:
+
+> However, we still must record that we've processed this src/dest pair, in case
+> this source file is hard-linked to another one. In that case, we'll use the
+> mapping information to link the corresponding destination names.
+
+and then, on the second name:
+
+> Note we currently replace DST_NAME unconditionally, even if it was a newer
+> separate file.
+
+So the skip records into `src_to_dest`, and a later operand naming the same inode
+is linked over its destination — the one thing `--update` was asked not to touch.
+
+**Why it is not fixed with the entry above.** Reaching it needs
+`refuse_overwrite_checks` to distinguish an `--update` skip from a `-n` skip and
+from an `-i` "no": `abandon_move` (the `-n`/`-i` path) deliberately does *not*
+record, so the two skips are not interchangeable here. That is a change to the
+`Verdict` enum, which every refusal in the file flows through, and it wants its
+own commit and its own cases rather than riding along with the table.
+
+**How it would be caught.** `scripts/mv-diff.sh` §22 has no case for it yet. The
+shape is `TREE='mkdir d; printf new > d/a; printf new > d/b; touch -d "2030-01-01"
+d/a d/b'`, `FAR='printf hello > a; ln a b'`, `mv -uv @FAR@/a @FAR@/b d` — and the
+`links{...}` column is again the whole case, since the bytes and the tree agree
+either way.
 
 ---
 

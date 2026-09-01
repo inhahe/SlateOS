@@ -212,9 +212,10 @@
 use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
+use coreutils::fileid::{Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry};
 use coreutils::fsattr::{self, GroupRetry, Link, On, Ownership};
 use coreutils::getopt::{self, Opt, Program, Takes};
+use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname::strip_trailing_slashes;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
@@ -436,6 +437,11 @@ struct Job<'a, O: Write, E: Write> {
     /// a test can put a canned reply behind a prompt without a terminal; see
     /// [`coreutils::yesno::Canned`].
     answers: &'a mut dyn Answers,
+    /// GNU's one `src_to_dest` table (`copy.c:1997`): which inodes this command
+    /// has already put somewhere, and where. One per command and not one per
+    /// operand — that is the whole point of it, and it is why it lives on the
+    /// `Job` rather than inside [`move_one`]. See the `earlier_file` block there.
+    copied: &'a mut Copied,
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -466,12 +472,18 @@ fn run_main() -> ExitCode {
             let mut out = Stream::stdout();
             let mut err = Stream::stderr();
             let mut answers = StdinAnswers::default();
+            // Built here and nowhere else: GNU's `src_to_dest` is a file-scope
+            // hash in `copy.c` created once per process, which is why two
+            // separate `mv` commands correctly produce two separate files where
+            // one command producing two names produces one file.
+            let mut copied = Copied::default();
             let earned = {
                 let mut job = Job {
                     flags: &flags,
                     out: &mut out,
                     err: &mut err,
                     answers: &mut answers,
+                    copied: &mut copied,
                 };
                 if move_all(&mut job, &dest, &paths) {
                     ExitCode::SUCCESS
@@ -1316,6 +1328,70 @@ fn move_one<O: Write, E: Write>(
         }
     }
 
+    // GNU's `earlier_file` block (`copy.c:2662`): has this command already put
+    // *this inode* somewhere? If it has, the second name for it becomes a hard
+    // link to where the first one landed rather than a second file, because a
+    // rename would have kept the two names together and `mv` promises to be
+    // indistinguishable from a rename — `cp_option_init` (`mv.c:129`) sets
+    // `preserve_links` unconditionally, with no option to turn it off.
+    //
+    // # Why it is *here*, and not down in the cross-device fallback
+    //
+    // The obvious place would be beside the copy, since a copy is the only thing
+    // that can produce a second file where a rename would not have. Upstream
+    // puts it before the rename that is allowed to replace, and the difference
+    // is measurable rather than stylistic. With `d/a` and `d/b` already present,
+    // GNU 9.4's `mv -v a b d` on one filesystem — `a` and `b` two names for one
+    // inode — prints:
+    //
+    // ```text
+    // renamed 'a' -> 'd/a'
+    // removed 'd/b'
+    // removed 'b'
+    // ```
+    //
+    // The second operand is *linked and then unlinked*, not renamed. The tree it
+    // leaves is the same either way, which is exactly why the placement has to be
+    // copied rather than reasoned about: only the `-v` transcript can tell, and
+    // `scripts/mv-diff.sh` compares it byte-for-byte.
+    //
+    // # The two ways in
+    //
+    // GNU asks the table differently depending on the link count, and it is not
+    // an optimisation:
+    //
+    // * **`st_nlink > 1`** — `remember_copied`, which both looks up and records.
+    //   This is the source that *has* another name, so a later operand may be it.
+    // * **`st_nlink == 1`** — a bare lookup (`copy.c:2673`). This arm is the one
+    //   that is easy to leave out and fatal to: by the time the last of a set of
+    //   links is reached, the earlier ones have been removed and its count is
+    //   back down to 1. A rule spelled "only when the count is above one" would
+    //   never fire on the operand that needs it most.
+    //
+    // Nothing is asked when the rename *succeeded* (`copy.c:2663`), and this
+    // function has already returned in that case.
+    //
+    // Directories are left out. Upstream's first arm handles them under
+    // `x->recursive` and produces `warning: source directory specified more than
+    // once`; this `mv` refuses a cross-device directory move outright, so the
+    // arm has nothing to protect yet. It belongs with the recursive fallback —
+    // `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`.
+    let src_id = if src_meta.is_dir() {
+        None
+    } else {
+        file_id(src, &src_meta)
+    };
+    if let Some(id) = &src_id {
+        let earlier = if nlink(&src_meta) > 1 {
+            job.copied.remember(id, target)
+        } else {
+            job.copied.lookup(id).map(Path::to_path_buf)
+        };
+        if let Some(earlier) = earlier {
+            return link_to_earlier(job, &earlier, src, target, moved_aside.as_deref());
+        }
+    }
+
     // Now the real rename, the one allowed to replace what is there. Keyed on
     // the errno rather than on `dst_meta`, which is `copy.c:2757` exactly and
     // is not the same condition: between the speculative rename above and the
@@ -1343,6 +1419,12 @@ fn move_one<O: Write, E: Write>(
             quoteaf_os(src),
             quoteaf_os(target)
         );
+        // No [`Copied::forget`] here, and upstream says why in as many words:
+        // "there is no need to call forget_created here, (compare with the other
+        // calls in this file) since the destination directory didn't exist
+        // before" (`copy.c:2807`). This `mv` cannot even reach it with an entry
+        // to forget — the table takes no directories — but the omission is
+        // deliberate rather than an oversight, which is why it is written down.
         return false;
     }
 
@@ -1365,6 +1447,12 @@ fn move_one<O: Write, E: Write>(
                 quoteaf_os(target)
             );
         }
+        // The destination was never written, so the entry the block above may
+        // have just added would make a *later* link point at a name that does
+        // not exist. GNU's `forget_created` at `copy.c:2865`, and it is
+        // unconditional there for the same reason it can be here: on the arm
+        // that only looked the inode up, there is nothing recorded to remove.
+        forget(job, src_id.as_ref());
         return false;
     }
 
@@ -1417,6 +1505,11 @@ fn move_one<O: Write, E: Write>(
         // could not then be cleared leaves the backup standing with no
         // destination — the same odd-but-measured outcome the rename failures
         // above produce, for the same reason.
+        //
+        // The table *is* corrected, though (`copy.c:2883`): un-backing-up and
+        // forgetting are two different repairs and upstream skips only the first
+        // one here.
+        forget(job, src_id.as_ref());
         return false;
     }
 
@@ -1433,6 +1526,13 @@ fn move_one<O: Write, E: Write>(
     announce(job, "copied", src, target, moved_aside.as_deref());
 
     if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut *job.err) {
+        // Upstream's `un_backup:` label forgets too, guarded by `earlier_file ==
+        // nullptr` (`copy.c:3361`) — "unless we've just failed to create a hard
+        // link", because *that* failure leaves the earlier entry legitimately
+        // pointing at a destination that does exist. That guard is expressed here
+        // by [`link_to_earlier`] having its own exit, so this call site is
+        // unconditionally the "we recorded and then failed" one.
+        forget(job, src_id.as_ref());
         return give_up_cross_device(job, &failure, target, moved_aside.as_deref());
     }
     // The second line of the pair, and it comes from somewhere else entirely in
@@ -1501,6 +1601,86 @@ fn announce_removed<O: Write, E: Write>(job: &mut Job<'_, O, E>, src: &Path) {
         return;
     }
     let _ = writeln!(job.out, "removed {}", quoteaf_os(src));
+}
+
+/// GNU's `forget_created`: drop this source's entry from the table because the
+/// destination it would have named was not created after all.
+///
+/// A one-line wrapper so that the three call sites read as the three
+/// `forget_created` calls they are, and so that "no id" — a directory, or a
+/// stat the portable arm could not turn into an inode number — is handled once
+/// rather than three times.
+fn forget<O: Write, E: Write>(job: &mut Job<'_, O, E>, id: Option<&FileId>) {
+    if let Some(id) = id {
+        job.copied.forget(id);
+    }
+}
+
+/// The source names an inode this command has already placed at `earlier`: link
+/// the two destinations together instead of producing a second file, then remove
+/// the source the way a successful move does.
+///
+/// GNU's non-directory arm of the `earlier_file` block (`copy.c:2744`), which is
+/// three lines — `create_hard_link` or `goto un_backup`, then `return true` —
+/// plus what `mv.c` does with that `true`.
+///
+/// # What is *not* printed
+///
+/// No `renamed` and no `copied` line, and that is structural rather than a
+/// choice: upstream returns from `copy_internal` here, above the block that
+/// prints either of them. `-v` still says two things, from two other places —
+/// `removed 'dst'` out of [`hardlink::force_link`] when the destination it took
+/// was occupied, and `removed 'src'` out of the `rm` below. Measured against GNU
+/// 9.4, `mv -v a b d` with `a`/`b` linked and `d/a`/`d/b` present prints exactly
+/// `renamed 'a' -> 'd/a'` / `removed 'd/b'` / `removed 'b'`.
+///
+/// # Why the failed removal does not put a backup back
+///
+/// [`give_up_cross_device`] exists because upstream's copying machinery jumps to
+/// its `un_backup` label from eleven places. The removal is not one of them: it
+/// happens in `do_move` (`mv.c:238`) *after* `copy()` has returned, so a source
+/// that could not be removed sets the exit status and leaves the destination —
+/// and any `-b` backup — exactly where they are. The link failure above it, by
+/// contrast, *is* an `un_backup` jump.
+///
+/// [`Copied::forget`] is likewise not called on either failure. On the link
+/// failure upstream's guard `if (earlier_file == nullptr)` skips it (`copy.c:3361`),
+/// because the entry names a destination that was created and is still there —
+/// it was this *second* name that could not be made. On the removal failure the
+/// destination is complete, so there is nothing to forget either.
+fn link_to_earlier<O: Write, E: Write>(
+    job: &mut Job<'_, O, E>,
+    earlier: &Path,
+    src: &Path,
+    target: &Path,
+    moved_aside: Option<&Path>,
+) -> bool {
+    if !hardlink::force_link(
+        "mv",
+        earlier,
+        target,
+        job.flags.verbose,
+        &mut *job.out,
+        &mut *job.err,
+    ) {
+        backup::un_backup(
+            "mv",
+            moved_aside,
+            target,
+            job.flags.verbose,
+            &mut *job.out,
+            &mut *job.err,
+        );
+        return false;
+    }
+    if let Err(failure) = remove_source(src) {
+        let why = strerror(&failure.err);
+        let what = &failure.what;
+        let _ = writeln!(job.err, "mv: {what}: {why}");
+        return false;
+    }
+    announce_removed(job, src);
+    true
 }
 
 /// Note that the file just moved now sits at `relname`, so a later source that
@@ -3113,12 +3293,14 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
         let mut answers = Canned::new(replies);
+        let mut copied = Copied::default();
         let ok = {
             let mut job = Job {
                 flags: &flags,
                 out: &mut out,
                 err: &mut err,
                 answers: &mut answers,
+                copied: &mut copied,
             };
             move_all(&mut job, &dest, &owned)
         };
@@ -3358,11 +3540,13 @@ mod tests {
             verbose: true,
             ..MvFlags::default()
         };
+        let mut copied = Copied::default();
         let mut job = Job {
             flags: &flags,
             out: &mut out,
             err: &mut err,
             answers: &mut answers,
+            copied: &mut copied,
         };
         announce(
             &mut job,
@@ -3388,11 +3572,13 @@ mod tests {
         let mut err: Vec<u8> = Vec::new();
         let mut answers = Canned::new(&[]);
         let flags = MvFlags::default();
+        let mut copied = Copied::default();
         let mut job = Job {
             flags: &flags,
             out: &mut out,
             err: &mut err,
             answers: &mut answers,
+            copied: &mut copied,
         };
         announce(&mut job, "renamed", Path::new("a"), Path::new("b"), None);
         announce(&mut job, "copied", Path::new("a"), Path::new("b"), None);
@@ -4225,6 +4411,131 @@ mod tests {
             copy_across_devices(&sub, &dir.path("elsewhere"), &meta, &mut Vec::new()).unwrap_err();
         assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);
         assert!(sub.join("inside").is_file(), "nothing may be moved");
+    }
+
+    // ------------------------------------------------- the src_to_dest table --
+
+    /// Two names for one inode, both moved onto names that already exist. The
+    /// destinations must come out as one file, and the transcript must show how:
+    /// the second operand is *linked* to the first result and then unlinked, not
+    /// renamed. Measured against GNU 9.4, which prints exactly these three lines.
+    ///
+    /// A same-filesystem test on purpose — no copy happens here at all, which is
+    /// the point. The table is consulted before the rename that is allowed to
+    /// replace (`copy.c:2662`), so it changes what a move that never leaves the
+    /// disk *says*. `scripts/mv-diff.sh` §22 has the cross-device twin.
+    #[test]
+    #[cfg(unix)]
+    fn a_second_name_for_one_inode_is_linked_to_where_the_first_landed() {
+        let dir = scratch("linked_pair");
+        let (a, b, d) = (dir.path("a"), dir.path("b"), dir.path("d"));
+        fs::create_dir(&d).unwrap();
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::write(d.join("a"), b"old").unwrap();
+        fs::write(d.join("b"), b"old").unwrap();
+
+        let flags = MvFlags {
+            verbose: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err) = mv_flags(flags, &[&a, &b, &d]);
+
+        assert!(ok, "{err}");
+        assert!(err.is_empty(), "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "renamed {} -> {}\nremoved {}\nremoved {}\n",
+                quoteaf_os(&a),
+                quoteaf_os(d.join("a")),
+                quoteaf_os(d.join("b")),
+                quoteaf_os(&b)
+            )
+        );
+        assert!(!a.exists() && !b.exists(), "both sources are gone");
+        assert_eq!(fs::read(d.join("b")).unwrap(), b"hello");
+        assert_eq!(
+            file_id(&d.join("a"), &fs::symlink_metadata(d.join("a")).unwrap()),
+            file_id(&d.join("b"), &fs::symlink_metadata(d.join("b")).unwrap()),
+            "one inode, two names — what a rename would have left"
+        );
+    }
+
+    /// The `st_nlink == 1` arm, which is the one that is easy to leave out. By
+    /// the time the third name is reached the first two have been removed and the
+    /// count is back to one, so a rule spelled "only when the count is above one"
+    /// would copy — or here, rename — it into a separate file.
+    #[test]
+    #[cfg(unix)]
+    fn the_last_link_is_found_even_though_its_count_is_back_to_one() {
+        let dir = scratch("linked_three");
+        let (a, b, c, d) = (dir.path("a"), dir.path("b"), dir.path("c"), dir.path("d"));
+        fs::create_dir(&d).unwrap();
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+        fs::hard_link(&a, &c).unwrap();
+        for name in ["a", "b", "c"] {
+            fs::write(d.join(name), b"old").unwrap();
+        }
+
+        let (ok, err) = mv(&[&a, &b, &c, &d]);
+
+        assert!(ok, "{err}");
+        assert_eq!(nlink(&fs::symlink_metadata(d.join("c")).unwrap()), 3);
+    }
+
+    /// Nothing is recorded when the rename *succeeds* (`copy.c:2663`), so a pair
+    /// moved onto free names is two renames and says so. The tree is the same
+    /// either way — a rename keeps links together by itself — which is precisely
+    /// why a table consulted unconditionally would go unnoticed until the
+    /// transcript was read.
+    #[test]
+    #[cfg(unix)]
+    fn a_rename_that_works_records_nothing_and_stays_a_rename() {
+        let dir = scratch("linked_free");
+        let (a, b, d) = (dir.path("a"), dir.path("b"), dir.path("d"));
+        fs::create_dir(&d).unwrap();
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
+        let flags = MvFlags {
+            verbose: true,
+            ..MvFlags::default()
+        };
+        let (ok, out, err) = mv_flags(flags, &[&a, &b, &d]);
+
+        assert!(ok, "{err}");
+        assert_eq!(
+            out,
+            format!(
+                "renamed {} -> {}\nrenamed {} -> {}\n",
+                quoteaf_os(&a),
+                quoteaf_os(d.join("a")),
+                quoteaf_os(&b),
+                quoteaf_os(d.join("b"))
+            )
+        );
+        assert_eq!(nlink(&fs::symlink_metadata(d.join("b")).unwrap()), 2);
+    }
+
+    /// Two names for one inode are still two *files* when only one of them is
+    /// asked for. The table is keyed on the inode, and the source that stays
+    /// behind must keep its bytes — a table that unlinked the inode rather than
+    /// the named link would lose it.
+    #[test]
+    #[cfg(unix)]
+    fn moving_one_name_of_a_pair_leaves_the_other_alone() {
+        let dir = scratch("linked_one");
+        let (a, b, g) = (dir.path("a"), dir.path("b"), dir.path("g"));
+        fs::write(&a, b"hello").unwrap();
+        fs::hard_link(&a, &b).unwrap();
+
+        let (ok, err) = mv(&[&a, &g]);
+
+        assert!(ok, "{err}");
+        assert_eq!(fs::read(&b).unwrap(), b"hello");
+        assert_eq!(fs::read(&g).unwrap(), b"hello");
     }
 
     /// A file whose name is not valid UTF-8 — the case the whole rewrite is

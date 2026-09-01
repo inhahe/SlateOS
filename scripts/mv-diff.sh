@@ -1732,8 +1732,41 @@ run_case -v @FAR@/l g
 # is the whole case — the tree and the bytes agree either way.
 TREE='mkdir d'
 FAR='printf hello > a; ln a b'
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS" \
-  -v @FAR@/a @FAR@/b d
+run_case -v @FAR@/a @FAR@/b d
+
+# Three names, so that the middle one is reached with a count still above one
+# and the last with a count of exactly one — the far side's `a` is gone by then.
+# It is the case that separates `remember` from `lookup`: a rule that consulted
+# the table only when the count was above one would copy `c` afresh and leave
+# `d/c` a separate file.
+TREE='mkdir d'
+FAR='printf hello > a; ln a b; ln a c'
+run_case -v @FAR@/a @FAR@/b @FAR@/c d
+
+# The same pair with the destinations already occupied. The link is then made
+# over a name in use — a link to a temporary followed by a rename — and `-v`
+# reports the replacement as `removed 'd/b'`, printed from inside gnulib's
+# `force_linkat` after the first operand's line rather than before the second's.
+TREE='mkdir d; printf old > d/a; printf old > d/b'
+FAR='printf hello > a; ln a b'
+run_case -v @FAR@/a @FAR@/b d
+
+# The same shape entirely on **one** filesystem, where no copy happens at all
+# and the answer is still not two renames. GNU consults the table before the
+# rename that is allowed to replace, so the second operand is linked to the
+# first result and then unlinked: `renamed 'a' -> 'd/a'` / `removed 'd/b'` /
+# `removed 'b'`, where two renames would have said `renamed` twice. The tree is
+# identical either way — this case exists for the transcript.
+TREE='mkdir d; printf old > d/a; printf old > d/b; printf hello > a; ln a b'
+run_case -v a b d
+
+# And the same again with the destinations *free*, where the speculative rename
+# succeeds and nothing is ever recorded. Both operands are renamed, both lines
+# say so, and the pair stays linked because a rename kept them so. The case pins
+# the `rename_errno == 0` arm — a table consulted unconditionally would turn the
+# second `renamed` into a `removed`.
+TREE='mkdir d; printf hello > a; ln a b'
+run_case -v a b d
 
 # The same inode, but only one of its names moved. Here the *right* answer is
 # two separate files, and the far side must keep `b` with its bytes: a fallback

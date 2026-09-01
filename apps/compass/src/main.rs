@@ -1039,10 +1039,14 @@ impl CompassApp {
                 let ring = r * 0.76;
                 let label = format!("{deg:.0}");
                 let (cx, cy) = (l.cx + sin_deg(angle) * ring, l.cy - cos_deg(angle) * ring);
-                let x = text::center_x(&label, cx, deg_size, FontWeightHint::Regular);
+                // The box is the measured width of the text and no wider.
+                // A generous box would be a `max_width` the run cannot fill,
+                // which is a promise to the compositor that the label ends
+                // somewhere it does not.
+                let wide = text::measure(&label, deg_size, FontWeightHint::Regular);
                 bounded(
                     f,
-                    Rect::new(x, cy - deg_size, deg_size * 3.0, deg_size * 2.0),
+                    Rect::new(cx - wide * 0.5, cy - deg_size, wide, deg_size * 2.0),
                     label,
                     SUBTEXT0,
                     deg_size,
@@ -1077,10 +1081,10 @@ impl CompassApp {
             let angle = deg as f32 - heading;
             let ring = r * 0.64;
             let (cx, cy) = (l.cx + sin_deg(angle) * ring, l.cy - cos_deg(angle) * ring);
-            let x = text::center_x(label, cx, size, weight);
+            let wide = text::measure(label, size, weight);
             bounded(
                 f,
-                Rect::new(x, cy - size, size * 4.0, size * 2.0),
+                Rect::new(cx - wide * 0.5, cy - size, wide, size * 2.0),
                 label,
                 color,
                 size,
@@ -1642,6 +1646,12 @@ fn bounded(
     if !(r.w.is_finite() && r.h.is_finite()) || r.w <= 0.0 || r.h <= 0.0 || size <= 0.0 {
         return;
     }
+    // A run taller than its box, centred in it, sticks out of both ends --
+    // which is how the status line came to be drawn below the bottom of a
+    // 30-pixel window. Shrinking to the box is what a strip too short for its
+    // type should do; the alternative is text outside the box it belongs to,
+    // and no caller can prevent that from where it stands.
+    let size = size.min(r.h);
     f.push(RenderCommand::Text {
         x: r.x,
         y: r.y + (r.h - size) * 0.5,
@@ -1663,6 +1673,10 @@ fn centred(
     size: f32,
     weight: FontWeightHint,
 ) {
+    // Measured at the size it will actually be drawn at, which is the size
+    // that fits the box: centring a 15-point string in a 4-point-tall strip
+    // against a 15-point measurement puts it in the wrong place.
+    let size = size.min(r.h);
     let x = text::center_x(text, r.x + r.w * 0.5, size, weight).max(r.x);
     bounded(
         f,
@@ -2725,5 +2739,920 @@ mod tests {
         let event = Event::Key(make_key_event(Key::Escape, false, false));
         app.handle_event(&event, SIZE);
         assert!(app.selected_waypoint.is_none());
+    }
+
+    // ── The window ──────────────────────────────────────────────────
+    //
+    // Everything below drives the program the way the compositor does: at a
+    // size, through `frame` and `handle_event`, with no access to a constant
+    // the drawing pass is not allowed to read either. The tests above check
+    // what the compass computes; these check that what it computes reaches a
+    // window and that a pointer can reach it back.
+
+    /// The window sizes every geometry sweep is run at.
+    ///
+    /// Not a grid for its own sake: each entry is a shape that breaks a
+    /// different assumption -- narrower than the panel is worth, shorter than
+    /// the header plus the status line, wider than it is tall and the other
+    /// way round, and two that are not really windows at all.
+    const GRID: [(f32, f32); 12] = [
+        (900.0, 720.0),
+        (1920.0, 1080.0),
+        (1280.0, 800.0),
+        (640.0, 480.0),
+        (480.0, 900.0),
+        (1600.0, 300.0),
+        (400.0, 300.0),
+        (320.0, 240.0),
+        (200.0, 160.0),
+        (120.0, 90.0),
+        (40.0, 30.0),
+        (2.0, 2.0),
+    ];
+
+    /// A waypoint with a name of `len` characters, for the states that need
+    /// a label too long for its column.
+    fn long_named(app: &mut CompassApp, len: usize) {
+        app.entry_lat_buf = String::from("12.5");
+        app.entry_lon_buf = String::from("-3.25");
+        app.entry_name_buf = "W".repeat(len);
+        assert!(
+            app.add_waypoint_from_entry(),
+            "the fixture must add a waypoint"
+        );
+    }
+
+    /// The states every geometry sweep is run over.
+    ///
+    /// A window is only as right as its worst state. Sweeping the default
+    /// state proves the default state: it is the list with more waypoints
+    /// than rows, the entry view with every buffer full, and the compass with
+    /// no room for its panel that have somewhere to go wrong.
+    fn states() -> Vec<(&'static str, CompassApp)> {
+        let mut out: Vec<(&'static str, CompassApp)> = Vec::new();
+
+        out.push(("compass, fresh", default_app()));
+
+        let mut turned = default_app();
+        turned.heading = 217.0;
+        turned.declination = -13.0;
+        out.push(("compass, turned and declined", turned));
+
+        let mut marked = default_app();
+        for _ in 0..3 {
+            marked.add_waypoint_at_current_position();
+        }
+        out.push(("compass, three waypoints", marked));
+
+        let mut full = default_app();
+        for _ in 0..MAX_WAYPOINTS {
+            full.add_waypoint_at_current_position();
+        }
+        full.selected_waypoint = Some(MAX_WAYPOINTS - 1);
+        out.push(("compass, list full", full));
+
+        let mut empty_list = default_app();
+        empty_list.view = View::Waypoints;
+        out.push(("list, empty", empty_list));
+
+        let mut list = default_app();
+        list.view = View::Waypoints;
+        for _ in 0..MAX_WAYPOINTS {
+            list.add_waypoint_at_current_position();
+        }
+        list.selected_waypoint = Some(MAX_WAYPOINTS - 1);
+        out.push(("list, full and last selected", list));
+
+        let mut wordy = default_app();
+        wordy.view = View::Waypoints;
+        long_named(&mut wordy, 64);
+        out.push(("list, one very long name", wordy));
+
+        let mut entry = default_app();
+        entry.view = View::CoordinateEntry;
+        out.push(("entry, empty", entry));
+
+        let mut typed = default_app();
+        typed.view = View::CoordinateEntry;
+        typed.active_coord_field = CoordField::Name;
+        typed.entry_lat_buf = String::from("-89.123456789012");
+        typed.entry_lon_buf = String::from("179.123456789012");
+        typed.entry_name_buf = String::from("Longest name yet");
+        out.push(("entry, every buffer full", typed));
+
+        out
+    }
+
+    /// Every run of text the frame drew, as `(text, x, y, size, max_width)`.
+    fn text_runs(frame: &Frame<Target>) -> Vec<(String, f32, f32, f32, Option<f32>)> {
+        frame
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    max_width,
+                    ..
+                } => Some((text.clone(), *x, *y, *font_size, *max_width)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Where the picture drew a given run of text, as a point inside it.
+    ///
+    /// This is how a control is found when the point of the test is *which*
+    /// control the press reaches. Asking `probe::rect_of` for the `Target`
+    /// asks the drawing pass where it thinks its own labels are, and a pass
+    /// that recorded every row one row off would answer with the same offset
+    /// it made the mistake with -- so finding and clicking would cancel out
+    /// and the test would pass over a list where every row chose its
+    /// neighbour. The words are the only thing in the frame a user can read.
+    fn text_point(app: &CompassApp, size: (f32, f32), wanted: &str) -> Option<(f32, f32)> {
+        let frame = app.frame(size.0, size.1);
+        let found: Vec<(f32, f32)> = text_runs(&frame)
+            .into_iter()
+            .filter(|(text, ..)| text == wanted)
+            .map(|(_, x, y, font_size, max_width)| {
+                (
+                    x + max_width.unwrap_or(font_size) * 0.5,
+                    y + font_size * 0.5,
+                )
+            })
+            .collect();
+        // Two runs reading the same words make "press the thing that says X"
+        // ambiguous, and the caller would silently get whichever came first.
+        // Better to stop and be told than to test the wrong rectangle.
+        assert!(
+            found.len() <= 1,
+            "{} runs of text read {wanted:?}",
+            found.len()
+        );
+        found.first().copied()
+    }
+
+    #[test]
+    fn the_window_is_painted_edge_to_edge_at_every_size() {
+        for (w, h) in GRID {
+            let frame = default_app().frame(w, h);
+            let first = frame.commands().first().expect("a frame draws something");
+            match first {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => {
+                    assert!(
+                        (*x - 0.0).abs() < 0.01 && (*y - 0.0).abs() < 0.01,
+                        "{w}x{h}: the background starts at ({x}, {y}), not the corner"
+                    );
+                    assert!(
+                        (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01,
+                        "{w}x{h}: the background is {width}x{height} -- the compositor \
+                         would show whatever was in the window before us in the rest"
+                    );
+                }
+                other => panic!("{w}x{h}: the frame opens with {other:?}, not a background"),
+            }
+        }
+    }
+
+    #[test]
+    fn the_frame_is_balanced_at_every_size_and_state() {
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                assert!(
+                    app.frame(w, h).is_balanced(),
+                    "{name} at {w}x{h}: a clip or translation was pushed and not popped, \
+                     so every later hit box is measured in the wrong space"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_control_lies_inside_the_window() {
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                for (target, rect) in frame.hits() {
+                    assert!(
+                        rect.x >= -0.01
+                            && rect.y >= -0.01
+                            && rect.right() <= w + 0.01
+                            && rect.bottom() <= h + 0.01,
+                        "{name} at {w}x{h}: {target:?} answers presses at {rect:?}, \
+                         which is partly outside the window"
+                    );
+                    assert!(
+                        !rect.is_empty(),
+                        "{name} at {w}x{h}: {target:?} has an empty hit box"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_run_of_text_is_bounded_and_inside_the_window() {
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let frame = app.frame(w, h);
+                for (text, x, y, size, max_width) in text_runs(&frame) {
+                    let Some(bound) = max_width else {
+                        panic!(
+                            "{name} at {w}x{h}: {text:?} is drawn with no max_width, so it \
+                             runs as far as the string is long and over whatever is beside it"
+                        );
+                    };
+                    assert!(
+                        bound.is_finite() && bound > 0.0,
+                        "{name} at {w}x{h}: {text:?} is bounded to {bound}"
+                    );
+                    assert!(
+                        x >= -0.01 && x + bound <= w + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {x}..{} across a {w}-wide window",
+                        x + bound
+                    );
+                    assert!(
+                        y >= -0.01 && y + size <= h + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {y}..{} down a {h}-tall window",
+                        y + size
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nothing_is_drawn_over_the_status_line() {
+        // The status line is the last thing drawn, so it cannot be painted
+        // over -- but a control that reaches under it would still take the
+        // press, and the user would be clicking a button they cannot see.
+        for (name, app) in states() {
+            for (w, h) in GRID {
+                let l = Layout::solve(w, h);
+                if l.status.is_empty() {
+                    continue;
+                }
+                for (target, rect) in app.frame(w, h).hits() {
+                    assert!(
+                        rect.y < l.status.y + 0.01,
+                        "{name} at {w}x{h}: {target:?} at {rect:?} sits under the status \
+                         line, which is drawn after it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_size_that_is_not_a_size_still_produces_a_window() {
+        // A compositor that hands us a zero or a NaN is misbehaving, but the
+        // answer to that is an empty window, not a frame full of NaN
+        // rectangles that the renderer will read as enormous.
+        for (w, h) in [
+            (0.0, 0.0),
+            (-100.0, -100.0),
+            (f32::NAN, 720.0),
+            (900.0, f32::NAN),
+            (f32::INFINITY, f32::INFINITY),
+        ] {
+            let app = default_app();
+            let frame = app.frame(w, h);
+            assert!(frame.is_balanced(), "{w}x{h}: unbalanced");
+            for (target, rect) in frame.hits() {
+                assert!(
+                    rect.x.is_finite()
+                        && rect.y.is_finite()
+                        && rect.w.is_finite()
+                        && rect.h.is_finite(),
+                    "{w}x{h}: {target:?} has hit box {rect:?}"
+                );
+            }
+            for (text, x, y, _, max_width) in text_runs(&frame) {
+                assert!(
+                    x.is_finite() && y.is_finite() && max_width.is_some_and(f32::is_finite),
+                    "{w}x{h}: {text:?} is drawn at ({x}, {y}) bounded to {max_width:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_rose_is_a_circle_wherever_it_is_drawn() {
+        // Inscribed in the larger dimension the rose would be an ellipse in
+        // any window that is not 5:4, which is what a fixed radius against a
+        // resizable window amounts to.
+        for (w, h) in GRID {
+            let l = Layout::solve(w, h);
+            if l.radius <= 0.0 {
+                continue;
+            }
+            assert!(
+                (l.rose.w - l.rose.h).abs() < 0.01,
+                "{w}x{h}: the rose is {}x{}",
+                l.rose.w,
+                l.rose.h
+            );
+            assert!(
+                l.rose.x >= -0.01
+                    && l.rose.right() <= w + 0.01
+                    && l.rose.y >= l.body.y - 0.01
+                    && l.rose.bottom() <= l.body.bottom() + 0.01,
+                "{w}x{h}: the rose at {:?} leaves the body {:?}",
+                l.rose,
+                l.body
+            );
+        }
+    }
+
+    #[test]
+    fn the_panel_is_given_up_before_the_rose_is() {
+        // The order things are surrendered in is the order of what they are
+        // worth. A compass with readouts and no rose is not a compass.
+        let mut narrow = 0;
+        for (w, h) in GRID {
+            let l = Layout::solve(w, h);
+            if l.panel.is_empty() {
+                narrow += 1;
+                continue;
+            }
+            assert!(
+                l.radius > 0.0,
+                "{w}x{h}: room for the panel but none for the rose"
+            );
+            assert!(
+                l.panel.w <= w - l.panel.w + 0.01,
+                "{w}x{h}: the panel takes {} of {w}, more than it leaves",
+                l.panel.w
+            );
+        }
+        assert!(
+            narrow > 0,
+            "no size in the grid is narrow enough to drop the panel, so the branch \
+             that drops it is never exercised"
+        );
+    }
+
+    #[test]
+    fn a_window_with_no_panel_still_shows_the_heading() {
+        // The heading is the one number the program exists to report. It
+        // lives in the panel, and the panel is the first thing given up.
+        let mut app = default_app();
+        app.heading = 137.0;
+        let mut checked = 0;
+        for (w, h) in GRID {
+            let l = Layout::solve(w, h);
+            if !l.panel.is_empty() || l.body.h <= 0.0 {
+                continue;
+            }
+            checked += 1;
+            let frame = app.frame(w, h);
+            assert!(
+                text_runs(&frame)
+                    .iter()
+                    .any(|(text, ..)| text.starts_with("137")),
+                "{w}x{h}: no panel and no heading either -- runs were {:?}",
+                text_runs(&frame)
+                    .iter()
+                    .map(|(t, ..)| t.clone())
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(checked > 0, "the no-panel case was never reached");
+    }
+
+    // ── The pointer ─────────────────────────────────────────────────
+    //
+    // Everything below finds a control by the words drawn in it and then
+    // presses that point. Nothing here asks the drawing pass where it put
+    // its own hit boxes: a pass that recorded every row one row off would
+    // answer such a question with the same offset it made the mistake with,
+    // and finding and pressing would cancel out.
+
+    /// Press the left button at `at`, through the entry point the compositor
+    /// uses.
+    fn press(app: &mut CompassApp, at: (f32, f32), size: (f32, f32)) {
+        app.click_at(at.0, at.1, MouseButton::Left, size);
+    }
+
+    /// The middle of the run of text reading `wanted`, or a failure naming it.
+    fn point(app: &CompassApp, size: (f32, f32), wanted: &str) -> (f32, f32) {
+        match text_point(app, size, wanted) {
+            Some(p) => p,
+            None => panic!("nothing on screen reads {wanted:?} at {size:?}"),
+        }
+    }
+
+    /// Whether anything drawn reads exactly `wanted`.
+    fn shows(app: &CompassApp, size: (f32, f32), wanted: &str) -> bool {
+        text_runs(&app.frame(size.0, size.1))
+            .iter()
+            .any(|(text, ..)| text == wanted)
+    }
+
+    /// Add a waypoint with a name of our choosing, through the entry view.
+    fn named(app: &mut CompassApp, name: &str, lat: f64, lon: f64) {
+        app.entry_lat_buf = format!("{lat}");
+        app.entry_lon_buf = format!("{lon}");
+        app.entry_name_buf = String::from(name);
+        assert!(app.add_waypoint_from_entry(), "the fixture must add {name}");
+    }
+
+    /// A list of `n` waypoints whose names are all different.
+    ///
+    /// Different names are the whole point: a test that presses "the row
+    /// reading Delta" cannot tell which row it reached if two rows read the
+    /// same thing.
+    fn listed(n: usize) -> CompassApp {
+        let mut app = default_app();
+        app.view = View::Waypoints;
+        for i in 0..n {
+            named(
+                &mut app,
+                &format!("Mark{i}"),
+                10.0 + i as f64,
+                20.0 + i as f64,
+            );
+        }
+        app.selected_waypoint = None;
+        app
+    }
+
+    /// The middle of the rose, taken from the picture rather than the layout.
+    ///
+    /// `N` and `S` are drawn on opposite ends of the same ring, so the
+    /// midpoint of the two is the centre they are drawn around -- exactly,
+    /// at any heading, without asking `Layout` anything.
+    fn rose_centre(app: &CompassApp, size: (f32, f32)) -> (f32, f32) {
+        let n = point(app, size, "N");
+        let s = point(app, size, "S");
+        ((n.0 + s.0) * 0.5, (n.1 + s.1) * 0.5)
+    }
+
+    /// Which waypoints the frame recorded a hit box for.
+    fn clickable_rows(app: &CompassApp, size: (f32, f32)) -> Vec<usize> {
+        let mut rows: Vec<usize> = app
+            .frame(size.0, size.1)
+            .hits()
+            .iter()
+            .filter_map(|(t, _)| match t {
+                Target::Waypoint(i) => Some(*i),
+                _ => None,
+            })
+            .collect();
+        rows.sort_unstable();
+        rows
+    }
+
+    #[test]
+    fn pressing_a_tab_switches_to_the_view_it_names() {
+        // Before the header existed the views were reachable with `W`, `C`
+        // and `Esc` and by nothing else.
+        for start in [View::Compass, View::Waypoints, View::CoordinateEntry] {
+            for (label, view, proof) in [
+                (
+                    "Waypoints",
+                    View::Waypoints,
+                    "No waypoints. Press C to add one, or Esc to go back.",
+                ),
+                ("Add waypoint", View::CoordinateEntry, "Add (Enter)"),
+                ("Compass", View::Compass, "HEADING"),
+            ] {
+                let mut app = default_app();
+                app.set_view(start);
+                let at = point(&app, SIZE, label);
+                press(&mut app, at, SIZE);
+                assert_eq!(
+                    app.view, view,
+                    "pressing {label:?} from {start:?} reached the wrong view"
+                );
+                assert!(
+                    shows(&app, SIZE, proof),
+                    "pressing {label:?} from {start:?} left {proof:?} unpainted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_unit_toggle_reads_the_unit_in_force_and_changes_it() {
+        let mut app = default_app();
+        assert!(shows(&app, SIZE, "km"), "the toggle must read the unit");
+
+        let at = point(&app, SIZE, "km");
+        press(&mut app, at, SIZE);
+        assert!(
+            shows(&app, SIZE, "mi"),
+            "the press did not reach the toggle"
+        );
+        assert!(!shows(&app, SIZE, "km"), "both units are on screen at once");
+
+        let at = point(&app, SIZE, "mi");
+        press(&mut app, at, SIZE);
+        assert!(shows(&app, SIZE, "km"), "the toggle only goes one way");
+    }
+
+    #[test]
+    fn the_declination_steppers_move_it_the_way_they_are_labelled() {
+        // `D` alone used to *decrease* declination, and the only mention of
+        // it on screen was a help line. A control labelled `-` that adds is
+        // the same bug wearing a button.
+        let mut app = default_app();
+        assert!(
+            shows(&app, SIZE, "+0"),
+            "the card must read the declination"
+        );
+
+        let minus = point(&app, SIZE, "-");
+        let plus = point(&app, SIZE, "+");
+
+        press(&mut app, minus, SIZE);
+        assert!(
+            (app.declination + 1.0).abs() < 1e-9,
+            "the button reading - moved declination to {}",
+            app.declination
+        );
+        assert!(shows(&app, SIZE, "-1"), "the readout did not follow");
+
+        for _ in 0..2 {
+            press(&mut app, plus, SIZE);
+        }
+        assert!(
+            (app.declination - 1.0).abs() < 1e-9,
+            "the button reading + moved declination to {}",
+            app.declination
+        );
+        assert!(shows(&app, SIZE, "+1"), "the readout did not follow");
+    }
+
+    #[test]
+    fn pressing_the_rose_points_the_compass_at_the_pressed_point() {
+        // The rose is the only pointer route to a heading there is: without
+        // it the compass turns with the arrow keys and in no other way.
+        let mut app = default_app();
+        // A magnetic heading and a declination that do not cancel, so a press
+        // that ignored declination would answer differently. 35 - 13 = 22,
+        // whose cardinal name is `NNE` -- three letters, so the panel readout
+        // cannot be mistaken for one of the rose's own labels.
+        app.heading = 35.0;
+        app.declination = -13.0;
+
+        let (cx, cy) = rose_centre(&app, SIZE);
+        let n = point(&app, SIZE, "N");
+        let ring = ((n.0 - cx).powi(2) + (n.1 - cy).powi(2)).sqrt();
+        assert!(ring > 1.0, "the rose is too small to press meaningfully");
+
+        // Up and to the right in equal measure: 45 degrees clockwise of north.
+        let d = ring * std::f32::consts::FRAC_1_SQRT_2;
+        press(&mut app, (cx + d, cy - d), SIZE);
+
+        assert!(
+            (app.true_heading() - 45.0).abs() < 0.5,
+            "pressing 45 degrees round the rose gave {}",
+            app.true_heading()
+        );
+        assert!(
+            shows(&app, SIZE, "45"),
+            "the heading readout did not follow the press"
+        );
+        assert!(
+            (app.heading - 58.0).abs() < 0.5,
+            "declination was not taken off the pressed bearing: magnetic {}",
+            app.heading
+        );
+    }
+
+    #[test]
+    fn pressing_a_row_selects_the_waypoint_whose_name_it_shows() {
+        let mut app = listed(6);
+        for i in 0..6 {
+            let name = format!("Mark{i}");
+            let at = point(&app, SIZE, &name);
+            press(&mut app, at, SIZE);
+            let picked = app
+                .selected_waypoint
+                .and_then(|s| app.waypoints.get(s))
+                .map(|w| w.name.clone());
+            assert_eq!(
+                picked.as_deref(),
+                Some(name.as_str()),
+                "pressing the row reading {name:?} selected {picked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_press_inside_the_list_falls_between_two_rows() {
+        // The gap under a row is drawn, and a press that lands in it has to
+        // belong to somebody. Before the hit boxes covered the gaps a press
+        // could land between two rows and select neither.
+        let app = listed(6);
+        let first = point(&app, SIZE, "Mark0");
+        let last = point(&app, SIZE, "Mark5");
+        let frame = app.frame(SIZE.0, SIZE.1);
+        let mut y = first.1;
+        while y <= last.1 {
+            let hit = frame.hit_test(first.0, y);
+            assert!(
+                matches!(hit, Some(Target::Waypoint(_))),
+                "a press at y={y} inside the list reached {hit:?}"
+            );
+            y += 0.5;
+        }
+    }
+
+    /// A window short enough that the list cannot show all ten rows.
+    const SHORT: (f32, f32) = (760.0, 230.0);
+
+    #[test]
+    fn a_row_that_does_not_fit_is_neither_drawn_nor_clickable() {
+        // The old list re-derived its rows arithmetically from constants, so
+        // a row that had been clipped away was still clickable at the
+        // coordinates it no longer occupied.
+        let app = listed(MAX_WAYPOINTS);
+        let rows = clickable_rows(&app, SHORT);
+        assert!(
+            rows.len() < MAX_WAYPOINTS,
+            "{SHORT:?} still fits every row -- the test proves nothing"
+        );
+        for i in 0..MAX_WAYPOINTS {
+            let drawn = shows(&app, SHORT, &format!("Mark{i}"));
+            assert_eq!(
+                drawn,
+                rows.contains(&i),
+                "row {i}: drawn={drawn}, clickable={}",
+                rows.contains(&i)
+            );
+        }
+    }
+
+    #[test]
+    fn the_selected_waypoint_is_always_on_screen() {
+        // A selection you cannot see is a selection you cannot act on: the
+        // delete button would be armed for a row nowhere in the window.
+        let mut app = listed(MAX_WAYPOINTS);
+        for i in 0..MAX_WAYPOINTS {
+            app.selected_waypoint = Some(i);
+            assert!(
+                shows(&app, SHORT, &format!("Mark{i}")),
+                "waypoint {i} is selected and off screen at {SHORT:?}"
+            );
+        }
+    }
+
+    /// Type `text` at the window, one character at a time, as a keyboard does.
+    fn type_str(app: &mut CompassApp, text: &str) {
+        for ch in text.chars() {
+            let mut buf = [0u8; 4];
+            app.key_at(&guitk::probe::typing(ch.encode_utf8(&mut buf)), SIZE);
+        }
+    }
+
+    #[test]
+    fn delete_is_only_offered_when_nothing_would_be_lost_by_pressing_it() {
+        // A button that accepts the press and does nothing is
+        // indistinguishable from one that is broken.
+        let mut app = listed(3);
+        assert_eq!(app.selected_waypoint, None, "the fixture must start clear");
+
+        let at = point(&app, SIZE, "Delete");
+        let hit = app.frame(SIZE.0, SIZE.1).hit_test(at.0, at.1);
+        assert!(
+            !matches!(hit, Some(Target::DeleteWaypoint)),
+            "delete answers a press with nothing selected"
+        );
+        press(&mut app, at, SIZE);
+        assert_eq!(app.waypoints.len(), 3, "an unarmed delete removed a row");
+
+        app.selected_waypoint = Some(1);
+        let hit = app.frame(SIZE.0, SIZE.1).hit_test(at.0, at.1);
+        assert!(
+            matches!(hit, Some(Target::DeleteWaypoint)),
+            "delete is drawn armed and answers nothing: {hit:?}"
+        );
+    }
+
+    #[test]
+    fn delete_removes_the_row_that_was_pressed_to_select_it() {
+        let mut app = listed(4);
+        let at = point(&app, SIZE, "Mark2");
+        press(&mut app, at, SIZE);
+        let del = point(&app, SIZE, "Delete");
+        press(&mut app, del, SIZE);
+
+        assert_eq!(app.waypoints.len(), 3, "delete removed the wrong number");
+        assert!(!shows(&app, SIZE, "Mark2"), "the pressed row survived");
+        for kept in ["Mark0", "Mark1", "Mark3"] {
+            assert!(shows(&app, SIZE, kept), "{kept} was taken with it");
+        }
+    }
+
+    #[test]
+    fn pressing_a_field_gives_it_the_keyboard_and_typing_reaches_it() {
+        // The name box was painted, labelled, and impossible to type into:
+        // `Tab` cycled two fields and the pointer reached none of them.
+        let mut app = default_app();
+        app.set_view(View::CoordinateEntry);
+        assert_eq!(app.active_coord_field, CoordField::Latitude);
+
+        let at = point(&app, SIZE, "WP auto-name");
+        press(&mut app, at, SIZE);
+        assert_eq!(
+            app.active_coord_field,
+            CoordField::Name,
+            "pressing the name box did not focus it"
+        );
+        type_str(&mut app, "Base camp");
+        assert_eq!(app.entry_name_buf, "Base camp");
+        assert!(
+            shows(&app, SIZE, "Base camp"),
+            "the typing is not on screen"
+        );
+        assert!(
+            !shows(&app, SIZE, "WP auto-name"),
+            "the placeholder outlived what was typed over it"
+        );
+
+        // And a second field, so that "the pointer focuses the name box" is
+        // not passing because every press focuses the name box.
+        let at = point(&app, SIZE, "e.g. 2.3522");
+        press(&mut app, at, SIZE);
+        assert_eq!(app.active_coord_field, CoordField::Longitude);
+        type_str(&mut app, "2.35");
+        assert_eq!(app.entry_lon_buf, "2.35");
+        assert_eq!(app.entry_name_buf, "Base camp", "the wrong buffer took it");
+    }
+
+    #[test]
+    fn the_add_button_makes_the_waypoint_the_fields_describe() {
+        let mut app = default_app();
+        app.set_view(View::CoordinateEntry);
+        app.entry_lat_buf = String::from("48.8566");
+        app.entry_lon_buf = String::from("2.3522");
+        app.entry_name_buf = String::from("Paris");
+
+        let at = point(&app, SIZE, "Add (Enter)");
+        press(&mut app, at, SIZE);
+
+        assert_eq!(app.waypoints.len(), 1, "the button added nothing");
+        let wp = &app.waypoints[0];
+        assert_eq!(wp.name, "Paris");
+        assert!(
+            (wp.coord.lat - 48.8566).abs() < 1e-9,
+            "latitude {}",
+            wp.coord.lat
+        );
+        assert!(
+            (wp.coord.lon - 2.3522).abs() < 1e-9,
+            "longitude {}",
+            wp.coord.lon
+        );
+    }
+
+    #[test]
+    fn the_mark_button_makes_a_waypoint_at_the_position_on_screen() {
+        let mut app = default_app();
+        let at = point(&app, SIZE, "Mark here (M)");
+        press(&mut app, at, SIZE);
+
+        assert_eq!(app.waypoints.len(), 1, "the button added nothing");
+        let wp = &app.waypoints[0];
+        assert!((wp.coord.lat - app.position.lat).abs() < 1e-9);
+        assert!((wp.coord.lon - app.position.lon).abs() < 1e-9);
+        // The readouts agree, which is what a user checks it against.
+        assert!(shows(&app, SIZE, "WP1"), "the new waypoint is not shown");
+        assert!(
+            shows(&app, SIZE, &app.position.format_lat()),
+            "the position it was taken from is not on screen"
+        );
+    }
+
+    #[test]
+    fn a_full_list_says_so_rather_than_swallowing_the_press() {
+        let mut app = default_app();
+        for _ in 0..MAX_WAYPOINTS {
+            assert!(app.add_waypoint_at_current_position());
+        }
+        // The button keeps its hit box and changes its words: a press that
+        // landed on nothing would leave the user guessing why.
+        let at = point(&app, SIZE, "List full");
+        press(&mut app, at, SIZE);
+
+        assert_eq!(app.waypoints.len(), MAX_WAYPOINTS, "the cap did not hold");
+        assert!(
+            shows(&app, SIZE, "Maximum 10 waypoints reached"),
+            "the refusal was silent"
+        );
+    }
+
+    #[test]
+    fn a_press_on_bare_background_changes_nothing() {
+        let mut app = default_app();
+        app.add_waypoint_at_current_position();
+        let frame = app.frame(SIZE.0, SIZE.1);
+
+        let mut bare = None;
+        let mut y = 3.0;
+        while y < SIZE.1 && bare.is_none() {
+            let mut x = 3.0;
+            while x < SIZE.0 {
+                if frame.hit_test(x, y).is_none() {
+                    bare = Some((x, y));
+                    break;
+                }
+                x += 7.0;
+            }
+            y += 7.0;
+        }
+        let bare = bare.expect("the whole window is covered in controls");
+
+        let before = text_runs(&frame);
+        press(&mut app, bare, SIZE);
+        let after = text_runs(&app.frame(SIZE.0, SIZE.1));
+        assert_eq!(
+            before, after,
+            "a press at {bare:?}, where nothing is drawn, changed the picture"
+        );
+    }
+
+    /// A second window size, unlike the first in both dimensions.
+    const OTHER: (f32, f32) = (1400.0, 900.0);
+
+    #[test]
+    fn a_press_is_answered_against_the_size_the_last_frame_was_drawn_at() {
+        // The compositor calls `render(w, h)` and then hands over presses with
+        // no size attached. Answering them against a constant answers them
+        // against a window that is not on the screen.
+        let mut app = default_app();
+        let _ = App::render(&mut app, OTHER.0, OTHER.1);
+        let at = point(&app, OTHER, "Waypoints");
+
+        // The point has to be one the two sizes disagree about, or the test
+        // would pass against a program that ignored the size entirely.
+        let elsewhere = default_app().frame(SIZE.0, SIZE.1).hit_test(at.0, at.1);
+        assert!(
+            !matches!(elsewhere, Some(Target::Tab(View::Waypoints))),
+            "{at:?} names the same tab at both sizes -- pick another control"
+        );
+
+        let response = App::on_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: at.0,
+                y: at.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert!(matches!(response, Response::Redraw));
+        assert_eq!(
+            app.view,
+            View::Waypoints,
+            "the press was answered against some other window"
+        );
+    }
+
+    #[test]
+    fn a_resize_moves_where_the_controls_answer() {
+        let mut app = default_app();
+        let _ = App::render(&mut app, SIZE.0, SIZE.1);
+        let before = point(&app, SIZE, "Waypoints");
+
+        let response = App::on_event(
+            &mut app,
+            &Event::Resize {
+                width: OTHER.0 as u32,
+                height: OTHER.1 as u32,
+            },
+        );
+        assert!(matches!(response, Response::Redraw));
+
+        let after = point(&app, OTHER, "Waypoints");
+        assert!(
+            (after.0 - before.0).abs() > 1.0 || (after.1 - before.1).abs() > 1.0,
+            "the tab did not move when the window did"
+        );
+
+        // No `render` in between: the resize alone has to be enough, because
+        // a press can arrive before the next frame is asked for.
+        App::on_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: after.0,
+                y: after.1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        assert_eq!(
+            app.view,
+            View::Waypoints,
+            "the resize did not reach the hit boxes"
+        );
     }
 }

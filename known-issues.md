@@ -104763,7 +104763,7 @@ file", in upstream's own words — and is tracked separately as
 
 ---
 
-## B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE — OPEN 2026-09-01
+## B-MVS-UPDATE-SKIP-DOES-NOT-LINK-A-REPEATED-INODE — FIXED 2026-09-01
 
 **In short:** `mv --update a b dir/`, where `a` and `b` are two names for one
 file and `dir/a` and `dir/b` already exist and are newer, leaves `dir/a` and
@@ -104807,6 +104807,59 @@ shape is `TREE='mkdir d; printf new > d/a; printf new > d/b; touch -d "2030-01-0
 d/a d/b'`, `FAR='printf hello > a; ln a b'`, `mv -uv @FAR@/a @FAR@/b d` — and the
 `links{...}` column is again the whole case, since the bytes and the tree agree
 either way.
+
+**FIXED 2026-09-01.** `refuse_overwrite_checks` step 2 now does the
+`remember_copied` and the `create_hard_link` before returning `Verdict::Skipped`,
+which is `copy.c:2380` in place. `scripts/mv-diff.sh` 339 → **341 passed, 0
+differed, 11 differ on purpose**; two new `#[cfg(unix)]` tests in `mv.rs`.
+
+Three things the entry above got wrong or did not know, all found by running the
+reference rather than reading it:
+
+* *"needs `refuse_overwrite_checks` to distinguish an `--update` skip from a `-n`
+  skip … a change to the `Verdict` enum"* — **no.** The two skips were already
+  distinguishable: `--update`'s is step 2 and `-n`/`-i`'s is step 3
+  (`abandon_move`), separate branches that merely happen to return the same
+  verdict. Nothing about `Verdict` had to change and nothing did. The entry
+  talked itself into a refactor it never needed, and deferred a ten-line fix
+  behind it.
+* **`remember` is unconditional here**, with none of the `nlink`-count sorting
+  the main `earlier_file` block does (`copy.c:2380` calls `remember_copied`
+  outright). It can be: the source is not moving, so its count is whatever it
+  always was.
+* **The neighbouring case matters as much and was not in the entry.** With `d/a`
+  newer but `d/b` *older*, the first operand is skipped-and-recorded and the
+  second is not skipped at all — it falls through to the ordinary `earlier_file`
+  block, links to `d/a` (a destination this command never wrote), and *removes*
+  its source, which the skipped operand did not. One command, one inode, two
+  routes into one table, two different answers about whether the source lives.
+  Both are now harness cases and both are pinned by a test.
+
+Measured against GNU 9.4 (`d/a`=`newer`, `d/b`=`newer2`, both stamped 2030;
+`a`/`b` two names for one older inode):
+
+```text
+$ mv -uv a b d
+removed 'd/b'
+$ cat d/b            # was "newer2"
+newer
+```
+
+Both sources survive, as the skip promised — and `d/b`, the file `--update`
+was asked to protect, is gone, replaced by a second name for `d/a`. Upstream
+flags this itself, in a comment twelve lines below the one that justifies the
+recording: *"Note we currently replace DST_NAME unconditionally, even if it was
+a newer separate file."* It is a real defect in the reference; matching it is
+nonetheless the contract this utility is written to.
+
+**Not a divergence, though it looks like one.** When `d/b` does *not* exist, the
+speculative rename succeeds, and `copy.c:2663` short-circuits the whole table on
+`rename_errno == 0` — so `b` is renamed, the pair stays linked because a rename
+kept it so, and nothing is recorded. Ours already did this. It is written down
+because reasoning from the code alone suggested the opposite (the first operand
+*had* recorded `d/a`, so a table consulted unconditionally would have linked
+`d/b` to a file with nothing to do with `b`), and only running both binaries
+settled it.
 
 ---
 
@@ -105157,3 +105210,46 @@ already has a second filesystem (`@FAR@`, `$XDG_RUNTIME_DIR`), so it measures
 GNU's behaviour correctly and cannot see this at all — the divergence is in the
 SlateOS kernel, which the harness does not run. It needs a `vfs_selftest` case,
 or a target-side test that renames between two mounts and asserts `EXDEV`.
+
+---
+
+## The boot test refuses to build for every lane because one gui module is orphaned (lane B filed; lane C's to fix)
+
+**Status:** OPEN — filed 2026-09-01, `requests/b-c-gui-toolkit-tree-module-is-orphaned-and-blocks-every-lanes-boot-test.md`
+
+**In short:** `./scripts/boot-test.sh` currently exits 1 before compiling
+anything, in *any* worktree, because `scripts/scan-orphan-modules.py --check` —
+one of its blocking gates — finds that `gui/toolkit/src/tree.rs` defines public
+items nothing else names. Lane B hit it boot-testing a merge that touched only
+`userspace/coreutils`.
+
+**Jargon, once.** *Orphan module* — a file that is compiled (there is a `pub mod`
+line for it) but that no other file uses, so nothing in it ever runs. *Gate* — a
+check `boot-test.sh` runs first and refuses to continue on.
+
+**Where.** `gui/toolkit/src/lib.rs:75` declares `pub mod tree;`. Nothing names it:
+`git grep "toolkit::tree\|use crate::tree\|::tree::" origin/main -- gui apps` is
+empty, and `git log -S "tree::" --all -- gui/` is empty too — no caller has ever
+existed on any branch. It is not a caller that was lost; the module was never
+wired up.
+
+**Not lane B's to fix.** `gui/**` is lane C's zone, and the choice between wiring
+it up, deleting it, and baselining it is a judgement about the module's future
+that only its author can make. It is on `origin/main` and predates lane B's
+merge, which was a fast-forward of `userspace/coreutils` + docs.
+
+**Consequence while it stands.** No lane can run a boot test, and the boot test
+is the gate that guards `main`. Lane B pushed `main` on 2026-09-01 without one
+for this reason, having verified the merged tree instead with
+`cargo check --workspace --target x86_64-unknown-linux-gnu` and the full
+coreutils suite; that substitution is recorded here so it is not mistaken for a
+boot test that passed.
+
+**Worth a second look by whoever owns the gate.** `scripts/pre-boot.py` carries a
+comment saying its own workspace-wide compile check is deliberately kept *out* of
+`boot-test.sh` so that "one lane's red tree [cannot] stop another lane's boot
+test", and softens a non-lane-A failure to advisory for that reason. The
+orphan-module gate is in `boot-test.sh` with no such softening, so it does the
+thing that comment set out to prevent. Possibly intentional — an orphan is a
+whole-repo fact in a way a per-lane compile error is not — but the blast radius
+of one lane's orphan is presently all three lanes' ability to merge.

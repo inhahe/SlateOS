@@ -105355,8 +105355,11 @@ comparison is finally pinned.
 
 ## A host out-of-memory during QEMU is recorded as a kernel PANIC, and zeroes the clean streak
 
-**Status:** open. Observed once, 2026-09-01, on a `--bench` boot in the lane-A
-worktree. Nothing in the tree was wrong; the boot history now says otherwise.
+**Status:** FIXED 2026-09-01 (see the closing section at the end of this entry).
+Observed once, 2026-09-01, on a `--bench` boot in the lane-A worktree. Nothing
+in the tree was wrong; the boot history said otherwise. The misdiagnosis is
+fixed; the host-side memory spike that caused it is not, and cannot be from
+here.
 
 **In short:** the machine running QEMU briefly ran out of mappable memory. QEMU
 could not give the emulated GPU the memory it asked for, the kernel correctly
@@ -105447,6 +105450,41 @@ its own absent-means-no default.
 re-run, and the streak counter should be read as a lower bound. This run was
 re-run and the entry will be updated if it recurs — one occurrence is not yet
 evidence about frequency.
+
+### FIXED 2026-09-01 — `HOST_FAIL` is implemented as specified above
+
+`boot-test.sh` now redirects QEMU's stderr to `build/qemu-stderr.txt` (and still
+echoes it to the console on the way out, so the redirect costs the operator
+nothing it used to show them), passes it to the recorder as `--qemu-stderr`, and
+deletes it alongside the serial log so a leftover can never excuse the *next*
+boot. `boot-history.py` grew `HOST_FAIL_SIGNATURES` — the four literal
+substrings tabulated above — plus `host_failure()`, `read_qemu_stderr()`, and a
+`describes_tree()` predicate that is now the single filter behind the streak,
+the clean/total counts, and both sets of medians.
+
+Both constraints this entry named are met, and both are covered by tests.
+Detection reads QEMU's stderr only: `test_a_kernel_cannot_forge_a_host_failure`
+puts the signature in the *guest's* log and asserts the verdict stays `PANIC`.
+And the default is unchanged:
+`test_a_host_signature_overrides_a_verdict_that_blames_the_tree` classifies this
+run's real serial log both ways — `PANIC` without the host's words, `HOST_FAIL`
+with them — so the override is doing the work, rather than the sample having
+been chosen to classify harmlessly.
+
+Two things went beyond the specification, both in the safe direction. The
+override runs *downward only*: a host signature never rewrites a verdict that
+clears the tree, because destroying a real clean boot would be worse than the
+bug being fixed. And `fingerprints_for` skips `HOST_FAIL` entirely — the
+matchers key on the shape of the exception without consulting the verdict, and a
+host OOM lands on whatever allocation the kernel happened to be making, so a
+host-killed boot could otherwise be filed as a recurrence of a known issue that
+did not recur.
+
+Reasoning in full, including the four rejected alternatives, in
+`design-decisions.md` §669. The underlying *cause* is not fixed and is not ours
+to fix — the boot lock serialises the three lanes' QEMU runs, but nothing
+serialises their `cargo` builds — so a recurrence remains possible. What changes
+is that it will be labelled rather than blamed on the kernel.
 
 ---
 

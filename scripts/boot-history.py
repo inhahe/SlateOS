@@ -691,6 +691,93 @@ def is_experiment(rec: dict) -> bool:
     """
     return bool(rec.get("experiment"))
 
+
+def describes_tree(rec: dict) -> bool:
+    """Whether this row is evidence about the tree's health.
+
+    Two different things disqualify a row, and they are kept as two predicates
+    on purpose. `is_experiment` means "invoked deliberately under non-default
+    conditions"; a host failure means "invoked normally, and the machine
+    underneath fell over". Widening `is_experiment` to cover the second would
+    have been one line fewer and is the mistake `known-issues.md` names when it
+    specifies this verdict: a flag that means two things can be satisfied by
+    whichever of them nobody was thinking about, and a real regression would
+    then be excused by a predicate that was never about it.
+
+    Every statistic in this file that claims to describe the tree filters on
+    *this* function, so the streak, the counts and the medians cannot come to
+    different views of what a boot is.
+    """
+    return not is_experiment(rec) and rec.get("verdict") != "HOST_FAIL"
+
+
+#: Substrings that prove the *host*, not the kernel, is what failed -- each one
+#: emitted by QEMU or by Cygwin, below the guest, where nothing in the tree can
+#: reach it.
+#:
+#: That last property is the whole design. Detection reads QEMU's stderr rather
+#: than the serial log precisely so that a kernel which printed
+#: `Failed to CreateFileMapping` cannot excuse itself; matching these words
+#: anywhere the guest can write would hand every kernel a way to opt out of
+#: being blamed, which is the one failure this file must never allow.
+#:
+#: Kept deliberately short and literal. A regex over host output would be a
+#: matcher whose false-positive rate nobody can bound, and a false positive here
+#: does not merely mislabel a row -- it *removes* a real failure from the counts.
+HOST_FAIL_SIGNATURES = (
+    ("Failed to CreateFileMapping", "QEMU could not map guest memory"),
+    ("The paging file is too small", "Windows pagefile could not grow in time"),
+    ("cannot set up guest memory", "QEMU could not allocate guest memory"),
+    ("cygheap read copy failed", "a Cygwin fork failed under memory pressure"),
+)
+
+
+def read_qemu_stderr(path: str | None) -> str:
+    """QEMU's own stderr for this run, or "" when there is none to read.
+
+    Absent is not an error and never will be: the file is written by
+    `boot-test.sh` only, so every other caller of this script -- `--classify` on
+    an old log, `--list`, a test -- legitimately has nothing to point at. A
+    missing file must therefore mean "no host evidence", which is exactly the
+    reading that leaves the existing verdict standing.
+
+    Read errors are swallowed for the reason argued at `read_accel`: this runs
+    from an EXIT trap under `|| true`, and losing the whole record of a failing
+    boot is far more expensive than losing one attribution. Swallowing is safe
+    in *this* direction specifically -- an unreadable file yields "", which can
+    only leave a failure blamed on the tree, never excuse one.
+    """
+    if not path:
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        print(f"boot-history: cannot read qemu stderr {path}: {exc}",
+              file=sys.stderr)
+        return ""
+
+
+def host_failure(text: str) -> str | None:
+    """The reason this run's host failed, or None if it did not say so.
+
+    Returns the human-readable half of the matched signature rather than a bool
+    so the row can record *what* went wrong. A row that says only "HOST_FAIL"
+    invites the next reader to re-derive the evidence from a build artefact that
+    was deleted by the following run.
+
+    First match wins, and the order above is not alphabetical: the two most
+    specific Windows messages come before the generic QEMU one, so a run that
+    printed both is described by the more informative of the two.
+    """
+    for needle, reason in HOST_FAIL_SIGNATURES:
+        if needle in text:
+            return reason
+    return None
+
+
 VERDICT_HELP = {
     "PASS": "marker reached, every gate green",
     "PASS_TOOLING": "kernel booted; the harness failed to produce an artefact",
@@ -699,10 +786,39 @@ VERDICT_HELP = {
     "PANIC": "kernel died (PANIC / FATAL in the serial log)",
     "WEDGE": "serial output stalled; kernel stopped progressing",
     "TIMEOUT": "marker never arrived, no panic, no stall detected",
+    "HOST_FAIL": "the host ran out of resources; says nothing about the tree",
 }
 
 
-def classify(serial: Serial | None, exit_code: int) -> str:
+def classify(serial: Serial | None, exit_code: int,
+             qemu_stderr: str = "") -> str:
+    """The verdict for one run: evidence first, host override second.
+
+    `qemu_stderr` defaults to empty so every existing caller keeps its exact
+    behaviour, and so the override can only ever be reached by a caller that
+    went and got the host's own words.
+    """
+    verdict = _verdict_from_evidence(serial, exit_code)
+    if host_failure(qemu_stderr) is None:
+        return verdict
+    # A host failure replaces a verdict that blames the tree, and never one
+    # that clears it -- which is why this is an override on the result rather
+    # than a branch taken before the evidence is read.
+    #
+    # Both halves are load-bearing. Downward: a kernel that reached BOOT_OK
+    # reached it, and a warning QEMU printed on the way does not un-boot it;
+    # rewriting a PASS would *destroy* a real clean boot, and this file's whole
+    # bias is that manufacturing a clean streak is the dangerous direction.
+    # Upward: NO_BOOT is left alone because it is not a verdict about the tree
+    # either -- it means the run produced no serial output at all, which main()
+    # declines to record, and promoting it here would file a row with no boot
+    # in it.
+    if verdict in CLEAN_VERDICTS or verdict == "NO_BOOT":
+        return verdict
+    return "HOST_FAIL"
+
+
+def _verdict_from_evidence(serial: Serial | None, exit_code: int) -> str:
     """Derive the verdict from evidence, using the exit code only to break ties.
 
     Deliberately *not* a lookup on the exit code. boot-test.sh reaches exit 1
@@ -906,7 +1022,16 @@ def fingerprints_for(serial: Serial | None, verdict: str) -> list[str]:
     same *shape* of wedge at different cut points, and being told which of them
     a new occurrence resembles is the entire diagnostic value.
     """
-    if serial is None or verdict in CLEAN_VERDICTS:
+    # HOST_FAIL is skipped for the reason a clean run is, arrived at from the
+    # opposite side: there is nothing here to attribute to a known issue.
+    # Skipping matters more than it looks. `_fp_pthread_teardown_pf` and its
+    # neighbours match on the *shape* of the exception in the log without
+    # consulting the verdict, and a host OOM lands on whatever allocation the
+    # kernel happened to be making -- so a host-killed boot can easily wear the
+    # shape of a known bug. Recording that would file a recurrence of an issue
+    # that did not recur, against a run the kernel was not responsible for, in
+    # the counter several `known-issues.md` closure bars are written in.
+    if serial is None or verdict in CLEAN_VERDICTS or verdict == "HOST_FAIL":
         return []
     out = []
     for fp in FINGERPRINTS:
@@ -1115,7 +1240,8 @@ def gated_ran(serial: Serial, markers: tuple[str, ...]) -> dict[str, bool]:
     return {m: (m in serial.text) for m in markers}
 
 
-def build_record(serial: Serial | None, verdict: str, args) -> dict:
+def build_record(serial: Serial | None, verdict: str, args,
+                 host_fail: str | None = None) -> dict:
     # `--commit`/`--branch` win over asking git, and boot-test.sh always passes
     # them.  It reads HEAD once, before the build, and hands that value down;
     # this function runs at the *end* of a run that took ten to twenty minutes,
@@ -1162,6 +1288,21 @@ def build_record(serial: Serial | None, verdict: str, args) -> dict:
     # failures in this file.
     if args.experiment:
         rec["experiment"] = args.experiment
+    # Why the host is being blamed, in the host's own terms, or absent when it
+    # is not being blamed. Kept as a separate field from `verdict` rather than
+    # encoded into it because a verdict is a closed vocabulary that `--list`
+    # aligns in a column, while this is a sentence -- and because a reader who
+    # doubts the attribution needs the reason to doubt, which a bare label
+    # cannot give them.
+    #
+    # Passed in rather than re-derived here on purpose: the caller already read
+    # qemu's stderr to reach the verdict, and reading it a second time is two
+    # answers to one question. They could differ -- the file is on disk and the
+    # run is over, but "cannot happen" is how a row ends up saying HOST_FAIL
+    # with no reason attached, or carrying a reason under a verdict that blames
+    # the kernel.
+    if host_fail:
+        rec["host_fail"] = host_fail
     if args.wall_seconds is not None:
         rec["wall_seconds"] = args.wall_seconds
     if args.build_seconds is not None:
@@ -1292,8 +1433,15 @@ def streaks(records: list[dict]) -> list[Streak]:
     show one, and `since_last` is exactly what several `known-issues.md`
     closure bars are written in terms of. This is the direction this module
     exists to prevent: not a missed failure, but a manufactured clean streak.
+
+    A `HOST_FAIL` row is stepped over by the same argument, and needs it just as
+    much. The kernel there did run, so the assumption above holds -- but the run
+    was cut short by the host at a moment nothing in the tree chose, so "this
+    fingerprint did not appear" says only that the boot ended before it could
+    have. Counting those would inflate `since_last` fastest exactly when the
+    machine is under load, which is when boots are being repeated most.
     """
-    tree = [r for r in records if not is_experiment(r)]
+    tree = [r for r in records if describes_tree(r)]
     out = []
     for fp in FINGERPRINTS:
         st = Streak(fp=fp, recorded=len(tree))
@@ -1465,10 +1613,15 @@ def wall_populations(records: list[dict]) -> dict[str, list[float]]:
     the ~40% shift arrives with nothing to attribute it to. Grouping by the
     accelerator makes the exclusion structural: an untagged WHPX boot now forms
     its own population instead of moving the TCG one.
+
+    `HOST_FAIL` boots are excluded on the same "not a build" ground, with a
+    second reason of their own: a run whose host could not hand QEMU the memory
+    it asked for was, by construction, competing for the machine, and its
+    duration measures that contention rather than what the boot costs.
     """
     out: dict[str, list[float]] = {}
     for rec in records:
-        if is_experiment(rec):
+        if not describes_tree(rec):
             continue
         wall = rec.get("wall_seconds")
         if not isinstance(wall, (int, float)) or isinstance(wall, bool):
@@ -1491,10 +1644,17 @@ def tail_clean_streak(records: list[dict]) -> int:
     cannot extend the streak, and it is not a boot of the tree at all, so it
     cannot end one either. Skipping is what makes this number mean "the tree has
     booted clean this many times running", whatever was probed in between.
+
+    A `HOST_FAIL` boot is stepped over by exactly that reasoning, and it is the
+    reason the verdict exists: on 2026-09-01 a host that briefly could not grow
+    its pagefile turned a nine-boot clean streak into zero, because a run the
+    tree had no part in was allowed to end one. It still cannot extend a streak
+    -- the kernel did not reach its marker, and pretending otherwise would be
+    the manufactured-clean-streak failure this file is built against.
     """
     streak = 0
     for rec in reversed(records):
-        if is_experiment(rec):
+        if not describes_tree(rec):
             continue
         if rec.get("verdict") in CLEAN_VERDICTS:
             streak += 1
@@ -1542,13 +1702,20 @@ def build_populations(records: list[dict]) -> dict[str, list[float]]:
     not a cheap build) and the sanitizer (KASAN instruments every memory
     access), so those are the two axes.
 
-    Experiment boots are excluded on the same rule as everywhere else in this
-    file, and runs that never built are absent rather than zero -- see
-    `--build-seconds`.
+    Experiment and `HOST_FAIL` boots are excluded on the same rule as everywhere
+    else in this file, and runs that never built are absent rather than zero --
+    see `--build-seconds`.
+
+    Excluding a `HOST_FAIL` row costs a build time that was, in itself, real:
+    the compile finished before QEMU ever started. It is dropped anyway, because
+    the memory pressure that killed the emulator is the same pressure the
+    compiler was running under, so the number is a measurement of a contended
+    host and not of this profile. Losing a sample understates nothing; keeping a
+    contended one inflates the median a future run is judged against.
     """
     out: dict[str, list[float]] = {}
     for rec in records:
-        if is_experiment(rec):
+        if not describes_tree(rec):
             continue
         secs = rec.get("build_seconds")
         if not isinstance(secs, (int, float)) or isinstance(secs, bool):
@@ -1603,17 +1770,43 @@ def report(records: list[dict], current: dict | None) -> None:
         # line that says which population this boot is in and the block that
         # prints that population's median cannot disagree about the partition.
         print(f"[boot-history] build: {population_of(current)}")
+        # The evidence, not just the label. `build/qemu-stderr.txt` is deleted
+        # by the next run, so this line is the last chance to say what the host
+        # actually printed -- and without it "HOST_FAIL" is an assertion the
+        # reader has no way to check or to disbelieve.
+        #
+        # The advice depends on the verdict because the field does not imply
+        # it. A host signature is recorded on any row that produced one,
+        # including a boot that reached its marker anyway -- and telling someone
+        # to re-run a boot that passed would be wrong, as well as teaching them
+        # to ignore the line on the runs where it matters.
+        host_why = current.get("host_fail")
+        if host_why:
+            if verdict == "HOST_FAIL":
+                print(f"[boot-history] host failure: {host_why} "
+                      f"-- excluded from the counts below; re-run this boot")
+            else:
+                print(f"[boot-history] note: the host complained ({host_why}), "
+                      f"but the kernel booted anyway")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
                 if fp.id in hits and fp.note:
                     print(f"[boot-history]   {fp.id}: {fp.note}")
 
-    # Probes are set aside before anything is counted, not filtered at each
-    # call site: the streak and the totals must agree about what a boot is, and
-    # two separate filters are two chances to disagree.
-    tree = [r for r in records if not is_experiment(r)]
-    probes = len(records) - len(tree)
+    # Rows that are not evidence about the tree are set aside before anything is
+    # counted, not filtered at each call site: the streak and the totals must
+    # agree about what a boot is, and two separate filters are two chances to
+    # disagree.
+    tree = [r for r in records if describes_tree(r)]
+    # Counted separately, and reported separately below, because they are
+    # excluded for different reasons and a reader deciding whether to trust the
+    # totals needs to know which. "3 boots excluded" would invite the guess that
+    # someone had been running probes, when the truth might be that this machine
+    # has run out of memory three times.
+    probes = sum(1 for r in records if is_experiment(r))
+    host_fails = sum(1 for r in records
+                     if not is_experiment(r) and r.get("verdict") == "HOST_FAIL")
 
     clean = sum(1 for r in tree if r.get("verdict") in CLEAN_VERDICTS)
     print(f"[boot-history] {len(tree)} boot(s) recorded, {clean} clean "
@@ -1622,6 +1815,10 @@ def report(records: list[dict], current: dict | None) -> None:
         print(f"[boot-history] {probes} experiment boot(s) excluded "
               f"(deliberate probes under non-default conditions; they say "
               f"nothing about the tree)")
+    if host_fails:
+        print(f"[boot-history] {host_fails} boot(s) excluded as host failures "
+              f"(the machine running QEMU ran out of resources; the kernel was "
+              f"not what failed)")
 
     print("[boot-history] current consecutive clean streak: "
           f"{tail_clean_streak(records)}")
@@ -1699,6 +1896,17 @@ def main(argv=None) -> int:
                              "appeared. Without it the `gated_ran` field is "
                              "omitted, not emptied -- absent means unknown, "
                              "and unknown must not read as all-clear.")
+    parser.add_argument("--qemu-stderr", default=None, metavar="PATH",
+                        help="the file QEMU's own stderr was redirected to. "
+                             "Searched for host-side failure signatures -- a "
+                             "pagefile that could not grow, a mapping QEMU "
+                             "could not create -- which turn a verdict that "
+                             "blames the tree into HOST_FAIL. It must be this "
+                             "stream and not the serial log: the guest writes "
+                             "the serial log, so a kernel that printed the "
+                             "same words could otherwise excuse itself. "
+                             "Without it no run is ever attributed to the "
+                             "host, which is the safe default.")
     parser.add_argument("--wall-seconds", type=float, default=None)
     parser.add_argument("--build-seconds", type=float, default=None,
                         help="seconds cargo spent in Step 1, or omitted when "
@@ -1752,7 +1960,11 @@ def main(argv=None) -> int:
         return cmd_list(args.history, args.limit)
 
     serial = read_serial(args.serial, args.marker)
-    verdict = classify(serial, args.exit_code)
+    # Read once, used twice: the verdict and the recorded reason must be two
+    # views of one piece of evidence, not two readings of one file.
+    qemu_stderr = read_qemu_stderr(args.qemu_stderr)
+    host_fail = host_failure(qemu_stderr)
+    verdict = classify(serial, args.exit_code, qemu_stderr)
 
     if args.classify:
         print(verdict)
@@ -1763,11 +1975,18 @@ def main(argv=None) -> int:
         # QEMU wrote anything. Recording it would put build breakage into a
         # series that exists to measure kernel behaviour, and would reset every
         # hang streak on every compile error.
+        #
+        # A host failure does not change that -- there is still no boot to
+        # record -- but it does change what the operator should conclude, so it
+        # is said out loud rather than left inside the guess below. This is the
+        # one place a host failure is reported without a row behind it.
         print("[boot-history] no serial output -- nothing to record "
               "(build or harness failure, not a boot outcome)")
+        if host_fail:
+            print(f"[boot-history] qemu's stderr says why: {host_fail}")
         return 0
 
-    record = build_record(serial, verdict, args)
+    record = build_record(serial, verdict, args, host_fail=host_fail)
     history = load_history(args.history)
 
     if not args.no_record:

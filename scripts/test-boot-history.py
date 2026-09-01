@@ -1841,15 +1841,275 @@ def test_empty_marker_object_is_distinct_from_a_missing_file(bh, tmpdir):
           "gated_ran" in rec, True)
 
 
+# --------------------------------------------------------------------------
+# Host failures
+# --------------------------------------------------------------------------
+
+#: QEMU's stderr from the boot of 2026-09-01, verbatim.
+#:
+#: Verbatim matters here more than in most samples. These signatures are the
+#: only thing standing between "the host fell over" and "the kernel died", and
+#: they are matched as literal substrings -- so a paraphrased sample would test
+#: the matcher against words QEMU does not print, and would keep passing after
+#: the real message stopped being recognised.
+E_HOST_OOM = (
+    "C:\\program files\\qemu\\qemu-system-x86_64.exe: warning: "
+    "Failed to CreateFileMapping: The paging file is too small for this "
+    "operation to complete.\n"
+)
+
+#: The Cygwin half of the same event: a helper in the harness died of the same
+#: pressure. Recorded separately because it can appear on its own.
+E_CYGHEAP = (
+    "0 [main] date (85728) child_copy: cygheap read copy failed, "
+    "0x0..0x80000CD40, done 0, windows pid 85728, Win32 error 299\n"
+)
+
+#: The guest's own log from that run. A boundary self-test refused an
+#: allocation the host could not back, and said so in the words of a genuine
+#: off-by-one in the bound check -- which is exactly why the verdict cannot be
+#: derived from this stream alone.
+S_HOST_OOM_GUEST = _PROLOGUE + (
+    "[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the bound "
+    "was rejected: I/O error (-600)\n"
+    "FATAL: virtio-gpu render-resource self-test failed: internal kernel "
+    "error (-1)\n"
+)
+
+
+def _host(verdict, why="QEMU could not map guest memory"):
+    """A boot the host, not the tree, ended."""
+    r = _rec(verdict)
+    r["host_fail"] = why
+    return r
+
+
+def test_a_host_signature_overrides_a_verdict_that_blames_the_tree(bh):
+    """The whole point: the run of 2026-09-01 must not read as a kernel death.
+
+    Both directions are asserted. Without the host's stderr the same serial log
+    is still a PANIC -- because that is the safe default and removing it would
+    be far worse than the bug being fixed -- and with it, the same log is
+    HOST_FAIL. The pair is what proves the override is doing the work rather
+    than the sample having been chosen to classify harmlessly.
+    """
+    s = _serial(bh, S_HOST_OOM_GUEST)
+    check("without host evidence the guest log still reads as a kernel death",
+          bh.classify(s, 1), "PANIC")
+    check("with QEMU's own stderr it is a host failure",
+          bh.classify(s, 1, E_HOST_OOM), "HOST_FAIL")
+    check("...and the cygwin signature alone is enough on its own",
+          bh.classify(s, 1, E_CYGHEAP), "HOST_FAIL")
+    check("unrelated host chatter changes nothing",
+          bh.classify(s, 1, "qemu: warning: guest updated active QH\n"),
+          "PANIC")
+
+
+def test_a_kernel_cannot_forge_a_host_failure(bh):
+    """The guest must not be able to excuse itself.
+
+    `known-issues.md` names this as one of two things to get right, and it is
+    the one with teeth: if the signatures were searched for in the serial log,
+    any kernel -- or any test fixture, or any string a userspace program
+    printed -- could opt out of being blamed by printing eleven words. The
+    stream is chosen, not the words.
+    """
+    forged = _serial(bh, _PROLOGUE + (
+        "[gpu] Failed to CreateFileMapping: The paging file is too small\n"
+        "PANIC: kernel wrote a shared CoW page\n"
+    ))
+    check("the signature in the GUEST's log does not excuse the guest",
+          bh.classify(forged, 1), "PANIC")
+    check("...not even when it is the whole log",
+          bh.classify(forged, 1, ""), "PANIC")
+
+
+def test_a_host_signature_never_rewrites_a_clean_verdict(bh):
+    """A boot that got where it was going got there, warning or no warning.
+
+    The override runs downward only. Rewriting a PASS would *destroy* a real
+    clean boot, and this file's standing bias is that a manufactured or
+    shortened clean streak are not symmetric errors -- one hides failures, the
+    other only adds them.
+    """
+    s = _serial(bh, S_PASS)
+    check("a host warning does not un-boot a passing kernel",
+          bh.classify(s, 0, E_HOST_OOM), "PASS")
+    check("...nor a PASS_TOOLING", bh.classify(s, 3, E_HOST_OOM),
+          "PASS_TOOLING")
+    check("...nor the documented bench livelock",
+          bh.classify(_serial(bh, S_PASS, marker="BENCH_OK"), 1, E_HOST_OOM),
+          "BENCH_INCOMPLETE")
+    # NO_BOOT is not a verdict about the tree either, and main() declines to
+    # record it. Promoting it would file a row with no boot in it.
+    check("a run with no serial output at all stays NO_BOOT",
+          bh.classify(None, 1, E_HOST_OOM), "NO_BOOT")
+
+
+def test_every_signature_is_matched_and_named(bh):
+    """Each signature fires, and each names a reason a human can act on.
+
+    A signature nobody exercises is a signature that may already have been
+    broken by a typo -- and this list is short precisely so that every entry
+    can be checked, which is worth nothing unless it is.
+    """
+    for needle, reason in bh.HOST_FAIL_SIGNATURES:
+        check(f"{needle!r} matches", bh.host_failure(f"noise\n{needle}\nmore"),
+              reason)
+        check_true(f"...and {needle!r} names a reason", bool(reason.strip()))
+    check("nothing matches an empty stream", bh.host_failure(""), None)
+    check("nothing matches ordinary QEMU chatter",
+          bh.host_failure("qemu-system-x86_64: warning: TCG doesn't support "
+                          "requested feature\n"), None)
+
+
+def test_a_missing_qemu_stderr_is_absence_of_evidence(bh, tmpdir):
+    """No file must mean "no host evidence", never an error and never a match.
+
+    Every caller of this script other than boot-test.sh legitimately has
+    nothing to point at -- `--classify` on an old log, `--list`, this suite --
+    and the reading that leaves the existing verdict standing is the only safe
+    one. An unreadable file has to behave the same way: swallowing there can
+    only leave a failure blamed on the tree, never excuse one.
+    """
+    check("no path at all", bh.read_qemu_stderr(None), "")
+    check("empty path", bh.read_qemu_stderr(""), "")
+    check("a path that does not exist",
+          bh.read_qemu_stderr(os.path.join(tmpdir, "nope.txt")), "")
+    # A directory: OSError rather than FileNotFoundError, i.e. the other arm.
+    check("a path that is not a file", bh.read_qemu_stderr(tmpdir), "")
+
+    real = os.path.join(tmpdir, "qemu-stderr.txt")
+    with open(real, "w", encoding="utf-8") as fh:
+        fh.write(E_HOST_OOM)
+    check("and a real file is read", bh.read_qemu_stderr(real), E_HOST_OOM)
+
+
+def test_the_host_reason_is_recorded_on_the_row(bh):
+    """`HOST_FAIL` alone is an assertion the reader cannot check.
+
+    `build/qemu-stderr.txt` is deleted by the next run, so the row is the last
+    surviving copy of why the host was blamed. A row that says only the verdict
+    invites the next reader to take it on trust or to disbelieve it, with no
+    way to do either.
+    """
+    args = _Args()
+    rec = bh.build_record(_serial(bh, S_HOST_OOM_GUEST), "HOST_FAIL", args,
+                          host_fail="QEMU could not map guest memory")
+    check("the reason is stored", rec.get("host_fail"),
+          "QEMU could not map guest memory")
+    plain = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("and an ordinary boot carries no such key",
+          "host_fail" in plain, False)
+
+
+def test_a_host_failure_is_not_evidence_about_the_tree(bh):
+    """It must be stepped over exactly as a probe is, and for the same reason.
+
+    This is the bug being fixed, stated as a test: on 2026-09-01 a host that
+    could not grow its pagefile in time turned a nine-boot clean streak into
+    zero. The streak is a published quantity -- four open `known-issues.md`
+    entries have closure conditions written as counts of consecutive clean
+    boots -- so a run the tree had no part in must neither end one nor extend
+    one.
+    """
+    records = [_rec("PASS"), _host("HOST_FAIL"), _rec("PASS")]
+    check("a host failure does not break the clean streak",
+          bh.tail_clean_streak(records), 2)
+    check("...and the same records without the host verdict do break it",
+          bh.tail_clean_streak([_rec("PASS"), _rec("PANIC"), _rec("PASS")]), 1)
+    check("...and it cannot extend one either",
+          bh.tail_clean_streak([_rec("PASS"), _host("HOST_FAIL")]), 1)
+
+    st = {s.fp.id: s for s in bh.streaks(records)}["W1"]
+    check("a host failure is not counted toward a fingerprint's clean run",
+          st.since_last, 2)
+    check("...nor among the records considered", st.recorded, 2)
+
+
+def test_describes_tree_keeps_the_two_exclusions_apart(bh):
+    """Two reasons to exclude a row, deliberately not merged into one flag.
+
+    `known-issues.md` names widening `is_experiment` as the mistake to avoid:
+    a flag meaning "invoked deliberately under non-default conditions" that
+    also meant "the host hiccupped" could be satisfied by whichever of the two
+    nobody was thinking about, and a real regression would then be excused by a
+    predicate that was never about it.
+    """
+    check("a host failure is not an experiment",
+          bh.is_experiment(_host("HOST_FAIL")), False)
+    check("...but it is still not evidence about the tree",
+          bh.describes_tree(_host("HOST_FAIL")), False)
+    check("a probe is excluded by the other half",
+          bh.describes_tree(_probe("TIMEOUT")), False)
+    check("an ordinary failing boot is evidence, and stays counted",
+          bh.describes_tree(_rec("PANIC")), True)
+
+
+def test_host_failure_wall_and_build_times_are_not_measurements(bh):
+    """A contended host measures contention, not the tree.
+
+    Both numbers go: the boot that could not get memory was competing for the
+    machine, and the compile that preceded it was competing for the same
+    machine. Keeping either inflates a median that a later run is judged
+    against.
+    """
+    def timed(wall, build, host=False):
+        r = _host("HOST_FAIL") if host else _rec("PASS")
+        r["wall_seconds"] = wall
+        r["build_seconds"] = build
+        return r
+
+    records = [timed(120, 50), timed(120, 50), timed(900, 400, host=True)]
+    check("the host failure is in no wall-time population",
+          sorted(v for vals in bh.wall_populations(records).values()
+                 for v in vals),
+          [120.0, 120.0])
+    check("...nor in any build-time population",
+          sorted(v for vals in bh.build_populations(records).values()
+                 for v in vals),
+          [50.0, 50.0])
+
+
+def test_a_host_failure_matches_no_known_issue(bh):
+    """A host OOM lands on whatever allocation the kernel was making.
+
+    So a host-killed boot can wear the shape of a real bug: the fingerprints
+    match on the shape of the exception in the log and do not consult the
+    verdict. Recording that would file a recurrence of an issue that did not
+    recur, against a run the kernel was not responsible for, in the very
+    counter several closure bars are written in.
+
+    The second assertion is what makes the first mean anything: the identical
+    serial log, classified without host evidence, *does* match.
+    """
+    s = _serial(bh, S_PTHREAD)
+    check("the same log does match when the kernel is to blame",
+          bh.fingerprints_for(s, bh.classify(s, 1)), ["B-PTHREAD-TEARDOWN-PF"])
+    check("but a host-killed boot records no recurrence",
+          bh.fingerprints_for(s, bh.classify(s, 1, E_HOST_OOM)), [])
+
+
+def test_the_host_verdict_is_documented_for_the_reader(bh):
+    """Every verdict this script can emit must explain itself in `report`.
+
+    A bare `HOST_FAIL` in the console output of a twenty-minute boot is a word
+    the reader has to go and look up, at the moment they are least inclined to.
+    """
+    check_true("HOST_FAIL has help text", bool(bh.VERDICT_HELP.get("HOST_FAIL")))
+    check("and it is not counted as clean",
+          "HOST_FAIL" in bh.CLEAN_VERDICTS, False)
+
+
 def main():
     bh = load_module()
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes -- the failure mode this whole script is about. Assert a floor.
-    if len(tests) < 60:
+    if len(tests) < 100:
         print(f"FATAL: test discovery found only {len(tests)} tests; the suite "
-              f"has at least 60. Discovery is broken, not the code.")
+              f"has at least 100. Discovery is broken, not the code.")
         return 1
     for name, fn in tests:
         params = inspect.signature(fn).parameters

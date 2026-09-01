@@ -103910,7 +103910,7 @@ the same lesson as §663's "a mask can only be tested by a value outside it",
 in a different costume: **an agreement test proves nothing about a case none
 of the parties encounters.**
 
-## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — FIXED 2026-09-01
 
 **In short:** when `mv` moves a file between two filesystems it cannot rename it,
 so it copies the bytes and deletes the original. Ours copies the bytes and the
@@ -103986,6 +103986,82 @@ calls the function, and asserts the destination's mtime is the source's pins the
 timestamp half at the function boundary where the differential harness can only
 see it through the whole program. Write it with the fix.
 
+**Fixed** by `copy_across_devices` doing the open, the create, the copy and the
+four preservation steps itself instead of calling `fs::copy`, in GNU's order:
+bytes, times, owner, mode. Three pieces are worth naming because none of them is
+obvious from the sentence above.
+
+* **The mode is written last, and a refused `chown` costs the set-ID bits.**
+  GNU's own comment is the argument — *"chown turns off set[ug]id bits for
+  non-root, so do the chmod last"* (`copy.c:3245`) — and `copy_reg`'s `case 0:
+  src_mode &= ~(S_ISUID | S_ISGID | S_ISVTX)` is why being *refused* the
+  ownership also drops them: a set-user-ID bit on a file that could not be given
+  to its source's owner is a privilege granted to whoever holds it now.
+* **The destination is created with the group and other bits held back**
+  (`create_destination`), which is GNU's `omitted_permissions`. Without it a
+  file whose source is world-readable is briefly world-readable *while holding
+  the source's contents and before the `chown`*.
+* **The ownership decision is shared with `cp`, not copied.**
+  `fsattr::owner_differs` and `fsattr::take_ownership` were split out of `cp`'s
+  `chown_to_source` in the commit before this one, so the group-only retry, the
+  root check and the set-ID consequence have exactly one implementation.
+
+Three unit tests pin it at the function boundary as this entry asked —
+`the_cross_device_fallback_carries_the_times`, `..._carries_the_set_user_id_bit`
+and `..._carries_a_links_own_time`, the last of which also asserts the link's
+target was *not* stamped through the link. Six `xfail_case`s in
+`scripts/mv-diff.sh` §22 became XPASS on the first run after the fix and are now
+plain `run_case`s.
+
+**Two things that did not fall out of it, and are still open.** The
+`UTIMECMP_TRUNCATE_SOURCE` half of `-u`'s comparison is now *reachable* — there
+is a preserved timestamp for the truncation to be about — and is still not
+implemented; see `destination_is_older`'s doc. And `preserve_links` across the
+fallback is untouched; that half has been split out into its own entry below,
+because leaving it under a heading marked FIXED would make a reader who found
+the §22 case believe it was already dealt with.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS — OPEN 2026-09-01
+
+**In short:** `mv /other/fs/a /other/fs/b dir/` moves two names for one inode
+and produces two independent files. A rename would have kept them one file, and
+`mv` promises to be indistinguishable from a rename: `cp_option_init`
+(`mv.c:129`) sets `preserve_links` unconditionally, with no option to turn it
+off. The bytes are all correct and nothing is lost, so this is invisible until
+someone writes to one of the names and the other does not change — or until a
+directory that fitted on the disk because of its links no longer does.
+
+**Split out of** `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`,
+which is now FIXED for the times, the owner and the mode. This is the one part
+of that entry the fix did not reach.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`. It is
+called once per source with no memory of the sources before it, so there is
+nowhere for the "I have already copied this inode" table to live. The refusal is
+structural rather than a missing line.
+
+**What GNU does.** `copy.c` keeps `src_to_dest`, a hash of (`st_dev`, `st_ino`)
+to the destination name already created, consulted in `copy_internal` before
+anything is copied. A source found in it is `link`ed to the name that is already
+there instead of being copied again. The table is per-invocation, which is why
+two separate `mv` commands correctly produce two separate files.
+
+**The proper fix.** The same table, keyed on `coreutils::fileid::FileId`, owned
+by the loop over the operands rather than by `copy_across_devices`, and only
+consulted for a source with `nlink > 1` — both of which `fileid` already
+provides for `cp`, which has exactly this table for `-l` and `--preserve=links`.
+It should land with the recursive directory fallback
+(`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`) rather than before it: a walk
+that recreates a tree needs the identical table, and building it twice is how the
+two would come to disagree.
+
+**How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
+entry: `mv -v @FAR@/a @FAR@/b d` with the fixture `printf hello > a; ln a b`. The
+`links{...}` column is the whole case — the tree and the bytes agree either way,
+which is exactly why the harness grew that column.
+
 ---
 
 ## B-MVS-CROSS-DEVICE-COPY-WRITES-THROUGH-THE-DESTINATION — FIXED 2026-09-01
@@ -104044,7 +104120,7 @@ followed, and a destination that will not go — and the §22 case is now a plai
 
 ---
 
-## B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP — FIXED 2026-09-01
 
 **In short:** when a cross-filesystem move fails, ours says `mv: cannot move 'a'
 to 'b': Permission denied` whatever went wrong, while GNU says which half of the
@@ -104077,6 +104153,30 @@ replaces.
 entry: a far source at mode 000 (the read end) and a near destination directory at
 mode 555 (the create end). Both sides fail with the same errno after the same
 `copied` line; only the sentence differs.
+
+**Fixed**, and it did fall out of the other fix exactly as predicted: holding two
+descriptors to preserve the mode, the owner and the times meant opening the
+source and creating the destination as separate steps, and each got its own error
+site. The sentence is carried out of `copy_across_devices` in a `Failed` struct
+rather than derived from the errno, because deriving it is impossible — an
+unreadable source and an unwritable destination directory both give `EACCES`. It
+carries the diagnostic already quoted, since GNU's quoting style is not uniform
+across the family: `quoteaf` in all of them bar `preserving permissions for %s`,
+which uses `quotef`, and the symlink arm's `failed to preserve ownership for %s`,
+which GNU prints with no quoting at all. All three are reproduced as written.
+
+Both §22 cases became XPASS on the first run after the fix and are now plain
+`run_case`s. **One sentence in the fallback is still not GNU's**, and cannot be:
+`cannot move X to Y`, the directory refusal, for which GNU has no equivalent
+because it does the move. It keeps the old wording deliberately — it is a refusal
+of the *operation*, not of a step inside it.
+
+**What is still funnelled.** The bytes. A failure part-way through the copy is
+reported as `error writing %s` whichever end failed, because `io::copy` returns
+one error for both — see
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`, which
+is the residue of this entry and was logged rather than folded into it, since its
+fix trades against `copy_file_range` and this one did not.
 
 ---
 
@@ -104112,6 +104212,103 @@ by the number of files in the tree.
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case
 keeps measuring something after the refusal is lifted.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES — OPEN 2026-09-01
+
+**In short:** a file moved across a filesystem boundary arrives without its
+extended attributes. Its times, owner, mode and access-control lists are carried
+now; everything else in the `user.*`, `trusted.*` and `security.*` namespaces is
+not. On a machine that stores nothing there this is invisible; on one that does,
+`mv` silently strips whatever was stored — a SELinux label, a `user.mime_type`, a
+backup tool's bookkeeping — and there is no diagnostic, because nothing looked.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `preserve_onto_file`. It runs
+`fsattr::set_times`, `fsattr::take_ownership` and `fsattr::copy_permissions`, and
+the last of those carries `Xattrs::Permissions` only — the ACL attributes, which
+are part of the mode's meaning. There is no `Xattrs::All` step, and
+`preserve_onto_link` has none either.
+
+**What GNU does.** `cp_option_init` (`mv.c:129`) sets `preserve_xattr = true`
+with `require_preserve_xattr = false`, so `copy_reg` calls `copy_attr` between
+the `set_owner` and the `copy_acl` (`copy.c:1668`) and a failure is a diagnostic
+rather than a failed move. There is a second, smaller thing tied to it:
+`copy.c:1457` ORs `S_IWUSR` into the mode the destination is created with, when
+copying attributes as a process that does not own the file, because the kernel's
+`xattr_permission` wants write access to the inode. `create_destination`'s doc
+says why that bit is deliberately not there yet.
+
+**The proper fix.** A `fsattr::copy_xattrs(On::File(source), On::File(dest),
+Xattrs::All)` between the ownership step and the permissions step, reporting each
+`XattrError` the way `cp` does and failing at none of them, plus the `S_IWUSR`
+widening in `create_destination`. `cp` already has all of the machinery —
+`Xattrs`, `XattrStep` and `XattrError` exist in `fsattr` for it — so this is
+wiring rather than new code. The ordering is not free: it must be after the
+`chown`, because on Linux a `chown` can drop `security.capability`, and before
+the mode, for the reason the whole tail is in that order.
+
+**How it would be caught.** Not by `scripts/mv-diff.sh` as it stands: the harness
+compares the tree, the bytes, the modes and the hard-link groups, and has no
+notion of extended attributes at all. Catching it means teaching `snapshot` to
+run `getfattr -d -m -` per file, which is worth doing in the same change and
+would also cover `cp`'s xattr cases, currently unmeasured for the same reason.
+Until then the unit tests in `mv.rs` are the place: they drive
+`copy_across_devices` directly and can set an attribute on the source and assert
+it on the destination, on a `/tmp` that supports one.
+
+---
+
+## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — OPEN 2026-09-01
+
+**In short:** if the bytes cannot be moved, ours always blames the destination.
+GNU says `error reading 'src'` when the source medium fails and `error writing
+'dst'` when the destination fills up; ours says `error writing 'dst'` for both.
+The exit status and the errno are right, and the errno usually gives it away
+(`ENOSPC` is not a read failure) — but `EIO` does not, and `EIO` is exactly the
+case where the reader most needs to know which of the two disks is dying.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`, `copy_across_devices`:
+
+```rust
+io::copy(&mut source, &mut dest)
+    .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
+```
+
+`io::copy` returns one `io::Error` for both ends and does not say which end it
+came from.
+
+**What GNU does.** `copy_reg` reads and writes itself, so the two have separate
+error sites (`copy.c:1287` and `copy.c:1300`). It reaches `copy_file_range`
+first and falls back to a read/write loop, and *its* fallback keeps the
+distinction because the loop is its own code.
+
+**Why it is written this way.** `io::copy` is specialised by `std` to
+`copy_file_range` when both sides are files, which is the same kernel-side copy
+GNU reaches for and matters for two reasons: the bytes never cross into
+userspace, and a sparse file's holes are reproduced as holes rather than written
+out as zeroes. A hand-written loop would tell the two failures apart and would
+lose both of those. The destination's sentence is the one kept because that is
+the end that fails in practice — a full filesystem, an exceeded quota, a device
+unplugged mid-write — while a read error means the source medium is failing,
+which is rarer.
+
+**The proper fix.** Keep `io::copy` for the common path and learn the side from
+the descriptors after it fails, rather than from the error: on failure, check
+whether the source is still readable (a zero-length `read` at the current
+offset). If it is not, the failure was the read. That gets the distinction back
+without giving up `copy_file_range`, at the cost of one syscall on a path that
+has already failed. The alternative — a loop — is the one GNU uses and is not
+worth the sparse-file regression.
+
+**How it would be caught.** Nothing measures it today. `scripts/mv-diff.sh` §22
+has cases for a source that cannot be *opened* and a destination directory that
+cannot be *created in*, which are the surrounding steps; a failure part-way
+through the bytes needs a source that opens and then fails to read, which means
+a device that can be made to fail on demand. The reachable version is a
+destination on a filesystem small enough to fill — `/dev/shm` with a size limit,
+or a loopback image — which is a fixture the harness does not have and would be
+the same fixture several other unmeasured cases want.
 
 ---
 

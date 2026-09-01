@@ -1676,8 +1676,7 @@ else
 TREE=''
 FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the mode's special bits and both times" \
-  -v @FAR@/f g
+run_case -v @FAR@/f g
 
 # The same file onto a name that already exists. Nothing about the fallback
 # changes, but the destination's own mode and times must not survive under the
@@ -1685,8 +1684,7 @@ xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the
 TREE='printf XXXXXXXXXX > g; chmod 606 g'
 FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the mode's special bits and both times" \
-  -v @FAR@/f g
+run_case -v @FAR@/f g
 
 # The case the unlink quoted above exists for. `g` and `g2` are one inode with
 # two names, and only `g` is named on the command line. After a rename `g2`
@@ -1710,13 +1708,13 @@ run_case -v @FAR@/f g
 TREE=''
 FAR='printf hello > t; ln -s t l; touch -h -d "2001-02-03 04:05:06" l'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: a symlink's own time" \
-  -v @FAR@/l g
+run_case -v @FAR@/l g
 
 # The same, dangling. Nothing can be opened at all, so a fallback that resolves
-# links cannot even appear to work — which is why this one already agrees while
-# the case above does not. A symlink has no times of its own worth setting when
-# there is nothing to set them from, and GNU does not set them either.
+# links cannot even appear to work. It has no pinned time, unlike the case
+# above: `touch -h` on a link to nowhere is refused on some filesystems, so the
+# pair is deliberately split — the case above measures the link's own stamp and
+# this one measures that the link text survives with nothing behind it.
 TREE=''
 FAR='ln -s nowhere l'
 run_case -v @FAR@/l g
@@ -1734,7 +1732,7 @@ run_case -v @FAR@/l g
 # is the whole case — the tree and the bytes agree either way.
 TREE='mkdir d'
 FAR='printf hello > a; ln a b'
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: a hard-linked group moved together" \
+xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-DOES-NOT-PRESERVE-HARD-LINKS" \
   -v @FAR@/a @FAR@/b d
 
 # The same inode, but only one of its names moved. Here the *right* answer is
@@ -1759,12 +1757,12 @@ xfail_case "B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED" \
 TREE='printf XXX > g; touch -d "1999-01-01" g'
 FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the mode's special bits and both times" \
-  -uv @FAR@/f g
+run_case -uv @FAR@/f g
 
-# Newer destination: it does not, and no fallback is entered — which is why
-# this case agrees while the one above it does not. It is the pair that shows
-# the disagreement is in the copy and not in `-u`'s comparison.
+# Newer destination: it does not, and no fallback is entered at all. It is the
+# pair that separates `-u`'s comparison from the copy it guards: the case above
+# exercises both and this one only the comparison, so a regression in either can
+# be told from a regression in the other by which of the two goes red.
 TREE='printf XXX > g; touch -d "2030-01-01" g'
 FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 STAMPS=1
@@ -1777,8 +1775,7 @@ run_case -uv @FAR@/f g
 TREE='printf XXX > g'
 FAR='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the mode's special bits and both times" \
-  -bv @FAR@/f g
+run_case -bv @FAR@/f g
 
 # The other direction: near to far. Everything above reads from the far side;
 # this reads from the near one and writes to the far, and a fallback that got
@@ -1786,8 +1783,7 @@ xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the
 TREE='printf hello > f; chmod 4741 f; touch -d "2001-02-03 04:05:06.123456789" f'
 FAR=':'
 STAMPS=1
-xfail_case "B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER: the mode's special bits and both times" \
-  -v f @FAR@/g
+run_case -v f @FAR@/g
 
 # The control. Both operands are on the far filesystem, so this is a rename and
 # must agree exactly — including the verbose line's word, which is `renamed`
@@ -1811,28 +1807,26 @@ run_case -v n @FAR@/f d
 # A far source that cannot be read. The fallback has to open it, so this fails
 # where a rename would have succeeded — the one place where being on another
 # filesystem changes whether a move is *possible* rather than only how it is
-# done. Both sides fail, with the same errno and after the same `copied` line;
-# what differs is the sentence, and it differs because GNU reports at the step
-# that failed (`copy.c`'s "cannot open %s for reading") while this `mv` funnels
-# every fallback failure through one `cannot move` diagnostic that names the
-# whole operation. The errno is the same, so the difference is only in how much
-# the user is told — but "cannot move X to Y: Permission denied" leaves the
-# reader to guess which of the two paths the denial was about.
+# done. Both sides fail, with the same errno, after the same `copied` line, and
+# now with the same sentence: `cannot open 'f' for reading`, which names the
+# step rather than the operation. This case is why the fallback opens the source
+# itself instead of handing both names to one library call — the call returns
+# one error for the read end and the write end alike, and the case below is that
+# same errno at the other end.
 TREE=''
 FAR='printf hello > f; chmod 000 f'
-xfail_case "B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP" \
-  -v @FAR@/f g
+run_case -v @FAR@/f g
 
 # A destination directory that cannot be written. The failure is on the near
 # side and before any bytes move, so the far source must still be there
 # afterwards: a fallback that unlinked the source before confirming the write
 # would have destroyed it. Both sides leave it, and this is the second half of
-# the pair above — the same errno at the *other* end of the copy, which GNU
-# distinguishes ("cannot create regular file %s") and this `mv` does not.
+# the pair above — the same errno at the *other* end of the copy, and the two
+# sentences have to disagree with each other: `cannot create regular file 'd/g'`
+# here against `cannot open 'f' for reading` there.
 TREE='mkdir d; chmod 555 d'
 FAR='printf hello > f'
-xfail_case "B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP" \
-  -v @FAR@/f d/g
+run_case -v @FAR@/f d/g
 
 # `-n` and `-i` across the boundary, to certify that the refusal happens before
 # the fallback is chosen rather than after the copy has already been made.

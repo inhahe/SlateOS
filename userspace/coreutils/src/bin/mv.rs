@@ -123,10 +123,13 @@
 //!
 //! The harness is the artifact to keep, not the fix list: it is 300 cases, it
 //! runs in about a minute, and it is how the next seventeen get found.
-//! Nine of its cases are marked as differing on purpose: four are `--help`
+//! Twelve of its cases are marked as differing on purpose: four are `--help`
 //! and `--version`, which name SlateOS rather than the GNU project and always
-//! will, and the other five are options this file does not implement yet — so
-//! implementing one is expected to *promote* a case rather than to add one. `-v` was the first to be promoted
+//! will; six are options this file does not implement yet — so
+//! implementing one is expected to *promote* a case rather than to add one; and
+//! two are the cross-device defects in the section below, which are the first
+//! xfails here that name a `known-issues.md` entry rather than a missing option.
+//! `-v` was the first to be promoted
 //! that way; its five entries became §14 and gained four more, which is the
 //! shape the rest should follow. `-i`/`-f`/`-n` was the second: its twelve
 //! entries became §15 and gained twenty more, plus the `--no-cl` abbreviation
@@ -166,11 +169,51 @@
 //! it needs a recursive copy that preserves modes, symlinks and hard links, and
 //! doing it wrong loses data quietly. It reports that it is not implemented
 //! rather than attempting a partial job. Logged in `known-issues.md`.
+//!
+//! # The cross-device fallback, and what §22 found in it
+//!
+//! §22 of the harness arrived long after the rest and is the one section not
+//! about an option: it moves files between two *filesystems*, which the other
+//! 300 cases never do because they all run inside one temporary directory. The
+//! section exists because of a claim that had been written down twice and never
+//! checked — that a second filesystem needed a mount and therefore a password.
+//! It did not. `$XDG_RUNTIME_DIR` and `/dev/shm` are already mounted, already
+//! writable, and already a different `st_dev` from `/tmp`.
+//!
+//! Its first run found four defects in a fallback that had been read carefully
+//! and looked right, and every one of them was invisible on a one-filesystem
+//! machine:
+//!
+//! - **The destination was written *through*, not replaced.** `fs::copy` opens
+//!   the destination with `O_TRUNC`, so `mv far/f g` rewrote the inode `g`
+//!   named — and every *other* name for it. A file the user never mentioned was
+//!   destroyed. GNU unlinks first, and its comment says why in one sentence:
+//!   *"so that a cross-device `mv' acts as if it were really using the rename
+//!   syscall"*. See [`clear_destination`].
+//! - **The times, the owner and the set-ID bits were all thrown away.**
+//!   `fs::copy` is documented to carry the permission bits and documented to
+//!   carry nothing else, so a moved file arrived stamped with the moment of the
+//!   move. A move is meant to be indistinguishable from a rename, and `mv` has
+//!   no option to turn any of that preservation off. See
+//!   [`copy_across_devices`] for the four ordered steps that replaced it.
+//! - **Failures named the operation rather than the step.** One `cannot move X
+//!   to Y` for a source that would not open and a destination that would not be
+//!   created — the same errno for both, with the half of the information that
+//!   says which file to go and look at discarded. See [`Failed`].
+//! - **A hard-linked group moved together arrives as separate files.** Still
+//!   true; it belongs with the recursive walk. Logged in `known-issues.md`.
+//!
+//! The first three are fixed and their cases are ordinary `run_case`s now. The
+//! general lesson is the one the eighteenth bug above already taught, in a
+//! sharper form: reading found none of these, and the reason the harness could
+//! not find them either was a sentence in its own header asserting the test was
+//! impossible.
 
 use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{FileId, file_id, nlink, same_entry, same_inode, split_entry};
+use coreutils::fsattr::{self, GroupRetry, Link, On, Ownership};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname::strip_trailing_slashes;
@@ -1337,7 +1380,12 @@ fn move_one<O: Write, E: Write>(
     // and reading correctly besides: announcing a copy about to be declined
     // would be a lie rather than an oddity.
     if src_meta.is_dir() {
-        return give_up_cross_device(job, src, target, &no_directories(), moved_aside.as_deref());
+        return give_up_cross_device(
+            job,
+            &no_directories(src, target),
+            target,
+            moved_aside.as_deref(),
+        );
     }
 
     // Clear the destination, so that the copy standing in for the rename ends
@@ -1384,8 +1432,8 @@ fn move_one<O: Write, E: Write>(
     // red.
     announce(job, "copied", src, target, moved_aside.as_deref());
 
-    if let Err(e) = copy_across_devices(src, target, &src_meta) {
-        return give_up_cross_device(job, src, target, &e, moved_aside.as_deref());
+    if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut *job.err) {
+        return give_up_cross_device(job, &failure, target, moved_aside.as_deref());
     }
     // The second line of the pair, and it comes from somewhere else entirely in
     // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
@@ -1798,11 +1846,14 @@ fn make_backup<O: Write, E: Write>(
 /// stamps are already within two seconds of each other *and* the filesystems'
 /// resolutions differ.
 ///
-/// It is not implemented here, and the reason it is not yet reachable is
-/// separate: this `mv`'s cross-device fallback is `fs::copy`, which does not
-/// carry the source's mtime over at all, so there is no preserved timestamp for
-/// the truncation to be about. Both halves are logged in `known-issues.md`, and
-/// the truncation belongs with whichever of them is done first.
+/// It is not implemented here, and it is now **reachable**, which it was not
+/// before 2026-09-01: until then the cross-device fallback was `fs::copy` and
+/// carried no timestamp at all, so there was no preserved stamp for the
+/// truncation to be about. [`copy_across_devices`] carries both stamps now, so
+/// the second `mv -u` of the same pair across a boundary asks the question
+/// upstream asks — and answers it without the rounding. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`, whose fix
+/// is what made this the last unimplemented half.
 fn destination_is_older(src_meta: &fs::Metadata, dst_meta: &fs::Metadata) -> bool {
     match (dst_meta.modified(), src_meta.modified()) {
         (Ok(dst), Ok(src)) => dst < src,
@@ -2048,6 +2099,37 @@ fn is_cross_device(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::CrossesDevices
 }
 
+/// A step of the cross-device fallback that failed, and the sentence GNU prints
+/// for that step.
+///
+/// The sentence is carried rather than derived from the error, because the two
+/// steps that fail with the same errno say different things: an unreadable
+/// source and an unwritable destination directory both give `EACCES`, and GNU
+/// answers `cannot open 'f' for reading` for one and `cannot create regular file
+/// 'd/g'` for the other. Ours used to answer `cannot move 'f' to 'd/g'` for both
+/// — the same exit status and the same errno, with the half of the information
+/// that says where to go and look thrown away. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FAILURES-DO-NOT-NAME-THE-STEP`.
+///
+/// It is the whole diagnostic bar the errno and the `mv: ` prefix, already
+/// quoted, because the quoting style is not the same in all of them: GNU quotes
+/// with `quoteaf` almost everywhere and with `quotef` in the permissions
+/// sentence, and a helper that took the names and picked a style would have to
+/// know which sentence it was building anyway.
+#[cfg_attr(test, derive(Debug))]
+struct Failed {
+    /// e.g. `cannot open 'f' for reading`.
+    what: String,
+    /// The errno, appended after `: `.
+    err: io::Error,
+}
+
+impl Failed {
+    fn new(what: String, err: io::Error) -> Self {
+        Failed { what, err }
+    }
+}
+
 /// Say that a cross-device move failed, put back anything `-b` moved aside, and
 /// report the move as not done.
 ///
@@ -2058,18 +2140,13 @@ fn is_cross_device(e: &io::Error) -> bool {
 /// keeping that one out of this helper is the point of having the helper.
 fn give_up_cross_device<O: Write, E: Write>(
     job: &mut Job<'_, O, E>,
-    src: &Path,
+    failure: &Failed,
     target: &Path,
-    err: &io::Error,
     moved_aside: Option<&Path>,
 ) -> bool {
-    let why = strerror(err);
-    let _ = writeln!(
-        job.err,
-        "mv: cannot move {} to {}: {why}",
-        quoteaf_os(src),
-        quoteaf_os(target)
-    );
+    let why = strerror(&failure.err);
+    let what = &failure.what;
+    let _ = writeln!(job.err, "mv: {what}: {why}");
     // **The only place `mv` puts a backup back**, and that is upstream's shape
     // rather than an omission here: the move-mode rename failures above it all
     // say `return false` outright (`copy.c:2866`). So `mv -b a b` whose rename
@@ -2091,10 +2168,18 @@ fn give_up_cross_device<O: Write, E: Write>(
 /// `known-issues.md` → `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`, and
 /// `scripts/mv-diff.sh` §22 for the case that becomes an XPASS the moment a
 /// recursive fallback lands.
-fn no_directories() -> io::Error {
-    io::Error::new(
-        io::ErrorKind::Unsupported,
-        "moving a directory across filesystems is not implemented by this mv",
+///
+/// The one sentence in this fallback that is *not* GNU's, because GNU has no
+/// equivalent — it does the move. `cannot move X to Y` is what the whole
+/// fallback used to say and is the right shape for a refusal of the operation
+/// rather than of a step within it.
+fn no_directories(src: &Path, target: &Path) -> Failed {
+    Failed::new(
+        format!("cannot move {} to {}", quoteaf_os(src), quoteaf_os(target)),
+        io::Error::new(
+            io::ErrorKind::Unsupported,
+            "moving a directory across filesystems is not implemented by this mv",
+        ),
     )
 }
 
@@ -2115,16 +2200,51 @@ fn clear_destination(target: &Path) -> io::Result<()> {
 /// The `EXDEV` fallback: reproduce the source at `target`, then remove it.
 ///
 /// `target` is a free name: [`clear_destination`] has just unlinked anything
-/// that was there, so every kind here creates rather than overwrites.
+/// that was there, so every kind here creates rather than overwrites. That is
+/// also why nothing here is conditional on a `new_dst`: GNU's is set `true` by
+/// the block that does the unlinking (`copy.c:2890`), so every test of it in the
+/// machinery below that point is a test of a constant for this caller.
+///
+/// **A move is meant to be indistinguishable from a rename**, and that is not a
+/// figure of speech: `cp_option_init` (`mv.c:129`) turns on `preserve_mode`,
+/// `preserve_timestamps`, `preserve_ownership`, `preserve_links` and
+/// `preserve_xattr` unconditionally, with no option to turn any of them off.
+/// Everything a rename would have kept for free this function has to carry by
+/// hand, in an order that is not free either:
+///
+/// 1. **the bytes**, into a destination created with the group and other bits
+///    held back — see [`create_destination`];
+/// 2. **the times**, from the source's `stat` at whatever resolution it has;
+/// 3. **the owner**, which may be refused, and a refusal costs the set-ID bits;
+/// 4. **the mode**, last, because a `chown` clears `S_ISUID`/`S_ISGID` for a
+///    non-root process and a mode written before it would be silently undone.
+///
+/// GNU's comment at the top of that sequence is the whole of the argument:
+/// *"chown turns off set[ug]id bits for non-root, so do the chmod last"*
+/// (`copy.c:3245`).
+///
+/// None of steps 2–4 is fatal. `mv` leaves `require_preserve` false
+/// (`mv.c:142`), so a preservation that fails is *reported* on `err` and the
+/// move still counts as done — which is the right answer for the overwhelmingly
+/// common one, an ordinary user who may not give the copy away.
+///
+/// **Extended attributes are not carried yet**, though `preserve_xattr` is on
+/// upstream. See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-FALLBACK-DROPS-EXTENDED-ATTRIBUTES`.
 ///
 /// # Errors
 ///
-/// Any failure of the copy or the removal, and the one case this does not
-/// implement: recreating a symlink on a host without `symlink(2)`. A directory
-/// never reaches here — [`move_one`] refuses it before the destination is
-/// cleared, because clearing first and refusing second would destroy a file for
-/// a move that then did not happen.
-fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io::Result<()> {
+/// The first step that failed, carrying [`Failed`]'s sentence for it. A
+/// directory never reaches here — [`move_one`] refuses it before the destination
+/// is cleared, because clearing first and refusing second would destroy a file
+/// for a move that then did not happen — but the arm is kept so that the
+/// function is safe to call directly, which is how it is tested.
+fn copy_across_devices<E: Write>(
+    src: &Path,
+    target: &Path,
+    metadata: &fs::Metadata,
+    err: &mut E,
+) -> Result<(), Failed> {
     let kind = metadata.file_type();
 
     if kind.is_symlink() {
@@ -2132,17 +2252,223 @@ fn copy_across_devices(src: &Path, target: &Path, metadata: &fs::Metadata) -> io
         // link's *text* is reproduced verbatim, so a relative link keeps meaning
         // whatever it means relative to its new directory, exactly as `rename`
         // would have left it.
-        let points_at = fs::read_link(src)?;
-        symlink(&points_at, target)?;
-        return fs::remove_file(src);
+        let points_at = fs::read_link(src).map_err(|e| {
+            Failed::new(format!("cannot read symbolic link {}", quoteaf_os(src)), e)
+        })?;
+        symlink(&points_at, target).map_err(|e| {
+            Failed::new(
+                format!("cannot create symbolic link {}", quoteaf_os(target)),
+                e,
+            )
+        })?;
+        preserve_onto_link(target, metadata, err);
+        return remove_source(src);
     }
 
     if kind.is_dir() {
-        return Err(no_directories());
+        return Err(no_directories(src, target));
     }
 
-    fs::copy(src, target)?;
-    fs::remove_file(src)
+    let mode = fsattr::permission_bits(metadata);
+    let mut source = fs::File::open(src)
+        .map_err(|e| Failed::new(format!("cannot open {} for reading", quoteaf_os(src)), e))?;
+    let mut dest = create_destination(target, mode).map_err(|e| {
+        Failed::new(
+            format!("cannot create regular file {}", quoteaf_os(target)),
+            e,
+        )
+    })?;
+
+    // `io::copy` and not a hand-written loop, because `std` specialises it to
+    // `copy_file_range` when both sides are files — the same kernel-side copy
+    // GNU reaches for, and the same reason: it moves the data without a trip
+    // through userspace and it reproduces a sparse file's holes instead of
+    // writing out the zeroes.
+    //
+    // **The price is that a read failure and a write failure arrive as one
+    // error**, where GNU distinguishes `error reading %s` from
+    // `error writing %s`. The destination's sentence is the one used, because
+    // that is the side that fails in practice — `ENOSPC`, `EDQUOT`, a full
+    // quota, a device going away mid-write — while a read error means the
+    // *source* medium is failing, which is rarer and louder. Telling them apart
+    // would mean giving up `copy_file_range`, which is a real loss for a real
+    // gain in a case nothing measures; it is logged rather than traded for.
+    // See `known-issues.md` →
+    // `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`
+    // for the recoverable version, and `design-decisions.md` §741 for the whole
+    // of the argument, including the two alternatives that were rejected.
+    io::copy(&mut source, &mut dest)
+        .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
+
+    preserve_onto_file(&source, &dest, target, metadata, mode, err);
+    remove_source(src)
+}
+
+/// Create `target` for writing, with the source's mode *narrowed* to the owner.
+///
+/// The withholding is GNU's `omitted_permissions`, which for a move is
+/// `dst_mode & (S_IRWXG | S_IRWXO)` — every group and other bit — because
+/// `preserve_ownership` is on (`copy.c:2892`). The bits come back in the final
+/// [`fsattr::copy_permissions`], and the window they are missing from is the one
+/// between the file existing and it having the right owner. Without the
+/// withholding, a file whose source is group- or world-readable is briefly
+/// readable by *this* process's group and by everyone, holding the source's
+/// contents, before the `chown` hands it to whoever should have had it.
+///
+/// `create_new` is GNU's `O_EXCL`, which it uses whenever `new_dst`
+/// (`copy.c:1457`) — and after the destination has been unlinked, `new_dst` is
+/// what this caller always is. It is not an optimisation: without it a name
+/// created between the unlink and the open would be opened and truncated, which
+/// is the very thing the unlink was there to prevent.
+///
+/// GNU also ORs in `S_IWUSR` here when it is about to copy extended attributes
+/// as a non-owner, "to allow copying xattrs on read-only files" — the kernel's
+/// `xattr_permission` wants write access to the inode. That bit is not added
+/// because this fallback does not carry extended attributes yet; it belongs
+/// with the change that does, and until then it would only widen a mode nobody
+/// reads.
+#[cfg_attr(not(unix), allow(unused_variables))]
+fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode & !GROUP_AND_OTHER);
+    }
+    opts.open(target)
+}
+
+/// `S_IRWXG | S_IRWXO` — the bits [`create_destination`] holds back until the
+/// owner is settled.
+#[cfg_attr(not(unix), allow(dead_code))]
+const GROUP_AND_OTHER: u32 = 0o077;
+
+/// Carry the source's times, owner and mode onto the copy, reporting what would
+/// not go and failing at none of it.
+///
+/// Every write is aimed at the two *descriptors* rather than at the two names,
+/// which is [`fsattr::On`]'s reason and not a convenience: the mode being
+/// restored last includes the set-user-ID bit, and restoring it by name after
+/// the bytes are written leaves a window in which the name can be made to mean
+/// a different file. A descriptor names an inode and cannot be re-pointed.
+fn preserve_onto_file<E: Write>(
+    source: &fs::File,
+    dest: &fs::File,
+    target: &Path,
+    metadata: &fs::Metadata,
+    mode: u32,
+    err: &mut E,
+) {
+    let on = On::File(dest);
+    let mut mode = mode;
+
+    // `and_then` because a source whose stamps cannot even be read leaves the
+    // copy with the wrong times just as surely as one that cannot be stamped,
+    // and `preserving times for` is the sentence for that.
+    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
+        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
+    }
+
+    // GNU's `!SAME_OWNER_AND_GROUP (*src_sb, sb)` (`copy.c:1645`), and the skip
+    // is worth having rather than a `chown` that would be a no-op: it is still a
+    // write, it can still fail, and on most kernels it clears the set-ID bits —
+    // which the ordinary case, a user moving their own file, would then have to
+    // put back.
+    if fsattr::owner_differs(on, metadata) {
+        match fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::Yes) {
+            Ownership::Taken => {}
+            // Both of the other two drop the set-ID and sticky bits, which is
+            // GNU's single `case 0` for the reported and the silent refusal
+            // alike: a set-user-ID bit on a file that could not be given to its
+            // source's owner is a privilege granted to whoever holds it now.
+            Ownership::Denied => mode &= !SET_ID_AND_STICKY,
+            Ownership::Failed(e) => {
+                preserve_failed(
+                    err,
+                    "failed to preserve ownership for",
+                    quoteaf_os(target),
+                    &e,
+                );
+                mode &= !SET_ID_AND_STICKY;
+            }
+        }
+    }
+
+    // GNU's `copy_acl (src_name, source_desc, dst_name, dest_desc, src_mode)`,
+    // reached because `x->move_mode` is true — the mode *and* the access-control
+    // lists, because on this kernel an ACL entry grants access no mode bit shows
+    // and a move that carried only the bits would produce a file the kernel
+    // treats differently from the one that was moved.
+    //
+    // Its diagnostic is the one in this family that uses the unquoted `quotef`
+    // style. Matched rather than tidied, for `cp`'s reason: a utility that
+    // differs from GNU only in the punctuation of a diagnostic is still one
+    // whose output a script cannot match on.
+    if let Err(e) = fsattr::copy_permissions(On::File(source), on, mode) {
+        preserve_failed(err, "preserving permissions for", quotef_os(target), &e);
+    }
+}
+
+/// Carry the source link's owner and times onto the recreated link.
+///
+/// Two steps rather than three, and in the other order from
+/// [`preserve_onto_file`]'s, both of which are upstream's shape. A symbolic link
+/// has no mode of its own that any permission check consults, and Linux has no
+/// working `lchmod` to write one with, so `copy_internal` returns before its
+/// mode block whenever the destination is a link (`copy.c:3285`). The `lchown`
+/// comes first because it is done where the link is *made* (`copy.c:3178`),
+/// while the `utimensat` is in the shared tail below that.
+///
+/// The `lchown` gets no group-only retry, which is the same asymmetry `cp` has
+/// to reproduce: that call is a bare `lchownat` while `copy_reg`'s and the
+/// tail's both retry. It is visible in `ls -l` on the moved link.
+fn preserve_onto_link<E: Write>(target: &Path, metadata: &fs::Metadata, err: &mut E) {
+    let on = On::Path(target, Link::NoFollow);
+
+    if let Ownership::Failed(e) =
+        fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::No)
+    {
+        // GNU prints this one *unquoted* — `error (0, errno, _("failed to
+        // preserve ownership for %s"), dst_name)` with no `quoteaf` at all,
+        // unlike every other use of the same sentence. Reproduced as written;
+        // it is upstream's inconsistency and a script that matched on it would
+        // be matching on what upstream prints.
+        preserve_failed(
+            err,
+            "failed to preserve ownership for",
+            target.display().to_string(),
+            &e,
+        );
+    }
+
+    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
+        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
+    }
+}
+
+/// `S_ISUID | S_ISGID | S_ISVTX`, the bits a refused `chown` costs.
+const SET_ID_AND_STICKY: u32 = 0o7000;
+
+/// Report a preservation step that would not go, without failing the move.
+///
+/// A separate function so that the "and does not fail" half is stated once: the
+/// three call sites in [`preserve_onto_file`] and the two in
+/// [`preserve_onto_link`] all return `()`, and `mv` leaves `require_preserve`
+/// false (`mv.c:142`), so there is no arm anywhere that turns one of these into
+/// a non-zero exit.
+fn preserve_failed<E: Write>(err: &mut E, what: &str, name: String, e: &io::Error) {
+    let why = strerror(e);
+    let _ = writeln!(err, "mv: {what} {name}: {why}");
+}
+
+/// Unlink the source once the copy is complete, with GNU's `rm` sentence.
+///
+/// `mv` does this through `rm()` (`mv.c:238`) rather than in `copy.c`, which is
+/// why the wording is `rm`'s: `remove.c:352` reports a failed unlink as
+/// `cannot remove %s`.
+fn remove_source(src: &Path) -> Result<(), Failed> {
+    fs::remove_file(src).map_err(|e| Failed::new(format!("cannot remove {}", quoteaf_os(src)), e))
 }
 
 #[cfg(unix)]
@@ -2171,8 +2497,10 @@ fn symlink(_points_at: &Path, _at: &Path) -> io::Result<()> {
 )]
 mod tests {
     use super::*;
+    use coreutils::fsattr::Times;
     use coreutils::yesno::Canned;
     use scratchdir::ScratchDir;
+    use std::time::{Duration, SystemTime};
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
@@ -3709,7 +4037,7 @@ mod tests {
         let moved = dir.path("moved");
 
         let meta = fs::symlink_metadata(&link).unwrap();
-        copy_across_devices(&link, &moved, &meta).unwrap();
+        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
 
         let moved_meta = fs::symlink_metadata(&moved).unwrap();
         assert!(
@@ -3728,9 +4056,90 @@ mod tests {
         let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
+    }
+
+    /// A move is meant to be indistinguishable from a rename, and a rename does
+    /// not re-date the file. This is the unit `known-issues.md` →
+    /// `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER` asked
+    /// for: it pins the source's stamp, calls the function, and asserts the
+    /// destination's is the same one — which the differential harness can only
+    /// see through the whole program and only on a machine with two filesystems.
+    ///
+    /// The stamp is deliberately in the past. "Not now" is the only assertion
+    /// that distinguishes a preserved time from a fresh one, and a time set to
+    /// *now* would pass whether or not anything was preserved.
+    #[test]
+    fn the_cross_device_fallback_carries_the_times() {
+        let dir = scratch("xdev_times");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"bytes").unwrap();
+
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        fsattr::set_times(On::Path(&a, Link::Follow), Times::both(long_ago)).unwrap();
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        let want = meta.modified().unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&b).unwrap().modified().unwrap();
+        assert_eq!(got, want, "the copy must keep the source's stamp");
+    }
+
+    /// The mode, including the bits `fs::copy` used to carry and the set-user-ID
+    /// bit it did not. The `chmod` is written *after* the `chown`, so a run as
+    /// root — where the `chown` actually happens and clears `S_ISUID` — is the
+    /// case this pins; as an ordinary user the `chown` is skipped and the bit
+    /// would survive either ordering.
+    #[test]
+    #[cfg(unix)]
+    fn the_cross_device_fallback_carries_the_set_user_id_bit() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("xdev_mode");
+        let a = dir.path("a");
+        let b = dir.path("b");
+        fs::write(&a, b"bytes").unwrap();
+        fs::set_permissions(&a, fs::Permissions::from_mode(0o4741)).unwrap();
+
+        let meta = fs::symlink_metadata(&a).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(got, 0o4741, "every bit, set-user-ID included");
+    }
+
+    /// A symlink has its own modification time, and `mv` carries it: the
+    /// `utimensat` in the shared tail is done with `AT_SYMLINK_NOFOLLOW`, so it
+    /// stamps the link and not what the link names. The target is checked too,
+    /// because stamping through the link would be the silent failure.
+    #[test]
+    #[cfg(unix)]
+    fn the_cross_device_fallback_carries_a_links_own_time() {
+        let dir = scratch("xdev_link_times");
+        let real = dir.path("real");
+        fs::write(&real, b"contents").unwrap();
+        let link = dir.path("link");
+        std::os::unix::fs::symlink("real", &link).unwrap();
+
+        let long_ago = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        fsattr::set_times(On::Path(&link, Link::NoFollow), Times::both(long_ago)).unwrap();
+        let target_stamp = fs::symlink_metadata(&real).unwrap().modified().unwrap();
+
+        let meta = fs::symlink_metadata(&link).unwrap();
+        let want = meta.modified().unwrap();
+        let moved = dir.path("moved");
+        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
+
+        let got = fs::symlink_metadata(&moved).unwrap().modified().unwrap();
+        assert_eq!(got, want, "the link's own stamp must come across");
+        assert_eq!(
+            fs::symlink_metadata(&real).unwrap().modified().unwrap(),
+            target_stamp,
+            "and must not have been written through the link"
+        );
     }
 
     /// The destination is *replaced*, not written through, and this is the step
@@ -3812,8 +4221,9 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
         let meta = fs::symlink_metadata(&sub).unwrap();
-        let e = copy_across_devices(&sub, &dir.path("elsewhere"), &meta).unwrap_err();
-        assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+        let e =
+            copy_across_devices(&sub, &dir.path("elsewhere"), &meta, &mut Vec::new()).unwrap_err();
+        assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);
         assert!(sub.join("inside").is_file(), "nothing may be moved");
     }
 

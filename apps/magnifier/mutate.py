@@ -753,12 +753,21 @@ MUTATIONS = [
         "        {\n            let y = l.header.y\n                + (l.header.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;",
         ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
     ),
-    (
-        "the header's reading is placed in a band too short for it",
-        "        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold)) {\n            let x = right - reading_w;",
-        "        {\n            let y = l.header.y\n                + (l.header.h - text::line_height(small, FontWeightHint::Bold)) / 2.0;\n            let x = right - reading_w;",
-        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
-    ),
+    # NOT a mutation: the reading's `centre_line(l.header, line_height(small))`
+    # -> the bare offset.  It is an equivalent mutant.  `small` is
+    # `(size * 0.7).max(8.0)` and `size` is `big.min(header.h * 0.8)`; when the
+    # `.max(8.0)` floor is not binding the line is `0.931 * size` and `size` is
+    # at most `0.8 * header.h`, and when it is binding the line is 10.64px
+    # against the 11px `shows` will not go below.  So the `None` arm is
+    # unreachable at every band, and the mutant paints nothing outside anything.
+    #
+    # It fits by a third of a pixel, though, which is not a margin, so the guard
+    # stays -- the floor is a literal that knows nothing about the band, and it
+    # is the term that bites first if any of the three numbers move.  What
+    # replaces the row is `a_header_tall_enough_to_be_shown_always_says_what_the
+    # _zoom_is`, which fails the moment the arm becomes reachable.  A guard no
+    # test can enter needs a proof that it cannot be entered, not a mutation
+    # that cannot fail.
     (
         "both header runs are centred by the larger one's line height",
         "        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold))",

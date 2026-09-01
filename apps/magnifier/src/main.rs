@@ -5023,26 +5023,105 @@ mod tests {
         // a reading wider than 45% of a narrow header put the two through each
         // other. The title's column ends where the reading's begins now, which
         // is one number rather than two guesses.
+        //
+        // Squeezed widths, not just the real ones. At every size in `WINDOWS`
+        // the reading is far too short to reach a flat half of the band —
+        // "paused" is the longest thing it ever says, and the widest header the
+        // layout hands out is 1920 — so restoring the flat half changed nothing
+        // any real window could see, and the row for it survived the sweep
+        // saying so. What reaches the fault is a *narrow* band whose fonts were
+        // sized by a *tall* window: `small` follows `header.h` and the window's
+        // `big`, and neither of them shrinks when the width does. Height is left
+        // alone here because it is the width the two columns are dividing.
         let mut a = app();
         a.paused = true;
+        let mut narrow = 0;
         for &(w, h) in WINDOWS {
-            let l = Layout::new(w, h, true);
-            if !l.shows(l.header) {
-                continue;
-            }
-            let mut f = Frame::new(w, h);
-            a.draw_header(&mut f, &l);
-            let runs = inked(&f);
-            for (i, (a_text, a_rect)) in runs.iter().enumerate() {
-                for (b_text, b_rect) in runs.iter().skip(i + 1) {
-                    assert!(
-                        a_rect.intersect(*b_rect).is_none(),
-                        "at {w}x{h} the header drew {a_text:?} at {a_rect:?} and {b_text:?} \
-                         at {b_rect:?}, which overlap"
-                    );
+            let base = Layout::new(w, h, true);
+            for band in squeezes(base.header) {
+                if band.h != base.header.h || !base.shows(band) {
+                    continue;
+                }
+                let mut l = base;
+                l.header = band;
+                let mut f = Frame::new(w, h);
+                a.draw_header(&mut f, &l);
+                let runs = inked(&f);
+                for (i, (a_text, a_rect)) in runs.iter().enumerate() {
+                    for (b_text, b_rect) in runs.iter().skip(i + 1) {
+                        assert!(
+                            a_rect.intersect(*b_rect).is_none(),
+                            "at {w}x{h} a {}-wide header drew {a_text:?} at {a_rect:?} and \
+                             {b_text:?} at {b_rect:?}, which overlap",
+                            band.w
+                        );
+                    }
+                }
+                // The coverage half of the claim. A no-overlap assertion over
+                // bands where the reading could not have overlapped anything
+                // is an assertion about nothing, and that is exactly the state
+                // this test was in. So: count the bands narrow enough that a
+                // flat half of them would have run the title into the reading,
+                // and require some.
+                if let Some((_, reading)) = runs.iter().find(|(t, _)| t == "paused")
+                    && reading.x < band.x + l.pad + band.w * 0.5
+                {
+                    narrow += 1;
                 }
             }
         }
+        assert!(
+            narrow > 0,
+            "no header was ever narrow enough for a flat half of it to reach the \
+             reading, so the split was never actually put to the question"
+        );
+    }
+
+    /// The other half of the header's bounds: both centrings are refusals, and
+    /// a refusal is invisible to a test that only asks where a run went. This
+    /// asks whether it went anywhere.
+    ///
+    /// The reading's centring is the tight one. `small` has a `.max(8.0)`
+    /// legibility floor, which is a literal that knows nothing about the band
+    /// it is drawn in, and at the shortest header `shows` admits — 11px — an
+    /// 8px line occupies 10.64 of them. It fits by a third of a pixel. That is
+    /// a coincidence, not a margin, and the only thing that keeps it a fact is
+    /// this assertion: move `shows`'s threshold, the floor, or the face's line
+    /// height, and the reading silently stops being drawn rather than
+    /// overflowing, which is the failure this campaign is least able to see.
+    #[test]
+    fn a_header_tall_enough_to_be_shown_always_says_what_the_zoom_is() {
+        let mut a = app();
+        a.paused = true;
+        let mut checked = 0;
+        for &(w, h) in WINDOWS {
+            let base = Layout::new(w, h, true);
+            for band in squeezes(base.header) {
+                // Width held at what the layout gave: a header can legitimately
+                // be too narrow to draw the reading in, and that refusal is the
+                // bound working. Height is the dimension with no such excuse.
+                if band.w != base.header.w || !base.shows(band) {
+                    continue;
+                }
+                let mut l = base;
+                l.header = band;
+                let mut f = Frame::new(w, h);
+                a.draw_header(&mut f, &l);
+                let runs = inked(&f);
+                assert!(
+                    runs.iter().any(|(t, _)| t == "paused"),
+                    "at {w}x{h} a header {}px tall is tall enough for `shows` to draw in, \
+                     and it drew {} run(s), none of them the reading",
+                    band.h,
+                    runs.len()
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 0,
+            "no header height was ever exercised, so this asserted nothing"
+        );
     }
 
     #[test]

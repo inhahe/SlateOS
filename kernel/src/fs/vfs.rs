@@ -2333,18 +2333,29 @@ impl Vfs {
     fn finish_listing(path: &Path, mut entries: Vec<DirEntry>) -> Vec<DirEntry> {
         Self::drop_volume_labels(&mut entries);
 
-        // Mount-point names that are direct children of `path`.  E.g. with
-        // path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"];
-        // a nested mount like "/mnt/usb" is not a direct child of "/".
-        let submount_names: Vec<PathBuf> = {
+        // Mount-point names that are direct children of `path`, each paired
+        // with the filesystem mounted there.  E.g. with path="/", mounts at
+        // "/tmp" and "/mnt" produce ["tmp", "mnt"]; a nested mount like
+        // "/mnt/usb" is not a direct child of "/".
+        //
+        // The handle is cloned here, under the lock we are already holding to
+        // find the name, because the alternative is to reconstruct a path and
+        // look the same mount up again from scratch — which is what this used
+        // to do, and it was the single most expensive thing about listing a
+        // directory that has mounts under it.  See `submount_root_ino`.
+        let submounts: Vec<(PathBuf, MountedFs)> = {
             let vfs = VFS.lock();
             Self::submount_children(&vfs, path)
         };
 
         // Inject the ones the underlying filesystem doesn't know about.
-        for name in submount_names {
+        //
+        // The VFS lock is released above, before the loop takes any per-mount
+        // lock — the §43 ordering that `submount_root_ino` documents and that
+        // the `MountPoint::fs_type` comment explains the cost of getting wrong.
+        for (name, fs) in submounts {
             if !entries.iter().any(|e| e.name == name) {
-                let ino = Self::submount_root_ino(path, &name);
+                let ino = Self::submount_root_ino(&fs);
                 entries.push(DirEntry {
                     name,
                     entry_type: EntryType::Directory,
@@ -3409,12 +3420,21 @@ impl Vfs {
         Err(KernelError::NotFound)
     }
 
-    /// Find mount-point names that are direct children of `dir_path`.
+    /// Find mount-point names that are direct children of `dir_path`, each
+    /// paired with a handle to the filesystem mounted there.
     ///
     /// For example, if `dir_path` is `"/"` and there are mounts at
     /// `"/tmp"` and `"/mnt/usb"`, this returns `["tmp"]` — only the
     /// immediate child, not nested mounts.
-    fn submount_children(vfs: &VfsInner, dir_path: &Path) -> Vec<PathBuf> {
+    ///
+    /// The handle is cloned out of the mount table rather than re-resolved
+    /// later by path, because this scan is already looking at the very entry
+    /// a later `resolve_mount` would find: [`Vfs::mount`] refuses a duplicate
+    /// mount path, so each path here maps to exactly one entry and the two
+    /// are equivalent.  Doing it here turns a per-submount longest-prefix
+    /// scan of the whole mount table into an `Arc` clone — see the
+    /// `vfs_readdir_mp_*` benchmarks for what that was costing.
+    fn submount_children(vfs: &VfsInner, dir_path: &Path) -> Vec<(PathBuf, MountedFs)> {
         let mut names = Vec::new();
 
         for mp in &vfs.mounts {
@@ -3425,7 +3445,7 @@ impl Vfs {
             // mount that some intermediate directory owns, not this one.
             if let Some(tail) = mp.path.strip_prefix(dir_path) {
                 if tail.components().count() == 1 {
-                    names.push(tail.to_path_buf());
+                    names.push((tail.to_path_buf(), Arc::clone(&mp.fs)));
                 }
             }
         }
@@ -3449,10 +3469,19 @@ impl Vfs {
     /// rather than propagated: a filesystem that cannot answer for its own
     /// root must not make listing the directory *above* it fail.
     ///
-    /// Callers must not hold the VFS lock or any filesystem lock — this
-    /// re-enters [`resolve_mount`].
-    fn submount_root_ino(dir_path: &Path, name: &Path) -> u64 {
-        Self::metadata_resolved(dir_path.join(name)).map_or(0, |m| m.ino)
+    /// `fs` is the handle [`submount_children`] cloned out of the mount
+    /// table, so this is `metadata_resolved`'s body with the path resolution
+    /// already done: for a path that *is* a mount point, `find_mount` yields
+    /// the relative path `/`, which is what is statted here.
+    ///
+    /// Callers must not hold the VFS lock — this takes the mounted
+    /// filesystem's own lock, and the §43 ordering is VFS-lock-first, so
+    /// taking them in that order from a caller that already holds the VFS
+    /// lock would invert it.  (The concrete deadlock this avoids is spelled
+    /// out on [`MountPoint::fs_type`]: `readdir("/proc")` holds the procfs
+    /// mutex while `gen_mounts` asks the VFS for the mount table.)
+    fn submount_root_ino(fs: &MountedFs) -> u64 {
+        fs.lock().metadata(Path::new("/")).map_or(0, |m| m.ino)
     }
 
     // --- Extended metadata VFS methods ---

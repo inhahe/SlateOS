@@ -51,7 +51,9 @@
 //!   beyond that.
 //! - Entries whose name does not fit `d_name` (255 bytes plus a terminator)
 //!   are skipped rather than truncated: a truncated name denotes a different
-//!   file, and acting on it would be worse than not seeing it.
+//!   file, and acting on it would be worse than not seeing it.  That, and an
+//!   empty name, are the *only* reasons an entry is dropped — nothing is
+//!   filtered by type, deliberately (see [`kernel_type_to_dt`]).
 
 use crate::errno;
 use crate::syscall::*;
@@ -199,9 +201,20 @@ pub(crate) fn kernel_type_to_dt(kernel_type: u8) -> u8 {
         // honest answer even though the follow-up stat it invites will
         // fail.  In practice this arm is unreachable from a listing — the
         // VFS drops labels on every route (`Vfs::drop_volume_labels`) and
-        // the kernel now documents `2` as reserved and never emitted — but
+        // the kernel documents `2` as reserved and never emitted — but
         // `SYS_FS_STAT` shares this encoding, so the code has a meaning and
         // deserves an answer rather than falling into the catch-all.
+        //
+        // Translating it is deliberately all we do: `readdir` and
+        // `fill_dirent64_batch` do *not* filter type 2 out.  A second filter
+        // in libc would not add a defence, it would add a place for the
+        // kernel's to fail invisibly — a regression in `drop_volume_labels`
+        // would fail lane A's `fat::mkfs_self_test` loudly while every real
+        // program on the system saw a listing we had quietly repaired.  If a
+        // label ever does arrive, it should show up as an odd entry nothing
+        // can open, which is a bug report; hiding it makes it a mystery.
+        // Lane A asked for exactly this in
+        // `requests/a-b-the-volume-label-divergence-did-not-exist-and-now-it-cannot.md`.
         KERNEL_TYPE_VOLLABEL => DT_UNKNOWN,
         _ => DT_UNKNOWN,
     }
@@ -468,9 +481,13 @@ pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
         };
         let next = dir.pos.wrapping_add(entry.record_len);
         let name_len = entry.name.len();
+        // The only entries dropped are ones that cannot be *represented*: a
+        // name with no room for its terminator would have to be truncated, and
+        // a truncated name denotes a different file.  Nothing is dropped for
+        // being the wrong kind of thing — see `kernel_type_to_dt` for why a
+        // volume label is not filtered here even though it has no POSIX type.
         let fits = name_len < dir.current.d_name.len();
-        let skip = !fits || name_len == 0 || entry.kernel_type == KERNEL_TYPE_VOLLABEL;
-        if skip {
+        if !fits || name_len == 0 {
             dir.pos = next;
             continue;
         }
@@ -1346,11 +1363,11 @@ fn emit_linux_dirent64(
 /// exactly how `getdents64` batches: that record is *not* consumed, so the
 /// caller's next call re-offers it against a fresh buffer.
 ///
-/// Entries are skipped rather than reported when the name is empty, when it
-/// is 256 bytes or longer (it could not be null-terminated inside
-/// [`LinuxDirent64::d_name`], and a truncated name denotes a different
-/// file), or when the record is a volume label — which 664 no longer emits,
-/// but which would otherwise surface in `/` as an entry nothing can open.
+/// The only entries skipped are ones that cannot be represented: an empty
+/// name, or one 256 bytes or longer, which could not be null-terminated
+/// inside [`LinuxDirent64::d_name`] and whose truncation would denote a
+/// different file.  Nothing is skipped for its *type* — the same rule
+/// [`readdir`] follows, for the reason in [`kernel_type_to_dt`].
 ///
 /// A pure function over two byte slices, so the batching boundary — the
 /// case where `out` fills mid-listing — is testable on the host, where the
@@ -1374,7 +1391,7 @@ fn fill_dirent64_batch(records: &[u8], pos: usize, out: &mut [u8]) -> (usize, us
         };
         let next = cursor.wrapping_add(entry.record_len);
         let name_len = entry.name.len();
-        if name_len == 0 || name_len >= 256 || entry.kernel_type == KERNEL_TYPE_VOLLABEL {
+        if name_len == 0 || name_len >= 256 {
             cursor = next;
             continue;
         }
@@ -1925,14 +1942,12 @@ mod tests {
     }
 
     #[test]
-    fn fill_dirent64_batch_skips_what_readdir_skips() {
-        // Empty names and volume labels are dropped on both routes.  664 no
-        // longer emits a label at all, so this is belt-and-braces: a label
-        // surfacing as an entry nothing can open would be a puzzling bug
-        // rather than a loud one.
+    fn fill_dirent64_batch_skips_only_names_it_cannot_represent() {
+        // An empty name is dropped because there is nothing to hand a caller.
+        // Everything else is passed on whatever its type — see the label test
+        // below for why that is a policy and not an omission.
         let mut records = [0u8; 256];
-        let mut n = packed_record(&mut records, KERNEL_TYPE_VOLLABEL, b"MYDISK", 0, 1);
-        n += packed_record(&mut records[n..], KERNEL_TYPE_FILE, b"", 0, 2);
+        let mut n = packed_record(&mut records, KERNEL_TYPE_FILE, b"", 0, 2);
         n += packed_record(&mut records[n..], KERNEL_TYPE_FILE, b"real", 0, 3);
         let mut out = [0u8; 256];
         let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out);
@@ -1945,8 +1960,28 @@ mod tests {
         let reclen = u16::from_le_bytes(out[16..18].try_into().expect("2 bytes")) as usize;
         assert_eq!(
             written, reclen,
-            "only the one real entry should have been emitted"
+            "only the one nameable entry should have been emitted"
         );
+    }
+
+    #[test]
+    fn a_volume_label_is_reported_as_unknown_rather_than_hidden() {
+        // The kernel drops labels on every listing route and reserves type 2,
+        // so this record cannot arrive in practice.  What is pinned here is
+        // the *policy*: libc does not add a second filter, because a filter
+        // here would turn a regression in the kernel's into an invisible one
+        // — lane A's `fat::mkfs_self_test` would fail loudly while every real
+        // program saw a listing we had quietly repaired.  A label must surface
+        // as an entry nothing can open, which is a bug report, rather than as
+        // a gap, which is a mystery.  See `kernel_type_to_dt`.
+        let mut records = [0u8; 128];
+        let n = packed_record(&mut records, KERNEL_TYPE_VOLLABEL, b"MYDISK", 0, 1);
+        let mut out = [0u8; 128];
+        let (written, next) = fill_dirent64_batch(&records[..n], 0, &mut out);
+        assert!(written > 0, "the label must not be filtered out");
+        assert_eq!(next, n);
+        assert_eq!(out[18], DT_UNKNOWN);
+        assert_eq!(&out[19..25], b"MYDISK");
     }
 
     #[test]

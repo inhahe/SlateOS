@@ -3052,6 +3052,17 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 ///   (entry_type: 0=file, 1=dir, 2=volume_label, 3=symlink,
 ///    4=char_device, 5=block_device)
 ///
+/// **`2` is reserved and never emitted.** A volume label is filesystem
+/// metadata that FAT happens to store in a root-directory slot, not an entry
+/// the directory contains, and the VFS drops labels on every listing route
+/// (`Vfs::drop_volume_labels`) — before the offset above is applied, so a
+/// dropped label can never make `entries_written` disagree with how far the
+/// offset advanced. `SYS_FS_LIST_DIR` (603) and [`SYS_FS_GETDENTS_PINNED`]
+/// behave identically; there is no route by which one lists a label and
+/// another does not. Read the label with [`SYS_FS_STATVFS`] instead. The
+/// value is left reserved rather than reused because renumbering the bytes
+/// above it would break every decoder to save one number.
+///
 /// All multi-byte fields are little-endian. A record is therefore
 /// `21 + name_len` bytes, and the same layout is what
 /// [`SYS_FS_GETDENTS_PINNED`] emits — both call one `entry_record_len` so
@@ -3414,6 +3425,15 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// the same `entry_record_len`.  A buffer too small for the whole listing
 /// truncates it — at a record boundary, never mid-record — rather than
 /// failing.
+///
+/// **This call lists exactly what `SYS_FS_LIST_DIR` (603) and
+/// [`SYS_FS_READDIR_AT`] list.**  That is worth stating rather than leaving
+/// to inference, because this number exists to be the race-free substitute
+/// for a listing taken by path: swapping routes to close a race must not
+/// also change what the directory is said to contain.  In particular no
+/// route emits a volume label (type byte `2` is reserved — see
+/// [`SYS_FS_READDIR_AT`]); the VFS drops them, so a `cp -r` that switches to
+/// this call does not acquire an entry named after the volume.
 ///
 /// Returns: on success, the bytes the *complete* listing occupies, which is
 /// not necessarily the number written.  `ret <= arg2` means the listing is

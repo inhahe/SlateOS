@@ -48,7 +48,19 @@ pub enum EntryType {
     Directory,
     /// Symbolic link.
     Symlink,
-    /// Volume label (FAT-specific, usually hidden).
+    /// Volume label — FAT-specific, and **never present in a listing**.
+    ///
+    /// FAT stores the label in a root-directory slot; that is an encoding
+    /// detail, not a claim that the volume contains a file by that name.
+    /// [`Vfs::drop_volume_labels`] removes it on every route out of the VFS,
+    /// so this variant reaches no caller of `readdir`, `readdir_at` or
+    /// `readdir_pinned` and no syscall's entry-type byte. The label is
+    /// available from [`Vfs::statvfs`]'s `volume_label` instead.
+    ///
+    /// The variant is kept rather than deleted because `FatFs::metadata`
+    /// still classifies a raw on-disk slot with it internally, and because
+    /// deleting it would silently renumber the syscall entry-type bytes
+    /// above it. Byte `2` stays reserved.
     VolumeLabel,
     /// Character device node (`/dev/input/event0`, `/dev/dri/card0`, …).
     ///
@@ -2226,31 +2238,81 @@ impl Vfs {
     // VFS operations
     // -------------------------------------------------------------------
 
-    /// List entries in a directory.
+    /// Drop [`EntryType::VolumeLabel`] entries from a listing.
     ///
-    /// If other filesystems are mounted at sub-paths of `path`, their
-    /// mount points appear as directory entries in the listing (even if
-    /// the underlying filesystem doesn't have a physical directory there).
-    pub fn readdir(path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
-        let path = path.as_ref();
-        let path = Self::resolve_follow(path)?;
-        check_path_access(&path, PathAccess::Read)?;
+    /// **A volume label is filesystem metadata, not a directory entry.** FAT
+    /// stores it in a root-directory slot, which is an encoding detail of
+    /// FAT and not a statement that the volume has a file named `MYDISK`.
+    /// The label is reachable through [`Vfs::statvfs`]'s `volume_label` and
+    /// settable through [`Vfs::set_volume_label`], which is where a caller
+    /// that wants it should look; nothing needs it to also appear in `ls`.
+    ///
+    /// **Why this is here and not left to the drivers.** It *was* left to the
+    /// drivers, and it worked: `FatFs::resolve_path`, `FatFs::readdir` and
+    /// `FatFs::readdir_at` each filter labels independently, so no VFS
+    /// listing has ever contained one. Lane B asked (2026-08-31) whether
+    /// `SYS_FS_LIST_DIR` (603), which drops labels, disagreed with
+    /// `SYS_FS_READDIR_AT` (647) and `SYS_FS_GETDENTS_PINNED` (664), which
+    /// pass them through — a `cp -r` of a FAT volume acquiring a spurious
+    /// entry named after the label. It does not, but only because the one
+    /// producer of the variant filters at every route it has.
+    ///
+    /// That is agreement by luck, and the luck is the kind that expires: an
+    /// exFAT driver *does* have a label in its root directory, and whoever
+    /// adds one has no reason to know that three syscalls above depend on
+    /// their filtering it. The guarantee belongs to the layer that states
+    /// it, so this states it — once, before pagination, for every route.
+    /// Drivers may keep filtering (FAT's is cheaper there, and it keeps its
+    /// name-collision checks honest); it is simply no longer load-bearing.
+    ///
+    /// Consequence for the ABI: entry-type byte `2` is **reserved and never
+    /// emitted** on 603/647/664. The match arms that produce it stay, because
+    /// the enum is exhaustive and an unreachable arm is cheaper than an
+    /// `unreachable!()` in a syscall path, but no decoder will see one.
+    fn drop_volume_labels(entries: &mut Vec<DirEntry>) {
+        entries.retain(|e| e.entry_type != EntryType::VolumeLabel);
+    }
 
-        // Collect mount-point names that are direct children of `path`.
-        // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
-        // Nested mounts like "/mnt/usb" are NOT direct children of "/".
+    /// Turn a backing filesystem's raw listing of `path` into the listing the
+    /// VFS promises: no volume labels, plus the mount points that are direct
+    /// children of `path`.
+    ///
+    /// **Every route out of the VFS must go through this**, and it exists
+    /// because for a while one of them did not. `readdir` and
+    /// `readdir_at_resolved` each open-coded both steps; `readdir_pinned`
+    /// open-coded neither, so `SYS_FS_GETDENTS_PINNED` (664) omitted every
+    /// mount point that `SYS_FS_READDIR_AT` (647) and `SYS_FS_LIST_DIR` (603)
+    /// showed — listing `/` by path gave `tmp`, `proc`, `sys`, `dev`; listing
+    /// the same directory through a pinned handle gave only what the root
+    /// filesystem physically contained.
+    ///
+    /// That is worse than a cosmetic difference, because 664 exists to be the
+    /// *race-free substitute* for a listing taken by path: a program that
+    /// swaps routes to stop a rename racing its walk would silently have
+    /// stopped descending into mounted filesystems. Two copies of a rule and
+    /// one place that forgot it is the same shape as the four disagreeing
+    /// `mkdir` masks in §663; the fix is the same shape too — one
+    /// implementation, called from everywhere, rather than three that agree
+    /// by inspection.
+    ///
+    /// **Lock order:** takes `VFS` and must therefore be called with no
+    /// backing-filesystem lock held. `readdir_pinned` drops its `fs` guard
+    /// before calling this for exactly that reason.
+    fn finish_listing(path: &Path, mut entries: Vec<DirEntry>) -> Vec<DirEntry> {
+        Self::drop_volume_labels(&mut entries);
+
+        // Mount-point names that are direct children of `path`.  E.g. with
+        // path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"];
+        // a nested mount like "/mnt/usb" is not a direct child of "/".
         let submount_names: Vec<PathBuf> = {
             let vfs = VFS.lock();
-            Self::submount_children(&vfs, &path)
+            Self::submount_children(&vfs, path)
         };
 
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        let mut entries = fs.lock().readdir(&relative)?;
-
-        // Inject submount directories that the underlying FS doesn't know about.
+        // Inject the ones the underlying filesystem doesn't know about.
         for name in submount_names {
             if !entries.iter().any(|e| e.name == name) {
-                let ino = Self::submount_root_ino(&path, &name);
+                let ino = Self::submount_root_ino(path, &name);
                 entries.push(DirEntry {
                     name,
                     entry_type: EntryType::Directory,
@@ -2260,7 +2322,26 @@ impl Vfs {
             }
         }
 
-        Ok(entries)
+        entries
+    }
+
+    /// List entries in a directory.
+    ///
+    /// If other filesystems are mounted at sub-paths of `path`, their
+    /// mount points appear as directory entries in the listing (even if
+    /// the underlying filesystem doesn't have a physical directory there).
+    ///
+    /// Volume labels are never listed — see [`drop_volume_labels`](Self::drop_volume_labels).
+    pub fn readdir(path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
+        let path = path.as_ref();
+        let path = Self::resolve_follow(path)?;
+        check_path_access(&path, PathAccess::Read)?;
+
+        let raw = {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().readdir(&relative)?
+        };
+        Ok(Self::finish_listing(&path, raw))
     }
 
     /// List entries in a directory with pagination.
@@ -2291,26 +2372,18 @@ impl Vfs {
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = path.as_ref();
         check_path_access(path, PathAccess::Read)?;
-        let submount_names: Vec<PathBuf> = {
-            let vfs = VFS.lock();
-            Self::submount_children(&vfs, path)
+
+        let raw = {
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
+            fs.lock().readdir(&relative)?
         };
-
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        let mut entries = fs.lock().readdir(&relative)?;
-
-        // Inject submount directories.
-        for name in submount_names {
-            if !entries.iter().any(|e| e.name == name) {
-                let ino = Self::submount_root_ino(path, &name);
-                entries.push(DirEntry {
-                    name,
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                    ino,
-                });
-            }
-        }
+        // Both steps run *before* `total` is taken and before the page is
+        // sliced.  A label dropped or a mount injected after the slice would
+        // make `entries_written` disagree with how far the offset actually
+        // advanced, so the caller's next page would step over a real
+        // neighbour: filtering belongs where the offset is computed, not
+        // where the record is packed.
+        let entries = Self::finish_listing(path, raw);
 
         let total = entries.len();
         let start = offset.min(total);
@@ -4072,12 +4145,24 @@ impl Vfs {
     /// This is the entry point `getdents64` needs: it resolves *the handle*,
     /// so a directory renamed out from under an open descriptor is reported
     /// as stale rather than listed from whatever now answers to the old name.
+    ///
+    /// The listing is the same one the path routes give — no volume labels,
+    /// submounts injected; see [`finish_listing`](Self::finish_listing).  That
+    /// matters more here than anywhere else: 664 exists to be the *race-free
+    /// substitute* for a listing taken by path, so swapping routes to close a
+    /// race must not also change what the directory is said to contain.
     pub fn readdir_pinned(dir: &PinnedDir) -> KernelResult<Vec<DirEntry>> {
         check_path_access(&dir.path, PathAccess::Read)?;
-        let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
-        let mut guard = fs.lock();
-        verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
-        guard.readdir(&dir_rel)
+        // The `fs` guard is scoped so it is released before `finish_listing`,
+        // which takes `VFS`.  Holding both would invert the lock order every
+        // other listing route establishes.
+        let raw = {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            guard.readdir(&dir_rel)?
+        };
+        Ok(Self::finish_listing(&dir.path, raw))
     }
 
     /// Compute the SHA-256 content hash of a file.

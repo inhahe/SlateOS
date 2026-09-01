@@ -8754,8 +8754,10 @@ pub fn sys_fs_list_dir(args: &SyscallArgs) -> SyscallResult {
             break;
         }
 
-        // Decided before reserving the slot: a volume label is metadata, not a
-        // directory entry, and must not consume a record.
+        // A volume label is metadata, not a directory entry, and must not
+        // consume a record.  `Vfs::readdir` now drops them, so this `continue`
+        // is unreachable; it stays because it is the only arm that would be
+        // *wrong* to write as a type byte, and leaving it costs nothing.
         let type_byte = match entry.entry_type {
             crate::fs::EntryType::File => 0u8,
             crate::fs::EntryType::Directory => 1u8,
@@ -9779,6 +9781,10 @@ pub fn sys_fs_getdents_pinned(args: &SyscallArgs) -> SyscallResult {
                     // one to a decoder that trusts its own length field.
                     break;
                 }
+                // Byte 2 is reserved and unreachable — `Vfs::readdir_pinned`
+                // drops volume labels, and it drops them before `needed` is
+                // folded above, so the byte requirement this call reports
+                // counts exactly the records it will write.
                 let type_byte = match entry.entry_type {
                     crate::fs::EntryType::File => 0u8,
                     crate::fs::EntryType::Directory => 1,
@@ -11791,13 +11797,16 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
                 // to depend on the old numbering — nothing outside the kernel
                 // decodes this record today, and `strace` only names the call.
                 //
-                // A volume label still consumes a record here, unlike in
-                // `SYS_FS_READDIR`, which skips it. This call is paginated by
-                // an offset into the directory, so dropping an entry would make
-                // `entries_written` disagree with how far the offset actually
-                // advanced, and the caller's next page would step over a real
-                // neighbour. Filtering belongs where the offset is computed,
-                // not where the record is packed.
+                // Byte 2 is reserved and unreachable: `Vfs::readdir_at` drops
+                // volume labels before it takes `total` and slices the page,
+                // so none arrives here. This arm used to be justified on the
+                // grounds that dropping an entry *here* would make
+                // `entries_written` disagree with how far the offset advanced
+                // — which is true, and is exactly why the filter is at the
+                // point the offset is computed instead. Filtering belongs
+                // where the offset is computed, not where the record is
+                // packed; that argument was always for a location, never for
+                // passing labels through.
                 if let Some(b) = out_slice.get_mut(pos) {
                     *b = match entry.entry_type {
                         crate::fs::vfs::EntryType::File => 0,

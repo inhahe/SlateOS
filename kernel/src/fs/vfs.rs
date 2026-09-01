@@ -3942,7 +3942,18 @@ impl Vfs {
             let (fs_src, _src_id, _opts, src_rel) = resolve_mount(&source)?;
             let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
             if !Arc::ptr_eq(&fs_src, &fs_new) {
-                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+                // POSIX names this exact case: `link()` gives `[EXDEV]` for
+                // "the link named by path2 and the file named by path1 are on
+                // different file systems and the implementation does not
+                // support links between file systems".  This returned
+                // `InvalidArgument` → `EINVAL` until 2026-08-31, which is not
+                // a near-miss but a different statement — `ln` printed
+                // "Invalid argument" where GNU prints "Invalid cross-device
+                // link", and nothing branched on it, which is why nothing
+                // caught it.  Both this route and the path-based `link` were
+                // changed together: one operation with two error codes
+                // depending on which route ran is worse than either code.
+                return Err(KernelError::CrossDevice);
             }
             let new_rel = new_dir_rel.join(new_name);
 
@@ -4420,7 +4431,9 @@ impl Vfs {
             let (fs_existing, _id_e, _opts_e, rel_existing) = resolve_mount(&existing)?;
             let (fs_new, _id_n, _opts_n, rel_new) = resolve_mount(&new_path)?;
             if !Arc::ptr_eq(&fs_existing, &fs_new) {
-                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+                // `EXDEV`, per `link()`'s own POSIX text — see the identical
+                // check in `link_at_pinned` for why this is not `EINVAL`.
+                return Err(KernelError::CrossDevice);
             }
             // The Vfs layer already resolved `existing` per `follow`, but the
             // final on-disk lookup happens inside the FS driver — so route to

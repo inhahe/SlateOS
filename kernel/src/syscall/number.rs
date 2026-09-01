@@ -2892,10 +2892,12 @@ pub const SYS_FS_STAT: u64 = 606;
 /// `arg2`: pointer to new link path string.
 /// `arg3`: new link path length (bytes).
 ///
-/// Both paths must resolve to the same mount point.  The existing
-/// path is followed through symlinks (the link points to the underlying
-/// file, not the symlink).  Only regular files can be hard-linked;
-/// directories return `IsADirectory`.
+/// Both paths must resolve to the same mount point; two that do not give
+/// `CrossDevice` (→ `EXDEV`), which is the code POSIX defines for this exact
+/// case and the same one [`SYS_FS_LINKAT_PINNED`] reports — see its note for
+/// why both routes changed together.  The existing path is followed through
+/// symlinks (the link points to the underlying file, not the symlink).  Only
+/// regular files can be hard-linked; directories return `IsADirectory`.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_LINK: u64 = 607;
@@ -3522,12 +3524,23 @@ pub const SYS_FS_SYMLINKAT_PINNED: u64 = 667;
 /// primitive beneath this and for a future caller that needs it.
 ///
 /// Returns: 0 on success; `ESTALE` if either handle no longer denotes the
-/// directory it was opened on; `InvalidArgument` if the two names resolve to
-/// different mounts, since hard links cannot cross one — this matches the
-/// path-based `link`, which reports the same code for the same reason, rather
-/// than the `EXDEV` a POSIX caller expects; translating it is the POSIX layer's
-/// job and is not made harder by the pinned route agreeing with the path one;
+/// directory it was opened on; `CrossDevice` (→ `EXDEV`) if the two names
+/// resolve to different mounts, since hard links cannot cross one — the same
+/// code the path-based [`SYS_FS_LINK`] reports for the same condition;
 /// otherwise a negative error code.
+///
+/// That was `InvalidArgument` (→ `EINVAL`) on both routes until 2026-08-31.
+/// The note here argued that the two routes agreeing mattered more than the
+/// code being right, and that translating it was the POSIX layer's job —
+/// which was true of the first half and wrong about the second: POSIX defines
+/// `[EXDEV]` as *exactly* this case ("the link named by path2 and the file
+/// named by path1 are on different file systems"), so there was nothing to
+/// translate, only a wrong code to pass on. It was observable: lane B's `ln`
+/// printed "Invalid argument" where GNU prints "Invalid cross-device link",
+/// and `errmsg.rs`'s `CrossesDevices` arm was unreachable from `link`.
+/// Nothing branches on it in coreutils, which is the argument *for* fixing it
+/// — an error code nothing branches on is one no test will ever catch. Both
+/// routes were changed in one commit, for the reason the old note gave.
 pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 
 /// Set the timestamps of `name` within the directory a handle was opened on,

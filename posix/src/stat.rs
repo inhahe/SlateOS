@@ -123,7 +123,9 @@ impl Stat {
 // it already tracks:
 //
 //   bytes [0..8]    file size                  (u64, little-endian)
-//   byte  [8]       entry type                 (0=file, 1=dir, 2=volume label, 3=symlink)
+//   byte  [8]       entry type                 (0=file, 1=dir, 2=volume label,
+//                                               3=symlink, 4=char dev, 5=block dev;
+//                                               see `dirent::KERNEL_TYPE_*`)
 //   bytes [9..12]   reserved (zero)
 //   bytes [12..16]  hard link count            (u32, little-endian; 0 if not provided)
 //   bytes [16..20]  permission bits            (u32; 0 = unknown, synthesize by type)
@@ -199,24 +201,43 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     let changed_ns = le_u64(raw, 56);
     let ino = le_u64(raw, 72);
 
-    // Map the kernel entry type to a POSIX file-type bit.  Volume labels (2)
-    // and any unknown value fall back to a regular file so callers branching
-    // on type get a sane answer.
-    let type_bits = match entry_type {
-        1 => crate::fcntl::S_IFDIR,
-        3 => crate::fcntl::S_IFLNK,
-        _ => crate::fcntl::S_IFREG,
+    // Map the kernel entry type to a POSIX file-type bit, and pick the
+    // default permission bits for a filesystem that tracks none.  Both
+    // tables are deliberately identical to the kernel's own
+    // `meta_mode_bits` (`kernel/src/syscall/linux.rs`), which fills
+    // `st_mode` for the *Linux* ABI's `stat` — one operation must not
+    // report a different file type depending on which ABI asked.
+    //
+    // The device arms are not decoration.  They were missing until
+    // 2026-08-31, so every character and block device reached callers as
+    // `S_IFREG | 0o644`: `ls -l /dev/null` printed `-rw-r--r--`,
+    // `S_ISCHR`/`S_ISBLK` answered 0, and `test -c` / `test -b` were false
+    // for every device node on the system.  Quoting lane A's rationale on
+    // the kernel side, which applies unchanged to this translator: libinput
+    // refuses a node that is not `S_ISCHR`, and libdrm and ALSA make the
+    // same check; and "a program about to write a disk image checks
+    // `S_ISBLK` on what it was handed, and a raw device reported as a
+    // regular file is one that check waves through."  A wrong *type* is far
+    // worse than an unknown one — it is a plausible answer, so nothing
+    // re-examines it.
+    //
+    // A volume label keeps the regular-file fallback: it has no Unix
+    // analogue at all, and a coherent shape beats a novel one.
+    let (type_bits, default_perm) = match entry_type {
+        crate::dirent::KERNEL_TYPE_DIR => (crate::fcntl::S_IFDIR, 0o755),
+        crate::dirent::KERNEL_TYPE_SYMLINK => (crate::fcntl::S_IFLNK, 0o777),
+        crate::dirent::KERNEL_TYPE_CHARDEV => (crate::fcntl::S_IFCHR, 0o660),
+        crate::dirent::KERNEL_TYPE_BLOCKDEV => (crate::fcntl::S_IFBLK, 0o660),
+        // `KERNEL_TYPE_FILE`, `KERNEL_TYPE_VOLLABEL`, and any code this
+        // libc does not yet know about.
+        _ => (crate::fcntl::S_IFREG, 0o644),
     };
     // Use the filesystem's real permission bits when present; otherwise
     // synthesize the conventional defaults for the file type.
     let perm_bits = if permissions != 0 {
         permissions & 0o7777
     } else {
-        match entry_type {
-            1 => 0o755,
-            3 => 0o777,
-            _ => 0o644,
-        }
+        default_perm
     };
     buf.st_mode = type_bits | perm_bits;
     buf.st_ino = ino;
@@ -585,6 +606,82 @@ mod tests {
         assert_eq!(st.st_mode, S_IFLNK | 0o777);
         assert!(st.is_link());
         assert_eq!(st.st_size, 12);
+    }
+
+    #[test]
+    fn a_character_device_stats_as_a_character_device() {
+        // Regression: entry type 4 fell into the `_ =>` arm and came back
+        // as S_IFREG | 0o644, so S_ISCHR was 0 for every node in /dev and
+        // `ls -l /dev/null` printed `-rw-r--r--`.  libinput, libdrm and
+        // ALSA all refuse a node that does not answer S_ISCHR.
+        let raw = raw_fsstat(0, crate::dirent::KERNEL_TYPE_CHARDEV, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFCHR | 0o660);
+        assert_eq!(S_ISCHR(st.st_mode), 1);
+        assert!(!st.is_file(), "a character device must not stat as a file");
+    }
+
+    #[test]
+    fn a_block_device_stats_as_a_block_device() {
+        // Same regression, higher stakes: a program about to write a disk
+        // image checks S_ISBLK on what it was handed, and a raw device
+        // reported as a regular file is one that check waves through.
+        let raw = raw_fsstat(0, crate::dirent::KERNEL_TYPE_BLOCKDEV, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFBLK | 0o660);
+        assert_eq!(S_ISBLK(st.st_mode), 1);
+        assert!(!st.is_file(), "a block device must not stat as a file");
+    }
+
+    #[test]
+    fn a_device_with_real_permissions_keeps_them() {
+        // The default 0o660 is only the fallback for a filesystem that
+        // tracks no permissions.  devfs supplies its own — dropping the
+        // write bits for a read-only device — and those must survive, or a
+        // read-only device would appear writable.
+        let raw = raw_fsstat_full(
+            0,
+            crate::dirent::KERNEL_TYPE_CHARDEV,
+            1,
+            0o444,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            7,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFCHR | 0o444);
+        assert_eq!(st.st_ino, 7);
+    }
+
+    #[test]
+    fn the_type_and_permission_tables_agree_with_the_kernels_own() {
+        // `fill_from_fsstat` and the kernel's `meta_mode_bits`
+        // (kernel/src/syscall/linux.rs) both turn a VFS entry type into an
+        // st_mode — one for the native ABI, one for the Linux ABI.  They
+        // must not disagree, or the same file would report two file types
+        // depending on which call asked.  This pins our half of that pair
+        // against the kernel's table as read on 2026-08-31.
+        for (code, want) in [
+            (crate::dirent::KERNEL_TYPE_FILE, S_IFREG | 0o644),
+            (crate::dirent::KERNEL_TYPE_DIR, S_IFDIR | 0o755),
+            (crate::dirent::KERNEL_TYPE_VOLLABEL, S_IFREG | 0o644),
+            (crate::dirent::KERNEL_TYPE_SYMLINK, S_IFLNK | 0o777),
+            (crate::dirent::KERNEL_TYPE_CHARDEV, S_IFCHR | 0o660),
+            (crate::dirent::KERNEL_TYPE_BLOCKDEV, S_IFBLK | 0o660),
+        ] {
+            let raw = raw_fsstat(0, code, 1);
+            let mut st = Stat::zeroed();
+            fill_from_fsstat(&mut st, &raw);
+            assert_eq!(st.st_mode, want, "kernel entry type {code}");
+        }
     }
 
     #[test]

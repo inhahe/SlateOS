@@ -99,6 +99,17 @@ pub type PtyResult<T> = Result<T, PtyError>;
 /// kernel pipe buffer size).
 const DEFAULT_CHANNEL_CAPACITY: usize = 64 * 1024;
 
+/// The slot after `i` in a ring of `capacity` slots, wrapping at the end.
+///
+/// `checked_rem` rather than a bare `%`: the two callers each return early
+/// when the ring is empty of room or of data, so a zero capacity cannot in
+/// fact reach here -- but a `%` that only holds because of a guard three
+/// statements away is a division fault waiting for the guard to move, and
+/// index zero is the right answer for a ring with nowhere to advance to.
+fn next_index(i: usize, capacity: usize) -> usize {
+    i.saturating_add(1).checked_rem(capacity).unwrap_or(0)
+}
+
 /// A unidirectional byte channel connecting one side of the PTY to the
 /// other. This is the userspace equivalent of a kernel pipe -- a ring
 /// buffer with read/write cursors.
@@ -150,9 +161,9 @@ impl ByteChannel {
             if let (Some(dst), Some(src)) = (self.buf.get_mut(self.tail), data.get(i)) {
                 *dst = *src;
             }
-            self.tail = (self.tail + 1) % capacity;
+            self.tail = next_index(self.tail, capacity);
         }
-        self.len += to_write;
+        self.len = self.len.saturating_add(to_write);
         Ok(to_write)
     }
 
@@ -171,9 +182,9 @@ impl ByteChannel {
             if let (Some(dst), Some(src)) = (out.get_mut(i), self.buf.get(self.head)) {
                 *dst = *src;
             }
-            self.head = (self.head + 1) % capacity;
+            self.head = next_index(self.head, capacity);
         }
-        self.len -= to_read;
+        self.len = self.len.saturating_sub(to_read);
         Ok(to_read)
     }
 
@@ -516,7 +527,7 @@ impl PtyMaster {
                 // accepts a prefix when it is nearly full, a long line could
                 // arrive at the child truncated rather than missing, which is
                 // worse than losing it.
-                let mut consumed = 0;
+                let mut consumed = 0_usize;
                 for &byte in data {
                     // Stop before consuming a byte we might not be able to
                     // deliver. Reporting a short write is what lets the caller
@@ -538,7 +549,7 @@ impl PtyMaster {
                             // the byte was accumulated -- nothing to do.
                         }
                     }
-                    consumed += 1;
+                    consumed = consumed.saturating_add(1);
                 }
                 if consumed == 0 && !data.is_empty() {
                     // Distinguishable from a successful zero-byte write, which
@@ -606,6 +617,37 @@ impl PtyMaster {
             inner.master_closed = true;
             inner.master_to_slave.close_write();
             inner.slave_to_master.close_read();
+        }
+    }
+
+    /// How many bytes the child has written that nobody has read yet.
+    ///
+    /// What a poll loop asks before it commits to a read: the emulator drains
+    /// the child once per tick and needs to know whether there is anything to
+    /// drain without taking a buffer's worth of copy to find out. Counts what
+    /// is already readable, so a byte still backlogged behind a full echo queue
+    /// is not counted until `flush_pending` has moved it across -- reporting it
+    /// sooner would promise a read that then returns `WouldBlock`.
+    pub fn available(&self) -> usize {
+        match self.inner.lock() {
+            Ok(mut inner) => {
+                inner.flush_pending();
+                inner.slave_to_master.available()
+            }
+            Err(_) => 0,
+        }
+    }
+
+    /// Whether the child has closed its end.
+    ///
+    /// Distinct from [`Self::is_closed`], which asks about *this* end. A reader
+    /// that stops at the first empty read cannot tell "nothing yet" from "never
+    /// again", and a terminal emulator has to: the first means wait, the second
+    /// means the shell has exited and the window should say so.
+    pub fn child_finished(&self) -> bool {
+        match self.inner.lock() {
+            Ok(inner) => inner.slave_to_master.is_write_closed(),
+            Err(_) => true,
         }
     }
 
@@ -1172,6 +1214,18 @@ impl ChildProcess {
 
 #[cfg(test)]
 mod tests {
+    // A test that unwraps a `Result` it expects to be `Ok` should fail loudly
+    // and point at the line that did it -- that is the diagnosis. The
+    // defensive lints exist to keep panics out of code that runs on a user's
+    // data, which this is not.
+    #![allow(
+        clippy::indexing_slicing,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::arithmetic_side_effects
+    )]
+
     use super::*;
 
     // -- PTY pair creation --

@@ -3,8 +3,14 @@ name = "terminal"
 version = "0.1.0"
 edition = "2024"
 description = "SlateOS Terminal Emulator — graphical VT100/xterm terminal"
+
 [dependencies]
 guitk = { path = "../../gui/toolkit" }
+# The window itself. The terminal used to be a simulation: `main` fed a demo
+# string into the parser, rendered one frame into a `RenderTree` and returned,
+# so the emulator underneath -- CSI parsing, scrollback, alt screen, selection
+# and a whole PTY in `pty.rs` -- had nothing to run in.
+oswindow = { path = "../../gui/window" }
 
 [lints]
 workspace = true

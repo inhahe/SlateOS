@@ -614,6 +614,78 @@ pub const SYS_FS_GETDENTS_PINNED: u64 = 664;
 /// be able to make it setuid, so a directory fd that serves a pinned `fstatat`
 /// will not necessarily serve a pinned `fchmodat`.
 pub const SYS_FS_FCHMODAT_PINNED: u64 = 665;
+/// `(dirfd, name ptr, name len, mode, flags) -> 0`.
+///
+/// `mode` is the low **nine** permission bits and must already have the umask
+/// applied — the umask lives here, not in the kernel. Nine, not the twelve
+/// [`SYS_FS_FCHMODAT_PINNED`] takes: a directory that is setgid or sticky from
+/// the instant it exists is a policy decision, and the caller can still make it
+/// with a following `fchmodat` where it is separately auditable. This matches
+/// [`SYS_FS_MKDIR_MODE`], which is the call the same code paths already use.
+///
+/// `flags` must be exactly `0`; `mkdirat(2)` defines none, and refusing junk
+/// now is what keeps the argument usable if one is ever defined.
+///
+/// Unlike [`SYS_FS_MKDIR_MODE`], the mode is stamped under the same filesystem
+/// lock that created the directory — so a directory asked for as `0o700` is
+/// never briefly world-readable while the chmod is still on its way.
+pub const SYS_FS_MKDIRAT_PINNED: u64 = 666;
+/// `(dirfd, link name ptr, link name len, target ptr, target len) -> 0`.
+///
+/// The two counted strings are treated completely differently, and that is
+/// deliberate. The **link name** must be exactly one component, because that is
+/// what makes the pin's containment mean anything. The **target** is arbitrary
+/// text stored verbatim — relative, absolute or dangling are all fine — because
+/// it is not a name being created; it is resolved only when something later
+/// walks through the link, under the ordinary traversal checks. Constraining it
+/// would secure nothing and would leave `symlinkat` unable to reproduce the
+/// `../lib/libfoo.so` links any real tree is full of.
+///
+/// A **zero-length** target is `InvalidArgument` here, where the path-based
+/// [`SYS_FS_SYMLINK`] accepts it. [`crate::file::symlinkat`] therefore declines
+/// the fast path for an empty target rather than forwarding it, so which route
+/// ran cannot change the answer.
+///
+/// There is no flags argument and there will not be one: neither name is ever
+/// followed, so there is no variant to select.
+pub const SYS_FS_SYMLINKAT_PINNED: u64 = 667;
+/// `(src dirfd, src name ptr, src name len, dst dirfd, dst name ptr,
+/// dst name len) -> 0`.
+///
+/// All six registers are spent, so there is **no flags argument** — which means
+/// this is always the unfollowed form, `link(2)`'s behaviour and `linkat(2)`'s
+/// own default. That is not a gap: `AT_SYMLINK_FOLLOW` asks to hard-link a
+/// symlink's *target*, and following is by definition leaving the pinned
+/// directory, so the flag asks the call to stop providing the one guarantee it
+/// exists for. [`crate::file::linkat`] routes the followed form to the
+/// path-based [`SYS_FS_LINK`] instead.
+///
+/// Both names must be exactly one component — the destination as much as the
+/// source, since the destination is where the new entry lands. The two handles
+/// may be the same.
+///
+/// A cross-mount link is `InvalidArgument`, **not** `CrossDevice`: the
+/// path-based `link` has always answered that way, and one operation with two
+/// error contracts depending on which route ran would be worse than one
+/// contract that disagrees with POSIX in a place the translation already
+/// handles.
+pub const SYS_FS_LINKAT_PINNED: u64 = 668;
+/// `(dirfd, name ptr, name len, atime ns, mtime ns, flags) -> 0`.
+///
+/// Zero means *leave unchanged*, which is this kernel's existing convention
+/// (`SYS_FS_SET_TIMES`) and not `utimensat(2)`'s `UTIME_OMIT`/`UTIME_NOW`
+/// sentinels — expanding those is this layer's job, and it already does it for
+/// the path-based call. `AT_SYMLINK_NOFOLLOW_PINNED` (0x100) stamps the link
+/// inode itself; unknown bits are `InvalidArgument`.
+///
+/// Requires `Rights::WRITE`, not `Rights::METADATA`. Backdating a file is a
+/// write to its metadata, and build systems and antivirus both decide what to
+/// re-examine from mtime.
+///
+/// This is the member of the set that runs on *every* copied entry rather than
+/// once per directory: restoring mtime is the last thing `cp -p` and every
+/// archive extractor do to each file.
+pub const SYS_FS_UTIMENSAT_PINNED: u64 = 669;
 
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;

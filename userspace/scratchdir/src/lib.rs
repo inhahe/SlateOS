@@ -114,9 +114,36 @@ impl ScratchDir {
     /// The file need not exist, and this does not create it — several callers
     /// specifically want a path that is *absent* (a `users.yaml` that is not
     /// there, so a shadow store is the only thing that can answer).
+    ///
+    /// # Why this appends `/` rather than calling [`PathBuf::join`]
+    ///
+    /// `join` uses the *host's* separator, which on a Windows dev box is `\`.
+    /// This OS defines `/` as the only separator and every other byte —
+    /// including `\` — as an ordinary character in a file name, and the code
+    /// under test implements exactly that: `coreutils::pathname::is_slash`
+    /// answers only for `/`. So a fixture that hands back a `\`-joined path is
+    /// handing the subject a *single-component* name that happens to contain
+    /// backslashes, which is not the input any target run can ever see.
+    ///
+    /// That is not hypothetical. `backup.rs`'s numbered-backup scan derives the
+    /// directory to read from the last separator in the name it is given; with
+    /// a `\`-joined fixture path it found no separator, scanned the process's
+    /// current directory instead of the scratch one, saw no `f.~1~` there, and
+    /// so answered `f~` — five tests red on Windows and green on Linux, for a
+    /// disagreement that was entirely the fixture's.
+    ///
+    /// Windows accepts `/` in its own path APIs, so the resulting path still
+    /// opens on the dev host; only the bytes change, and they change to the
+    /// ones the target would have produced. On Unix this is byte-for-byte what
+    /// `join` already did.
     #[must_use]
     pub fn path(&self, name: &str) -> PathBuf {
-        self.0.join(name)
+        // `new` builds the directory with `join`, so it never ends in a
+        // separator and this cannot double one.
+        let mut joined = self.0.clone().into_os_string();
+        joined.push("/");
+        joined.push(name);
+        PathBuf::from(joined)
     }
 
     /// The directory itself, for callers that need to hand the whole thing to

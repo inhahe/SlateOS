@@ -102611,6 +102611,176 @@ most of the list-shaped ones: `filemanager`, `logviewer`, `procexplorer`,
 passing through the clamp?* The third is the one that bites, because the state
 change and the clamp are usually in different files.
 
+### Lesson 102: test the entry point the platform calls, not the one underneath it (lane C, 2026-08-31)
+
+**In short:** the `terminal` had a test saying *a tick is what reads the child*
+-- the thing that makes a shell's prompt appear. It passed, and the terminal was
+still write-only under a real window. The test called `handle_event`, the
+terminal's own dispatcher. The compositor calls `App::on_event`, which is a
+layer above it, and that layer answered a tick itself and returned before
+`handle_event` was ever reached.
+
+The reason `on_event` did that was not laziness. It has to return a `Response`
+-- `Redraw` or `Idle` -- and a tick that changed nothing must not ask for a
+frame, or the terminal redraws twenty-five times a second at an idle prompt. So
+it needed the answer `tick` returns. Reaching for it directly was the obvious
+way to get it, and it silently bypassed everything else the tick did.
+
+| Layer | Who calls it | What the suite called |
+|---|---|---|
+| `TerminalState::handle_event` | the app's own `on_event`, and every test | ✓ eleven tests |
+| `App::on_event` | the compositor, and nothing else | ✗ nothing, until this one |
+
+**The rule.** *For each trait a type implements for a platform, at least one
+test must enter through the trait.* An `impl App` is not documentation; it is
+the only code the compositor runs. A suite that tests the inherent methods and
+trusts the impl to forward to them is testing a program the user never runs. The
+same holds for `impl Probe`, for `Iterator`, for `Drop` -- any impl whose caller
+is not in your own crate.
+
+**The shape of the bug, generally: a wrapper that needs one fact from the body,
+and takes it by calling a part of the body directly.** The fix is to let the
+body run in full and have it *report* the fact -- here `on_tick` does the ageing
+and the read and leaves the answer in `tick_changed`, which `on_event` then
+reads. The wrapper is no longer allowed to choose which half of the body runs.
+
+**Where else to look.** Every app in the wiring campaign: each has an `impl App`
+with `on_event` and `render`, and the suites overwhelmingly call the inherent
+`click`/`key`/`frame` beneath them. Two questions per app: *does any test call
+`on_event` or `render` by those names*, and *does `on_event` have an early
+return above the call to the real dispatcher?* An early return for
+`CloseRequested` is fine -- there is nothing below it to skip. An early return
+that computes something first is the fault.
+
+A second instance of the same family was in the terminal's other direction, and
+is worth recording because it looks nothing like the first: `output_buffer` had
+**two writers and one dead end**. Keystrokes were written straight to the PTY by
+`to_child`, while the parser's own replies -- the cursor position report, the
+device attributes answer -- were appended to `output_buffer`, which nothing ever
+drained. A full-screen program that asked the terminal where its cursor was
+waited for an answer sitting in a `Vec`. Two ways *out* of a subsystem, one of
+which was never finished, is the same mistake as two ways *in*, one of which is
+never tested. The repair is lesson 101's funnel: `to_child` only queues, and
+`flush_to_child` is the one route out, reached from every arm of the dispatch.
+
+---
+
+### Lesson 103: a test that asks the predicate cannot see which argument the drawing pass gave it (lane C, 2026-08-31)
+
+**In short:** the terminal highlights the text you drag over, and paints its
+cursor only in the lit half of the blink. Two tests said so, both passed, and
+the mutation sweep broke each feature outright without either test noticing.
+Both asked the thing that *decides* -- `is_selected(...)`, and the `blink_on`
+field -- instead of looking at the picture. The drawing pass was left free to
+call that decider with the wrong row, or never call it at all, and every
+assertion stayed true.
+
+| What the user sees | What the test asked | What it could not see |
+|---|---|---|
+| the highlight is on the line you dragged over | `term.is_selected(buffer_row, 0)` | which row `draw_cells` passes it -- the screen row or the buffer row |
+| the cursor blinks | `term.blink_on` after a tick | whether `draw_cursor` consults `blink_on` at all |
+
+Both faults were in the *call*, not in the function: `is_selected(screen_row,
+col)` where the buffer row was meant, and a `draw_cursor` that painted
+regardless. A predicate test pins the predicate, which is worth having -- but
+the call site is where the argument is chosen, and no amount of predicate
+testing reaches it.
+
+**The rule.** *For any state that reaches the user only through the picture, at
+least one test must read the frame.* Concretely: scan
+`frame(w, h).commands()` for the ink -- the selection-coloured `FillRect`, the
+cursor-coloured one -- and assert where it is, or that it is absent.
+
+**How to tell which kind of test you are writing.** Ask what would still be true
+if the drawing pass never called this function at all. If the answer is
+"everything this test asserts", the test is about a helper, not about a feature.
+
+**A third survivor in the same sweep is this blindness in a different costume,**
+and is worth naming because it looks like a *whole-frame* test, which is the
+strong kind: `no_glyph_runs_off_the_window_it_is_drawn_in` bounded every `Text`
+command by `max_width.unwrap_or_else(|| text::measure(glyph, ..))`. Deleting the
+bound from the production code left the test computing a plausible one on its
+behalf -- and one character measured is about one cell wide by definition, so
+an unbounded glyph looked perfectly bounded. When an invariant is about what a
+command *declares*, a computed stand-in for the missing declaration is not a
+convenience, it is the hole (lesson 100's dilution, arriving through a
+`unwrap_or_else` instead of through a weakened assertion). The fix was to fail
+on the `None`.
+
+**Where else to look.** Every app in the wiring campaign: any `is_*`/`should_*`
+predicate the drawing pass consults per item (selected, highlighted, hovered,
+disabled, checked, filtered, expanded) and any field whose only effect is
+whether something is painted (blink, flash, focus ring, unread badge). Grep the
+suite for the predicate's name: if every use is `assert!(x.is_selected(..))` and
+none is a scan of `frame(..).commands()`, the picture is untested. And grep the
+whole-frame tests for `unwrap_or`/`unwrap_or_else`/`unwrap_or_default` on a
+field read out of a `RenderCommand` -- each one is a declaration the test has
+agreed to supply for the code.
+
+---
+
+### Lesson 104: finding a control by the code's own label and then clicking it proves nothing (lane C, 2026-08-31)
+
+**In short:** the camera's device panel lists the resolutions a webcam
+supports, one per row, and clicking a row selects it. The test said so, and it
+passed over a version of the panel where **every row chose the setting named on
+the row above it**. The test asked the drawing pass "where is the 1920x1080
+row?", clicked wherever it was told, and then asked whether 1920x1080 had been
+chosen. Both halves went through the same map, so the map's error cancelled
+itself out.
+
+This is not lesson 103 -- the test *did* read the picture. It read the wrong
+part of it. `probe::rect_of(&app, Target::Resolution(2))` searches the hit
+boxes the pass recorded, and the fault under test was in *what payload the pass
+recorded*, not in where. Relabelling every row consistently is invisible to any
+test whose only handle on a row is the label it is checking:
+
+| | what the test did | what the mutant did | verdict |
+|---|---|---|---|
+| find | ask for the box of `Resolution(2)` | recorded row 3's box under `Resolution(2)` | got row 3 |
+| act | click that box | dispatched it as `Resolution(2)` | chose 1920x1080 |
+| assert | is the resolution 1920x1080? | yes | **passes** |
+
+The user, meanwhile, clicks the row that reads `1920x1080` and gets `1280x720`.
+
+**The rule.** *When the point of the test is **which** control a click lands
+on, find the control by something the code did not choose for the purpose --
+the words drawn in it.* Scan `frame(w, h).commands()` for the `Text` whose
+content is the label, click at a point inside it, and assert on the label. The
+`Target` payload is the very thing in question; a test may not use it as both
+the question and the answer.
+
+**The shape to look for is circularity, not weakness.** These tests are not
+loose -- `the_device_panel_chooses_the_resolution_and_rate_it_names` asserts an
+exact equality on an exact setting. They are *closed loops*: every step of the
+test is derived from the same expression in the production code, so the whole
+test is invariant under a change to that expression. A mutation sweep is the
+only cheap way to find one, because a closed loop reads exactly like a strict
+test.
+
+**Two smaller consequences, both worth copying.**
+
+- **Locate by text, and require the text to be unique.** The camera's helper
+  asserts that at most one run of text reads the wanted words, because the same
+  string appearing twice in a frame would silently hand the caller whichever
+  came first -- a second closed loop hiding inside the fix for the first.
+- **A mutation that survives is not automatically a hole.** The same sweep's
+  other survivor widened a clip from the strip to the whole window, which
+  cannot alter one pixel: the tile count is a floor of whole steps, so nothing
+  ever reaches the clip. That row was deleted with the reason written into the
+  table rather than given an owning test. Inventing an owner for a mutation
+  that cannot change the output teaches the table to claim coverage it does not
+  have, which is worse than the missing row.
+
+**Where else to look.** Every app in the wiring campaign, and mechanically:
+grep the suites for `probe::click(&mut app, Target::X(i))` (or `rect_of`
+followed by a click) where `i` also appears in the assertion. Each one is a
+closed loop unless something outside the pass's own bookkeeping -- the drawn
+label, a fixed coordinate, a count -- breaks it. The panels most at risk are
+the ones drawn from a list in a loop: filter lists, resolution and rate lists,
+tab strips, column headers, palette swatches, and any `Target` variant carrying
+an index or an enum payload.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
@@ -102974,6 +103144,134 @@ caller bakes it in — every caller goes through `backup.rs`'s one function. It
 is a genuine data-loss window rather than a wrong message, which is the only
 reason it is above "cosmetic".
 
+## B-MV-DECIDED-BY-LOOKING-AT-THE-DESTINATION-WHERE-GNU-LOOKS-AT-THE-RENAME (lane B, 2026-08-31) — FIXED
+
+**In short.** `mv` was written by reading GNU's `mv` and reproducing what it
+appeared to do. A harness that actually *runs* both and compares the output
+(`scripts/mv-diff.sh`, 178 cases against a built coreutils 9.4) found **17
+places where the two disagreed** — and they were not 17 separate oversights.
+They were one wrong idea, repeated: we decided what to do next by **looking at
+the destination**, where GNU decides by **looking at what the rename returned**.
+Those two questions have the same answer in the ordinary case and different
+answers in every unusual one. All 17 are now fixed and the harness reports 0
+differences.
+
+**Why the reading-based version passed review.** Every one of the 17 sites was
+individually defensible, and several were things the code had a *test* for. A
+test written from the same misreading as the code agrees with it. The only
+thing that disagreed was GNU itself.
+
+### The structural error
+
+GNU carries `x.rename_errno` as a tri-state: not tried, succeeded, or failed
+with this errno (`mv.c:466`, `copy.c:2231`). Every later decision reads that
+variable. We had no such variable — we re-derived the situation from a `stat`
+of the destination whenever we needed it. The re-derivation is a *different
+question*, and it is asked at a *later time*.
+
+Concretely, `copy.c:2757` retries the rename when the recorded errno is
+`EEXIST`. We retried when the destination existed. A destination that was
+deleted by another process in between makes those differ; so does a rename that
+failed with `EEXIST` for a reason the destination no longer shows.
+
+### The one that could not be found by reading at all
+
+`copy.c:2241-2250` decides which file to `stat` for `dest_info` — the record
+that powers "will not overwrite just-created `%s`":
+
+```c
+char const *name    = rename_errno == 0 ? dst_name  : src_name;
+int         dirfd   = rename_errno == 0 ? dst_dirfd : AT_FDCWD;
+char const *relname = rename_errno == 0 ? drelname  : src_name;
+… follow_fstatat (dirfd, relname, &src_sb, fstatat_flags) …
+```
+
+**When the rename succeeded, GNU stats the destination.** The variable is
+called `src_sb`, and it is named for the *other* branch. We stat'd the source —
+which the rename had just renamed away — so the stat failed, nothing was ever
+recorded in `dest_info`, and the just-created check could never fire under any
+input. Two of the 17 differences were this one line, and no amount of re-reading
+our own code would have shown it; only running GNU did.
+
+### The rest, grouped
+
+- **`>2` operands with a non-directory last operand.** GNU calls
+  `target_directory_operand`, and on failure with `2 < n_files` reports
+  `mv: target 'c': Not a directory` (`mv.c:490`). We reported a per-source
+  error. Note the synthesised error is built from an `ErrorKind`, **not** a
+  hard-coded `20`: `errmsg::strerror` picks the POSIX text by kind precisely
+  because a raw OS code is a Win32 code on the dev host and an errno on the
+  target, and `from_raw_os_error(20)` printed *"The system cannot find the
+  device specified."* on Windows.
+- **`mv a/.. d`.** We had given `mv` `cp`'s rule. The
+  `arg_base += STREQ (arg_base, "..")` bump is `cp.c:678` **only**; `mv.c:544`
+  has no equivalent, so GNU targets `d/..` and refuses it as
+  `are the same file`. Our diagnostic said the source "names nothing".
+- **Diagnostic wording and which operand is named.** `copy.c:2833-2862` splits
+  on the errno: `EDQUOT|EEXIST|EISDIR|EMLINK|ENOSPC|ETXTBSY|ENOTEMPTY` give
+  `cannot overwrite %s` (destination only — `copy.c:2851` says naming the
+  source too "is more likely to confuse the user than be helpful"), everything
+  else gives `cannot move %s to %s`.
+- **The refusal checks ran against a destination that might not exist.** They
+  are now asked only when the `stat` succeeded, which is GNU's guard.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs`; harness
+`scripts/mv-diff.sh`. Commit "mv: rebuild the rename path around GNU's control
+flow, measured not recalled".
+
+**What this supersedes.** Item 3 of "`mv` converted, and the four further bugs
+the rewrite uncovered (2026-08-22)" above says `mv a/.. dst` is "refused with a
+diagnostic" — the refusal is now GNU's `are the same file` rather than ours.
+The twelve-unimplemented-options list in that section is unchanged and is now
+mirrored as 61 explicitly-marked cases in the harness, so each one can be
+promoted to a passing case as it lands.
+
+## B-TWO-TEST-FIXTURES-WERE-TESTING-THE-HOST-AND-NOT-THE-SUBJECT (lane B, 2026-08-31) — FIXED
+
+**In short.** Eight tests were red on the Windows dev host and green on Linux.
+None of them was a bug in the code being tested. Both causes were fixtures that
+fed the subject a value **the target could never produce**, and then reported
+the subject's correct handling of that impossible value as a defect.
+
+**Class 1 — a fixture path joined with the host's separator (7 tests).**
+`ScratchDir::path` used `PathBuf::join`, which on Windows inserts `\`. This OS
+defines `/` as the only separator and every other byte — `\` included — as an
+ordinary character in a file name, and `coreutils::pathname::is_slash` answers
+only for `/`, correctly. So the fixture was handing the subject a
+**single-component name that happened to contain backslashes**.
+
+`backup.rs`'s numbered-backup scan derives the directory to read from the last
+separator in the name it is given. Finding none, it scanned the *process's
+current directory* instead of the scratch one, saw no `f.~1~` there, and
+answered `f~`. Five `backup::tests` and two of `cp`'s failed on that, and each
+looked like a backup bug.
+
+Fixed in `ScratchDir::path`, which now appends `/` explicitly. Windows accepts
+`/` in its own path APIs, so the path still opens on the dev host; only the
+bytes change, and they change to the ones the target would emit. On Unix it is
+byte-for-byte what `join` already did.
+
+**Class 2 — a timestamp finer than the host clock (1 test).**
+`both_sets_the_two_to_one_instant` asked for `UNIX_EPOCH + Duration::new(7, 8)`
+— 8ns. A `SystemTime` is only as fine as the clock underneath it, and on
+Windows that is a FILETIME at **100ns ticks**, so the value rounded to a flat
+7s *before the subject ever saw it*. The assertion then read the host's dropped
+nanosecond field as a defect in `Times::both`. `Times::both` carries `u32`
+nanoseconds through unexamined and does not care which multiple it gets, so the
+test now uses 800ns and proves the same property on both hosts.
+
+**The generalisable point.** A cross-platform test suite has two subjects, and
+only one of them is the code. When a test is red on one host and green on
+another, the first question is not "what does the code do differently there" —
+it is "**what did the fixture hand it that the target cannot produce**". Seven
+of these eight were one line in a helper shared by six crates.
+
+**Where.** `userspace/scratchdir/src/lib.rs` (`path`);
+`userspace/coreutils/src/fsattr.rs` (`both_sets_the_two_to_one_instant`).
+`cp`'s tests, which carried their own hand-rolled clock-named scratch helper
+and a trailing `remove_dir_all` that an unwind skips, were converted to
+`ScratchDir` in the same commit — 264 call sites, 121 cleanup tails removed.
+
 ## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
 
 **What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
@@ -103012,3 +103310,143 @@ already claim to mean.
 **Watch it.** `scripts/check-boot-skips.py` will start reporting this skip on
 100% of boots once ten qualifying boots are recorded — which is the mechanism
 for making sure the skip above does not quietly become the permanent answer.
+
+---
+
+## B-THE-PINNED-FAST-PATH-DOWNGRADED-ITS-FIRST-REAL-REFUSAL-TO-THE-RACY-ROUTE — FIXED 2026-08-31
+
+**Status:** FIXED. Recorded because the hole existed on `main` from 2026-08-24
+(the landing of syscall 662) until 2026-08-31, and because the *shape* of the
+mistake — inferring a fact the other side could have simply told us — is worth
+having written down somewhere other than a commit message.
+
+**In short:** the POSIX layer has a fast path that asks the kernel to do a
+`unlinkat`/`fstatat`/`chmod`/… against a directory *handle* rather than a
+remembered path, so that swapping the directory mid-operation cannot redirect
+it. When such a call came back refused, this side could not tell "your kernel is
+too old to have this call" apart from "the handler ran and this filesystem
+cannot do it" — both were error code -2 — so it guessed. On the guess's wrong
+side, a filesystem's honest refusal was quietly retried by path name, which is
+exactly the race the fast path exists to close.
+
+**Where it lived.** `posix/src/file.rs`, `fn pinned_answer`, plus seven
+`PINNED_*_ANSWERED` statics beside it.
+
+**The guess.** Each syscall carried its own latch, `false` until that syscall
+returned anything other than -2, `true` forever after:
+
+| latch | -2 arrives | meaning taken | what happened |
+|---|---|---|---|
+| never set | first call | "kernel too old" | fall back to the path-based route |
+| set | any later call | "filesystem refused" | returned to the caller as the answer |
+
+The reasoning was sound as far as it went — a kernel that *has* the call answers
+the first invocation with a success or a real error, which flips the latch, so
+every subsequent -2 is honoured. The defect is the window before that first
+answer. On a kernel that has the call but a filesystem that cannot perform it,
+*every* invocation is -2, the latch never flips, and every invocation falls back
+by path. Lane A's `dispatch.rs` comment states the cost exactly: the call "gets
+silently downgraded to the racy path-based route, on the failure path, where
+nobody is looking."
+
+**Two further costs, both smaller but real.** The behaviour differed between the
+first invocation and every later one, so a test could pin only one of the two at
+a time and the suite's result depended on call ordering. And each of the seven
+syscalls needed its own latch — 662's first success must not vouch for 663 —
+which is seven statics to keep in step by hand as the family grew.
+
+**What fixed it.** Lane A split the two facts onto two numbers on 2026-08-31:
+an *empty dispatch slot* now answers `NoSuchSyscall` (-10), a *registered
+handler that refused* still answers `NotSupported` (-2). `pinned_answer` became
+a comparison against -10 (plus `HOST_ENOSYS`, which is the host build's
+compiled-out `SYSCALL` reporting itself), the seven statics and the `answered`
+parameter are gone, and `only_an_empty_dispatch_slot_falls_back` pins the rule
+in both directions with no ordering to arrange.
+
+**The general lesson.** The old code inferred, by observation over time, a fact
+the kernel already knew at the moment it answered. Any such inference has a
+window in which it is wrong, and the window is invisible because it closes
+itself. When two conditions need different responses, ask for two answers rather
+than building a heuristic to separate one — and if the other side is another
+lane, file the request. That is what happened here, and it took a day.
+
+## B-READDIR-INVENTS-D_INO-FROM-THE-ENTRY-POSITION-SO-DU-AND-TAR-COALESCE-A-TREE — OPEN 2026-08-31
+
+**In short:** when a program lists a directory, every entry comes back with an
+"inode number" — the number the filesystem uses to tell one file from another.
+Ours does not come from the filesystem. It is the entry's position in the
+listing: the first file in a directory is 0, the second is 1, and so on. So the
+first file in *every* directory claims the number that means "unknown", and the
+third file in one directory and the third file in another claim to be the same
+file. `du` and `tar` use exactly that number to notice when two names are one
+file, so they count such a tree once instead of once per file. Blocked on lane A:
+the kernel does not send an inode for a directory entry, and a client cannot
+invent a true one.
+
+**Where.** `posix/src/dirent.rs`, two sites, both feeding the same wrong value:
+
+| site | code | what it fills |
+|---|---|---|
+| `readdir`, `:218` | `dir.current.d_ino = dir.pos as u64;` | `struct dirent`'s `d_ino` |
+| `getdents64`, `:1181` | `emit_linux_dirent64(remaining, pos as u64, …)` | the `d_ino` of each `linux_dirent64` |
+
+The comment at `:217` says "Synthetic inode from position", so this was known to
+be a placeholder when written; what was not recorded is that the placeholder is
+observable and that two of its values are actively wrong rather than merely
+uninformative.
+
+**The two failures, in order of how quietly they fail.**
+
+1. **`d_ino == 0` for the first entry of every directory.** Zero is the value the
+   ABI reserves for "no inode available"; `kernel/src/syscall/handlers.rs:8923`
+   documents it as such for `SYS_FS_STAT`'s record. Assigning it to a file that
+   certainly exists means a caller that checks for the reserved value gets the
+   wrong answer about the one entry it is most likely to look at first.
+2. **Collisions across directories.** `/a/foo` and `/b/bar` are both the third
+   entry of their directory and so both inode 3. `du` and `tar` do hard-link
+   coalescing from the *listing* rather than from a stat of each file, so they
+   see one file with many names and count it once. `find -samefile` matches on
+   position. `ls -i` prints a column of indices. This is precisely the failure
+   list lane A wrote when they closed the same gap in `SYS_FS_FSTATAT_PINNED`
+   (`kernel/src/syscall/number.rs:3343-3353`, design-decisions.md §653) — it is
+   already happening here, one call over.
+
+**Why it is not fixable on this side.** The client has nothing better to use.
+Neither directory-listing wire format carries an inode: `SYS_FS_LIST_DIR` (603)
+writes a 264-byte record of `name[256] | size[4] | type[1] | pad[3]`, and
+`SYS_FS_READDIR_AT` (647) / `SYS_FS_GETDENTS_PINNED` (664) write a packed
+`type | name_len | name | size`. The only way to get a true inode per entry today
+is one `stat` syscall per entry during the walk, which turns an O(1) listing into
+O(n) syscalls and still races — the entry can be replaced between the listing and
+the stat, which is the very race 664 exists to close.
+
+**What the proper fix looks like.** A `u64 ino` appended to the shared 647/664
+record, requested in
+`requests/b-a-664s-record-has-no-inode-and-647-turns-out-to-have-no-callers-either.md`.
+It is cheap kernel-side: `DirEntry` (`kernel/src/fs/vfs.rs:85-102`) has no inode
+field, but every implementation has the value in hand at the moment it builds one
+— ext4's `child_ino` is the closure parameter at `fs/ext4/vfs_impl.rs:174`/`:225`
+and is used on the line above the construction, memfs has `self.ino`
+(`fs/memfs.rs:311`), FAT has `self.first_cluster` (`fs/fat.rs:759`). When the
+field lands, both sites above read it from the wire and pass `0` through
+unchanged rather than substituting anything.
+
+**What NOT to do, recorded because it is the tempting fix.** Do not hash the name
+into an inode client-side. The kernel's own Linux-ABI `getdents64` does exactly
+that — FNV-1a over path + "/" + name, `kernel/src/syscall/linux.rs:43174` — and
+it is a bug rather than a model: `fill_stat_from_meta` at `:19927` writes the
+real `meta.ino` as `st_ino`, so within one ABI a `stat` and a `getdents64` of the
+same file report two different inodes, and every consumer that cross-checks the
+two (`find -inum`, `ls -i` against `stat`, `rsync`/`tar` hard-link detection)
+sees a contradiction instead of a missing value. A synthesized inode that
+disagrees with `st_ino` is not an improvement on a missing one; it converts a
+detectable gap into an undetectable disagreement. Reported to lane A as §3 of the
+request above.
+
+**Until then**, the honest interim is `0` for every entry rather than the
+position index — "not available" is true where "entry 3" is false. Not applied
+yet, because it would regress the one thing the index accidentally gets right
+(distinct entries within a single directory compare unequal, which is what makes
+`ls -i` of one directory look plausible), and because the field is expected to
+land before 664 is wired. If lane A declines the widening, apply the `0` and note
+it here.

@@ -51,6 +51,7 @@
 
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
+use crate::fs::selftest::{Setup, Skips};
 use crate::fs::vfs::{DirEntry, EntryType, FileMeta, FileSystem};
 use crate::serial_println;
 
@@ -285,19 +286,39 @@ fn check_meta(
 /// recursive walk would multiply the same evidence rather than add to it, and
 /// on procfs it would wander into a tree that changes underneath the walk.
 ///
-/// A backend that cannot list `dir` is reported and skipped rather than failed —
-/// the harness is a contract check, not a mount test, and a fixture that failed
-/// to build is not a contract violation.
-pub fn check_tree(backend: &str, fs: &mut dyn FileSystem, dir: &Path, r: &mut Report) {
+/// A backend that cannot list `dir` is skipped **only** when it said it does not
+/// implement the operation. Any other error is counted as a failure: a driver
+/// that is asked to list its own root and refuses has answered the question this
+/// harness exists to ask, and treating that as "nothing to check here" would let
+/// the harness disable itself on exactly the boot where it had found something.
+/// See `crate::fs::selftest::classify` for the three errors that mean "this
+/// system cannot" as against "this system was asked and refused".
+pub fn check_tree(
+    backend: &'static str,
+    fs: &mut dyn FileSystem,
+    dir: &Path,
+    r: &mut Report,
+    skips: &mut Skips,
+) {
     let entries = match fs.readdir(dir) {
         Ok(e) => e,
         Err(e) => {
-            serial_println!(
-                "[fsconform] {}: cannot list {} ({:?}) — skipped, not failed",
-                backend,
-                dir.display(),
-                e
-            );
+            match crate::fs::selftest::classify::<()>(Err(e)) {
+                Setup::Unsupported(_) => {
+                    skips.record(backend, "backend does not implement readdir");
+                }
+                Setup::Ready | Setup::Failed(_) => {
+                    r.failed = r.failed.saturating_add(1);
+                    serial_println!(
+                        "[fsconform] FAIL {}:{} — readdir refused with {:?}, which is not \
+                         a missing feature; a backend that cannot list its own root has \
+                         answered this harness rather than excused itself from it",
+                        backend,
+                        dir.display(),
+                        e
+                    );
+                }
+            }
             return;
         }
     };
@@ -305,13 +326,21 @@ pub fn check_tree(backend: &str, fs: &mut dyn FileSystem, dir: &Path, r: &mut Re
     // The directory itself, with no parent entry to cross-check against.
     match fs.metadata(dir) {
         Ok(meta) => check_meta(backend, dir, &meta, None, r),
-        Err(e) => serial_println!(
-            "[fsconform] {}: readdir({}) succeeded but metadata() did not ({:?}) — \
-             the two routes disagree about whether the object exists",
-            backend,
-            dir.display(),
-            e
-        ),
+        Err(e) => {
+            // Counted, not merely printed: `readdir` has already answered that
+            // this object exists, so a `metadata` that disagrees is the same
+            // cross-route contradiction the per-entry loop below fails on, and
+            // reporting it only as a log line would let a backend contradict
+            // itself about its own root while the harness still says "passed".
+            r.failed = r.failed.saturating_add(1);
+            serial_println!(
+                "[fsconform] FAIL {}:{} — readdir succeeded but metadata() returned \
+                 {:?}; the two routes disagree about whether the object exists",
+                backend,
+                dir.display(),
+                e
+            );
+        }
     }
 
     for entry in &entries {
@@ -348,6 +377,7 @@ pub fn self_test() -> KernelResult<()> {
     serial_println!("[fsconform] Running cross-backend FileMeta conformance...");
 
     let mut r = Report::new();
+    let mut skips = Skips::new();
 
     // A backend the harness fully controls, driven directly rather than through
     // the VFS. It is here for two reasons beyond checking memfs: it is the one
@@ -355,22 +385,39 @@ pub fn self_test() -> KernelResult<()> {
     // "0 objects" in the report below can only mean the harness itself is
     // broken; and it exercises the direct-`dyn FileSystem` route that the
     // synthetic btrfs/zfs/f2fs/ntfs volumes will use.
+    //
+    // A fixture that will not build is a *failure*, not a skip. It is
+    // `MemFs::new()`, two writes and a mkdir against an allocator the kernel has
+    // already proven it has; there is no environment in which it legitimately
+    // cannot be made. Skipping here would be deciding not to run the harness
+    // based on the outcome of a call into the very code the harness checks.
     match build_memfs_fixture() {
-        Ok(mut fs) => check_tree("memfs", &mut fs, Path::new("/"), &mut r),
-        Err(e) => serial_println!(
-            "[fsconform] memfs fixture could not be built ({e:?}) — skipped, not failed"
-        ),
+        Ok(mut fs) => check_tree("memfs", &mut fs, Path::new("/"), &mut r, &mut skips),
+        Err(e) => {
+            r.failed = r.failed.saturating_add(1);
+            serial_println!(
+                "[fsconform] FAIL memfs:/ — the fixture could not be built ({e:?}); it is \
+                 `MemFs::new()` plus two writes and a mkdir and depends on nothing about \
+                 this boot, \
+                 so this is memfs failing, not an austere environment"
+            );
+        }
     }
 
     // The live VFS mounts. Every boot has at least the root; a boot with
     // pseudo-filesystems mounted gets those too, and those are exactly the
     // backends whose `ino` and `nlinks` are documented as placeholders.
+    //
+    // The mount check asks the *mount table*, not the filesystem: whether
+    // `/proc` is mounted is a fact about this boot's configuration, and a
+    // question the code under test does not get a vote on.
     for path in ["/", "/proc", "/sys", "/dev", "/tmp"] {
         let p = Path::new(path);
-        if !crate::fs::selftest::is_mounted(path) && path != "/" {
+        if path != "/" && !crate::fs::selftest::is_mounted(path) {
+            skips.record(path, "not mounted on this boot");
             continue;
         }
-        check_vfs_path(p, &mut r);
+        check_vfs_path(p, &mut r, &mut skips);
     }
 
     // A pass over zero objects is not a pass, and this is the difference
@@ -389,20 +436,27 @@ pub fn self_test() -> KernelResult<()> {
         return Err(crate::error::KernelError::InternalError);
     }
 
+    skips.report("[fsconform]");
+
     if r.failed == 0 {
+        // The suffix, not just the `report` above: the closing line is the one a
+        // reader believes, so a run that reached four of five mounts must not
+        // read as a full pass to someone who scrolled to the bottom.
         serial_println!(
-            "[fsconform] Conformance passed ({} clause(s) over {} object(s)).",
+            "[fsconform] Conformance passed ({} clause(s) over {} object(s)){}.",
             r.passed,
-            r.objects
+            r.objects,
+            skips.suffix()
         );
         return Ok(());
     }
 
     serial_println!(
-        "[fsconform] Conformance FAILED: {} clause(s) held, {} broke, over {} object(s).",
+        "[fsconform] Conformance FAILED: {} clause(s) held, {} broke, over {} object(s){}.",
         r.passed,
         r.failed,
-        r.objects
+        r.objects,
+        skips.suffix()
     );
     Err(crate::error::KernelError::InternalError)
 }
@@ -414,13 +468,38 @@ pub fn self_test() -> KernelResult<()> {
 /// and it is *their* disagreement that reaches a program. Driving the backend
 /// directly would check the driver and miss anything the VFS layer adds on top,
 /// which is where `finish_listing` synthesises submount entries.
-fn check_vfs_path(dir: &Path, r: &mut Report) {
+///
+/// `dir`'s presence has already been established from the mount table by the
+/// caller, so a `readdir` that then refuses is not evidence that the path is
+/// absent — it is the mounted filesystem declining. Only the three errors
+/// `crate::fs::selftest::classify` reads as "this system cannot" are skipped;
+/// everything else is a failure, because a skip decided from the outcome of the
+/// call under test disables the check on exactly the boot where it would have
+/// fired.
+fn check_vfs_path(dir: &Path, r: &mut Report, skips: &mut Skips) {
     use crate::fs::vfs::Vfs;
 
     let backend = "vfs";
     let entries = match Vfs::readdir(dir) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(e) => {
+            match crate::fs::selftest::classify::<()>(Err(e)) {
+                Setup::Unsupported(_) => {
+                    skips.record("vfs readdir", "filesystem does not implement readdir");
+                }
+                Setup::Ready | Setup::Failed(_) => {
+                    r.failed = r.failed.saturating_add(1);
+                    serial_println!(
+                        "[fsconform] FAIL {}:{} — path is mounted but readdir returned \
+                         {:?}, which is not a missing feature",
+                        backend,
+                        dir.display(),
+                        e
+                    );
+                }
+            }
+            return;
+        }
     };
 
     for entry in &entries {

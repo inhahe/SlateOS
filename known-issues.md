@@ -106071,9 +106071,16 @@ of one lane's orphan is presently all three lanes' ability to merge.
 
 ## A-READDIR-FSROOT-ARM-NOT-CONTROLLED-FOR-INODE-TABLE-SIZE
 
-**Status:** open, low priority. Tech debt in a benchmark, not a kernel bug. The
-arm's *direction* is sound and its conclusion stands; only the magnitude it
-prints is uninterpretable.
+**Status:** FIXED 2026-09-01 in `91b0f753e` — arm 4b landed and the report line
+now compares against it instead of against `base`. The first controlled reading
+came off a **contaminated** boot, so the number itself is not yet quotable; see
+"What the controlled arm measured so far" at the bottom. The debt — a benchmark
+making an unfair comparison and printing the result as a finding — is closed.
+
+*The rest of this entry is the original text, kept because it is the argument
+for the fix.* Tech debt in a benchmark, not a kernel bug. The arm's *direction*
+was sound and its conclusion stood; only the magnitude it printed was
+uninterpretable.
 
 **In short:** one arm of a benchmark compares two directories that differ in two
 ways at once, and reports the difference as if they differed in only one. It
@@ -106129,3 +106136,59 @@ would turn a direction into a measurement.
 speedup, and the printed percentage should not be quoted anywhere. The FIXED
 section of `readdir("/") costs 4x per entry` states that caveat inline for the
 same reason.
+
+---
+
+### FIXED 2026-09-01 — commit `91b0f753e`, arm 4b
+
+**What landed.** `vfs_readdir_fsroot_peer`: a second fresh `MemFs` mounted at
+`/tmp/_rdm/p`, with the eight files one level down in `/tmp/_rdm/p/c`, so the
+listed directory is an ordinary *child* of a filesystem whose inode table is the
+same size (ten inodes against nine — the extra is the child directory itself).
+
+Two things were controlled, not one. The inode-table confound is the one this
+entry was filed about. The second is the mount table: **`peer` is mounted before
+either measurement window**, so both arms see the same number of mounts. That is
+what removed the `table_1` correction the old comparison had to apply — the
+correction existed only because the old arms were measured across *different*
+mount tables, and it was the smaller of the two errors anyway. Mount-root-ness
+is now the only difference between the two sides.
+
+The report block matches on `(fsroot_result, peer_result)` and has three arms:
+controlled when both are present (carrying the same split-half VOID guard §670
+put on the rest of the ladder), explicitly "**NOT quotable** as a mount-root
+cost" when the peer could not be set up — rather than silently falling back to
+the biased comparison, which is the failure this entry describes — and
+UNAVAILABLE when the fs-root mount itself failed.
+
+**What the controlled arm measured so far.** One boot, and it is not a reading:
+
+| | uncontrolled (old) | controlled (new) |
+|---|---|---|
+| comparison | `fsroot` vs `base` | `fsroot` vs `peer` |
+| result | −54%, −62% | −16% (19697ns vs 23637ns) |
+
+The confound accounted for roughly three quarters of the apparent effect, which
+is the right order — `bench_vfs_readdir_breakdown` prices 2048 extra inodes at
+53%, and `base`'s filesystem holds the whole boot image.
+
+**Why −16% is not yet a finding.** That boot was `RUN CONTAMINATED` (reference
+access cost spread 115% over 15 samples against a 25% tolerance), and the
+positional attribution puts both new arms in the worst of it: `vfs_readdir_fsroot`
+ran at 1.50x the run's baseline reference cost and `vfs_readdir_fsroot_peer` at
+1.59x — positions 55 and 56, inside the same disturbance. Their split-halves
+(12% and 15%) passed the kernel-side guard, so the line printed rather than
+voiding, but a host that moved 115% under the canary is not a host to read a
+16% difference from.
+
+**A negative here is not impossible, unlike `d_table`.** Worth stating because
+the ladder treats a negative mount-table delta as proof of noise, and the two
+are different. For a mount root, `find_mount` yields the relative path `/` and
+the per-filesystem lookup is the root directory directly; the peer's child needs
+one more component walked inside its memfs. The fs root genuinely does less
+work, so "cheaper" has a mechanism and the sign is not self-refuting. What is
+missing is a quiet boot, not an explanation.
+
+**Trigger for closing the number out:** the next `--bench` boot that is not
+contaminated. Nothing depends on it — the parent entry's conclusion never rested
+on the magnitude, only on the direction, and the direction is unchanged.

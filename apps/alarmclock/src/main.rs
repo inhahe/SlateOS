@@ -144,6 +144,34 @@ const CUSTOM_H: f32 = 36.0;
 /// Gap between two chips in a row of them.
 const CHIP_GAP: f32 = 8.0;
 
+/// The alarm editor's vertical stack, at the size it would like to be drawn.
+///
+/// A pad, then six rows — title, the hour/minute spinners, the label field, the
+/// repeat-day chips, the sound/snooze pair, and the Save/Cancel strip — with a
+/// gap between each and a pad under the last. These add up to
+/// [`EDITOR_NATURAL_H`], which is *taller than the content area of a window at
+/// this app's own minimum size*: laid out at natural size the Save and Cancel
+/// buttons fall below the panel, where the clip hides them and [`Frame::hit`]
+/// drops their hit boxes — an editor with no pointer route out.
+///
+/// So the stack is solved rather than assumed. See [`AlarmClockApp::draw_editor`].
+const EDITOR_PAD: f32 = 10.0;
+const EDITOR_GAP: f32 = 8.0;
+const EDITOR_TITLE_H: f32 = 20.0;
+const EDITOR_SPINNER_H: f32 = 102.0;
+const EDITOR_LABEL_H: f32 = 32.0;
+const EDITOR_CHIP_H: f32 = 30.0;
+const EDITOR_ACTION_H: f32 = 34.0;
+
+/// The height the editor's stack wants: two pads, five gaps, six rows.
+const EDITOR_NATURAL_H: f32 = EDITOR_PAD * 2.0
+    + EDITOR_GAP * 5.0
+    + EDITOR_TITLE_H
+    + EDITOR_SPINNER_H
+    + EDITOR_LABEL_H
+    + EDITOR_CHIP_H * 2.0
+    + EDITOR_ACTION_H;
+
 /// Presets per row on the timer tab. Seven in rows of four is two rows with a
 /// ragged end, which is what a wrapped grid looks like; four across is the
 /// widest that keeps `60 min` legible at [`MIN_WIDTH`].
@@ -344,6 +372,18 @@ fn text(
     weight: FontWeightHint,
     max_width: f32,
 ) {
+    let bound = max_width.max(0.0);
+    // Refuse a run the clip in force cannot show, exactly as `guitk::put_text`
+    // does. This helper used to push unconditionally, and that is the whole
+    // reason an overrunning pass in this app reached the *picture* rather than
+    // stopping at the pixels: a clip hides an overrun from the eye, but a
+    // `RenderCommand::Text` pushed under it still says a label is on screen, and
+    // anything that reads the frame to find out what is displayed is told a lie.
+    // `Frame::hit` already drops a hit box with nothing visible, so refusing
+    // here is what puts ink and hit boxes back under one rule.
+    if !f.is_visible(Rect::new(x, y, bound, size)) {
+        return;
+    }
     f.push(RenderCommand::Text {
         x,
         y,
@@ -351,7 +391,7 @@ fn text(
         color,
         font_size: size,
         font_weight: weight,
-        max_width: Some(max_width.max(0.0)),
+        max_width: Some(bound),
         overflow: TextOverflow::Ellipsis,
     });
 }
@@ -374,7 +414,16 @@ fn text_centred(
 ) {
     let measured = guitk::text::measure(body, size, weight).min(width);
     let left = x + (width - measured) / 2.0;
-    text(f, left, y, body, color, size, weight, width);
+    // Bounded to `measured`, not to `width`. The bound is measured from where
+    // the run *starts*, and a centred run starts half the slack in -- so
+    // passing `width` declares a box that hangs that same half-slack off the
+    // right-hand end of the box the run was told to centre in. "Stopwatch" in
+    // a 120-point tab was declared to run to 385 in a 360-point window: a
+    // quarter of it off the edge of the screen, and no ellipsis until then,
+    // because the renderer trims at the bound it is given and this one was a
+    // lie. Where the string is too long to centre, `measured` saturates at
+    // `width`, `left` lands back at `x`, and the bound is the box exactly.
+    text(f, left, y, body, color, size, weight, measured);
 }
 
 /// A filled button with a centred label and a hit box, drawn in one call so the
@@ -1597,6 +1646,21 @@ impl Stopwatch {
         let stats = self.lap_stats();
         for (i, lap) in self.laps.iter().rev().enumerate() {
             let row_y = pane.y + (i as f32) * LAP_ROW_H;
+            // A clip hides an overrun from the eye, but not from the frame.
+            // This app draws its runs through its own `text` helper, which
+            // pushes a `RenderCommand::Text` whether or not the clip in force
+            // could show it -- so without this test a lap four hundred points
+            // below the table still enters the picture, claiming to be a label
+            // that is on screen, and a reader of the picture is told a lie.
+            // A row is drawn whole or not at all, so the comparison is against
+            // the row's own edges in the scrolled space; `i` only increases, so
+            // the first row past the bottom ends the walk.
+            if row_y - scroll >= pane.bottom() {
+                break;
+            }
+            if row_y - scroll + LAP_ROW_H <= pane.y {
+                continue;
+            }
             // The best and worst laps are only worth colouring once there is
             // something to compare against; with one lap it is both, and
             // painting it green and red at once says nothing.
@@ -2431,41 +2495,92 @@ impl AlarmClockApp {
         f.translate(0.0, -self.alarm_scroll);
         let mut y = list.y;
         for alarm in &self.alarms {
-            alarm.draw(f, list.x, y, list.w, self.time_format);
-            y += alarm.card_height() + ALARM_ROW_GAP;
+            // See the lap table: the clip stops the pixels, not the commands.
+            // Cards differ in height, so each is tested on its own edges rather
+            // than on a fixed stride, but `y` still only increases, so the first
+            // card past the bottom ends the walk.
+            let card_h = alarm.card_height();
+            if y - self.alarm_scroll >= list.bottom() {
+                break;
+            }
+            if y - self.alarm_scroll + card_h > list.y {
+                alarm.draw(f, list.x, y, list.w, self.time_format);
+            }
+            y += card_h + ALARM_ROW_GAP;
         }
         f.untranslate();
         f.unclip();
     }
 
     /// The alarm editor, drawn over the alarm tab's content area.
+    ///
+    /// The stack is *solved* for the height it was given, not laid out at a
+    /// fixed size and allowed to run off the bottom. At this app's own minimum
+    /// window the content area is 248 points tall and the natural stack is
+    /// [`EDITOR_NATURAL_H`] — so the Save and Cancel buttons used to be painted
+    /// below the panel, hidden by the clip in force and with their hit boxes
+    /// dropped by `Frame::hit`. That is worse than a cosmetic overrun: the
+    /// editor covers the alarm tab, so with no reachable Save and no reachable
+    /// Cancel it was a trap the pointer could not get out of.
+    ///
+    /// Guarding the overrun would have hidden the buttons just as thoroughly.
+    /// Instead every vertical metric — row heights, gaps, pads and the font
+    /// sizes that go with them — is multiplied by the ratio of the height
+    /// available to the height wanted, capped at 1 so a roomy window is laid
+    /// out at natural size and the slack is simply left under the last row.
+    /// Widths are untouched: the window is clamped to [`MIN_WIDTH`], so the
+    /// horizontal direction has the room the rows were written for.
     fn draw_editor(&self, f: &mut Frame, editor: &AlarmEditor, content: Rect) {
         fill(f, content, SURFACE0, 10.0);
         f.clip(content);
+
+        // Not `clamp` alone: `clamp` returns NaN for a NaN input, and a NaN
+        // scale would put a NaN into every rectangle below, where it compares
+        // false against every edge and so escapes any bound that is checked.
+        // A height that is not a number gets the natural layout instead.
+        let ratio = content.h / EDITOR_NATURAL_H;
+        let s = if ratio.is_finite() {
+            ratio.clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let pad = EDITOR_PAD * s;
+        let gap = EDITOR_GAP * s;
+        let spinner_h = EDITOR_SPINNER_H * s;
+        let label_h = EDITOR_LABEL_H * s;
+        let chip_h = EDITOR_CHIP_H * s;
+        let action_h = EDITOR_ACTION_H * s;
+
         let x = content.x + 10.0;
         let w = (content.w - 20.0).max(0.0);
+        let mut row_y = content.y + pad;
         text(
             f,
             x,
-            content.y + 10.0,
+            row_y,
             if editor.editing.is_some() {
                 "Edit alarm"
             } else {
                 "New alarm"
             },
             TEXT_COLOR,
-            15.0,
+            15.0 * s,
             FontWeightHint::Bold,
             w,
         );
+        row_y += EDITOR_TITLE_H * s + gap;
 
         // Two spinners, hour and minute, each an up button over a big number
-        // over a down button.
+        // over a down button. The three share `spinner_h`, so the number and
+        // the space around it give way first as the stack is squeezed.
         let col_w = 84.0;
-        let gap = 16.0;
-        let hour_x = content.x + (content.w - col_w * 2.0 - gap) / 2.0;
-        let minute_x = hour_x + col_w + gap;
-        let top = content.y + 38.0;
+        let col_gap = 16.0;
+        let hour_x = content.x + (content.w - col_w * 2.0 - col_gap) / 2.0;
+        let minute_x = hour_x + col_w + col_gap;
+        let top = row_y;
+        let step_h = 26.0 * s;
+        let num_size = 32.0 * s;
+        let inner = ((spinner_h - step_h * 2.0 - num_size) / 2.0).max(0.0);
         for (col_x, value, up, down) in [
             (
                 hour_x,
@@ -2482,7 +2597,7 @@ impl AlarmClockApp {
         ] {
             button(
                 f,
-                Rect::new(col_x, top, col_w, 26.0),
+                Rect::new(col_x, top, col_w, step_h),
                 "\u{25B2}",
                 SURFACE1,
                 TEXT_COLOR,
@@ -2491,36 +2606,37 @@ impl AlarmClockApp {
             text_centred(
                 f,
                 col_x,
-                top + 32.0,
+                top + step_h + inner,
                 col_w,
                 &format!("{:02}", value),
                 TEXT_COLOR,
-                32.0,
+                num_size,
                 FontWeightHint::Bold,
             );
             button(
                 f,
-                Rect::new(col_x, top + 76.0, col_w, 26.0),
+                Rect::new(col_x, top + spinner_h - step_h, col_w, step_h),
                 "\u{25BC}",
                 SURFACE1,
                 TEXT_COLOR,
                 down,
             );
         }
+        let colon_size = 22.0 * s;
         text_centred(
             f,
             hour_x + col_w,
-            top + 44.0,
-            gap,
+            top + step_h + inner + (num_size - colon_size) / 2.0,
+            col_gap,
             ":",
             SUBTEXT0,
-            22.0,
+            colon_size,
             FontWeightHint::Bold,
         );
+        row_y += spinner_h + gap;
 
         // Label.
-        let mut row_y = top + 116.0;
-        let label_rect = Rect::new(x, row_y, w, 32.0);
+        let label_rect = Rect::new(x, row_y, w, label_h);
         let focused = self.focus == Some(Focus::Label);
         fill(
             f,
@@ -2535,24 +2651,25 @@ impl AlarmClockApp {
         } else {
             editor.label.clone()
         };
+        let label_size = 13.0 * s;
         text(
             f,
             x + 8.0,
-            row_y + 8.0,
+            row_y + (label_h - label_size) / 2.0,
             body,
             if editor.label.is_empty() && !focused {
                 OVERLAY0
             } else {
                 TEXT_COLOR
             },
-            13.0,
+            label_size,
             FontWeightHint::Regular,
-            w - 16.0,
+            (w - 16.0).max(0.0),
         );
         f.hit(Target::EditLabel, label_rect);
 
         // Repeat-day chips.
-        row_y += 40.0;
+        row_y += label_h + gap;
         let chip_w = ((w - CHIP_GAP * 6.0) / 7.0).max(1.0);
         for (i, day) in Weekday::all().into_iter().enumerate() {
             let cx = x + i as f32 * (chip_w + CHIP_GAP);
@@ -2563,7 +2680,7 @@ impl AlarmClockApp {
                 .unwrap_or(false);
             button(
                 f,
-                Rect::new(cx, row_y, chip_w, 30.0),
+                Rect::new(cx, row_y, chip_w, chip_h),
                 day.single_letter(),
                 if on { BLUE } else { SURFACE1 },
                 if on { CRUST } else { SUBTEXT0 },
@@ -2572,11 +2689,11 @@ impl AlarmClockApp {
         }
 
         // Sound and snooze, each a chip that cycles on click.
-        row_y += 38.0;
+        row_y += chip_h + gap;
         let half = ((w - CHIP_GAP) / 2.0).max(1.0);
         button(
             f,
-            Rect::new(x, row_y, half, 30.0),
+            Rect::new(x, row_y, half, chip_h),
             &format!("Sound: {}", editor.sound.label()),
             SURFACE1,
             SUBTEXT1,
@@ -2584,18 +2701,20 @@ impl AlarmClockApp {
         );
         button(
             f,
-            Rect::new(x + half + CHIP_GAP, row_y, half, 30.0),
+            Rect::new(x + half + CHIP_GAP, row_y, half, chip_h),
             &format!("Snooze: {}", editor.snooze().label()),
             SURFACE1,
             SUBTEXT1,
             Target::EditSnooze,
         );
 
-        // Save and cancel.
-        row_y += 40.0;
+        // Save and cancel. The stack was solved so that this row lands inside
+        // `content` at every window size the app can be given; the test that
+        // owns the claim is `the_editor_can_always_be_left_by_pointer`.
+        row_y += chip_h + gap;
         button(
             f,
-            Rect::new(x, row_y, half, 34.0),
+            Rect::new(x, row_y, half, action_h),
             "Save",
             GREEN,
             CRUST,
@@ -2603,7 +2722,7 @@ impl AlarmClockApp {
         );
         button(
             f,
-            Rect::new(x + half + CHIP_GAP, row_y, half, 34.0),
+            Rect::new(x + half + CHIP_GAP, row_y, half, action_h),
             "Cancel",
             SURFACE2,
             TEXT_COLOR,
@@ -2686,6 +2805,13 @@ impl AlarmClockApp {
         f.translate(0.0, -self.timer_scroll);
         for (i, timer) in self.timers.iter().enumerate() {
             let y = list.y + i as f32 * (TIMER_ROW_H + TIMER_ROW_GAP);
+            // See the lap table: the clip stops the pixels, not the commands.
+            if y - self.timer_scroll >= list.bottom() {
+                break;
+            }
+            if y - self.timer_scroll + TIMER_ROW_H <= list.y {
+                continue;
+            }
             timer.draw(f, list.x, y, list.w);
         }
         f.untranslate();
@@ -5096,5 +5222,502 @@ mod tests {
     #[test]
     fn test_parse_duration_hms_hh_invalid_seconds() {
         assert_eq!(parse_duration_hms("1:00:60"), None);
+    }
+
+    // ========================================================================
+    // Geometry sweeps
+    // ========================================================================
+    //
+    // Three rules held over the whole picture, added after all three scrolling
+    // panes were found walking their entire collection under a clip and
+    // trusting the clip to tidy up after them. It does not tidy up. A clip
+    // stops the *renderer* showing what is outside it, and `Frame::hit` drops
+    // a control that lands out there -- so an overrun leaves no trace in the
+    // hit boxes, and none in the text either for an app that draws its runs
+    // through `guitk::put_text`, which refuses to emit one the clip in force
+    // cannot show.
+    //
+    // This app does not draw through `put_text`. Its own `text` helper, at the
+    // top of this file, pushes a `RenderCommand::Text` unconditionally. So a
+    // lap row four hundred points below the table went into the picture as a
+    // label claiming to be on screen, and every test that read the picture to
+    // find out what the user could see was reading a lie. Nothing here caught
+    // it across 175 tests, because none of them asked where the paint landed.
+    // (known-issues.md, Lesson 107; C-ALARMCLOCK-SCROLLS-BY-CLIP-ALONE.)
+
+    /// Window sizes the sweeps below run at.
+    ///
+    /// Two of them are below the minimum on one axis or both, because `frame`
+    /// clamps up to `MIN_WIDTH`/`MIN_HEIGHT` and a sweep that never asked for a
+    /// smaller window would not notice if that clamp went away.
+    const GRID: [(f32, f32); 10] = [
+        (100.0, 60.0),
+        (360.0, 200.0),
+        (MIN_WIDTH, MIN_HEIGHT),
+        (360.0, 400.0),
+        (400.0, 320.0),
+        (480.0, 360.0),
+        (520.0, 800.0),
+        (640.0, 480.0),
+        (900.0, 340.0),
+        (1280.0, 900.0),
+    ];
+
+    /// Apps holding more than any window in `GRID` can show.
+    ///
+    /// An empty app is worth nothing to these sweeps -- the fault needs
+    /// something to overrun with -- so every state below holds more rows than
+    /// the tallest window here has room for. Each list appears twice, once at
+    /// rest and once parked at the far end of its travel, because the top edge
+    /// and the bottom edge fail differently: at rest only the bottom can
+    /// overrun, and scrolled, only the top.
+    fn states() -> Vec<(&'static str, AlarmClockApp)> {
+        let mut out: Vec<(&'static str, AlarmClockApp)> = Vec::new();
+
+        out.push(("nothing at all", AlarmClockApp::new()));
+
+        for (name, scroll) in [("alarms", 0.0_f32), ("alarms scrolled", 10_000.0)] {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = ActiveTab::Alarm;
+            for i in 0..30_u8 {
+                app.create_alarm_with_label(i % 24, (i.wrapping_mul(7)) % 60, "get up");
+            }
+            app.alarm_scroll = scroll;
+            out.push((name, app));
+        }
+
+        // A ringing alarm grows a strip for Snooze and Dismiss, so the rows in
+        // this list are not all the same height. That is the case the alarm
+        // pane's guard has to get right on its own: it cannot step by a
+        // constant and test the result, it has to ask each card how tall it is.
+        let mut mixed = AlarmClockApp::new();
+        for i in 0..30_u8 {
+            let id = mixed.create_alarm(i % 24, 0);
+            if i % 3 == 0 {
+                if let Some(alarm) = mixed.find_alarm_mut(id) {
+                    alarm.ringing = true;
+                }
+            }
+        }
+        out.push(("alarms, every third one ringing", mixed));
+
+        for (name, scroll) in [("timers", 0.0_f32), ("timers scrolled", 10_000.0)] {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = ActiveTab::Timer;
+            for i in 0..30_u32 {
+                app.create_timer(60u32.saturating_add(i.saturating_mul(30)));
+            }
+            app.timer_scroll = scroll;
+            out.push((name, app));
+        }
+
+        for (name, scroll) in [("laps", 0.0_f32), ("laps scrolled", 10_000.0)] {
+            let mut app = AlarmClockApp::new();
+            app.active_tab = ActiveTab::Stopwatch;
+            app.stopwatch.start();
+            for _ in 0..40 {
+                app.stopwatch.tick(1_234);
+                app.stopwatch.lap();
+            }
+            app.lap_scroll = scroll;
+            out.push((name, app));
+        }
+
+        let mut editing = AlarmClockApp::new();
+        for i in 0..30_u8 {
+            editing.create_alarm(i % 24, 0);
+        }
+        editing.editor = Some(AlarmEditor::new_alarm(7, 30));
+        out.push(("the editor open over a full list", editing));
+
+        out
+    }
+
+    /// Every filled box in the frame, in *window* coordinates, paired with the
+    /// clip that was in force when it was drawn.
+    ///
+    /// This began as a copy of the same helper in `contacts`, which reads a
+    /// command's coordinates straight out of the tree -- correct there, because
+    /// that app never translates. All three panes here draw under a
+    /// `PushTranslate`, so a command's own numbers are in the scrolled space
+    /// and mean nothing until the offset in force is added back. `Frame::push`
+    /// performs exactly this conversion to keep its clip stack in window
+    /// coordinates; this is that arithmetic repeated on the reading side.
+    fn fills_clipped(frame: &Frame, size: (f32, f32)) -> Vec<Fill> {
+        painted(frame, size).fills
+    }
+
+    /// A filled box, in window coordinates, and the clip in force when it was
+    /// drawn.
+    struct Fill {
+        rect: Rect,
+        clip: Rect,
+    }
+
+    /// A run of text, in window coordinates, and the clip in force when it was
+    /// drawn.
+    struct Run {
+        text: String,
+        /// The run's box: as wide as the `max_width` it was bounded to, as tall
+        /// as its font.
+        area: Rect,
+        clip: Rect,
+        /// Whether the run carried a `max_width` at all. An unbounded run has
+        /// an infinitely wide `area`, which would fail the sideways test with a
+        /// message about geometry when the fault is that it has no bound.
+        bounded: bool,
+    }
+
+    /// Everything one walk of the command list found.
+    struct Painted {
+        fills: Vec<Fill>,
+        runs: Vec<Run>,
+    }
+
+    /// Whether the fill at `fills[i]`, which lies wholly outside `boundary`, is
+    /// excused for it.
+    ///
+    /// The unit of "do not draw this" is the *item*, and an item is drawn whole
+    /// or not at all. A two-point sliver of a timer card at the bottom edge
+    /// still paints its progress ring and its delete button in full, ninety
+    /// points below the cut, and that is correct: a card that starts inside the
+    /// pane is a card the pane is showing. So a fill wholly outside is excused
+    /// exactly when some other fill drawn *under the same clip* encloses it and
+    /// is itself at least partly inside. Nothing else is -- a row four hundred
+    /// points below the pane has no such parent, because the only fill
+    /// enclosing it is its own card background, which is just as invisible.
+    ///
+    /// Shared by both sweeps that ask the question, because a rule stated twice
+    /// is a rule that drifts. They differ only in what `boundary` is: the clip
+    /// that was in force, or the box the pass was handed.
+    fn carried(fills: &[Fill], i: usize, boundary: Rect) -> bool {
+        let Some(subject) = fills.get(i) else {
+            return false;
+        };
+        fills.iter().enumerate().any(|(j, outer)| {
+            j != i
+                && outer.clip == subject.clip
+                && boundary.intersect(outer.rect).is_some()
+                && outer.rect.intersect(subject.rect) == Some(subject.rect)
+        })
+    }
+
+    /// Every run of text in the frame, with the clip that was in force.
+    fn text_runs_clipped(frame: &Frame, size: (f32, f32)) -> Vec<Run> {
+        painted(frame, size).runs
+    }
+
+    /// One walk of the command list producing both lists above.
+    ///
+    /// One walk and not two, because the bookkeeping is the whole difficulty
+    /// and a second copy of it is a second chance to get it wrong: the clip
+    /// stack has to be converted into window coordinates as it is pushed, the
+    /// translation stack has to be unwound on `PopTranslate` and not merely
+    /// accumulated, and the two interact -- a clip pushed inside a translation
+    /// is itself in the scrolled space.
+    fn painted(frame: &Frame, size: (f32, f32)) -> Painted {
+        let window = Rect::new(0.0, 0.0, size.0.max(MIN_WIDTH), size.1.max(MIN_HEIGHT));
+        let mut clips: Vec<Rect> = Vec::new();
+        let mut stack: Vec<(f32, f32)> = Vec::new();
+        let mut offset = (0.0_f32, 0.0_f32);
+        let mut fills = Vec::new();
+        let mut runs = Vec::new();
+        for c in frame.commands() {
+            match c {
+                RenderCommand::PushClip {
+                    x,
+                    y,
+                    width,
+                    height,
+                } => {
+                    let next = Rect::new(*x, *y, *width, *height).translated(offset.0, offset.1);
+                    let merged = clips
+                        .last()
+                        .map_or(next, |outer| outer.intersect(next).unwrap_or(Rect::EMPTY));
+                    clips.push(merged);
+                }
+                RenderCommand::PopClip => {
+                    clips.pop();
+                }
+                RenderCommand::PushTranslate { dx, dy } => {
+                    stack.push((*dx, *dy));
+                    offset.0 += *dx;
+                    offset.1 += *dy;
+                }
+                RenderCommand::PopTranslate => {
+                    if let Some((dx, dy)) = stack.pop() {
+                        offset.0 -= dx;
+                        offset.1 -= dy;
+                    }
+                }
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => fills.push(Fill {
+                    rect: Rect::new(*x, *y, *width, *height).translated(offset.0, offset.1),
+                    clip: clips.last().copied().unwrap_or(window),
+                }),
+                RenderCommand::Text {
+                    x,
+                    y,
+                    text,
+                    font_size,
+                    max_width,
+                    ..
+                } => {
+                    let bound = max_width.unwrap_or(f32::INFINITY);
+                    runs.push(Run {
+                        text: text.clone(),
+                        area: Rect::new(*x, *y, bound, *font_size).translated(offset.0, offset.1),
+                        clip: clips.last().copied().unwrap_or(window),
+                        bounded: max_width.is_some(),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Painted { fills, runs }
+    }
+
+    #[test]
+    fn nothing_is_painted_entirely_outside_the_clip_in_force() {
+        // The rule the three panes broke. A clip makes what is outside it
+        // invisible; it does not make it free, and it does not turn a picture
+        // claiming to have painted a lap row four hundred points below the
+        // table into an honest one.
+        //
+        // *Entirely* outside, not partly: a row straddling the bottom edge is
+        // rightly half drawn and half cut, and so is one straddling the top of
+        // a scrolled pane. What nothing may be is wholly invisible.
+        //
+        // With one exemption, stated once in `carried` and shared with the
+        // pass sweep below rather than written out twice.
+        for (w, h) in GRID {
+            for (name, mut app) in states() {
+                app.clamp_scrolls(w, h);
+                let frame = app.frame(w, h);
+                let fills = fills_clipped(&frame, (w, h));
+                for (i, fill) in fills.iter().enumerate() {
+                    let (rect, clip) = (fill.rect, fill.clip);
+                    if rect.is_empty() || clip.intersect(rect).is_some() {
+                        continue;
+                    }
+                    assert!(
+                        carried(&fills, i, clip),
+                        "{name} at {w}x{h}: a filled box at {rect:?} is painted entirely \
+                         outside the clip {clip:?} that was in force, and no item drawn \
+                         under that clip carries it"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_run_of_text_is_bounded_and_inside_the_window() {
+        // Two rules, and the second is the one the panes broke.
+        //
+        // Bounded: a run with no `max_width` runs as far as the string is long
+        // and over whatever is beside it. Every run in this file goes through
+        // the `text` helper, which takes the bound as an argument -- so the way
+        // to lose one is to pass `f32::INFINITY` or a constant unrelated to the
+        // box, not to forget the field.
+        //
+        // Inside: sideways a run must fit its clip outright, because nothing
+        // here scrolls sideways, so a run hanging over the edge is a run cut in
+        // half. Vertically it need only be *partly* inside, because a row at
+        // either edge of a scrolled pane is meant to be half drawn. What is
+        // forbidden is a run wholly outside -- ink nobody can ever see, and, in
+        // this app, ink that goes into the picture regardless and tells anyone
+        // reading it that a label is on screen.
+        for (w, h) in GRID {
+            for (name, mut app) in states() {
+                app.clamp_scrolls(w, h);
+                let frame = app.frame(w, h);
+                for Run {
+                    text,
+                    area: run,
+                    clip,
+                    bounded,
+                } in text_runs_clipped(&frame, (w, h))
+                {
+                    assert!(
+                        bounded,
+                        "{name} at {w}x{h}: {text:?} is drawn with no max_width, so it runs \
+                         as far as the string is long and over whatever is beside it"
+                    );
+                    assert!(
+                        run.w.is_finite() && run.w >= 0.0,
+                        "{name} at {w}x{h}: {text:?} is bounded to {}",
+                        run.w
+                    );
+                    if clip.is_empty() {
+                        // A pane squeezed to nothing clips everything; there is
+                        // no box left to be inside of. The rule above still
+                        // applies and is what this branch keeps checking.
+                        continue;
+                    }
+                    assert!(
+                        run.x >= clip.x - 0.01 && run.right() <= clip.right() + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {}..{} across {clip:?}",
+                        run.x,
+                        run.right()
+                    );
+                    assert!(
+                        run.bottom() > clip.y - 0.01 && run.y < clip.bottom() + 0.01,
+                        "{name} at {w}x{h}: {text:?} spans {}..{} down {clip:?}, which it \
+                         misses entirely -- it is drawn where nothing can see it",
+                        run.y,
+                        run.bottom()
+                    );
+                }
+            }
+        }
+    }
+
+    /// One drawing pass: the app it belongs to, the frame it writes into, and
+    /// the box it is told to stay inside.
+    type Pass = fn(&AlarmClockApp, &mut Frame, Rect);
+
+    /// The stopwatch draws from six loose numbers rather than a rect, so it
+    /// needs a shim to sit in the table beside the other two.
+    fn stopwatch_pass(app: &AlarmClockApp, f: &mut Frame, area: Rect) {
+        app.stopwatch
+            .draw(f, area.x, area.y, area.w, area.h, app.lap_scroll);
+    }
+
+    fn passes() -> Vec<(&'static str, Pass)> {
+        vec![
+            ("alarm tab", AlarmClockApp::draw_alarm_tab),
+            ("timer tab", AlarmClockApp::draw_timer_tab),
+            ("stopwatch", stopwatch_pass),
+        ]
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_box_it_was_given() {
+        // Phrased over *fills*, and it has to be: a clip stops the renderer
+        // showing text past the edge and makes `Frame::hit` drop the boxes out
+        // there, so a pass that overran would look correct from both. The fill
+        // is the only witness left. (known-issues.md, Lesson 107.)
+        //
+        // "Reaches the box", not "lies inside it", which is the stricter form
+        // the same sweep takes in `dbviewer`. The difference is that these
+        // three panes scroll: an item straddling the pane's top edge is drawn
+        // starting above it, on purpose, and demanding containment would fail
+        // on correct code. What is forbidden is paint that never touches the
+        // box at all -- which is exactly what walking a whole collection with
+        // no edge test produces, and is what all three of these did.
+        // The boxes are the ones `content_rect` actually produces, not a list
+        // of cruel little rectangles. `dbviewer`'s copy of this sweep hands its
+        // passes 60x18 to prove they clamp, and that is right there because its
+        // passes are handed panes carved out of a sidebar split that really can
+        // collapse. Here there is one box, `content_rect`, and `frame` clamps
+        // the window to 360x320 before deriving it -- so a 60x18 content area
+        // is a state the program cannot enter, and a failure at that size would
+        // be a report about arithmetic no user can reach. It does not weaken
+        // the sweep: the overrun this test exists for happened at ordinary
+        // window sizes with thirty alarms in the list, and every size in `GRID`
+        // catches it.
+        for (state, mut app) in states() {
+            for (w, h) in GRID {
+                app.clamp_scrolls(w, h);
+                let area = AlarmClockApp::content_rect(w.max(MIN_WIDTH), h.max(MIN_HEIGHT));
+                // The frame is far bigger than the box on every side, so an
+                // overrun has somewhere to go and is not quietly clamped by the
+                // frame's own bounds.
+                let size = (area.right() + 400.0, area.bottom() + 400.0);
+                for (name, pass) in passes() {
+                    let mut f = Frame::new(size.0, size.1);
+                    pass(&app, &mut f, area);
+                    let fills = fills_clipped(&f, size);
+                    for (i, fill) in fills.iter().enumerate() {
+                        let filled = fill.rect;
+                        if filled.is_empty() || area.intersect(filled).is_some() {
+                            continue;
+                        }
+                        assert!(
+                            carried(&fills, i, area),
+                            "{state} at {w}x{h}: the {name} pass, given {area:?}, filled \
+                             {filled:?}, which does not touch it"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_editor_can_always_be_left_by_pointer() {
+        // The editor covers the alarm tab, so Save and Cancel are the only two
+        // ways out that a pointer has. Laid out at its natural height the stack
+        // is 308 points tall and the content area of a window at this app's own
+        // minimum size is 248 -- so both buttons were painted below the panel,
+        // where the clip in force hid them and `Frame::hit` dropped their boxes
+        // for having nothing visible. The editor was a trap.
+        //
+        // Asked through `frame`, not through a pass, because the claim is about
+        // what a *user* can reach: the whole window, at the sizes the window
+        // manager can actually give it, with the hit boxes trimmed exactly as
+        // the real click path trims them.
+        for (w, h) in GRID {
+            let mut app = AlarmClockApp::new();
+            for i in 0..30u8 {
+                app.create_alarm_with_label(i % 24, (i.wrapping_mul(7)) % 60, "get up");
+            }
+            probe::click_sized(&mut app, Target::AddAlarm, MouseButton::Left, (w, h));
+            assert!(app.editor.is_some(), "the editor did not open at {w}x{h}");
+
+            for target in [Target::EditSave, Target::EditCancel] {
+                let rect = probe::rect_of_sized(&app, target, (w, h)).unwrap_or_else(|| {
+                    panic!("{target:?} has no hit box at {w}x{h}: the editor cannot be left")
+                });
+                assert!(
+                    !rect.is_empty(),
+                    "{target:?} at {w}x{h} has an empty hit box: {rect:?}"
+                );
+            }
+
+            // And the box does what it names, at that size.
+            probe::click_sized(&mut app, Target::EditCancel, MouseButton::Left, (w, h));
+            assert!(
+                app.editor.is_none(),
+                "Cancel did not close the editor at {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_editor_is_laid_out_inside_the_panel_it_was_given() {
+        // The companion to the test above, phrased over fills rather than hit
+        // boxes: every rectangle the editor paints lies inside `content`. Hit
+        // boxes are trimmed to the clip, so a button that overran by a point
+        // would still answer presses -- the fill is what says whether the stack
+        // was *solved* for the height it was given or merely clipped to it.
+        for (w, h) in GRID {
+            let mut app = AlarmClockApp::new();
+            app.editor = Some(AlarmEditor::new_alarm(7, 30));
+            let content = AlarmClockApp::content_rect(w.max(MIN_WIDTH), h.max(MIN_HEIGHT));
+            let size = (content.right() + 400.0, content.bottom() + 400.0);
+            let mut f = Frame::new(size.0, size.1);
+            let editor = app.editor.as_ref().unwrap();
+            app.draw_editor(&mut f, editor, content);
+            for fill in fills_clipped(&f, size) {
+                let r = fill.rect;
+                // Edge by edge rather than `intersect(r) == Some(r)`, which
+                // recomputes `h` as `bottom - y` from inexact floats and so can
+                // report a rectangle as unequal to itself.
+                assert!(
+                    r.x >= content.x
+                        && r.y >= content.y
+                        && r.right() <= content.right()
+                        && r.bottom() <= content.bottom(),
+                    "at {w}x{h} the editor filled {r:?}, which leaves its panel {content:?}"
+                );
+            }
+        }
     }
 }

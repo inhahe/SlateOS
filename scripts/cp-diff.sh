@@ -302,7 +302,19 @@ STAMPS=
 # is *overridden* by its option, so the interesting cases are the pairs — the
 # variable alone, and the variable with the option that beats it.
 ENVV=()
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); }
+# The umask `cp` runs under, when a case needs one other than the harness's.
+# Applied to the *copy* and not to the fixture: [`run_one`] builds the two in
+# separate subshells precisely so a case can give a source a mode the umask
+# would not have allowed and still see what the copy does with it.
+#
+# Empty means "whatever this shell has", which is every case but the read-only
+# extended-attribute pair in section 17. Those set `0222`, a umask that strips
+# the owner-write bit — the one bit `cp` grants a new destination *on purpose*,
+# so that a copy of a read-only file can still be given its attributes. Nothing
+# else in the suite can tell a `cp` that repairs that stripping from one that
+# does not.
+UMASK=
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); UMASK=''; }
 reset_knobs
 
 # The two sides run in two different directories, and a case that names an
@@ -333,6 +345,9 @@ run_one() {
     # differs for a reason that has nothing to do with either program.
     # Prepended rather than replacing `PATH`, so `timeout` is still findable.
     PATH="$bindir/$side:$PATH"
+    # After the `cd` and before the run, so it reaches `cp` and nothing else —
+    # not the fixture above, and not the snapshot afterwards.
+    [ -z "$UMASK" ] || umask "$UMASK"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
     diff_run timeout -k 2 30 env "${ENVV[@]}" cp "$@" >"$out" 2>"$err"
@@ -381,6 +396,7 @@ compare() {
   [ -z "$ANSWERS" ] || label="$label   [in: ${ANSWERS//$'\n'/\\n}]"
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
+  [ -z "$UMASK" ] || label="$label   [umask: $UMASK]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
@@ -1792,6 +1808,55 @@ run_case file.txt new.txt
 # word off. The source keeps its attribute; the copy must not get it.
 STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1'
 xattr_case -a --no-preserve=xattr file.txt new.txt
+
+# A *read-only* source with an attribute, which is the case where carrying the
+# attribute needs the destination to be created with a mode it is not meant to
+# keep.
+#
+# Linux's `xattr_permission` (`fs/xattr.c`) demands write access to the inode
+# before it will set an attribute on it, so a faithful copy of a `0444` file is
+# a file no `setxattr` can reach — and the obvious implementation, "create it
+# with the source's mode, then copy the attributes", loses every one of them.
+# GNU creates the destination with `S_IWUSR` added (`copy.c:1451`, guarded by
+# `preserve_xattr && !owner_privileges`) and takes the bit off again in the
+# settle-up chmod, so the copy arrives at `0444` *with* its attributes.
+#
+# The three spellings are here because the loss is a different colour under
+# each: `--preserve=xattr` prints and exits 1, `--preserve=all` prints and
+# exits 0, and `-a` says nothing at all and just drops the attribute. The last
+# is the one worth having a case for — it is the spelling a user reaches for
+# and the one whose failure is silent.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 444 file.txt'
+xattr_case --preserve=xattr file.txt new.txt
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 444 file.txt'
+xattr_case --preserve=all file.txt new.txt
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 444 file.txt'
+xattr_case -a file.txt new.txt
+# `0400`: no group or other bits at all, so the withholding under `-p` has
+# nothing to withhold and the extra bit is the only thing separating the
+# creation mode from the final one.
+STAMPS=1 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 400 file.txt'
+xattr_case -a file.txt new.txt
+# The same down a tree, where the directory is read-only too. A directory needs
+# no extra bit — it is forced to `S_IRWXU` anyway so that it can be filled, and
+# GNU's `extra_permissions` is local to `copy_reg` — so this case says that the
+# file's repair and the directory's are separate and both happen.
+STAMPS=1 TREE='mkstamped
+              diff_setxattr tree user.ondir d
+              diff_setxattr tree/a.txt user.onfile f
+              chmod 444 tree/a.txt
+              chmod 500 tree'
+xattr_case -a tree dst
+# And under a umask that strips the very bit being granted. `umask 0222` takes
+# owner-write off everything the kernel creates, so the mode asked for at
+# `open` is not the mode that arrives, and a `cp` that only *asks* is back to
+# the silent loss above. GNU re-adds it with an explicit chmod after the open
+# and gives up gracefully if even that fails (`copy.c:1539`). This is the only
+# case in the suite that reaches that repair.
+STAMPS=1 UMASK=0222 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 444 file.txt'
+xattr_case -a file.txt new.txt
+STAMPS=1 UMASK=0222 TREE='mkstamped; diff_setxattr file.txt user.tag v1; chmod 444 file.txt'
+xattr_case --preserve=xattr file.txt new.txt
 
 # Access-control lists, which ride on `--preserve=mode` and not on
 # `--preserve=xattr`.

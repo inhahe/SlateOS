@@ -244,12 +244,17 @@ MUTATIONS = [
         ["a_band_tall_enough_for_a_line_draws_one"],
     ),
     (
-        # The room is a field precisely so that the frame can be checked against
-        # it; a room reported wider than it is puts the check back where it was.
+        # The room is a field precisely so that the frame can be checked
+        # against it -- which makes the room itself a claim, and a claim that
+        # nothing pins is a check that can be relaxed to nothing while staying
+        # green.  Reporting the whole window as the room passes
+        # `the_board_fits_the_room_it_was_solved_from` trivially; what it cannot
+        # pass is the chrome, which the room is supposed to have had taken out
+        # of it.
         "the board reports a room bigger than the one it was solved from",
         "            board_band: band,",
         "            board_band: Rect::new(0.0, 0.0, w, h),",
-        ["the_board_fits_the_room_it_was_solved_from"],
+        ["the_board_never_overlaps_the_chrome"],
     ),
     # ── Identity ────────────────────────────────────────────────────
     (

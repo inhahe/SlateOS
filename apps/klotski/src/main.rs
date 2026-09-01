@@ -2439,24 +2439,32 @@ mod tests {
         // the picture is fine while a dark mat is painted over the title bar.
         // The region a pass owns is the region it *paints*, not the one the
         // layout named after it.
+        //
+        // The *room* as well as the frame. The room is what
+        // `the_board_fits_the_room_it_was_solved_from` measures the frame
+        // against, so a room reported larger than the chrome really left over
+        // would relax that test to nothing while leaving it green — a check
+        // whose subject is itself a claim needs its subject pinned.
         for &(w, h) in WINDOWS {
             let l = Layout::new(w, h);
-            if l.board_frame.is_empty() {
-                continue;
-            }
-            for (name, r) in [
-                ("header", l.header),
-                ("controls", l.controls),
-                ("footer", l.footer),
-            ] {
-                if r.is_empty() {
+            for (what, board) in [("band", l.board_band), ("frame", l.board_frame)] {
+                if board.is_empty() {
                     continue;
                 }
-                assert!(
-                    l.board_frame.intersect(r).is_none(),
-                    "at {w}x{h} the board sits on the {name}: board frame {:?}, {name} {r:?}",
-                    l.board_frame
-                );
+                for (name, r) in [
+                    ("header", l.header),
+                    ("controls", l.controls),
+                    ("footer", l.footer),
+                ] {
+                    if r.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        board.intersect(r).is_none(),
+                        "at {w}x{h} the board {what} sits on the {name}: \
+                         {board:?}, {name} {r:?}"
+                    );
+                }
             }
         }
     }

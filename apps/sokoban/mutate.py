@@ -84,7 +84,7 @@ MUTATIONS = [
         # The shape of the warehouse is the only thing that makes one level's
         # board different from another's.
         "the board is sized from a fixed shape rather than the level's",
-        "            let per_w = cols as f32 + (cols as f32 - 1.0) * GAP_PER_CELL;",
+        "            let per_w = cols as f32 + (cols as f32 + 1.0) * GAP_PER_CELL;",
         "            let per_w = 8.0;",
         ["the_layout_is_a_function_of_the_window_size_and_the_level_shape_alone"],
     ),
@@ -597,16 +597,16 @@ MUTATIONS = [
     ),
     (
         "the footer line is drawn without a width limit",
-        "                Some((l.footer.w - l.pad * 2.0).max(0.0)),",
-        "                None,",
+        "                (l.footer.w - l.pad * 2.0).max(0.0),",
+        "                f32::MAX,",
         ["every_string_the_footer_draws_is_bounded_and_clipped"],
     ),
     (
         # The mirror image of positioning text by guessing its width: right
         # alignment with no left bound puts a long string off the screen.
         "a right-aligned string is bounded on one side only",
-        "    push_text(f, l, (right - w).max(left), y, Some(room));",
-        "    push_text(f, l, right - text::measure(l.text, l.size, l.weight), y, None);",
+        "    let w = text::measure(l.text, l.size, l.weight).min(room);",
+        "    let w = text::measure(l.text, l.size, l.weight);",
         ["every_string_is_drawn_inside_the_window_it_was_given"],
     ),
     (
@@ -637,9 +637,9 @@ MUTATIONS = [
     ),
     (
         "the overlay's decoration is placed off the window it decorates",
-        "                dx.clamp(0.0, (l.window.w - d).max(0.0)),\n"
-        "                dy.clamp(0.0, (l.window.h - d).max(0.0)),",
-        "                dx,\n                dy,",
+        "                    dx.clamp(l.window.x, l.window.right() - d),\n"
+        "                    dy.clamp(l.window.y, l.window.bottom() - d),",
+        "                    dx,\n                    dy,",
         ["the_overlay_survives_every_window_in_the_list"],
     ),
     (
@@ -753,6 +753,202 @@ MUTATIONS = [
         "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
         "        self.frame(width, height).into_tree()",
         ["rendering_records_the_size_it_drew_at"],
+    ),
+    # -- Lesson 109: every bound a squeeze can reach --------------------
+    (
+        # The four lines the whole campaign is about. A centring that does not
+        # refuse a band it cannot fill is above the band by half the shortfall.
+        "a run is centred in a band that cannot hold it",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    Some(band.y + (band.h - height) / 2.0)",
+        [
+            "centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative",
+            "no_pass_paints_outside_the_region_it_owns",
+        ],
+    ),
+    (
+        # A band with no width is no band, however tall it is.
+        "a band with no width is still a band a run can be centred in",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    (band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        # The mat is the grid grown by a gap on every side, so the solve has to
+        # reserve `cols + 1` gaps and not `cols - 1`.
+        "the board reserves the gaps between its cells but not the ones at its ends",
+        "            let per_h = rows as f32 + (rows as f32 + 1.0) * GAP_PER_CELL;",
+        "            let per_h = rows as f32 + (rows as f32 - 1.0) * GAP_PER_CELL;",
+        ["the_board_is_drawn_with_square_cells_inside_the_body"],
+    ),
+    (
+        # The mat is a named rectangle so that a test can hold the pass to it.
+        # Growing it by a gap it did not reserve is the fault that naming found.
+        "the mat is drawn a gap larger than the one the solve sized",
+        "        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));",
+        "        fill(\n"
+        "            f,\n"
+        "            Rect::new(\n"
+        "                l.board_frame.x - l.gap,\n"
+        "                l.board_frame.y - l.gap,\n"
+        "                l.board_frame.w + l.gap * 2.0,\n"
+        "                l.board_frame.h + l.gap * 2.0,\n"
+        "            ),\n"
+        "            CRUST,\n"
+        "            CornerRadii::all(l.gap.max(1.0)),\n"
+        "        );",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The header's one-line fallback: falling back to one line does not make
+        # one line fit.
+        "the header falls back to one line without asking whether one line fits",
+        "        let stack = if two_lines { title_h + sub_h } else { title_h };\n"
+        "        let Some(top) = centre_line(l.header, stack) else {\n"
+        "            return;\n"
+        "        };",
+        "        let top = if two_lines {\n"
+        "            l.header.y + (l.header.h - title_h - sub_h) / 2.0\n"
+        "        } else {\n"
+        "            l.header.y + (l.header.h - title_h) / 2.0\n"
+        "        };",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The title takes what the counters leave. Given the whole band it runs
+        # under them and off the right-hand edge in a narrow window.
+        "the header's title takes the whole band rather than what the counters leave",
+        "        let title_w = (right - left - counter_w - l.pad).max(0.0);",
+        "        let title_w = (right - left).max(0.0);",
+        ["the_headers_title_stops_where_its_counters_begin"],
+    ),
+    (
+        # A run given no room is a run the renderer is asked to draw in
+        # nothing. Containment cannot see it: `inked` takes the limit as
+        # the run's width, and a box with no width is inside anything.
+        "a run with no room is pushed anyway",
+        "    if l.text.is_empty() || limit <= 0.0 {",
+        "    if l.text.is_empty() {",
+        ["no_run_is_pushed_into_a_box_with_no_room"],
+    ),
+    (
+        # A centred run starts half the slack in, so the box's full width is
+        # half the slack more than the run can have.
+        "a centred run is given its box's width from where it starts",
+        "    push_text(f, l, x, y, r.right() - x);",
+        "    push_text(f, l, x, y, r.w);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a right-aligned run is given its box's width from where it starts",
+        "    push_text(f, l, x, y, right - x);",
+        "    push_text(f, l, x, y, (right - left).max(0.0));",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # A stroke straddles the line it is drawn on.
+        "a border is drawn on the edge it is meant to sit inside",
+        "    let inner = Rect::new(r.x + lw / 2.0, r.y + lw / 2.0, r.w - lw, r.h - lw);",
+        "    let inner = r;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # A clamp on the origin is not a bound on the dot.
+        "a window too small for one dot gets a full set of them",
+        "        if d <= l.window.w && d <= l.window.h {",
+        "        if l.window.w > 0.0 {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The stripe's width has a one-point floor that does not scale.
+        "the cursor stripe is as wide as its floor whatever the row is",
+        "                if let Some(stripe) = Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h).intersect(r)\n"
+        "                {\n"
+        "                    fill(f, stripe, PEACH, CornerRadii::all(1.0));\n"
+        "                }",
+        "                fill(\n"
+        "                    f,\n"
+        "                    Rect::new(r.x, r.y, (l.pad * 0.5).max(1.0), r.h),\n"
+        "                    PEACH,\n"
+        "                    CornerRadii::all(1.0),\n"
+        "                );",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The mark is bounded by the gutter it was measured for.
+        "the done mark is drawn without the gutter it was measured for",
+        "                (r.w - l.pad * 2.0).min(mark_w).max(0.0),",
+        "                f32::MAX,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The menu's rows are centred with a bare offset, because the floor
+        # on the row height dominates every `centre_line` that could stand
+        # there. This is that floor: drop it and the first row's words go
+        # above the body.
+        "the menu rows have no floor to keep their type inside them",
+        "            row: (font * 2.1).max(1.0),",
+        "            row: (font * 0.5).max(1.0),",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the footer places its lines whether or not the band can hold them",
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {\n"
+        "            return;\n"
+        "        };",
+        "        let top = l.footer.y + (l.footer.h - lh * shown as f32) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the victory card places its stack whether or not the panel can hold it",
+        "        let Some(top) = centre_line(panel, stack) else {\n"
+        "            return;\n"
+        "        };",
+        "        let top = panel.y + (panel.h - stack) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        # The converse: containment is satisfied by drawing nothing at all,
+        # and a `centre_line` that refuses every band is how a pass draws
+        # nothing while staying scrupulously inside its region.
+        "no band is ever tall enough for a line",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    None",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        "the menu refuses every body rather than only the ones with no room",
+        "        if l.body.is_empty() {",
+        "        if true {",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        # A band of no area gets no commands at all, not one degenerate fill.
+        # This is the refusal every pass in the file leans on, which is why
+        # none of them repeats it.
+        "a rectangle with no area is still filled",
+        "    if r.is_empty() {\n"
+        "        return;\n"
+        "    }\n"
+        "    f.push(RenderCommand::FillRect {",
+        "    f.push(RenderCommand::FillRect {",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
+    ),
+    (
+        # `f.clip` pushes a command whether or not the rectangle has area,
+        # so a pass that clips before it has refused the band cannot be
+        # silent about a band it was never given -- and leaves the clip
+        # unbalanced on the way out besides.
+        "the footer clips its band before it has refused it",
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {\n"
+        "            return;\n"
+        "        };\n"
+        "        f.clip(l.footer);",
+        "        f.clip(l.footer);\n"
+        "        let Some(top) = centre_line(l.footer, lh * shown as f32) else {\n"
+        "            return;\n"
+        "        };",
+        ["a_pass_with_room_paints_and_a_pass_with_none_paints_nothing"],
     ),
 ]
 

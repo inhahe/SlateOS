@@ -1304,9 +1304,11 @@ impl Sokoban {
     }
 
     fn draw_header(&self, f: &mut Frame<Target>, l: &Layout) {
-        if l.header.is_empty() {
-            return;
-        }
+        // No `l.header.is_empty()` bail: `fill` refuses a rectangle with no
+        // area and `centre_line` refuses a band that cannot hold the stack, so
+        // an empty band already leaves this pass without emitting a command.
+        // The bail was a guard in front of two rules that already held, and the
+        // sweep proved it — deleting it changed no test's answer.
         fill(f, l.header, MANTLE, CornerRadii::ZERO);
 
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
@@ -1460,14 +1462,21 @@ impl Sokoban {
 
             let size = (r.h * 0.44).clamp(7.0, l.font);
             let lh = text::line_height(size, FontWeightHint::Bold);
-            // The row's own baseline, asked for once. Both runs below sit on
-            // it, so a row too short for its type draws its stripe and its
-            // background and no words -- rather than words half a line above
-            // the stripe. `size` is clamped up to 7 points, so a row 4 points
-            // tall does not merely get small type: it gets none.
-            let Some(y) = centre_line(r, lh) else {
-                continue;
-            };
+            // The row's own baseline, asked for once, so both runs below sit on
+            // it. It is a bare centring and not a `centre_line`, because a
+            // `centre_line` here is a guard nothing can reach and the sweep
+            // said so: the row height has a floor of `2.1 * font` and the type
+            // in it is the larger of 7 points and `0.44 * r.h`, and the first
+            // of those beats the second everywhere the two clamps can go.
+            // `font` is at least 8, so `r.h >= 16.8 - 0.4 * pad`; `pad` is
+            // `min(w, h) * 0.02`, and reaching its own ceiling of 10 needs a
+            // window 500 points across, by which point `font` is 13 and the row
+            // is 27 points tall. The tightest case is the smallest window,
+            // `r.h = 14.4` against a 9.5-point line. The bound that does the
+            // work is the floor on `Layout::row`, and that is what the
+            // mutation row points at: drop it to `0.5 * font` and this
+            // centring puts the first row's words above the body.
+            let y = r.y + (r.h - lh) / 2.0;
             let done = self.is_completed(index);
             let mark = if done { "done" } else { "" };
             // The name starts after the widest mark either row could carry, so
@@ -1631,9 +1640,11 @@ impl Sokoban {
     }
 
     fn draw_controls(&self, f: &mut Frame<Target>, l: &Layout) {
-        if l.controls.is_empty() {
-            return;
-        }
+        // As in `draw_header`, and for one more reason: `button_rects` gives a
+        // dropped band four empty rectangles, `fill` refuses each of them, and
+        // `Frame::hit` records nothing for a rectangle no viewer could see. The
+        // `l.controls.is_empty()` bail this opened with stood in front of all
+        // three and survived its own mutation row because of it.
         fill(f, l.controls, MANTLE, CornerRadii::ZERO);
         let buttons = self.buttons();
         for ((target, name), r) in buttons.iter().copied().zip(l.button_rects(buttons.len())) {
@@ -1669,9 +1680,11 @@ impl Sokoban {
     }
 
     fn draw_footer(&self, f: &mut Frame<Target>, l: &Layout) {
-        if l.footer.is_empty() {
-            return;
-        }
+        // No bail here either — but note that the order matters, and it is the
+        // reason `draw_list` keeps its own. `f.clip` pushes a command whether
+        // or not the rectangle has area, so a pass that clips *before* it has
+        // refused the band cannot be silent about a band it was never given.
+        // This one refuses at `centre_line`, which is above the clip.
         fill(f, l.footer, MANTLE, CornerRadii::ZERO);
         let lh = text::line_height(l.small, FontWeightHint::Regular);
         // Two lines if two fit, otherwise one -- and `centre_line` is what says
@@ -2048,7 +2061,12 @@ fn label_right(f: &mut Frame<Target>, l: &Label, left: f32, right: f32, y: f32) 
     // The header's own counter did exactly that at 170 pixels wide.
     let room = (right - left).max(0.0);
     let w = text::measure(l.text, l.size, l.weight).min(room);
-    let x = (right - w).max(left);
+    // `(right - w).max(left)` — the shape this was first written in — is a
+    // clamp the line above already implies: `w <= room` gives `right - w >=
+    // right - room == left`, so the `max` never fires. A clamp a stronger
+    // guard dominates is a clamp no test can reach, which reads as coverage
+    // and is not; the bound that does the work is the `.min(room)`.
+    let x = right - w;
     // The limit is measured from where the run *starts*, not from the box it
     // sits in. `right - left` is what the box is worth to a run beginning at
     // `left`; this one begins at `right - w`, so handing it the box's whole
@@ -2629,6 +2647,67 @@ mod tests {
                      no height",
                     f.commands().len()
                 );
+            }
+        }
+    }
+
+    /// A run is never handed a box it cannot be drawn in.
+    ///
+    /// Containment cannot see this one. `inked` takes a run's `max_width` as
+    /// its width, so a run told it may fill nought points measures as an empty
+    /// rectangle, and an empty rectangle is inside every region there is. The
+    /// command is still there, though: the program asked the renderer to draw
+    /// a string in no room, with `Ellipsis` overflow, and what comes back is
+    /// the renderer's business rather than the program's. `push_text` refuses
+    /// the call instead, and this is what says so.
+    #[test]
+    fn no_run_is_pushed_into_a_box_with_no_room() {
+        for (state, g) in states() {
+            for &(w, h) in WINDOWS {
+                for (text, x, _y, max, _overflow) in text_boxes(&g.draw((w, h))) {
+                    let Some(max) = max else {
+                        unreachable!("push_text always sets a limit");
+                    };
+                    assert!(
+                        max > 0.0,
+                        "{state}: {text:?} was pushed at x = {x} with {max} points \
+                         of room at {w}x{h}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The header's two columns do not overlap.
+    ///
+    /// The band is wide enough for both runs only some of the time, and what
+    /// the title does with the rest of it is the whole reason the columns are
+    /// named. Containment is blind here — a title given the *whole* band still
+    /// stays inside the header; it just runs underneath the counters — so the
+    /// claim has to be about the two runs and not about the band.
+    #[test]
+    fn the_headers_title_stops_where_its_counters_begin() {
+        let g = playing();
+        for &(w, h) in WINDOWS {
+            let mut f = Frame::new(w, h);
+            let l = Layout::new(w, h, g.cols, g.rows);
+            g.draw_header(&mut f, &l);
+            // Pairwise, and not "the title against everything": the subtitle
+            // shares the title's column and sits on the line below it, so the
+            // claim is that no two runs occupy the same point — which is what
+            // two named columns and two stacked lines are worth.
+            let runs = inked(&f);
+            for (i, (ta, a)) in runs.iter().enumerate() {
+                for (tb, b) in runs.iter().skip(i + 1) {
+                    let Some(over) = a.intersect(*b) else {
+                        continue;
+                    };
+                    assert!(
+                        over.w <= 0.01 || over.h <= 0.01,
+                        "at {w}x{h} {ta:?} at {a:?} and {tb:?} at {b:?} overlap \
+                         by {over:?}"
+                    );
+                }
             }
         }
     }
@@ -4911,13 +4990,22 @@ mod tests {
                 if !PLAY_FOOTER.contains(&text.as_str()) {
                     continue;
                 }
+                // The *value* of the limit, not merely its presence. While
+                // "unbounded" was spelled `None`, `max.is_some()` was a real
+                // check; now that `push_text` takes an `f32` there is no way to
+                // draw a run without a limit, and the question is whether the
+                // limit is the band's. A run told it may fill `f32::MAX` is as
+                // unbounded as one told nothing, and the assertion that only
+                // asked "is there a number here?" could not tell them apart.
+                let Some(max) = max else {
+                    unreachable!("push_text always sets a limit");
+                };
                 assert!(
-                    max.is_some(),
-                    "the footer line was drawn without a width limit at {w}x{h}"
-                );
-                assert!(
-                    x >= l.footer.x,
-                    "the footer line started left of its band at {w}x{h}"
+                    x >= l.footer.x && x + max <= l.footer.right() + 0.01,
+                    "the footer line was given {max} points of room from x = {x} \
+                     in a band running {} to {}, at {w}x{h}",
+                    l.footer.x,
+                    l.footer.right()
                 );
             }
         }

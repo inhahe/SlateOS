@@ -103285,6 +103285,102 @@ answer. The fix was to make the code true rather than to delete either copy:
 the letters are placed on the row's single baseline now, through `span` for the
 horizontal half. If a comment claims a guard is the only one, mutate it.
 
+**sokoban** (2026-09-01) -- done: 112 tests, 120/120 mutation rows caught. The
+grep said 8 sites; the app had eleven faults. Three were found by reading (an
+unnamed band, a fallback branch, and three guards standing in front of rules
+that already held) and six by the containment sweep -- and five of those six are
+one mistake, which is the main thing this app adds:
+
+8. **A run's width limit must be measured from where the run starts, not from
+   the box it sits in.** `label_centred` passed `r.w` and `label_right` passed
+   `right - left`, which is what the box is worth to a run beginning at its left
+   edge. A centred run begins half the slack in and a right-aligned one begins
+   `right - w` in, so the box's full width tells the renderer it may paint that
+   far *past* the edge the run was aligned to: a "Play" 27 points wide, centred
+   in a 136-point button, was licensed to fill 136 points starting 54 past the
+   button's left edge, and ran 54 points off the band. The limit is
+   `box.right() - x` now. Expect this in every app with a `label_centred` or
+   `label_right`, which is most of them -- and note that the horizontal
+   containment check is what finds it, so shape 6's "measure the ink on both
+   axes" is a prerequisite.
+9. **Make "no limit" unspellable.** `push_text` took an `Option<f32>` and the
+   file carried a `label()` convenience that passed `None`; one caller used it
+   for the header's title, and "Sokoban" at 28 points ran 110 points wide out of
+   a band 1 point wide. Deleting the helper is not enough while the parameter is
+   still an `Option` -- the next edit re-adds it. Change the type to `f32`, so
+   the only way to draw a run is to say how much room it has, and split any band
+   two runs share into named columns (here a title column that takes what the
+   counters leave) so there is a real number to pass.
+10. **A clamp on an origin is not a bound on the thing drawn from it.** The
+    victory confetti clamped each dot's top-left corner with
+    `dy.clamp(0.0, (l.window.h - d).max(0.0))` and then drew `d` points anyway,
+    so in a window shorter than one dot the `.max(0.0)` collapsed the range to
+    a single legal origin and the dot was painted out of the window from it. The
+    same shape as shape 6's floors: a size with a floor that does not scale
+    (`(l.pad * 0.5).max(1.0)` for the menu cursor's stripe, 1.7 points wide in a
+    row 1 point wide) is a bound on nothing. Both are fixed by refusing the case
+    outright -- `if d <= window.w && d <= window.h`, and `.intersect(r)` for the
+    stripe, which bounds all four sides and returns `None` for a row with no
+    room, the same `Option` shape as `centre_line`.
+
+**Then the sweep over the finished suite faulted six rows, and not one of them
+was a missing bound.** Four were shape 2 again -- and the interesting part is
+that the *fix* introduced them. Three passes opened with an
+`if l.<band>.is_empty() { return; }` that only became unreachable once `fill`
+learned to refuse a rectangle with no area and `centre_line` learned to refuse a
+band that cannot hold its stack; `draw_list`'s new `centre_line` is dominated by
+the floor on the row height. **Expect the sweep after the fix to find guards the
+fix made redundant, and re-point their rows rather than deleting them** -- at
+`fill`'s own refusal, at the floor that does the work, at `centre_line` returning
+`None` for every band. One guard survived the audit and is worth knowing about:
+
+11. **A pass that clips is not free to skip its band check.** `Frame::clip`
+    pushes a `PushClip` command whether or not the rectangle has area, so a pass
+    that clips before it has refused the band emits two commands for a band it
+    was never given -- and, on an early return between the two, leaves the clip
+    unbalanced. `draw_list` keeps its `l.body.is_empty()` bail for exactly this
+    reason while its three neighbours lost theirs; `draw_footer` gets away
+    without one only because its refusal is above its clip. When deleting a
+    dominated band guard, check for a `clip` below it first.
+
+And two of the six were places **containment is structurally blind**, both worth
+checking for in every app that gets the treatment:
+
+12. **Containment cannot see a run that overlaps another run.** A title handed
+    the whole band instead of what the counters leave does not leave the band --
+    it runs underneath them. Naming the columns is what makes the claim
+    sayable; say it, pairwise over the pass's runs, or the named columns are
+    decoration. (Pairwise and not "the title against the rest": a subtitle
+    shares the title's column and sits on the line below it.)
+13. **Containment cannot see a run given no room at all.** The natural `inked`
+    helper takes `max_width` as the run's width, so a run told it may fill
+    nought points measures as an empty rectangle -- and an empty rectangle is
+    inside everything. The command is still there, asking the renderer to draw
+    a string with `Ellipsis` overflow in no room. Assert separately that every
+    `Text` command carries a positive limit. Related, and the reason shape 9
+    needs this one: closing off `None` **guts every test that only asserted a
+    limit existed**. `max.is_some()` was a real check until `push_text` took an
+    `f32`, and then it was vacuous -- the sweep caught it as a `[??]`, the fault
+    falling to the containment test instead of its named owner. Grep for
+    `.is_some()` in the suite after the type change and make each one assert the
+    limit's *value* against the band.
+
+Also worth carrying: **`stroke` should have `fill`'s contract.** A stroke
+straddles the line it is drawn on, so a 2-point border asked for a card's exact
+rectangle paints a point outside it on every side -- the victory card's border
+landed at y = -0.71. Inset the rectangle by half the line width inside `stroke`
+itself rather than at each call site; hangman fixed the same fault one call site
+at a time, and sokoban shows it belongs in the helper.
+
+And the counts to date, remeasured 2026-09-01 after this app: **47 apps and 140
+sites remain**, with only automator, taskscheduler, hangman and sokoban carrying
+`no_pass_paints_outside_the_region_it_owns`. The largest remaining are rush,
+magnifier and klotski at 7 each, then spades and snippets at 6. klotski is the
+same program as sokoban structurally -- same `Layout`, same five `draw_*` passes,
+same `fill`/`push_text`/`label`/`label_right`/`label_centred` helpers with
+`push_text` still taking an `Option<f32>` -- so this app's fix transfers to it
+nearly verbatim.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

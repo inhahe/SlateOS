@@ -105165,10 +105165,19 @@ engine is a red `main` for all three lanes:
 4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
 
 Each stage is certifiable the same way the `fsattr` moves in this chain were:
-`scripts/cp-diff.sh` must stay byte-identical at its current 557 passed, 0
-differed, 33 differ on purpose, and `scripts/mv-diff.sh` at 341/0/11. A stage
-that moves code without changing behaviour and *does* move those numbers has a
-bug in the move.
+`scripts/cp-diff.sh` and `scripts/mv-diff.sh` must stay byte-identical across
+it. A stage that moves code without changing behaviour and *does* move those
+numbers has a bug in the move.
+
+The numbers themselves are deliberately **not** written down here any more.
+They were — "557 passed, 0 differed, 33 differ on purpose" and "341/0/11" —
+and within a day of being written both were wrong, because the harnesses gain
+cases faster than this entry gets re-read: cp-diff is 572/0/30 and mv-diff
+357/0/11 as of 2026-09-01, having moved twice that day for reasons that had
+nothing to do with this work. A stale target number is worse than none, since
+the natural reading of a mismatch is that the stage broke something. Take the
+baseline by *running both harnesses immediately before starting a stage*, and
+compare against that.
 
 **How it is caught.** `scripts/mv-diff.sh` §22, one `xfail_case` naming this
 entry, whose fixture carries a setgid bit and a subdirectory so that the case

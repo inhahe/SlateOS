@@ -508,6 +508,16 @@ elif [ "$DIFF_XATTR_REF" != yes ]; then
 else
   echo "  xattr: $DIFF_XATTR, reference has USE_XATTR"
 fi
+# And the same pair of facts for section 24. The comparison itself is shared —
+# an ACL is stored as an extended attribute and `xattrs` already reads it — so
+# what these two lines report is only whether that section's cases can run.
+if [ -z "$DIFF_SETFACL" ]; then
+  echo "  acl:   NOT EXERCISED -- no working setfacl, section 24 skipped"
+elif [ "$DIFF_ACL_REF" != yes ]; then
+  echo "  acl:   NOT EXERCISED -- reference built without USE_ACL, section 24 skipped"
+else
+  echo "  acl:   $DIFF_SETFACL, reference has USE_ACL"
+fi
 
 # =============================================================================
 # 1. Too few operands
@@ -2065,6 +2075,93 @@ run_case -v @FAR@/f g
 # a directory attribute can be tested in until that lands — and when it does,
 # the far version of this case is the one to add.
 TREE='mkdir d; printf x > d/f; diff_setxattr d user.dir v'
+FAR=':'
+run_case -v d e
+
+fi
+
+# =============================================================================
+# 24. Access-control lists
+# =============================================================================
+# An ACL is a permission list finer than the nine mode bits — "user 0 may write
+# this as well as the owner". It is compared by the same `xattrs` the section
+# above added, because on Linux an ACL *is* the extended attribute
+# `system.posix_acl_access`; what it needs of its own is a way to make one, and
+# a reference that keeps one.
+#
+# It is a separate section from §23 rather than more cases in it because the two
+# gates are independent and fail differently. §23 needs `USE_XATTR`, without
+# which the reference *refuses* `--preserve=xattr` outright; this needs
+# `USE_ACL`, without which the reference copies happily and merely drops the
+# entries while carrying the bits. A single gate would skip cases that could
+# have run, and a single skip message could not say which fact was missing.
+#
+# `mv` has no options here — it preserves everything it can, always — so unlike
+# `cp` there is no negative case to write. What varies is only whether the move
+# is a `rename(2)` or the copy-and-unlink fallback, which is the same split §22
+# and §23 are built around.
+#
+# Measured, not assumed: with the `copy_xattrs(.., Xattrs::Permissions)` call in
+# `fsattr::copy_permissions` short-circuited — leaving the chmod and the
+# clearing, which is exactly a gnulib built without libacl, carrying the bits
+# and dropping the entries — this run goes from 357/0 to 353/4. The four are the
+# four that cross the boundary; the control and the directory below it stay
+# green, which is right, since a `rename(2)` never touches the inode and so
+# carries the list whatever our code does. Four of six is the honest ceiling
+# here for the same reason §23's is three of five.
+if [ -z "$far_root" ] || [ -z "$DIFF_SETFACL" ] || [ "$DIFF_ACL_REF" != yes ]; then
+  echo "SKIP section 24: needs a second device, a working setfacl, and a"
+  echo "                reference built with USE_ACL (without it gnulib compiles"
+  echo "                copy_acl down to a plain chmod, so it carries the mode"
+  echo "                bits and silently drops the entries)"
+else
+
+# The control, as in §23: one filesystem, so this is a rename, the inode is
+# never touched and the list survives whatever `mv` does. If it fails, the
+# fixture is what is broken.
+TREE='printf hello > f; diff_setfacl f u:0:rwx'
+FAR=':'
+run_case -v f g
+
+# Across the boundary, where the fallback has to read the list off the source
+# and write it onto a new inode.
+TREE=''
+FAR='printf hello > f; diff_setfacl f u:0:rwx'
+run_case -v @FAR@/f g
+
+# Two entries, so that a fallback carrying only the first is caught, and a
+# group entry alongside the user one — adding a named entry makes `setfacl`
+# synthesise a mask, which has to arrive as it was and not be recomputed from
+# the mode at the far end.
+TREE=''
+FAR='printf hello > f
+      diff_setfacl f u:0:rwx
+      diff_setfacl f g:0:r-x'
+run_case -v @FAR@/f g
+
+# A destination that already exists and carries its own list. A rename replaces
+# the inode, so the destination's entry must be *gone* and not merged with the
+# source's — the ACL half of §22's second case, and the one a fallback that
+# opened the destination in place would fail.
+TREE='printf XXXXXXXXXX > g; diff_setfacl g g:0:r-x'
+FAR='printf hello > f; diff_setfacl f u:0:rwx'
+run_case -v @FAR@/f g
+
+# A list and an ordinary attribute on one file. These are two entries in one
+# attribute list carried by two different pieces of GNU's code, so a fallback
+# that handled either alone passes one of the cases above and fails this.
+TREE=''
+FAR='printf hello > f
+      diff_setfacl f u:0:rwx
+      diff_setxattr f user.tag v1'
+run_case -v @FAR@/f g
+
+# A directory's *default* ACL — `system.posix_acl_default`, a second attribute
+# that new children inherit — within one filesystem, which is the only shape a
+# directory can be moved in until `B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-
+# REFUSED` lands. As with §23's last case, the far version is the one to add
+# when it does.
+TREE='mkdir d; printf x > d/f; diff_setfacl d u:0:rwx; diff_setfacl d d:u:0:rwx'
 FAR=':'
 run_case -v d e
 

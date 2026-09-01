@@ -14508,7 +14508,12 @@ EROFS). Regression test: Path Z Part 28 (`self_test_linux_link`) hard-links
 `/mnt/lnk-dst` to a pre-staged `/mnt/lnk-src` from ring 3 and reads the byte
 back through it.
 
-**memfs does not support hard links (deferred):** the test runs on the **ext4**
+**memfs does not support hard links (deferred):** *— no longer true as of
+2026-09-01; memfs was refactored to a flat inode table and implements
+`link`/`link_no_follow`. See `design-decisions.md` §665 and
+`A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK`. The paragraph is
+kept because the fidelity-gap history after it is still accurate.* The test
+runs on the **ext4**
 mount at `/mnt`, not the in-memory root (`/`, `/tmp`). memfs stores file data
 inline in by-value tree nodes (`MemFsNodeKind::File(Vec<u8>)` owned by the
 parent's `BTreeMap`), so two directory entries cannot share one inode — which
@@ -103308,7 +103313,32 @@ of these eight were one line in a helper shared by six crates.
 and a trailing `remove_dir_all` that an unwind skips, were converted to
 `ScratchDir` in the same commit — 264 call sites, 121 cleanup tails removed.
 
-## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
+## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK — FIXED 2026-09-01 (lane A, filed 2026-08-31)
+
+**Status: FIXED.** memfs now keeps a flat inode table (`BTreeMap<ino, node>`)
+with directories holding `name -> ino`, and implements `link` /
+`link_no_follow`. See `design-decisions.md` §665, which also reverses §30's
+June decision to defer exactly this refactor.
+
+What that changed, in the terms this entry was filed in:
+
+- The recorded skip (`pinned linkat: the positive same-inode/nlinks
+  assertion`) is **deleted**, not merely unreached — the assertion is stated
+  unconditionally, so a regression fails the boot rather than restoring the
+  skip.
+- `nlink` and `st_ino` now mean on memfs what the entry below notes they were
+  only half-promising: `nlink` counts the names, and `drop_link` frees the
+  object when the last one goes.
+- `self_test_linux_link` (ring 3) falls back from `/mnt` to `/tmp`, so the
+  **diskless** boot the CI actually runs exercises `link(2)` end to end. This
+  was the entry's real subject — not that memfs lacked a feature, but that the
+  configuration under test could not reach the feature's tests.
+- `memfs::self_test` gained direct coverage: shared inode, shared data, unlink
+  decrementing rather than deleting, follow vs no-follow, and no inode leak.
+
+The original report follows unedited.
+
+---
 
 **What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
 `FileSystem::link`'s default applies and every hard link on a memfs mount

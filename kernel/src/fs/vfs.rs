@@ -321,7 +321,14 @@ pub struct FileMeta {
 
     // --- Link count ---
     /// Number of hard links pointing to the underlying data.
-    /// Always 1 for filesystems that don't support hard links (FAT, memfs).
+    /// Always 1 for filesystems that don't support hard links (FAT).
+    ///
+    /// For a *directory* this is the Unix convention — `2 + immediate
+    /// subdirectory count`, counting `.` and each child's `..` — not the
+    /// number of names the directory has, which is always 1.  `find(1)`'s
+    /// leaf optimisation reads it and stops descending once it has seen
+    /// `nlinks - 2` subdirectories, so reporting the name count instead
+    /// would make `find` skip real directories.
     pub nlinks: u32,
 
     // --- Block count ---
@@ -929,7 +936,8 @@ pub trait FileSystem: Send {
     /// same underlying file data (same inode on ext4).  Both paths must
     /// be on the same filesystem.
     ///
-    /// Default: not supported (FAT, memfs, procfs, devfs, ISO9660).
+    /// Default: not supported (FAT, procfs, devfs, ISO9660).  ext4 and memfs
+    /// override it.
     fn link(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         let _ = (existing, new_path);
         Err(KernelError::NotSupported)
@@ -942,10 +950,10 @@ pub trait FileSystem: Send {
     /// hard-links the symlink inode itself, not its target.
     ///
     /// Default: delegate to [`link`].  This is correct for filesystems that
-    /// either lack hard links entirely (FAT, memfs, procfs, devfs, ISO9660 —
-    /// they return `NotSupported` regardless) or lack symlinks (FAT), where
-    /// the follow/no-follow distinction cannot arise.  ext4 overrides this to
-    /// resolve `existing` without following the final component.
+    /// either lack hard links entirely (FAT, procfs, devfs, ISO9660 — they
+    /// return `NotSupported` regardless) or lack symlinks (FAT), where the
+    /// follow/no-follow distinction cannot arise.  ext4 and memfs override
+    /// this to resolve `existing` without following the final component.
     fn link_no_follow(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         self.link(existing, new_path)
     }
@@ -7927,11 +7935,7 @@ pub fn self_test() -> KernelResult<()> {
         };
         cleanup();
 
-        // Reports whether the filesystem under `/tmp` could actually make the
-        // hard link, so the skip can be recorded outside the closure: `record`
-        // takes `&mut self`, and capturing `skips` here would make `run` an
-        // `FnMut` still borrowing it at the point the skip is written.
-        let run = || -> KernelResult<bool> {
+        let run = || -> KernelResult<()> {
             Vfs::mkdir("/tmp/_pin2")?;
             Vfs::mkdir("/tmp/_pin2/src")?;
             Vfs::mkdir("/tmp/_pin2/dst")?;
@@ -8051,39 +8055,33 @@ pub fn self_test() -> KernelResult<()> {
             // would pass a content check and be a completely different (and
             // wrong) result.
             //
-            // `NotSupported` is accepted here and *only* here. memfs, which is
-            // what `/tmp` is, stores its tree as owned nodes -- a directory
-            // holds its children by value -- so two names cannot denote one
-            // node and `FileSystem::link`'s default refusal stands. That is a
-            // real gap in memfs rather than a property of this primitive, so
-            // it is recorded as a skip rather than hidden: the rest of the
-            // linkat assertions below (containment, stale refusal) do not
-            // reach the filesystem at all and run unconditionally.
-            let linked = match Vfs::link_at_pinned(&src, b"f", &dst, b"hard", false) {
-                Ok(()) => true,
-                Err(KernelError::NotSupported) => false,
-                Err(e) => return Err(e),
-            };
-            if linked {
-                let src_meta = Vfs::metadata("/tmp/_pin2/src/f")?;
-                let hard_meta = Vfs::metadata("/tmp/_pin2/dst/hard")?;
-                if src_meta.ino == 0 || src_meta.ino != hard_meta.ino {
-                    serial_println!(
-                        "[vfs]   FAIL: link_at_pinned produced ino {} for a link to ino {} — a \
-                         hard link must be the same inode, not a copy",
-                        hard_meta.ino,
-                        src_meta.ino
-                    );
-                    return Err(KernelError::InvalidArgument);
-                }
-                if hard_meta.nlinks < 2 {
-                    serial_println!(
-                        "[vfs]   FAIL: link_at_pinned left nlinks = {}, want at least 2 — `rm` \
-                         uses this to decide whether removing a name destroys the data",
-                        hard_meta.nlinks
-                    );
-                    return Err(KernelError::InvalidArgument);
-                }
+            // This used to accept `NotSupported` as a skip: memfs stored its
+            // tree as owned nodes -- a directory held its children by value --
+            // so two names could not denote one node. memfs now keeps a flat
+            // inode table with directories holding name -> ino, so the skip is
+            // gone and the assertion runs. It is stated unconditionally on
+            // purpose: an assertion that tolerates a filesystem declining to
+            // do the thing is an assertion that passes when the thing stops
+            // working.
+            Vfs::link_at_pinned(&src, b"f", &dst, b"hard", false)?;
+            let src_meta = Vfs::metadata("/tmp/_pin2/src/f")?;
+            let hard_meta = Vfs::metadata("/tmp/_pin2/dst/hard")?;
+            if src_meta.ino == 0 || src_meta.ino != hard_meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: link_at_pinned produced ino {} for a link to ino {} — a hard \
+                     link must be the same inode, not a copy",
+                    hard_meta.ino,
+                    src_meta.ino
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if hard_meta.nlinks < 2 {
+                serial_println!(
+                    "[vfs]   FAIL: link_at_pinned left nlinks = {}, want at least 2 — `rm` uses \
+                     this to decide whether removing a name destroys the data",
+                    hard_meta.nlinks
+                );
+                return Err(KernelError::InvalidArgument);
             }
 
             // utimensat, including the zero-means-unchanged convention: the
@@ -8270,7 +8268,7 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
             let _ = Vfs::remove("/tmp/_pin2/dst/x");
-            Ok(linked)
+            Ok(())
         };
 
         let result = run();
@@ -8289,33 +8287,14 @@ pub fn self_test() -> KernelResult<()> {
         }
         let _ = Vfs::rmdir("/tmp/_pin2/aside/made");
         cleanup();
-        let linked = result?;
-
-        // Recorded here rather than inside `run` for the borrow reason above.
-        // This is a gap in memfs, not in `link_at_pinned`: everything that
-        // makes the primitive safe -- `check_at_name` and both `verify_pinned`
-        // passes -- runs before the filesystem is reached, so the containment
-        // and stale-handle assertions below were exercised either way. What is
-        // missing is only the proof that a successful link shares an inode.
-        if !linked {
-            skips.record(
-                "pinned linkat: the positive same-inode/nlinks assertion",
-                "/tmp is memfs, whose directories own their children by value, so no two names \
-                 can denote one node and `FileSystem::link` stays at its refusing default",
-            );
-        }
+        result?;
 
         serial_println!(
             "[vfs]   pinned mkdir/symlink/link/utimens: OK (a swapped destination refuses all \
              four with StaleHandle and leaves the impostor directory empty; both of linkat's \
              names are contained; a symlink target keeps `..` and `/` while a link *name* with \
-             them is refused; mkdirat's mode is stamped, utimensat leaves a zero argument \
-             alone{})",
-            if linked {
-                ", linkat shares an inode"
-            } else {
-                ", linkat's same-inode check skipped -- memfs cannot hard-link"
-            }
+             them is refused; mkdirat's mode is stamped, utimensat leaves a zero argument alone, \
+             linkat shares an inode)"
         );
     } else {
         skips.record(

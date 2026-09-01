@@ -22315,8 +22315,8 @@ fn sys_link(args: &SyscallArgs) -> SyscallResult {
 /// plain `link(2)` and `linkat` without `AT_SYMLINK_FOLLOW` pass `false`
 /// (hard-link the symlink inode itself → `Vfs::link_no_follow`); `linkat`
 /// with `AT_SYMLINK_FOLLOW` passes `true` (→ `Vfs::link`, which dereferences
-/// the symlink).  memfs/FAT have no hard links (they answer `NotSupported`
-/// either way); ext4 honours the distinction.
+/// the symlink).  ext4 and memfs honour the distinction; FAT has no hard links
+/// (it answers `NotSupported` either way).
 ///
 /// Kernel context (no caller PID) preserves the EROFS terminal the batch-481
 /// fidelity self-tests assert; ring-3 callers create a real hard link.

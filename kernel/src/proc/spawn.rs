@@ -13232,10 +13232,10 @@ pub fn self_test_fastpy_slateos_link() -> KernelResult<()> {
         return Ok(());
     };
 
-    // Hard links require a filesystem with a stable inode identity — memfs
-    // (`/tmp`) returns NotSupported for `link`, only ext4 overrides it.  The
-    // boot environment mounts an ext4 volume at `/mnt` (backed by vdb), so the
-    // hard-link test targets ext4, not the memfs used by the other fastpy tools.
+    // Targets the ext4 volume at `/mnt` (backed by vdb) rather than the memfs
+    // `/tmp` the other fastpy tools use.  Both support hard links now, but ext4
+    // is the one whose `link` this rung is otherwise the only ring-3 exercise
+    // of; `self_test_linux_link` covers the memfs side on a diskless boot.
     const TARGET: &str = "/mnt/link-target.txt";
     const TARGET_ARG: &[u8] = b"/mnt/link-target.txt";
     const LINK: &str = "/mnt/link-hard";
@@ -20258,41 +20258,60 @@ pub fn self_test_linux_symlink_readlink() -> KernelResult<()> {
 /// Ring-3 regression test for the **`link(2)`/`linkat(2)`** (hard-link)
 /// syscalls, which were stale `EROFS` stubs until wired to `Vfs::link`.
 ///
-/// Hard links require an inode-sharing FS; memfs (the in-memory root) cannot
-/// share an inode between two names, so the test runs on the ext4 mount at
-/// `/mnt`.  The harness pre-creates `/mnt/lnk-src` containing the single byte
-/// `'L'` and removes any stale `/mnt/lnk-dst`.  A hand-built Linux-ABI ELF
-/// ([`elf::build_linux_link_test_elf`]) calls `link("/mnt/lnk-src",
-/// "/mnt/lnk-dst")`, then `open("/mnt/lnk-dst", O_RDONLY)` + `read` one byte
-/// and asserts it is `'L'` — proving the new name shares the source's inode
-/// data.  A clean `exit_code == 0` confirms the hard link was really created
-/// and is readable through the new name.  After the process exits, the harness
-/// independently confirms via `Vfs::read_file` that `/mnt/lnk-dst` reads back
-/// `"L"`.  Skips cleanly when there is no writable `/mnt` ext4 mount.
+/// Runs on the ext4 mount at `/mnt` when there is one, and on memfs `/tmp`
+/// otherwise, so a diskless boot exercises it too.  The harness pre-creates
+/// `<base>/lnk-src` containing the single byte `'L'` and removes any stale
+/// `<base>/lnk-dst`.  A hand-built Linux-ABI ELF
+/// ([`elf::build_linux_link_test_elf`]) calls `link(src, dst)`, then
+/// `open(dst, O_RDONLY)` + `read` one byte and asserts it is `'L'` — proving
+/// the new name shares the source's inode data.  A clean `exit_code == 0`
+/// confirms the hard link was really created and is readable through the new
+/// name.  After the process exits, the harness independently confirms via
+/// `Vfs::read_file` that the new name reads back `"L"`.
 ///
 /// Self-diagnosing sentinels: `0xC1`/193 = `link` failed, `0xC2`/194 =
 /// `open(new)` failed, `0xC3`/195 = `read` wrong length, `0xC4`/196 = wrong
-/// byte read back.  Skips gracefully (`Ok`) if the VFS cannot stage the
-/// source.  Must run **after** filesystem init.
+/// byte read back.  Must run **after** filesystem init.
 pub fn self_test_linux_link() -> KernelResult<()> {
-    // Hard links require an inode-sharing FS.  memfs (the in-memory root /,
-    // /tmp) stores file data inline in by-value tree nodes and cannot share an
-    // inode between two names, so it correctly reports "unsupported" (Linux
-    // returns EPERM for such FSes).  We therefore test the success path on the
-    // ext4 mount at /mnt, which implements hard links.  See known-issues
-    // B-SYM1 for the memfs limitation.
-    const SRC_PATH: &str = "/mnt/lnk-src";
-    const SRC_PATH_NUL: &[u8] = b"/mnt/lnk-src\0";
-    const DST_PATH: &str = "/mnt/lnk-dst";
-    const DST_PATH_NUL: &[u8] = b"/mnt/lnk-dst\0";
+    // Prefer ext4 when a `/mnt` exists, because that also exercises the ext4
+    // driver's `link`; fall back to memfs `/tmp`, which has had hard links
+    // since it stopped storing its tree as by-value nodes and moved to a flat
+    // inode table.
+    //
+    // The fallback is the point.  This rung used to `return Ok(())` on a
+    // diskless boot, which is the configuration the boot test actually runs —
+    // so the one ring-3 assertion that `link(2)` is not still an `EROFS` stub
+    // never once executed in CI.  A test whose only path to running is a
+    // fixture CI does not have is a test that does not exist.
+    let on_ext4 = crate::fs::Vfs::exists("/mnt");
+    let (src_path, dst_path, src_nul, dst_nul, base): (&str, &str, &[u8], &[u8], &str) = if on_ext4
+    {
+        (
+            "/mnt/lnk-src",
+            "/mnt/lnk-dst",
+            b"/mnt/lnk-src\0",
+            b"/mnt/lnk-dst\0",
+            "ext4 /mnt",
+        )
+    } else {
+        (
+            "/tmp/lnk-src",
+            "/tmp/lnk-dst",
+            b"/tmp/lnk-src\0",
+            b"/tmp/lnk-dst\0",
+            "memfs /tmp",
+        )
+    };
     const MAX_YIELDS: usize = 256;
 
-    serial_println!("[spawn] Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)...");
+    serial_println!("[spawn] Running Linux link()/linkat() hard-link test (ring 3, {base})...");
 
-    // Skip cleanly when /mnt isn't an ext4 mount (diskless boot).
+    // `/tmp` is created during filesystem init, so this can only fire if that
+    // failed — in which case a loud skip is right and a bare `write_file`
+    // failure below would be less informative.
     if pathz_missing(
-        "Linux link()/linkat() hard-link (ring 3, ext4 /mnt)",
-        &["/mnt"],
+        "Linux link()/linkat() hard-link (ring 3)",
+        &[if on_ext4 { "/mnt" } else { "/tmp" }],
     ) {
         return Ok(());
     }
@@ -20312,11 +20331,11 @@ pub fn self_test_linux_link() -> KernelResult<()> {
             }
         }
     }
-    drain(DST_PATH);
-    drain(SRC_PATH);
+    drain(dst_path);
+    drain(src_path);
 
     // Stage the source file with a single known byte.
-    if let Err(e) = crate::fs::Vfs::write_file(SRC_PATH, b"L") {
+    if let Err(e) = crate::fs::Vfs::write_file(src_path, b"L") {
         serial_println!(
             "[spawn]   FAIL: Linux link() (ring 3): ext4 /mnt write failed: {:?}",
             e
@@ -20324,7 +20343,7 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
-    let exe_elf = elf::build_linux_link_test_elf(SRC_PATH_NUL, DST_PATH_NUL);
+    let exe_elf = elf::build_linux_link_test_elf(src_nul, dst_nul);
     let argv: &[&[u8]] = &[b"spawn-test-linux-link"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
     let caps = [(ResourceType::File, 1u64, Rights::READ | Rights::WRITE)];
@@ -20344,8 +20363,8 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     let result = match spawn_process(&exe_elf, &options) {
         Ok(r) => r,
         Err(e) => {
-            let _ = crate::fs::Vfs::remove(SRC_PATH);
-            let _ = crate::fs::Vfs::remove(DST_PATH);
+            let _ = crate::fs::Vfs::remove(src_path);
+            let _ = crate::fs::Vfs::remove(dst_path);
             serial_println!("[spawn]   FAIL: link spawn returned {:?}", e);
             return Err(e);
         }
@@ -20360,12 +20379,12 @@ pub fn self_test_linux_link() -> KernelResult<()> {
 
     let state = pcb::state(result.pid);
     let exit_code = pcb::exit_code(result.pid);
-    let kernel_readback = crate::fs::Vfs::read_file(DST_PATH);
+    let kernel_readback = crate::fs::Vfs::read_file(dst_path);
 
     thread::on_thread_exit(result.task_id);
     pcb::destroy(result.pid);
-    let _ = crate::fs::Vfs::remove(SRC_PATH);
-    let _ = crate::fs::Vfs::remove(DST_PATH);
+    let _ = crate::fs::Vfs::remove(src_path);
+    let _ = crate::fs::Vfs::remove(dst_path);
 
     if state != Some(pcb::ProcessState::Zombie) {
         serial_println!(
@@ -20390,8 +20409,9 @@ pub fn self_test_linux_link() -> KernelResult<()> {
         Ok(ref d) if d.as_slice() == b"L" => {}
         other => {
             serial_println!(
-                "[spawn]   FAIL: link() (ring 3) — process exited 0 but kernel readback of \
-                 /mnt/lnk-dst was not \"L\": {:?}",
+                "[spawn]   FAIL: link() (ring 3) — process exited 0 but kernel readback of {} was \
+                 not \"L\": {:?}",
+                dst_path,
                 other.as_ref().map(alloc::vec::Vec::len)
             );
             return Err(KernelError::InternalError);
@@ -20399,8 +20419,11 @@ pub fn self_test_linux_link() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   Linux link() (ring 3: hard-linked /mnt/lnk-dst to /mnt/lnk-src and read \"L\" back \
-         through it; kernel confirmed): OK"
+        "[spawn]   Linux link() (ring 3: hard-linked {} to {} on {} and read \"L\" back through \
+         it; kernel confirmed): OK",
+        dst_path,
+        src_path,
+        base
     );
     Ok(())
 }
@@ -20410,8 +20433,9 @@ pub fn self_test_linux_link() -> KernelResult<()> {
 ///
 /// Plain `link(2)` (and `linkat` without `AT_SYMLINK_FOLLOW`) must hard-link
 /// the *symlink inode itself*, whereas `linkat(AT_SYMLINK_FOLLOW)` dereferences
-/// it and hard-links the target file.  memfs/FAT lack hard links, so this can
-/// only be exercised on ext4; it runs entirely in kernel context (direct `Vfs`
+/// it and hard-links the target file.  This rung exercises **ext4's** version
+/// of that distinction; memfs's is asserted directly in `memfs::self_test`,
+/// which runs on every boot.  It runs entirely in kernel context (direct `Vfs`
 /// calls) because the distinction is a pure VFS/driver property.
 ///
 /// Setup: a target file `/mnt/nfl-target` ("T") and a symlink `/mnt/nfl-link`

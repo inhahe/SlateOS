@@ -11,10 +11,35 @@
 //!
 //! ## Design
 //!
-//! Uses a tree of [`MemFsNode`] nodes.  Each node is a
+//! **Names and objects are separate.** [`MemFs`] owns a flat inode table
+//! (`BTreeMap<ino, `[`MemFsNode`]`>`); a directory holds
+//! `BTreeMap<name, ino>`, not the objects themselves.  Each node is a
 //! [`File`](MemFsNodeKind::File) (data: `Vec<u8>`), a
-//! [`Dir`](MemFsNodeKind::Dir) (children: `BTreeMap<name, node>`),
+//! [`Dir`](MemFsNodeKind::Dir) (children: `BTreeMap<name, ino>`),
 //! or a [`Symlink`](MemFsNodeKind::Symlink) (target path string).
+//!
+//! The obvious alternative — a tree of nodes owned by their parent
+//! directory — is what this was until 2026-09-01, and it cannot express a
+//! **hard link**, because a hard link is precisely two names for one object
+//! and an owning tree gives every object exactly one name.  Nothing else
+//! forced the change; but hard links are not an exotic feature to bolt on
+//! later (`ln`, `cp -al`, `tar`'s link dedup, and every safe-rename dance
+//! use them), so the representation has to admit them from the bottom.
+//!
+//! Two consequences worth knowing:
+//!
+//! - **`nlink` is real.** A file or symlink inode counts the directory
+//!   entries naming it, and is freed when that count reaches zero.
+//!   Directories still *report* the Unix `2 + subdirectories` convention —
+//!   see [`MemFs::nlink_of`] — because that is what `find(1)`'s leaf
+//!   optimisation reads.
+//! - **`rename` moves a number, not a subtree.** Renaming a directory used
+//!   to move every descendant node; now it moves one `u64` between two
+//!   maps, which is both O(1) and impossible to half-complete.
+//!
+//! Hard links to *directories* are refused ([`KernelError::PermissionDenied`],
+//! as on Linux): the resolver below assumes the directory graph is a tree,
+//! and a second name for a directory would let a path walk loop forever.
 //!
 //! Path resolution walks the tree component by component with
 //! exact (case-sensitive) matching.  Symlinks are followed
@@ -64,8 +89,12 @@ fn alloc_memfs_ino() -> u64 {
 enum MemFsNodeKind {
     /// A regular file with byte contents.
     File(Vec<u8>),
-    /// A directory containing named children.
-    Dir(BTreeMap<PathBuf, MemFsNode>),
+    /// A directory: names to inode numbers.
+    ///
+    /// The map holds `ino`s rather than nodes so that two entries — in this
+    /// directory or in different ones — can name the same object.  Look the
+    /// number up in [`MemFs::inodes`].
+    Dir(BTreeMap<PathBuf, u64>),
     /// A symbolic link storing a target path string.
     ///
     /// The target is stored as-is (not resolved).  It can be absolute
@@ -78,8 +107,21 @@ enum MemFsNodeKind {
 struct MemFsNode {
     kind: MemFsNodeKind,
     /// Stable synthetic inode number (assigned at creation, never reused
-    /// for the lifetime of this node).  Surfaced as `st_ino`.
+    /// for the lifetime of this node).  Surfaced as `st_ino`, and the key
+    /// this node is stored under in [`MemFs::inodes`].
+    ///
+    /// Kept in the node as well as in the key so that a `&MemFsNode` handed
+    /// to a helper still knows its own identity; the two are set together at
+    /// insertion and never diverge.
     ino: u64,
+    /// Number of directory entries that name this node.
+    ///
+    /// This is the *link count in the namespace*, not the value reported as
+    /// `st_nlink` — for a directory those differ, see [`MemFs::nlink_of`].
+    /// A file or symlink whose count reaches zero has no name left and its
+    /// inode is dropped; memfs has no open-file table keeping an unlinked
+    /// inode alive, because every VFS operation here arrives by path.
+    links: u32,
     /// Timestamps (wall-clock: nanoseconds since the Unix epoch).
     created_ns: Timestamp,
     modified_ns: Timestamp,
@@ -162,56 +204,42 @@ fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
 }
 
 impl MemFsNode {
-    fn new_file(data: Vec<u8>) -> Self {
+    /// Build a fresh node of `kind` with mode `permissions`, a newly
+    /// allocated inode number and **one** link.
+    ///
+    /// One link, not zero, because a node is only ever created in order to
+    /// be named: the three callers below each insert it under exactly one
+    /// name in the same operation.  Additional names go through
+    /// [`MemFs::add_link`], which is the only other place `links` grows.
+    fn new(kind: MemFsNodeKind, permissions: u16) -> Self {
         let now = metadata_now_ns();
         Self {
-            kind: MemFsNodeKind::File(data),
+            kind,
             ino: alloc_memfs_ino(),
+            links: 1,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
             changed_ns: now,
             uid: 0,
             gid: 0,
-            permissions: 0o644,
+            permissions,
             attributes: FileAttr::NONE,
             xattrs: Vec::new(),
         }
+    }
+
+    fn new_file(data: Vec<u8>) -> Self {
+        Self::new(MemFsNodeKind::File(data), 0o644)
     }
 
     fn new_dir() -> Self {
-        let now = metadata_now_ns();
-        Self {
-            kind: MemFsNodeKind::Dir(BTreeMap::new()),
-            ino: alloc_memfs_ino(),
-            created_ns: now,
-            modified_ns: now,
-            accessed_ns: now,
-            changed_ns: now,
-            uid: 0,
-            gid: 0,
-            permissions: 0o755,
-            attributes: FileAttr::NONE,
-            xattrs: Vec::new(),
-        }
+        Self::new(MemFsNodeKind::Dir(BTreeMap::new()), 0o755)
     }
 
     fn new_symlink(target: PathBuf) -> Self {
-        let now = metadata_now_ns();
-        Self {
-            kind: MemFsNodeKind::Symlink(target),
-            ino: alloc_memfs_ino(),
-            created_ns: now,
-            modified_ns: now,
-            accessed_ns: now,
-            changed_ns: now,
-            uid: 0,
-            gid: 0,
-            // Symlinks are always 0o777 (permissions are on the target).
-            permissions: 0o777,
-            attributes: FileAttr::NONE,
-            xattrs: Vec::new(),
-        }
+        // Symlinks are always 0o777 (permissions are on the target).
+        Self::new(MemFsNodeKind::Symlink(target), 0o777)
     }
 
     fn is_dir(&self) -> bool {
@@ -241,14 +269,16 @@ impl MemFsNode {
         }
     }
 
-    fn children(&self) -> Option<&BTreeMap<PathBuf, MemFsNode>> {
+    /// This directory's `name -> ino` map, or `None` if it is not a
+    /// directory.  Resolve the numbers through [`MemFs::node`].
+    fn children(&self) -> Option<&BTreeMap<PathBuf, u64>> {
         match &self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
             _ => None,
         }
     }
 
-    fn children_mut(&mut self) -> Option<&mut BTreeMap<PathBuf, MemFsNode>> {
+    fn children_mut(&mut self) -> Option<&mut BTreeMap<PathBuf, u64>> {
         match &mut self.kind {
             MemFsNodeKind::Dir(children) => Some(children),
             _ => None,
@@ -276,33 +306,6 @@ impl MemFsNode {
         }
     }
 
-    /// Link count surfaced as `st_nlink`.
-    ///
-    /// memfs does not implement file hard links yet, so regular files and
-    /// symlinks always report a single link.  Directories follow the Unix
-    /// convention: a directory's link count is 2 (its own name in the
-    /// parent directory plus its own `.` entry) plus one for each immediate
-    /// subdirectory (each contributes a `..` entry pointing back to here).
-    ///
-    /// Reporting this honestly matters for tools that exploit it: `find(1)`
-    /// uses the "leaf optimisation" — a directory whose `nlink == 2` has no
-    /// subdirectories, so `find` can skip stat'ing its entries to decide
-    /// whether to descend.  Hardcoding `1` defeated that optimisation and
-    /// produced a link count no real filesystem ever reports for a directory.
-    fn nlink_count(&self) -> u32 {
-        match &self.kind {
-            MemFsNodeKind::Dir(children) => {
-                let subdirs = children.values().filter(|c| c.is_dir()).count();
-                // 2 ("." + the name in the parent) + one ".." per immediate
-                // subdirectory.  `saturating_add`/`try_from(..).unwrap_or`
-                // keep this arithmetic-side-effect free and clamp the
-                // (practically unreachable) > u32::MAX case.
-                u32::try_from(subdirs.saturating_add(2)).unwrap_or(u32::MAX)
-            }
-            MemFsNodeKind::File(_) | MemFsNodeKind::Symlink(_) => 1,
-        }
-    }
-
     /// Entry type for this node.
     fn entry_type(&self) -> EntryType {
         match &self.kind {
@@ -318,11 +321,20 @@ impl MemFsNode {
             name: PathBuf::from(name),
             entry_type: self.entry_type(),
             size: self.size(),
+            // Same value `to_file_meta` reports as `st_ino`, from the same
+            // field, so a listing and a stat of the same object never
+            // disagree about its identity.
+            ino: self.ino,
         }
     }
 
-    /// Convert to rich FileMeta.
-    fn to_file_meta(&self) -> FileMeta {
+    /// Convert to rich `FileMeta`.
+    ///
+    /// `nlinks` is passed in rather than read off the node because a
+    /// directory's reported count depends on how many of its children are
+    /// themselves directories, which only [`MemFs::nlink_of`] can see — the
+    /// node holds `ino`s, not nodes.
+    fn to_file_meta(&self, nlinks: u32) -> FileMeta {
         FileMeta {
             size: self.size(),
             entry_type: self.entry_type(),
@@ -335,10 +347,7 @@ impl MemFsNode {
             gid: self.gid,
             permissions: self.permissions,
             attributes: self.attributes,
-            // Directories report 2 + immediate-subdir count (Unix `.`/`..`
-            // convention); files and symlinks report 1 (no file hard links
-            // yet).  See `nlink_count`.
-            nlinks: self.nlink_count(),
+            nlinks,
             blocks: 0,
             xattrs: self.xattrs.clone(),
             hash: Vec::new(),
@@ -373,15 +382,208 @@ impl MemFsNode {
 
 /// In-memory filesystem instance.
 pub struct MemFs {
-    /// Root directory node.
-    root: MemFsNode,
+    /// Every object in this filesystem, keyed by its inode number.
+    ///
+    /// This is the only owner of a node.  Directories name their children by
+    /// `ino` (see [`MemFsNodeKind::Dir`]), which is what lets two names refer
+    /// to one object.  An entry is removed exactly when the last name for it
+    /// goes; [`MemFs::drop_link`] is the only place that happens.
+    inodes: BTreeMap<u64, MemFsNode>,
+    /// Inode number of the root directory.
+    ///
+    /// The root has no parent entry naming it, so it is reachable only from
+    /// here.  It is never removed for the lifetime of the mount.
+    root_ino: u64,
 }
 
 impl MemFs {
     /// Create a new empty in-memory filesystem.
     pub fn new() -> Self {
-        Self {
-            root: MemFsNode::new_dir(),
+        let root = MemFsNode::new_dir();
+        let root_ino = root.ino;
+        let mut inodes = BTreeMap::new();
+        inodes.insert(root_ino, root);
+        Self { inodes, root_ino }
+    }
+
+    // -----------------------------------------------------------------------
+    // Inode-table access
+    // -----------------------------------------------------------------------
+
+    /// Look up a node by inode number.
+    ///
+    /// `NotFound` rather than a panic on a missing number: a stale `ino` is a
+    /// bug in this file, but a kernel that panics on it is worse than one
+    /// that reports the object as gone.
+    fn node(&self, ino: u64) -> KernelResult<&MemFsNode> {
+        self.inodes.get(&ino).ok_or(KernelError::NotFound)
+    }
+
+    /// Look up a node by inode number, mutably.
+    fn node_mut(&mut self, ino: u64) -> KernelResult<&mut MemFsNode> {
+        self.inodes.get_mut(&ino).ok_or(KernelError::NotFound)
+    }
+
+    /// The value to report as `st_nlink` for `ino`.
+    ///
+    /// Files and symlinks report the number of directory entries naming
+    /// them, which is what `links` counts.  Directories follow the Unix
+    /// convention instead: 2 (the name in the parent, plus the directory's
+    /// own `.`) plus one for each immediate subdirectory, each of which
+    /// contributes a `..` pointing back here.
+    ///
+    /// Reporting the directory form honestly matters for tools that exploit
+    /// it: `find(1)`'s leaf optimisation treats `nlink == 2` as "no
+    /// subdirectories, do not bother stat'ing the children".  A hardcoded 1
+    /// both defeats that and is a count no real filesystem reports.
+    ///
+    /// A directory's `links` field is therefore *not* what it reports, and
+    /// stays 1 — there is exactly one name for it, since hard links to
+    /// directories are refused.
+    fn nlink_of(&self, ino: u64) -> u32 {
+        let Ok(node) = self.node(ino) else {
+            return 0;
+        };
+        match node.children() {
+            Some(children) => {
+                let subdirs = children
+                    .values()
+                    .filter(|child_ino| self.node(**child_ino).is_ok_and(MemFsNode::is_dir))
+                    .count();
+                // `saturating_add` / `try_from(..).unwrap_or` keep this
+                // arithmetic-side-effect free and clamp the (practically
+                // unreachable) > u32::MAX case.
+                u32::try_from(subdirs.saturating_add(2)).unwrap_or(u32::MAX)
+            }
+            None => node.links,
+        }
+    }
+
+    /// Add one name for `ino` and account for it.
+    ///
+    /// The only place `links` grows after node creation.  The caller has
+    /// already validated that `name` is free in `parent_ino` and that the
+    /// link is permitted.
+    fn add_link(&mut self, parent_ino: u64, name: PathBuf, ino: u64) -> KernelResult<()> {
+        {
+            let parent = self.node_mut(parent_ino)?;
+            let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.insert(name, ino);
+            parent.touch_modified();
+        }
+        let node = self.node_mut(ino)?;
+        node.links = node.links.saturating_add(1);
+        // ctime, not mtime: linking changes the inode's metadata (its link
+        // count), never its contents.
+        node.changed_ns = metadata_now_ns();
+        Ok(())
+    }
+
+    /// Create `node` as a new object and give it its first name.
+    ///
+    /// Returns the new inode number.  `node.links` is already 1 (see
+    /// [`MemFsNode::new`]), so this does not go through
+    /// [`add_link`](Self::add_link).
+    ///
+    /// The name is inserted before the node, so a `parent_ino` that is not a
+    /// directory fails without having left an unreachable inode behind.
+    /// Nothing can observe the gap: `&mut self` means no other caller is in
+    /// the filesystem between the two statements.
+    fn insert_new(&mut self, parent_ino: u64, name: PathBuf, node: MemFsNode) -> KernelResult<u64> {
+        let ino = node.ino;
+        {
+            let parent = self.node_mut(parent_ino)?;
+            let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.insert(name, ino);
+            parent.touch_modified();
+        }
+        self.inodes.insert(ino, node);
+        Ok(ino)
+    }
+
+    /// Remove `name` from directory `parent_ino` and return the inode it
+    /// named, or `NotFound`.
+    ///
+    /// Does **not** touch the inode's link count — pair it with
+    /// [`drop_link`](Self::drop_link) to delete a name, or with
+    /// [`add_link`](Self::add_link) elsewhere to move one.
+    fn take_child(&mut self, parent_ino: u64, name: &Path) -> KernelResult<u64> {
+        let parent = self.node_mut(parent_ino)?;
+        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+        let ino = children.remove(name).ok_or(KernelError::NotFound)?;
+        parent.touch_modified();
+        Ok(ino)
+    }
+
+    /// Give the object `ino` an additional name at `new_path`.
+    ///
+    /// Shared by [`FileSystem::link`] and [`FileSystem::link_no_follow`],
+    /// which differ only in how they turn `existing` into an inode number —
+    /// once they have one, there is nothing left for the two to disagree
+    /// about, so there is one implementation of the rules rather than two.
+    ///
+    /// # Errors
+    /// - `PermissionDenied` if `ino` is a directory.  Directory hard links
+    ///   would make the namespace a graph rather than a tree, which
+    ///   [`resolve_path_str`](Self::resolve_path_str) assumes it is not:
+    ///   a cycle would make it loop without the symlink-depth counter ever
+    ///   firing, because no symlink is involved.  Linux refuses these for the
+    ///   same reason (`EPERM`), so refusing costs no compatibility.
+    /// - `PermissionDenied` if `ino` or the new parent is immutable.
+    /// - `AlreadyExists` if `new_path`'s final component is taken.  `link(2)`
+    ///   never replaces — unlike `rename`, which does.
+    fn link_ino(&mut self, ino: u64, new_path: &Path) -> KernelResult<()> {
+        if self.node(ino)?.is_dir() {
+            return Err(KernelError::PermissionDenied);
+        }
+        if self.node(ino)?.attributes.contains(FileAttr::IMMUTABLE) {
+            return Err(KernelError::PermissionDenied);
+        }
+
+        let (parent_ino, name) = self.resolve_parent(new_path)?;
+        if self
+            .node(parent_ino)?
+            .attributes
+            .contains(FileAttr::IMMUTABLE)
+        {
+            return Err(KernelError::PermissionDenied);
+        }
+        if self.child_ino(parent_ino, name)?.is_some() {
+            return Err(KernelError::AlreadyExists);
+        }
+
+        let name = name.to_path_buf();
+        self.add_link(parent_ino, name, ino)
+    }
+
+    /// The inode `name` refers to in directory `parent_ino`, if any.
+    fn child_ino(&self, parent_ino: u64, name: &Path) -> KernelResult<Option<u64>> {
+        let children = self
+            .node(parent_ino)?
+            .children()
+            .ok_or(KernelError::NotADirectory)?;
+        Ok(children.get(name).copied())
+    }
+
+    /// Account for one name for `ino` going away, freeing the inode when the
+    /// last one does.
+    ///
+    /// This is the only place a node is removed from [`MemFs::inodes`].  A
+    /// directory being removed by `rmdir` also comes through here: its
+    /// `links` is 1, so the first drop frees it.
+    ///
+    /// The caller has already removed the name from its parent's map; this
+    /// takes only the inode side, so the two halves cannot get out of step
+    /// by one half being forgotten in a new call site.
+    fn drop_link(&mut self, ino: u64) {
+        let Some(node) = self.inodes.get_mut(&ino) else {
+            return;
+        };
+        node.links = node.links.saturating_sub(1);
+        if node.links == 0 {
+            self.inodes.remove(&ino);
+        } else {
+            node.changed_ns = metadata_now_ns();
         }
     }
 
@@ -441,15 +643,16 @@ impl MemFs {
                 return Ok(PathBuf::from("/"));
             };
 
-            let mut current = &self.root;
+            let mut current = self.node(self.root_ino)?;
             let mut hit_symlink = false;
 
             for (i, component) in components.iter().enumerate() {
                 let is_last = i == last_index;
                 let children = current.children().ok_or(KernelError::NotADirectory)?;
-                let node = children
+                let child_ino = *children
                     .get(component.as_path())
                     .ok_or(KernelError::NotFound)?;
+                let node = self.node(child_ino)?;
 
                 if let MemFsNodeKind::Symlink(ref target) = node.kind {
                     if is_last && !follow_last {
@@ -491,32 +694,25 @@ impl MemFs {
         }
     }
 
-    /// Walk a path WITHOUT following symlinks.
+    /// Walk a path WITHOUT following symlinks, returning the inode number it
+    /// names.
     ///
     /// Used after [`resolve_path_str`] has already resolved all symlinks.
-    fn walk(&self, path: &Path) -> KernelResult<&MemFsNode> {
+    ///
+    /// There is no `walk_mut`: with names and objects separated, a walk needs
+    /// only shared access, and the caller reaches the node it found through
+    /// [`node_mut`](Self::node_mut).  That is what removes the nested-borrow
+    /// contortions the owning-tree version needed, where walking mutably
+    /// borrowed every ancestor for as long as the descendant was held.
+    fn walk(&self, path: &Path) -> KernelResult<u64> {
         let components = Self::path_components(path);
-        if components.is_empty() {
-            return Ok(&self.root);
-        }
-        let mut current = &self.root;
+        let mut current = self.root_ino;
         for component in &components {
-            let children = current.children().ok_or(KernelError::NotADirectory)?;
-            current = children.get(*component).ok_or(KernelError::NotFound)?;
-        }
-        Ok(current)
-    }
-
-    /// Walk a path without following symlinks (mutable).
-    fn walk_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
-        let components = Self::path_components(path);
-        if components.is_empty() {
-            return Ok(&mut self.root);
-        }
-        let mut current = &mut self.root;
-        for component in &components {
-            let children = current.children_mut().ok_or(KernelError::NotADirectory)?;
-            current = children.get_mut(*component).ok_or(KernelError::NotFound)?;
+            let children = self
+                .node(current)?
+                .children()
+                .ok_or(KernelError::NotADirectory)?;
+            current = *children.get(*component).ok_or(KernelError::NotFound)?;
         }
         Ok(current)
     }
@@ -525,47 +721,53 @@ impl MemFs {
     // Public resolve helpers (used by FileSystem trait impls)
     // -----------------------------------------------------------------------
 
-    /// Resolve a path, following ALL symlinks (including the final one).
-    fn resolve(&self, path: &Path) -> KernelResult<&MemFsNode> {
+    /// Resolve a path to an inode number, following ALL symlinks (including
+    /// the final one).
+    fn resolve_ino(&self, path: &Path) -> KernelResult<u64> {
         let resolved = self.resolve_path_str(path, true)?;
         self.walk(&resolved)
     }
 
+    /// Resolve a path, following ALL symlinks (including the final one).
+    fn resolve(&self, path: &Path) -> KernelResult<&MemFsNode> {
+        let ino = self.resolve_ino(path)?;
+        self.node(ino)
+    }
+
     /// Resolve a path mutably, following ALL symlinks.
     fn resolve_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
-        // Phase 1: resolve symlinks immutably → owned String.
-        let resolved = self.resolve_path_str(path, true)?;
-        // Phase 2: walk the resolved path (no symlinks left).
-        self.walk_mut(&resolved)
+        let ino = self.resolve_ino(path)?;
+        self.node_mut(ino)
+    }
+
+    /// Resolve a path to an inode number, following intermediate symlinks
+    /// but NOT the final component.
+    fn resolve_ino_no_follow(&self, path: &Path) -> KernelResult<u64> {
+        let resolved = self.resolve_path_str(path, false)?;
+        self.walk(&resolved)
     }
 
     /// Resolve a path, following intermediate symlinks but NOT the
     /// final component.  Used by `lstat` and `readlink`.
     fn resolve_no_follow(&self, path: &Path) -> KernelResult<&MemFsNode> {
-        let resolved = self.resolve_path_str(path, false)?;
-        self.walk(&resolved)
+        let ino = self.resolve_ino_no_follow(path)?;
+        self.node(ino)
     }
 
     /// Resolve a path mutably, following intermediate symlinks but NOT the
     /// final component.  Used by `lchown`/`lutimes`-style operations that
     /// must mutate the symlink inode itself, not its target.
     fn resolve_no_follow_mut(&mut self, path: &Path) -> KernelResult<&mut MemFsNode> {
-        // Phase 1: resolve intermediate symlinks immutably → owned String
-        // whose final component is left unfollowed.
-        let resolved = self.resolve_path_str(path, false)?;
-        // Phase 2: walk the resolved path without following the final link.
-        self.walk_mut(&resolved)
+        let ino = self.resolve_ino_no_follow(path)?;
+        self.node_mut(ino)
     }
 
     /// Resolve the parent directory of a path (following symlinks in
-    /// intermediate components) and return `(parent_node, filename)`.
+    /// intermediate components) and return `(parent_ino, filename)`.
     ///
     /// The filename is the last component of the original path (not
     /// followed if it's a symlink).  The parent path IS fully resolved.
-    fn resolve_parent_mut<'a, 'b>(
-        &'a mut self,
-        path: &'b Path,
-    ) -> KernelResult<(&'a mut MemFsNode, &'b Path)> {
+    fn resolve_parent<'b>(&self, path: &'b Path) -> KernelResult<(u64, &'b Path)> {
         let components = Self::path_components(path);
         let filename = *components.last().ok_or(KernelError::InvalidArgument)?;
         let parent_path = Self::parent_path_of(&components);
@@ -573,12 +775,12 @@ impl MemFs {
         // Resolve the parent (following all symlinks in the parent path).
         let resolved_parent = self.resolve_path_str(&parent_path, true)?;
 
-        let parent = self.walk_mut(&resolved_parent)?;
-        if !parent.is_dir() {
+        let parent_ino = self.walk(&resolved_parent)?;
+        if !self.node(parent_ino)?.is_dir() {
             return Err(KernelError::NotADirectory);
         }
 
-        Ok((parent, filename))
+        Ok((parent_ino, filename))
     }
 
     /// Resolve the write target for a file operation.
@@ -602,12 +804,15 @@ impl MemFs {
             let resolved_parent = self.resolve_path_str(&parent_path, true)?;
 
             // Check if filename exists in the resolved parent.
-            let parent_node = self.walk(&resolved_parent)?;
-            let children = parent_node.children().ok_or(KernelError::NotADirectory)?;
+            let parent_ino = self.walk(&resolved_parent)?;
+            let children = self
+                .node(parent_ino)?
+                .children()
+                .ok_or(KernelError::NotADirectory)?;
 
-            match children.get(filename.as_path()) {
-                Some(node) => {
-                    if let MemFsNodeKind::Symlink(ref target) = node.kind {
+            match children.get(filename.as_path()).copied() {
+                Some(child_ino) => {
+                    if let MemFsNodeKind::Symlink(ref target) = self.node(child_ino)?.kind {
                         // Follow the symlink.
                         depth = depth.wrapping_add(1);
                         if depth > MAX_SYMLINK_DEPTH {
@@ -639,12 +844,21 @@ impl FileSystem for MemFs {
     }
 
     fn readdir(&mut self, path: &Path) -> KernelResult<Vec<DirEntry>> {
-        let node = self.resolve(path)?;
-        let children = node.children().ok_or(KernelError::NotADirectory)?;
+        let dir_ino = self.resolve_ino(path)?;
+        let children = self
+            .node(dir_ino)?
+            .children()
+            .ok_or(KernelError::NotADirectory)?;
 
+        // A name whose inode has gone is a bug in this file rather than
+        // something a caller can cause, but listing it as a broken entry
+        // would be worse than omitting it: every consumer of a `DirEntry`
+        // assumes the object exists.
         let entries: Vec<DirEntry> = children
             .iter()
-            .map(|(name, child)| child.to_dir_entry(name))
+            .filter_map(|(name, child_ino)| {
+                self.node(*child_ino).ok().map(|n| n.to_dir_entry(name))
+            })
             .collect();
 
         Ok(entries)
@@ -667,11 +881,14 @@ impl FileSystem for MemFs {
     fn stat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let components = Self::path_components(path);
         if components.is_empty() {
-            // Root directory.
+            // Root directory.  Its inode comes from the root node rather than
+            // a literal, so `stat("/")` agrees with the `..` entry a child
+            // directory listing reports for it.
             return Ok(DirEntry {
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
+                ino: self.root_ino,
             });
         }
 
@@ -684,11 +901,11 @@ impl FileSystem for MemFs {
         // Follow symlinks to find the actual write target.
         let (parent_path, filename) = self.resolve_write_path(path)?;
 
-        let parent = self.walk_mut(&parent_path)?;
-        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+        let parent_ino = self.walk(&parent_path)?;
 
-        match children.get_mut(&*filename) {
-            Some(existing) => {
+        match self.child_ino(parent_ino, &filename)? {
+            Some(existing_ino) => {
+                let existing = self.node_mut(existing_ino)?;
                 // Enforce attribute restrictions.
                 if existing.attributes.contains(FileAttr::IMMUTABLE) {
                     return Err(KernelError::PermissionDenied);
@@ -705,75 +922,87 @@ impl FileSystem for MemFs {
                 file_data.extend_from_slice(data);
                 // NLL: file_data borrow ends here (last use above).
                 existing.touch_modified();
+                // Only the inode changed, so the directory's mtime is left
+                // alone — and every other name for this inode now reads the
+                // new bytes, which is what a hard link is for.  (The `None`
+                // arm below does add an entry, and `insert_new` stamps the
+                // directory there.)
             }
             None => {
                 // Create new file (constructor sets timestamps to now).
-                children.insert(filename, MemFsNode::new_file(data.to_vec()));
+                self.insert_new(parent_ino, filename, MemFsNode::new_file(data.to_vec()))?;
             }
         }
-        parent.touch_modified();
         Ok(())
     }
 
     fn remove(&mut self, path: &Path) -> KernelResult<()> {
         // remove() does NOT follow the final component — it removes the
         // entry itself (file or symlink).  Intermediate symlinks ARE followed.
-        let (parent, filename) = self.resolve_parent_mut(path)?;
-        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+        let (parent_ino, filename) = self.resolve_parent(path)?;
 
-        let node = children.get(filename).ok_or(KernelError::NotFound)?;
-        if node.is_dir() {
-            return Err(KernelError::IsADirectory);
+        let ino = self
+            .child_ino(parent_ino, filename)?
+            .ok_or(KernelError::NotFound)?;
+        {
+            let node = self.node(ino)?;
+            if node.is_dir() {
+                return Err(KernelError::IsADirectory);
+            }
+            if node.attributes.contains(FileAttr::IMMUTABLE) {
+                return Err(KernelError::PermissionDenied);
+            }
         }
-        if node.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
-        children.remove(filename);
-        parent.touch_modified();
+        self.take_child(parent_ino, filename)?;
+        // Unlink, not delete: the object survives while another name refers
+        // to it, and only the last `remove` frees it.
+        self.drop_link(ino);
         Ok(())
     }
 
     fn mkdir(&mut self, path: &Path) -> KernelResult<()> {
         // mkdir does NOT follow the final component — if the name
         // already exists (even as a symlink), it returns AlreadyExists.
-        let (parent, dirname) = self.resolve_parent_mut(path)?;
-        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+        let (parent_ino, dirname) = self.resolve_parent(path)?;
+        if self
+            .node(parent_ino)?
+            .attributes
+            .contains(FileAttr::IMMUTABLE)
+        {
             return Err(KernelError::PermissionDenied);
         }
-        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
-
-        if children.contains_key(dirname) {
+        if self.child_ino(parent_ino, dirname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
 
-        children.insert(dirname.to_path_buf(), MemFsNode::new_dir());
-        parent.touch_modified();
+        self.insert_new(parent_ino, dirname.to_path_buf(), MemFsNode::new_dir())?;
         Ok(())
     }
 
     fn rmdir(&mut self, path: &Path) -> KernelResult<()> {
         // rmdir does NOT follow the final component — a symlink at the
         // end returns NotADirectory (like Linux).
-        let (parent, dirname) = self.resolve_parent_mut(path)?;
-        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
+        let (parent_ino, dirname) = self.resolve_parent(path)?;
 
-        let node = children.get(dirname).ok_or(KernelError::NotFound)?;
-        if !node.is_dir() {
-            return Err(KernelError::NotADirectory);
-        }
-        if node.attributes.contains(FileAttr::IMMUTABLE) {
-            return Err(KernelError::PermissionDenied);
-        }
-
-        // Must be empty.
-        if let Some(grandchildren) = node.children() {
-            if !grandchildren.is_empty() {
+        let ino = self
+            .child_ino(parent_ino, dirname)?
+            .ok_or(KernelError::NotFound)?;
+        {
+            let node = self.node(ino)?;
+            let children = node.children().ok_or(KernelError::NotADirectory)?;
+            if node.attributes.contains(FileAttr::IMMUTABLE) {
+                return Err(KernelError::PermissionDenied);
+            }
+            // Must be empty.
+            if !children.is_empty() {
                 return Err(KernelError::InvalidArgument); // Directory not empty.
             }
         }
 
-        children.remove(dirname);
-        parent.touch_modified();
+        self.take_child(parent_ino, dirname)?;
+        // A directory has exactly one name (hard links to directories are
+        // refused), so this drop is always the last one and frees the inode.
+        self.drop_link(ino);
         Ok(())
     }
 
@@ -905,32 +1134,51 @@ impl FileSystem for MemFs {
         //    renames a temp file over the target, so the standard safe-write
         //    pattern could never replace an existing file on memfs, which is
         //    what `/tmp` always is.
-        {
-            let to_parent = self.walk(&resolved_to_parent)?;
-            let to_children = to_parent.children().ok_or(KernelError::NotADirectory)?;
-            if let Some(existing) = to_children.get(to_name.as_path()) {
-                if existing.entry_type() == EntryType::Directory {
-                    return Err(KernelError::IsADirectory);
-                }
+        let to_parent_ino = self.walk(&resolved_to_parent)?;
+        let displaced = self.child_ino(to_parent_ino, to_name.as_path())?;
+        if let Some(existing_ino) = displaced {
+            if self.node(existing_ino)?.entry_type() == EntryType::Directory {
+                return Err(KernelError::IsADirectory);
             }
         }
 
-        // Remove source node.
-        let removed_node = {
-            let from_parent = self.walk_mut(&resolved_from_parent)?;
-            let children = from_parent
-                .children_mut()
-                .ok_or(KernelError::NotADirectory)?;
-            children
-                .remove(from_name.as_path())
-                .ok_or(KernelError::NotFound)?
-        };
+        let from_parent_ino = self.walk(&resolved_from_parent)?;
+        let source_ino = self
+            .child_ino(from_parent_ino, from_name.as_path())?
+            .ok_or(KernelError::NotFound)?;
 
-        // Insert at destination.  `insert` returns any node that was already
-        // there and drops it — that drop is the replacement in case 3 above.
-        let to_parent = self.walk_mut(&resolved_to_parent)?;
-        let children = to_parent.children_mut().ok_or(KernelError::NotADirectory)?;
-        children.insert(to_name, removed_node);
+        // 4. Both names already denote the *same object* — two hard links to
+        //    one file.  POSIX: "rename() shall return successfully and perform
+        //    no other action."  Without this the move below would drop `from`
+        //    and leave only `to`, i.e. silently unlink one of the two names the
+        //    caller asked to keep.  The case became reachable the moment memfs
+        //    could hold two names for one inode, and is invisible to any test
+        //    written before it could.
+        if displaced == Some(source_ino) {
+            return Ok(());
+        }
+
+        // Move the *name*: one `u64` leaves one map and enters another.  The
+        // object never moves and its link count never changes, so renaming a
+        // directory no longer relocates its whole subtree — which is why this
+        // is now O(1) and cannot leave a half-moved tree behind.
+        let moved_ino = self.take_child(from_parent_ino, from_name.as_path())?;
+
+        {
+            let to_parent = self.node_mut(to_parent_ino)?;
+            let children = to_parent.children_mut().ok_or(KernelError::NotADirectory)?;
+            children.insert(to_name, moved_ino);
+            to_parent.touch_modified();
+        }
+
+        // Replacement (case 3): the displaced entry lost its name, so its
+        // inode loses a link — and is freed only if that was its last one.
+        // The owning-tree version relied on `BTreeMap::insert` dropping the
+        // node it evicted, which silently destroys a file that another hard
+        // link still names.
+        if let Some(existing_ino) = displaced {
+            self.drop_link(existing_ino);
+        }
         Ok(())
     }
 
@@ -955,85 +1203,63 @@ impl FileSystem for MemFs {
 
         // Exchanging an entry with itself is a no-op (but the entry must
         // still exist, else ENOENT).
+        let a_parent_ino = self.walk(&resolved_a_parent)?;
         if resolved_a_parent == resolved_b_parent && a_name == b_name {
-            let parent = self.walk(&resolved_a_parent)?;
-            let children = parent.children().ok_or(KernelError::NotADirectory)?;
-            if !children.contains_key(a_name.as_path()) {
+            if self.child_ino(a_parent_ino, a_name.as_path())?.is_none() {
                 return Err(KernelError::NotFound);
             }
             return Ok(());
         }
+        let b_parent_ino = self.walk(&resolved_b_parent)?;
 
-        // Detach a's node (must exist).
-        let node_a = {
-            let parent = self.walk_mut(&resolved_a_parent)?;
-            let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
-            children
-                .remove(a_name.as_path())
-                .ok_or(KernelError::NotFound)?
-        };
+        // Both names must exist *before* anything moves.  Looking them up
+        // first is what makes the exchange all-or-nothing: the owning-tree
+        // version had to detach `a`, discover `b` was missing, and put `a`
+        // back — a rollback that could itself fail.  Here nothing has been
+        // touched yet when the second lookup returns `NotFound`.
+        let ino_a = self
+            .child_ino(a_parent_ino, a_name.as_path())?
+            .ok_or(KernelError::NotFound)?;
+        let ino_b = self
+            .child_ino(b_parent_ino, b_name.as_path())?
+            .ok_or(KernelError::NotFound)?;
 
-        // Detach b's node; if it does not exist, restore a and fail so the
-        // exchange is all-or-nothing.
-        let node_b_result = match self.walk_mut(&resolved_b_parent) {
-            Ok(parent) => match parent.children_mut() {
-                Some(children) => children
-                    .remove(b_name.as_path())
-                    .ok_or(KernelError::NotFound),
-                None => Err(KernelError::NotADirectory),
-            },
-            Err(e) => Err(e),
-        };
-        let node_b = match node_b_result {
-            Ok(n) => n,
-            Err(e) => {
-                // Roll back the detach of a (its parent existed a moment ago).
-                if let Ok(parent) = self.walk_mut(&resolved_a_parent) {
-                    if let Some(children) = parent.children_mut() {
-                        children.insert(a_name, node_a);
-                    }
-                }
-                return Err(e);
-            }
-        };
-
-        // Re-attach swapped: b's node at a's location, a's node at b's.
+        // Swap the two numbers.  No link count changes: each object still has
+        // exactly the names it had, and neither object moves.
         {
-            let parent_a = self.walk_mut(&resolved_a_parent)?;
+            let parent_a = self.node_mut(a_parent_ino)?;
             let children = parent_a.children_mut().ok_or(KernelError::NotADirectory)?;
-            children.insert(a_name, node_b);
+            children.insert(a_name, ino_b);
+            parent_a.touch_modified();
         }
         {
-            let parent_b = self.walk_mut(&resolved_b_parent)?;
+            let parent_b = self.node_mut(b_parent_ino)?;
             let children = parent_b.children_mut().ok_or(KernelError::NotADirectory)?;
-            children.insert(b_name, node_a);
+            children.insert(b_name, ino_a);
+            parent_b.touch_modified();
         }
         Ok(())
     }
 
     fn debug_stats(&self) -> String {
-        fn count_nodes(node: &MemFsNode) -> (usize, usize, usize, u64) {
+        // Count *objects*, not names: a file with three hard links is one
+        // file and its bytes are stored once, so counting the namespace
+        // would triple both.
+        let mut files = 0usize;
+        let mut dirs = 0usize;
+        let mut links = 0usize;
+        let mut bytes = 0u64;
+        for node in self.inodes.values() {
             match &node.kind {
-                MemFsNodeKind::File(data) => (1, 0, 0, data.len() as u64),
-                MemFsNodeKind::Dir(children) => {
-                    let mut files = 0usize;
-                    let mut dirs = 1usize; // Count this dir.
-                    let mut links = 0usize;
-                    let mut bytes = 0u64;
-                    for child in children.values() {
-                        let (f, d, l, b) = count_nodes(child);
-                        files = files.wrapping_add(f);
-                        dirs = dirs.wrapping_add(d);
-                        links = links.wrapping_add(l);
-                        bytes = bytes.wrapping_add(b);
-                    }
-                    (files, dirs, links, bytes)
+                MemFsNodeKind::File(data) => {
+                    files = files.wrapping_add(1);
+                    bytes = bytes.wrapping_add(data.len() as u64);
                 }
-                MemFsNodeKind::Symlink(_) => (0, 0, 1, 0),
+                MemFsNodeKind::Dir(_) => dirs = dirs.wrapping_add(1),
+                MemFsNodeKind::Symlink(_) => links = links.wrapping_add(1),
             }
         }
 
-        let (files, dirs, links, bytes) = count_nodes(&self.root);
         use core::fmt::Write;
         let mut s = String::new();
         let _ = write!(
@@ -1047,16 +1273,18 @@ impl FileSystem for MemFs {
     // --- Extended metadata operations ---
 
     fn metadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
-        let node = self.resolve(path)?;
-        Ok(node.to_file_meta())
+        let ino = self.resolve_ino(path)?;
+        let nlinks = self.nlink_of(ino);
+        Ok(self.node(ino)?.to_file_meta(nlinks))
     }
 
     fn lmetadata(&mut self, path: &Path) -> KernelResult<FileMeta> {
         // No-follow: return the trailing symlink's own metadata rather
         // than its target's.  Mirrors `metadata` but uses the
         // non-following resolver.
-        let node = self.resolve_no_follow(path)?;
-        Ok(node.to_file_meta())
+        let ino = self.resolve_ino_no_follow(path)?;
+        let nlinks = self.nlink_of(ino);
+        Ok(self.node(ino)?.to_file_meta(nlinks))
     }
 
     fn set_attributes(&mut self, path: &Path, attrs: FileAttr) -> KernelResult<()> {
@@ -1188,21 +1416,23 @@ impl FileSystem for MemFs {
             return Err(KernelError::InvalidArgument);
         }
 
-        let (parent, linkname) = self.resolve_parent_mut(path)?;
-        if parent.attributes.contains(FileAttr::IMMUTABLE) {
+        let (parent_ino, linkname) = self.resolve_parent(path)?;
+        if self
+            .node(parent_ino)?
+            .attributes
+            .contains(FileAttr::IMMUTABLE)
+        {
             return Err(KernelError::PermissionDenied);
         }
-        let children = parent.children_mut().ok_or(KernelError::NotADirectory)?;
-
-        if children.contains_key(linkname) {
+        if self.child_ino(parent_ino, linkname)?.is_some() {
             return Err(KernelError::AlreadyExists);
         }
 
-        children.insert(
+        self.insert_new(
+            parent_ino,
             linkname.to_path_buf(),
             MemFsNode::new_symlink(target.to_path_buf()),
-        );
-        parent.touch_modified();
+        )?;
         Ok(())
     }
 
@@ -1215,6 +1445,22 @@ impl FileSystem for MemFs {
         }
     }
 
+    // --- Hard link operations ---
+
+    fn link(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
+        let ino = self.resolve_ino(existing)?;
+        self.link_ino(ino, new_path)
+    }
+
+    fn link_no_follow(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
+        // `link(2)` and `linkat` without `AT_SYMLINK_FOLLOW`: a trailing
+        // symlink in `existing` is itself the thing being linked, so the new
+        // name is a second name for the *symlink* inode.  Both names then
+        // dangle or resolve together, which is the point.
+        let ino = self.resolve_ino_no_follow(existing)?;
+        self.link_ino(ino, new_path)
+    }
+
     fn lstat(&mut self, path: &Path) -> KernelResult<DirEntry> {
         let components = Self::path_components(path);
         if components.is_empty() {
@@ -1222,6 +1468,7 @@ impl FileSystem for MemFs {
                 name: PathBuf::from("/"),
                 entry_type: EntryType::Directory,
                 size: 0,
+                ino: self.root_ino,
             });
         }
 
@@ -1235,24 +1482,12 @@ impl FileSystem for MemFs {
     /// Since memfs is RAM-backed, total capacity is essentially unlimited
     /// (bounded by heap size).  We report the current used byte count.
     fn statvfs(&mut self) -> KernelResult<FsInfo> {
-        fn count_nodes(node: &MemFsNode) -> (u64, u64) {
-            match &node.kind {
-                MemFsNodeKind::File(data) => (data.len() as u64, 1),
-                MemFsNodeKind::Dir(children) => {
-                    let mut bytes = 0u64;
-                    let mut count = 1u64; // Count this dir.
-                    for child in children.values() {
-                        let (b, c) = count_nodes(child);
-                        bytes = bytes.wrapping_add(b);
-                        count = count.wrapping_add(c);
-                    }
-                    (bytes, count)
-                }
-                MemFsNodeKind::Symlink(_) => (0, 1),
-            }
-        }
-
-        let (_used_bytes, node_count) = count_nodes(&self.root);
+        // The inode table *is* the object count, so this no longer walks the
+        // namespace.  That is not merely cheaper (O(1) rather than O(tree)):
+        // it is now correct in a case the walk could not express — a file
+        // reachable under two names is one inode, and the recursive count
+        // would have reported it twice.
+        let node_count = self.inodes.len() as u64;
 
         Ok(FsInfo {
             fs_type: String::from("memfs"),
@@ -1853,6 +2088,152 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     fs.remove(Path::new("/nlinkdir/file.txt"))?;
     fs.rmdir(Path::new("/nlinkdir/sub2"))?;
     fs.rmdir(Path::new("/nlinkdir"))?;
+
+    // --- Hard links ---
+    //
+    // The property under test is that a hard link is a second *name*, not a
+    // second *object*.  Every assertion below is one that an implementation
+    // which copied instead of linking would fail, which is why they check
+    // shared data and shared inode numbers rather than merely that `link`
+    // returned Ok.
+    let inodes_before = fs.statvfs()?.total_inodes;
+
+    fs.write_file(Path::new("/hl_orig.txt"), b"shared")?;
+    fs.link(Path::new("/hl_orig.txt"), Path::new("/hl_second.txt"))?;
+
+    // Same object: same inode number from both names, and nlink is 2.
+    let a = fs.stat(Path::new("/hl_orig.txt"))?;
+    let b = fs.stat(Path::new("/hl_second.txt"))?;
+    if a.ino != b.ino || a.ino == 0 {
+        crate::serial_println!(
+            "[memfs]   FAILED: hard link inodes differ ({} vs {})",
+            a.ino,
+            b.ino
+        );
+        return Err(KernelError::IoError);
+    }
+    if fs.metadata(Path::new("/hl_orig.txt"))?.nlinks != 2 {
+        crate::serial_println!("[memfs]   FAILED: nlink after link != 2");
+        return Err(KernelError::IoError);
+    }
+    // A second object holding equal bytes would pass the checks above; only
+    // a write through one name showing up under the other rules it out.
+    fs.write_file(Path::new("/hl_second.txt"), b"written via the second name")?;
+    if fs.read_file(Path::new("/hl_orig.txt"))?.as_slice() != b"written via the second name" {
+        crate::serial_println!("[memfs]   FAILED: hard links do not share data");
+        return Err(KernelError::IoError);
+    }
+    // Renaming one name moves that name and nothing else.
+    fs.rename(Path::new("/hl_second.txt"), Path::new("/hl_renamed.txt"))?;
+    if fs.metadata(Path::new("/hl_orig.txt"))?.nlinks != 2 {
+        crate::serial_println!("[memfs]   FAILED: rename changed a link count");
+        return Err(KernelError::IoError);
+    }
+    // Renaming one hard link onto another name of the *same* object is a
+    // no-op success, not a move: POSIX requires both names to survive.  A
+    // plain detach-and-reattach passes every other assertion here and fails
+    // this one by leaving a single name behind.
+    fs.link(Path::new("/hl_orig.txt"), Path::new("/hl_third.txt"))?;
+    fs.rename(Path::new("/hl_third.txt"), Path::new("/hl_renamed.txt"))?;
+    if fs.stat(Path::new("/hl_third.txt")).is_err()
+        || fs.stat(Path::new("/hl_renamed.txt")).is_err()
+    {
+        crate::serial_println!("[memfs]   FAILED: rename between two names of one object lost one");
+        return Err(KernelError::IoError);
+    }
+    if fs.metadata(Path::new("/hl_orig.txt"))?.nlinks != 3 {
+        crate::serial_println!("[memfs]   FAILED: same-object rename changed the link count");
+        return Err(KernelError::IoError);
+    }
+    fs.remove(Path::new("/hl_third.txt"))?;
+    crate::serial_println!("[memfs]   rename between two names of one object is a no-op: OK");
+
+    // Unlinking one name must decrement, not delete: the surviving name still
+    // reads the data.  This is the case the old owning-tree memfs could not
+    // represent at all.
+    fs.remove(Path::new("/hl_renamed.txt"))?;
+    if fs.read_file(Path::new("/hl_orig.txt"))?.as_slice() != b"written via the second name" {
+        crate::serial_println!("[memfs]   FAILED: unlinking one name destroyed the object");
+        return Err(KernelError::IoError);
+    }
+    if fs.metadata(Path::new("/hl_orig.txt"))?.nlinks != 1 {
+        crate::serial_println!("[memfs]   FAILED: nlink after unlink != 1");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   hard link (shared inode, shared data, nlink): OK");
+
+    // link never replaces an existing name — unlike rename, which does.
+    match fs.link(Path::new("/hl_orig.txt"), Path::new("/hl_orig.txt")) {
+        Err(KernelError::AlreadyExists) => {}
+        other => {
+            crate::serial_println!("[memfs]   FAILED: link onto existing name gave {:?}", other);
+            return Err(KernelError::IoError);
+        }
+    }
+    // Directories are refused, so the namespace stays a tree and the path
+    // resolver's no-cycles assumption holds.
+    fs.mkdir(Path::new("/hl_dir"))?;
+    match fs.link(Path::new("/hl_dir"), Path::new("/hl_dir_alias")) {
+        Err(KernelError::PermissionDenied) => {}
+        other => {
+            crate::serial_println!("[memfs]   FAILED: hard link to directory gave {:?}", other);
+            return Err(KernelError::IoError);
+        }
+    }
+    fs.rmdir(Path::new("/hl_dir"))?;
+    crate::serial_println!("[memfs]   link refuses directories and existing names: OK");
+
+    // Follow vs no-follow on a symlink source.  `link` dereferences and links
+    // the *target*; `link_no_follow` links the *symlink inode*.  The two are
+    // distinguishable only by asking whether the new name is itself a symlink.
+    fs.symlink(Path::new("/hl_sym"), Path::new("hl_orig.txt"))?;
+    fs.link(Path::new("/hl_sym"), Path::new("/hl_followed"))?;
+    fs.link_no_follow(Path::new("/hl_sym"), Path::new("/hl_unfollowed"))?;
+    if fs.lstat(Path::new("/hl_followed"))?.entry_type != EntryType::File {
+        crate::serial_println!(
+            "[memfs]   FAILED: link() through a symlink did not link the target"
+        );
+        return Err(KernelError::IoError);
+    }
+    if fs.lstat(Path::new("/hl_unfollowed"))?.entry_type != EntryType::Symlink {
+        crate::serial_println!(
+            "[memfs]   FAILED: link_no_follow() did not link the symlink itself"
+        );
+        return Err(KernelError::IoError);
+    }
+    if fs.readlink(Path::new("/hl_unfollowed"))?.as_path() != Path::new("hl_orig.txt") {
+        crate::serial_println!("[memfs]   FAILED: linked symlink lost its target");
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   link follow vs no-follow on a symlink: OK");
+
+    // Removing every name frees the object: the inode table returns to the
+    // size it had before this block, which no per-name bookkeeping would
+    // give if a link had leaked an inode.
+    fs.remove(Path::new("/hl_unfollowed"))?;
+    fs.remove(Path::new("/hl_followed"))?;
+    fs.remove(Path::new("/hl_sym"))?;
+    fs.remove(Path::new("/hl_orig.txt"))?;
+    match fs.read_file(Path::new("/hl_orig.txt")) {
+        Err(KernelError::NotFound) => {}
+        other => {
+            crate::serial_println!(
+                "[memfs]   FAILED: last unlink left the file readable: {:?}",
+                other.map(|d| d.len())
+            );
+            return Err(KernelError::IoError);
+        }
+    }
+    let inodes_after = fs.statvfs()?.total_inodes;
+    if inodes_after != inodes_before {
+        crate::serial_println!(
+            "[memfs]   FAILED: hard link test leaked inodes ({} -> {})",
+            inodes_before,
+            inodes_after
+        );
+        return Err(KernelError::IoError);
+    }
+    crate::serial_println!("[memfs]   last unlink frees the inode: OK");
 
     // Clean up.
     fs.remove(Path::new("/target.txt"))?;

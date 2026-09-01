@@ -2423,6 +2423,18 @@ accompany a different Linux-compat signal strategy.
 
 ## 30. memfs hard links — leave unsupported (spec-correct EPERM); test `link(2)` on ext4 instead of refactoring memfs to an inode table
 
+> **SUPERSEDED 2026-09-01 by §665.** Option (A) below — the inode-table
+> refactor — was done. What this entry got wrong is not that ext4 went untested
+> (it did not: the boot test attaches `rootfs.ext4` as vdb, `/mnt` is mounted,
+> and the ring-3 `link(2)` rung has run on ext4 in all 14 boots in the skip
+> window). It is that "test it on ext4 *instead*" quietly conceded every
+> assertion that can only be made where the filesystem under test is the root —
+> above all `[vfs] pinned linkat`, which works in `/tmp` and therefore **skipped
+> its positive same-inode/`nlinks` assertion in 7 of those same 14 boots**. One
+> filesystem passing is not the property; *every* filesystem claiming `link`
+> support honouring it is. The entry is kept unedited below, because the
+> reasoning it records is the reasoning §665 has to answer.
+
 **Date:** 2026-06-16
 
 **Decided by:** Claude (autonomous) — reversible; the operator may overrule. Made
@@ -57601,6 +57613,38 @@ so the register is now written explicitly at every call. That commit was
 verified present on `origin/main` before this one was written; the kernel half
 must not be merged ahead of it.
 
+### CORRECTION 2026-08-31 — "already safe" was checked one layer too high
+
+The paragraph above establishes that the *source* of the caller was fixed
+before the kernel started reading `arg4`. That is necessary. It is not
+sufficient, and the reason is a layer the paragraph never mentions: **between
+lane B's source and the instruction that actually issues the syscall sits a
+prebuilt artifact.** The boot-test fixtures do not compile `posix` — they link
+`toolchain/sysroot/lib/libc.a`, and fastpy resolves that sysroot to a *sibling*
+`os` checkout rather than to the worktree being tested
+(`fastpy/compiler/toolchain.py:160-186`). All three lanes were linking an
+11-day-old `libc.a` for exactly this reason.
+
+So the check that was run — "is `e8fec2292` on `origin/main`?" — answers a
+question about a file. The question that matters is whether the `libc.a` the
+test binary links was *built from* that file. A `libc.a` predating `e8fec2292`
+still issues `syscall4`, and the register hazard is live in the running system
+while the source ordering looks impeccable.
+
+Nothing here was actually broken: `libc.a` is rebuilt often enough, and the
+observed staleness window did not straddle `e8fec2292`. But the argument was
+unsound, and an unsound argument that happens to reach a true conclusion is the
+kind that gets reused on a case where it does not. The general form:
+
+> Ordering a source change before a consumer change proves nothing about
+> execution order when a *build artifact* sits between them. Verify the
+> artifact, not the commit.
+
+The concrete follow-up is a boot-test gate that mirrors fastpy's sysroot
+resolution, hashes the resolved `libc.a`, and fails when its contents differ
+from `toolchain/sysroot/lib/libc.a` in the worktree under test — so "the tree I
+tested is the tree I built" stops being an assumption.
+
 ### Testing
 
 `fs::handle` gains a mode test that pins what the probe got *wrong* rather than
@@ -57613,3 +57657,692 @@ The rename decode is tested as a pure function rather than through the handler,
 because the rest of that handler reads user pointers and cannot run from kernel
 space. That is a deliberate split: the decode is the part where an error would
 be silent, so it is the part worth isolating to make testable.
+
+## §662 — `DirEntry` carries the filesystem's inode, and 647/664's record grows a `u64 ino`
+
+**Date:** 2026-08-31 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** Every operating system reports two numbers that are supposed to
+be the same one: the identity a file has when you *list* the directory it is
+in, and the identity it has when you *ask about the file directly*. Ours were
+never the same number, because listing did not report an identity at all and
+the compatibility layer made one up from the file's name. Programs compare
+those two numbers to decide whether two names are the same file — that is how
+`cp` refuses to copy a file over itself, and how `tar`, `du` and `rsync` avoid
+counting one file twice — and when the numbers disagree, none of those
+programs report an error. They just get the answer wrong. The directory-listing
+record now carries the real number, so the two agree.
+
+### The problem
+
+`fs::vfs::DirEntry` had three fields — name, type, size — and no identity.
+Every consumer that needed one had to invent it, and two of them did, in
+different ways:
+
+- `posix`'s `Dirent::d_ino` used the entry's *position in the listing*, which
+  changes when a neighbour is created or removed.
+- The Linux-ABI `getdents64` used `synth_inode`, an FNV-1a hash of
+  `dir_path + "/" + name` (`kernel/src/syscall/linux.rs:43243`). Stable and
+  collision-resistant — and, being a hash of the path, *guaranteed* never to
+  equal the inode `stat` reports for the same file.
+
+The second is the interesting failure, because it is the one that looks
+correct. `fill_stat_from_meta` writes `meta.ino` to `st_ino`
+(`linux.rs:19927`), which for ext4, btrfs, f2fs, zfs, ntfs and memfs is a real
+number from the backing filesystem. So `ls -i` and `stat` printed different
+inodes for the same file, `find -inum "$(stat -c %i f)"` matched nothing, and
+`tar`, `rsync`, `du` and `cp --preserve=links` — all of which detect hard
+links by comparing `(st_dev, st_ino)` pairs against `d_ino` — silently drew
+the wrong conclusion. No syscall returned an error in any of those cases. The
+values were plausible; only their relationship was wrong.
+
+Lane B independently reached the same conclusion from the other side while
+wiring `SYS_FS_GETDENTS_PINNED` (664), and asked for the field
+(`requests/b-a-*`). Their framing is the sharper one: *an invented `d_ino` is
+worse than an absent one*, because an absent one is a value userspace can test
+for, and an invented one is a value userspace believes.
+
+### The decision
+
+1. **`DirEntry` gains `pub ino: u64`, bound at construction by every
+   backend.** All 91 construction sites across 13 filesystems now pass the
+   identity that filesystem already had in hand — ext4's `child_ino` straight
+   out of the directory block, btrfs's `location.objectid`, zfs's ZAP object
+   number, f2fs's node number, NTFS's MFT record number, memfs's per-node
+   counter, FAT's first cluster. In every case the value is the same one that
+   filesystem's `metadata()` already reports as `st_ino`, so the two agree by
+   construction rather than by coincidence.
+
+2. **`0` means "this filesystem has no stable per-object identity", not
+   "unknown" and not "deleted".** It is the convention `FileMeta::ino` already
+   used, and the filesystems that report it here are exactly the ones that
+   report it there: `procfs`, `sysfs`, `devfs`, `iso9660`, and FAT files with
+   no allocated cluster. A caller reading 0 from a listing and 0 from a stat
+   is being told one consistent thing.
+
+3. **647 and 664's shared record grows a trailing `u64 ino`**, making it
+   `u8 type | u32 name_len | name | u64 size | u64 ino` — 21 + `name_len`
+   bytes. Both handlers now compute the length with the one
+   `entry_record_len`; 647 had carried its own inline copy of the formula,
+   which is precisely the drift that helper's own doc comment warns about, and
+   664's ABI note defines its record as "the same encoding 647 uses", so
+   agreement had better not depend on two authors remembering to edit both.
+
+4. **`getdents64` prefers `ent.ino` and keeps the hash only as a fallback**
+   for the filesystems with no identity at all.
+
+### Alternatives rejected
+
+**Let userspace stat each entry.** Correct, and it is what a caller must do
+anyway when `d_type` comes back `DT_UNKNOWN` — but it is one syscall per
+entry, which is the cost `readdir` exists to avoid, and it would not have
+fixed `d_ino` itself. The field would have stayed a lie that a diligent caller
+worked around and an ordinary one believed.
+
+**A new syscall number rather than a wider record.** The usual reason to add a
+number instead of widening is that widening breaks existing decoders. There
+are none: 664 has never had a caller, 647's only consumer is `posix`, which
+decodes 603's fixed 264-byte format and not this one, and lane B confirmed
+they had not yet written the decoder. Changed now precisely *because* that
+window is open; once B wires 664 it closes permanently and the same change
+costs a second syscall number forever. Same reasoning as §653.
+
+**Omit the field on filesystems that have no inode.** A record whose shape
+depends on its contents cannot be decoded by a reader that has not already
+decoded it. A fixed layout with a documented sentinel is strictly better.
+
+**Emit a literal `0` for `d_ino` in `getdents64` on identity-less
+filesystems, instead of the hash.** Rejected, but it is the closest call here.
+In favour: it would make `d_ino` and `st_ino` agree *everywhere*, since
+`st_ino` is also 0 on those filesystems, which is the entire point of this
+change. Against: `getdents64` is the Linux ABI, and a Linux readdir loop is
+entitled to read `d_ino == 0` as a deleted entry and skip the name — glibc's
+`readdir` does not, but enough ported code does that emitting 0 would risk
+losing entries from `/proc` and `/dev` listings outright. Losing a name is a
+worse failure than reporting an identity that a stat will not confirm, so the
+hash stays. The residual disagreement is real and is logged in
+`known-issues.md` as `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS`.
+
+### What this does not fix
+
+`posix`'s `Dirent::d_ino` is lane B's, and still carries the position index
+until they decode the new field. That is theirs to change and the request they
+filed says they will.
+
+### Testing
+
+The VFS pagination selftest now asserts `entry.ino == Vfs::metadata(path).ino`
+for every entry of a ten-file directory, and separately that none of them is 0
+— memfs assigns every node a number at creation, so a 0 there would mean the
+listing dropped it rather than that the filesystem had none. That second
+assertion is the one that matters: a listing reporting synthesised numbers
+would pass every other check in that test, including the first one, if the
+same synthesis were used on both sides.
+
+---
+
+## §663 — `mkdir`'s mode is ten bits (`0o1777`) on both routes: sticky in, setuid/setgid out
+
+**Date:** 2026-09-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** When a program creates a directory it passes a number saying who
+may read, write and enter it. Twelve bits of that number mean something on a
+file; only ten of them mean anything on a *new directory*. We were accepting
+nine on one route and twelve on the other, and — as it turned out — throwing
+away all but nine on both, one layer further down, where nobody was looking.
+All four places now agree on ten: the nine ordinary permission bits, plus the
+"sticky" bit that makes a shared directory like `/tmp` safe by stopping people
+deleting each other's files. The two bits we now refuse (`setuid`/`setgid`)
+were never settable this way on Linux either, and one of them silently decides
+who owns files created in the directory afterwards.
+
+### What was actually there
+
+Four masks sat on one operation, and no two of them agreed:
+
+| Layer | path route (660) | pinned route (666) |
+|---|---|---|
+| `posix`'s `apply_umask_mkdir` | `0o777` | `0o777` |
+| syscall handler | `0o7777` (since §639) | `0o777` |
+| `Vfs::mkdir_mode` / `mkdir_at_pinned` | `0o777` | `0o777` |
+
+**The middle row never mattered.** §639 Decision 3 widened
+`sys_fs_mkdir_mode` to `0o7777` on 2026-08-30 on the argument that "the mask
+was never a limit of the filesystem, only of this line." That argument was
+correct about `open`, where the widening did reach the disk, and wrong about
+`mkdir`, where it was *not this line* — `Vfs::mkdir_mode` masked the mode to
+`0o777` again before stamping it, so `mkdir(path, 0o1777)` produced exactly
+the `0o777` directory it had produced the day before. The widening was dead
+for two days and no test could see it, because every mode any test asserted
+lay inside `0o777`.
+
+This is the same shape lane B described in
+`requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md` §4,
+where `posix`'s `apply_umask` was undoing the same §639 widening for `open`:
+**a widening recorded in one layer and quietly re-narrowed in another produces
+no error on either side**, because "the bit is missing" and "the bit was never
+requested" produce identical directories. Theirs crossed a lane boundary;
+this one did not cross anything — it was two functions in one crate, both
+written by this lane, three weeks apart. The lane boundary was never what made
+it invisible. The absence of a test that asserts a bit *outside* the old mask
+was.
+
+### Decision 1 — sticky is accepted
+
+`S_ISVTX` is the one bit where creating it in a single step buys something
+real. The two-step alternative — `mkdir(0o777)` then `chmod(0o1777)` — leaves
+a window in which the directory is world-writable and *not yet* sticky, and in
+that window any user may delete any other user's files in it. Every other mode
+bit's two-step is merely untidy; this one's is a hole.
+
+Linux honours it here for the same reason — `mkdir(2)` VERSIONS: "Under Linux,
+apart from the permission bits, the `S_ISVTX` mode bit is also honored" — and
+`vfs_mkdir` masks to precisely `S_IRWXUGO|S_ISVTX`.
+
+**Against:** GNU coreutils never passes special bits through `mkdir()` even on
+Linux where they would be honoured (`lib/mkdir-p.c:117-130` deliberately
+creates with restricted permissions first and applies special bits after, so
+that unauthorized users "cannot nip in before the directory is ready"). So
+`mkdir -m 1777` is two syscalls on GNU/Linux too, and widening buys *that*
+caller nothing. Lane B, who ships our `mkdir`, said plainly they have no
+caller today.
+
+**Why it went in anyway:** the width is ABI, and ABI is cheap to widen now and
+expensive to widen later. A native caller — anything using the `SYS_FS_*`
+family directly rather than through libc, which is the whole point of that
+family existing — has no `mkdir-p.c` to imitate and no reason to write the
+two-step. The bit costs one character in a mask and closes a race for whoever
+does want it.
+
+### Decision 2 — setuid/setgid are refused, reversing §639 for `mkdir` only
+
+This is a *narrowing* of what 660 accepted since 2026-08-30, and it is a
+partial reversal of §639 Decision 3, which widened `SYS_FS_MKDIR_MODE` to
+`0o7777` "to match" `SYS_FS_OPENAT2`. The match was the mistake:
+
+- **The specification splits it here, not merely the implementation.** This is
+  lane B's citation and it is the load-bearing one, because it puts the
+  asymmetry in the *interface* rather than in one kernel's choices. `mkdir(2)`
+  DESCRIPTION: "in the absence of a default ACL, the mode of the created
+  directory is `(mode & ~umask & 0777)`." That `& 0777` is stated for `mkdir`
+  and is **absent** from `open(2)`, which says only `(mode & ~umask)`. So
+  `open` taking twelve while `mkdir` takes fewer is not an inconsistency we
+  are tolerating — it is the shape the interface actually has, and §639's
+  "to match" was matching two calls that the standard does not match.
+- **Linux splits it in the same place**, and its one extension over the spec
+  is exactly the bit Decision 1 keeps: `vfs_create` keeps `S_IALLUGO` (all
+  twelve); `vfs_mkdir` keeps `S_IRWXUGO|S_ISVTX` (the spec's nine, plus
+  sticky). The reason is in the same man page — a new directory's setgid bit
+  is *inherited from its parent*, never taken from the caller's mode word:
+  "If the parent directory has the set-group-ID bit set, then so will the
+  newly created directory."
+- **So accepting it offers an authority `mkdir(2)` does not have**, in the one
+  bit that decides who owns files created in that directory later. A caller
+  could produce a directory Linux could not.
+- **And §639's own safety argument runs the other way here.** §639 justified
+  storing an unenforced `setuid` on a file by noting the failure is
+  "less privilege than the metadata claims", which is fail-closed. That
+  reasoning does not transfer: we do not implement setgid-directory
+  inheritance at all, so a stored setgid bit on a directory is metadata
+  asserting a semantic the kernel never performs, and a program that reads it
+  to decide "the group will be inherited, so I need not `chgrp`" is wrong in
+  whichever direction the group topology happens to point. An unenforced bit
+  is only safe when the thing it would have granted is *privilege*; this one
+  would have granted an *expectation*.
+
+**What it costs:** a caller wanting a setgid directory does it in two calls,
+via `SYS_FS_FCHMODAT_PINNED` (665), which still takes all twelve. That is the
+same shape GNU already uses for special bits, and the request is explicit and
+separately auditable where a mode-word bit is neither.
+
+### Decision 3 — the same mask on all four sites, in one change
+
+660 and 666 mask identically, and so do `Vfs::mkdir_mode` and
+`Vfs::mkdir_at_pinned`. One operation with two masks depending on which route
+ran is worse than either mask consistently applied — the argument that settled
+`link`'s error code in §662's week, applied to a width instead of a code.
+
+Lane B asked for the same thing and for the same reason, and added the part
+that makes it a *cross-lane* constraint: `apply_umask_mkdir` masks to `0o777`
+on their side, so until they move it to `0o1777` the widening is once again
+visible only to native callers. That is not a bug — it is the trap in Decision
+1's own history repeating one layer up — so the request went out in the same
+exchange rather than after it. The narrowing half (setuid/setgid) needs
+nothing from them: their mask already drops those bits.
+
+### The test that would have caught it
+
+`vfs_selftest` now creates `0o1755` on **both** routes and asserts `0o1755`
+reads back, and creates `0o2755` on the pinned route and asserts `0o755`. The
+first pair is the one that matters: every previous mkdir assertion used a mode
+inside `0o777`, which is precisely why a `& 0o777` two layers down survived
+two days of green tests. **A mask can only be tested by a value outside it.**
+
+### The same mask, found three more times by going and looking
+
+Having established that the bug is "a nine-bit mask under a twelve-bit
+contract, invisible because nothing tests a tenth bit", the obvious next move
+was to grep for the other nine-bit masks rather than assume this was the only
+one. Three of the read-only backends had it, in `metadata()`:
+
+```rust
+// btrfs, zfs
+let permissions = u16::try_from(inode.mode & 0o777).unwrap_or(0o444) & 0o555;
+// f2fs
+let permissions = (inode.mode & 0o777) & 0o555;
+```
+
+All three carried a comment saying the mode "is reported **as-is** — with the
+write bits masked off", which is an accurate description of `& 0o555` and a
+false description of the `& 0o777` in front of it. The `& 0o555` is justified
+and stays: the mount refuses every write, so advertising write permission is a
+lie userspace acts on. But **that argument reaches the three write bits and
+stops.** A read-only mount does not make a setuid binary not-setuid; it makes
+it unmodifiable. Sticky on a read-only directory is equally true and equally
+inert.
+
+Meanwhile `FileMeta::permissions` documents itself as twelve bits — "setuid
+setgid sticky rwxrwxrwx" — and ext4 (`i_mode & 0o7777`) and iso9660
+(`m & 0o7777`) deliver twelve. So the same file, with the same bits on disk,
+reported a different mode depending on which filesystem driver read it, and
+`cp -a` or `tar` pulling data *off* a btrfs/zfs/f2fs mount silently dropped
+setuid, setgid and sticky from everything it copied. Fixed to `& 0o7555` —
+twelve bits minus the three write bits, which is what the comment always
+claimed.
+
+The generalisable part is not the mask. It is that **a documented contract
+with more than one implementation needs a test that reads the contract, not
+one per implementation** — nothing here was wrong in a way any single
+backend's own tests could see, because each backend was internally consistent.
+Logged in `known-issues.md` as `A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST`,
+because the fix above closes the three instances and not the hole that let
+them diverge.
+
+## §664 — a volume label is metadata, not a directory entry, and the VFS is where that is guaranteed
+
+**Date:** 2026-09-01 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** A FAT-formatted disk has a name — "MYDISK" — and FAT stores that
+name in a slot in the disk's top-level folder, alongside the actual files. That
+is a storage trick, not a claim that the disk contains a file called MYDISK;
+copying the disk should not produce a file by that name. It never did, but only
+because the FAT driver remembered to hide the slot in each of the three places
+it could have shown it. Now the layer above guarantees it instead, so the next
+driver with a disk name in its top-level folder cannot reintroduce the problem
+by forgetting.
+
+### The question lane B asked, and why the answer was "no, but"
+
+Lane B, wiring `SYS_FS_GETDENTS_PINNED` (664), noticed that `SYS_FS_LIST_DIR`
+(603) skips `EntryType::VolumeLabel` while `SYS_FS_READDIR_AT` (647) and 664
+both emit it as type byte 2, and asked whether one directory therefore had two
+contents depending on which call asked — with a concrete consequence: a `cp -r`
+of a FAT volume through 664 acquiring a spurious entry named after the label.
+B offered to filter type 2 client-side and argued, correctly, that the client
+is the wrong place: every client has to remember, and the one that forgets
+fails silently.
+
+It does not happen. `FatFs` is the only producer of the variant, and it filters
+at all three routes into `to_vfs_entry` — `readdir` (`fat.rs:3127`),
+`readdir_at` (`:3163`), and `resolve_path` (`:1888`), the last of which is what
+makes it airtight, since the other two `to_vfs_entry` call sites go through it.
+No `DirEntry` carrying the variant has ever left the driver. 603's `continue`
+and 647/664's `=> 2` are all unreachable; type byte 2 has never been emitted.
+
+**So the answer to B was "there is no divergence" — and that answer is worth
+less than it sounds.** Three syscalls agreed about the contents of a directory
+because one driver's author filtered in three separate places, and nothing
+anywhere recorded that they were relying on it.
+
+### The decision
+
+**Filter at the VFS**, in one helper (`Vfs::drop_volume_labels`) called from
+`Vfs::readdir`, `Vfs::readdir_at_resolved` and `Vfs::readdir_pinned`.
+
+*The case against* is real and is why this was not obviously right: it is a
+`retain` over every listing on a path the design spec calls performance-
+critical, to remove a value that cannot occur, in a kernel whose own rules say
+not to add abstraction that buys nothing measurable. Defensive code against an
+impossible input is usually just cost.
+
+*The case for*, which won:
+
+- **The input is not impossible, it is merely absent today.** exFAT has a
+  volume label in its root directory and is a plausible next driver. Whoever
+  writes it has no reason to know that three syscall handlers depend on their
+  remembering to filter. The invariant's lifetime is currently bounded by one
+  future author's diligence.
+- **The failure is silent and untestable in the ordinary way.** A test cannot
+  distinguish "the label was filtered" from "there was no label" without
+  independently proving the label exists — which is the same trap that hid four
+  disagreeing `mkdir` masks for two days (§663), found the same week, one file
+  away.
+- **The cost is a `retain` on an already-allocated `Vec`, downstream of block
+  I/O and an allocation.** It does not appear against the noise of either.
+- **The guarantee belongs to the layer that states it.** 664's whole purpose is
+  to be the race-free substitute for a listing taken by path; "these two calls
+  list the same thing" is a VFS-level promise, so the VFS should be what keeps
+  it, not three drivers independently.
+
+Drivers keep their own filters — FAT's are cheaper there and its short-name
+collision checks need them — but they stop being load-bearing.
+
+**Placement was the only genuinely delicate part.** The filter runs *before*
+`readdir_at_resolved` takes `total` and slices the page, and *before* 664 folds
+`needed`. 647's old comment argued at length that a label must consume a record
+because dropping one mid-pack would make `entries_written` disagree with how
+far the offset advanced, so the caller's next page would step over a real
+neighbour. That argument is correct, and it was always an argument about
+*where* to filter, never about whether — which is exactly why it is honoured by
+moving the filter up rather than by passing labels through.
+
+### What the ABI says now
+
+Entry-type byte `2` is **reserved and never emitted** on 603, 647 and 664.
+Reserved rather than reclaimed: renumbering 3/4/5 down would break every
+decoder to recover one value. The label is read from `SYS_FS_STATVFS` (608)
+and written by `Vfs::set_volume_label`, neither of which goes through a
+listing. 664's ABI note now states outright that it lists exactly what 603 and
+647 list, because that is the property a caller swapping routes to close a race
+is actually relying on, and it should not have to infer it from three handlers
+happening to match.
+
+### The test, and the order its assertions are in
+
+`fat::mkfs_self_test` already formatted a RAM disk with the label `SELFTEST`,
+so the fixture existed. It now asserts, in this order:
+
+1. `Vfs::statvfs(mp).volume_label == "SELFTEST"`;
+2. no `VolumeLabel` entry and no entry named `SELFTEST` from `readdir`,
+   `readdir_at` or `readdir_pinned`;
+3. the three routes report the same set of names.
+
+**Assertion 1 is not a warm-up.** Without it, 2 passes on a volume that has no
+label at all, and the test proves nothing — the identical mistake to asserting
+a directory mode of `0o755` against a mask that clears `0o1000`. Assertion 3
+states B's actual requirement directly instead of leaving it to be inferred.
+
+### The bug this actually found, which was not the one asked about
+
+Reading both listings end-to-end in order to answer B turned up that
+**`Vfs::readdir_pinned` never injected submounts.** `Vfs::readdir` and
+`Vfs::readdir_at_resolved` both add mounted filesystems' mount points to a
+listing — `/mnt/usb` appears when you list `/mnt` even though the underlying
+filesystem has no such directory — and `readdir_pinned` did not. So 664 listed
+only what the backing filesystem physically contains: no `tmp`, `proc`, `sys`
+or `dev` at the root. A `cp -r` that switched to 664 precisely to stop a rename
+racing its walk would silently have stopped descending into every mounted
+filesystem, and reported success.
+
+That is B's question in the opposite direction, in the same pair of calls —
+and unlike the volume label it was **real**. It sharpens this entry's own
+justification uncomfortably: the filter above was argued for against a
+*hypothetical* future driver that forgets a rule, while the identical failure
+mode was concurrently *true*, in the same three functions, about a different
+rule. "Three sites that happen to agree" was not a risk here; it was already a
+bug.
+
+So it was fixed in the same change, and generalised: **`Vfs::finish_listing`**
+is now the single route by which a raw driver listing becomes a VFS listing —
+it drops labels *and* injects submounts — and all three entry points call it
+instead of open-coding zero, one or both steps. One function, not three sites
+that must match. `readdir_pinned` scopes its backing-filesystem guard so it
+drops before `finish_listing` takes `VFS`, preserving the lock order (`VFS` is
+never taken while a filesystem lock is held).
+
+**And the test nearly missed it.** The three-route agreement check described
+above *passed with the bug present*: the FAT volume's root has no submounts,
+and three routes that all omit the same thing agree perfectly. It can only see
+this because it now mounts a memfs inside the volume first, at a mount point
+with no physical directory behind it, so the entry can only come from
+injection. That is §663's lesson in a second costume — an agreement test proves
+nothing about a case none of the parties encounters, just as a mask can only be
+tested by a value outside it.
+
+### Still open
+
+`FileSystem::readdir_at` has a default implementation, a doc comment urging
+implementors to override it for efficiency, overrides in FAT and ext4 — and no
+callers at all, because `readdir_at_resolved` open-codes the default in order
+to dedup submount names against the whole listing. So 647 on a large directory
+reads and formats every entry to return one page, and ext4's native paginated
+walk has never run. Logged as
+`A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS` in
+`known-issues.md`; the real fix needs a mount-time policy on mount-point names
+colliding with real directory entries, which is a decision, not a patch.
+
+Neither was on anyone's list. Both turned up because answering "is there a
+divergence between these two listings?" required reading both listings' full
+path from syscall to driver, which is the third time in two days that tracing
+one value end-to-end has found something nobody was looking for.
+
+## §665 — memfs separates names from objects: a flat inode table, and §30's deferral reversed
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous) — this reverses §30, which was also
+`Claude (autonomous)` and explicitly marked reversible. No operator decision is
+being overturned.
+
+**In short:** The in-memory filesystem — which is what `/` and `/tmp` are on
+every boot — stored each file *inside* the directory that named it. That makes
+a **hard link** (two names for one file, what `ln` without `-s` creates)
+impossible to express, so `ln foo bar` on `/tmp` failed with "operation not
+permitted". It has been rewritten to keep files in one table and let
+directories hold *numbers* pointing into it, so two names can point at the same
+file. §30 decided in June to leave this alone and test hard links on the ext4
+disk instead; that decision is now reversed, and this entry records why the
+reasoning that supported it stopped holding.
+
+### What changed
+
+`MemFs` was `{ root: MemFsNode }` with `Dir(BTreeMap<name, MemFsNode>)` — a
+tree of nodes owned by their parent. It is now:
+
+```rust
+struct MemFs { inodes: BTreeMap<u64, MemFsNode>, root_ino: u64 }
+enum MemFsNodeKind { File(Vec<u8>), Dir(BTreeMap<PathBuf, u64>), Symlink(PathBuf) }
+```
+
+Every name-side mutation goes through one of five helpers — `insert_new`,
+`add_link`, `take_child`, `drop_link`, `child_ino` — so the two halves of a
+link (the entry in a directory, and the count on the inode) cannot get out of
+step by a new call site forgetting one of them. `drop_link` is the only place
+a node leaves `inodes`, and it frees only when the count reaches zero.
+
+`link` and `link_no_follow` are implemented; hard links to **directories** are
+refused with `PermissionDenied`, as on Linux, because the path resolver assumes
+the directory graph is a tree and a cycle made of directory links would spin
+without ever tripping the symlink-depth counter — no symlink is involved.
+
+### Why §30's reasoning stopped holding
+
+§30 rejected the refactor as "a sweeping rewrite of a core subsystem … with no
+current consumer demanding it." Three of its four supporting claims have since
+become false, and one was never quite right:
+
+| §30 said | Now |
+|---|---|
+| "no current consumer demanding it" | `Vfs::link_at_pinned` — the primitive `cp -r`/`cp -al` needs — had its positive same-inode assertion **skipped** for exactly this reason. A recorded skip *is* a consumer. |
+| "the practically important case already works [on ext4]" | True as stated, and it is the *"instead"* that does not survive. ext4 really is exercised every boot — `rootfs.ext4` is attached as vdb, `/mnt` is mounted, and the ring-3 `link(2)` rung ran on it in all 14 boots in the skip window. But "one filesystem honours `link`" is a weaker property than "every filesystem that claims `link` honours it", and it is the weaker one §30 bought. The assertions that needed the *root* filesystem to have hard links — `pinned linkat`'s positive half, and memfs's own coverage — had no way to run at all. |
+| "large, risky" | It came to ~900 lines of diff in one file, compiled on the first `cargo check`, and *removed* code: `walk_mut`, `nlink_count`, `rename`'s subtree move, `rename_exchange`'s rollback, and `statvfs`'s recursive count all went away. |
+| "memfs reporting no hard-link support is spec-correct" | Still true, and still not the point. `EPERM` is a *permitted* answer, not a good one; it made the filesystem under `/tmp` less capable than the one under `/mnt` for no reason a caller could predict. |
+
+The general shape is the one §664 just paid for from the other direction: a
+property that no test could observe, because the configuration that would
+expose it was the one nobody ran.
+
+### What it bought beyond hard links
+
+The refactor was justified by hard links, but separating names from objects
+fixed four things that were not on anyone's list:
+
+- **`rename` moves one `u64`.** It used to move a whole subtree, so renaming a
+  large directory was O(descendants) and had an intermediate state.
+- **`rename_exchange` needs no rollback.** Both lookups now precede any
+  mutation, so the all-or-nothing property is structural rather than restored
+  by an unwind path that had to be right.
+- **`rename` no longer silently destroys a file.** `BTreeMap::insert` returns
+  the evicted value; the old code dropped it, which is correct only when the
+  displaced name was the object's *last* name. It goes through `drop_link` now.
+- **`statvfs` counts objects, not names.** The recursive walk would have
+  reported a twice-linked file twice.
+- **`walk` needs only `&self`.** The nested-borrow contortions the owning tree
+  forced (mutably borrowing every ancestor for as long as a descendant was
+  held) are gone.
+
+### `nlink` for directories is not the link count
+
+A directory's internal `links` is always 1 — it has one name. But
+`MemFs::nlink_of` reports `2 + immediate subdirectory count` for directories,
+the Unix `.`/`..` convention, because `find(1)`'s leaf optimisation subtracts 2
+and stops descending once it has seen that many subdirectories. Reporting the
+true name count (1) would make `find` skip every real directory. The two
+numbers are deliberately different and the field's doc on `FileMeta::nlinks`
+now says so.
+
+### Tests
+
+`memfs::self_test` gained a hard-link block whose every assertion fails against
+an implementation that copies instead of linking: same inode from both names,
+nlink 2, a write through one name read back through the other, unlink of one
+name leaving the other readable, and the inode table returning to its prior
+size once the last name goes. The follow/no-follow split is asserted by whether
+the *new* name is itself a symlink, which is the only thing that distinguishes
+them.
+
+`vfs_selftest`'s `pinned linkat` skip is retired: the assertion is now stated
+unconditionally, because one that tolerates the filesystem declining to do the
+thing is one that passes when the thing stops working.
+
+`self_test_linux_link` (ring 3) now falls back to `/tmp` when there is no
+`/mnt`. This one is insurance rather than a fix: the rung is *not* currently
+skipping — `/mnt` is mounted on every boot the harness runs, and the skip
+window records no skip for it — so the fallback buys coverage for a diskless
+configuration rather than restoring coverage that was missing. It still prefers
+ext4 when a disk is present, since that is the only ring-3 exercise of ext4's
+`link`.
+
+An earlier draft of this entry (and of the commit message) asserted the boot
+test "runs diskless" and that the ext4 rung therefore never executed. That was
+wrong, and it was wrong in the direction that flatters the change — checked
+against the serial log and `check-boot-skips.py --list` afterwards, not before
+writing it down. The real gap was narrower and is stated in the table above.
+
+### How to reverse
+
+There is no reason to, but: the tree form is recoverable by inlining `node()`
+at its call sites and folding the table back into `Dir`. Doing so re-breaks
+hard links and re-introduces every item in the list above, so the reversal
+would have to be motivated by something other than simplicity.
+
+---
+
+## §666 — pinned `renameat` (670) keeps its flags and packs the two name lengths; cross-mount is refused rather than emulated
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel already had a way to move a file by name
+(`SYS_FS_RENAME`). Lane B's `mv` needs a version that takes two *directory
+handles* instead — an opened, verified reference to a directory — so that a
+rename cannot be tricked into moving the wrong thing if someone swaps a
+directory out from under it mid-operation. A syscall gets six registers to pass
+arguments in, and this one needs seven things: two handles, two names, each
+name's length, and a flags word. Something had to give. This entry records that
+the flags word stayed and the two lengths were squeezed into one register
+instead — and that the new call flatly refuses to move a file between two disks,
+where the older path-based call quietly copies it.
+
+### The register problem, and why 668's answer does not transfer
+
+`SYS_FS_LINKAT_PINNED` (668) hit exactly this wall a day earlier and resolved
+it by **dropping the flag**. That was right there and is wrong here, and the
+difference is worth stating because the two calls otherwise look identical.
+
+668's flag was `AT_SYMLINK_FOLLOW`: it asks the kernel to link a symlink's
+*target* rather than the symlink. Following a symlink is, definitionally, a
+request to go somewhere the handle does not point — so refusing the flag costs
+a caller nothing that the pin was providing in the first place. A caller who
+wants it wants the path route.
+
+670's flags are `RENAME_NOREPLACE` and `RENAME_EXCHANGE`. Neither leaves the
+pinned directory. They are atomicity guarantees *inside* it:
+
+| flag | what it buys | can the caller synthesise it? |
+|---|---|---|
+| `RENAME_NOREPLACE` | fail rather than clobber an existing destination | **No.** "stat, then rename" reopens precisely the window the flag closes. |
+| `RENAME_EXCHANGE` | swap two names in one step | **No.** Three renames through a temporary name is not atomic and can be interrupted halfway. |
+
+And the caller is not hypothetical: `mv -n` *is* `RENAME_NOREPLACE`. Dropping
+the flag would have meant lane B's `mv -n` either races or does not exist.
+
+So the flag stays, and the register comes from packing the two name lengths
+into `arg4` as `(source_len << 32) | dest_len`. This is not a convention
+invented for this call — `SYS_FS_READDIR_AT` already packs `(offset << 32) |
+count` into `arg2`, and the GPU calls pack `width | (height << 32)`.
+
+**Alternative considered: a pointer to an argument struct.** Rejected. It
+replaces one packed register with an extra user-memory read that can fault,
+fail, or be raced against by another thread in the calling process — turning a
+value the kernel already holds in a register into one more piece of
+attacker-controlled memory to validate. Packing has a real cost (the lengths
+are `u32`, not `usize`) and that cost is invisible: `read_user_path` caps each
+name at `PATH_MAX` and the one-component check rejects anything longer anyway,
+so no legal value comes close to 2^32.
+
+### Cross-mount: refused, where the path route copies
+
+`Vfs::rename` falls back to copy-then-delete when the two paths are on
+different mounts. `Vfs::rename_at_pinned` returns `CrossDevice` (`EXDEV`)
+instead.
+
+This is a deliberate divergence between the two routes, and the reason is that
+**a pin cannot span a copy.** The path route's cross-mount rename is a
+*sequence* of independent operations — `stat`, `copy`, `set_permissions`,
+`set_owner`, `remove` — each taking and releasing its own lock. There is no
+point at which a handle's verification covers the whole of it. A call that
+verified both handles, then copied, then deleted, would be offering a guarantee
+it stops honouring halfway through, and the caller could not tell the
+difference from the outside. That is strictly worse than refusing, because a
+refusal is visible.
+
+Refusing also buys the property that makes the locking trivial: `Arc::ptr_eq`
+on the two mounts' filesystem handles establishes that **one** guard reaches
+both directories, so both pins are re-verified under the very lock that
+performs the rename, and there is no lock ordering to get wrong because there
+are never two locks. Contrast `link_at_pinned`, which has a case where only one
+of its two handles can be re-verified in pass 2.
+
+The cost is nil in practice: POSIX already requires `mv` to handle `EXDEV` by
+copying, so lane B's fallback path exists whether or not this call refuses.
+
+### `RenameMode` moved to the VFS
+
+The enum was defined in `syscall::handlers`, next to the flag decode. It now
+lives in `fs::vfs`, with `handlers` re-exporting it and keeping
+`RenameMode::from_flags` as an inherent impl.
+
+The split is: the *three renames* are a filesystem semantic, and both the path
+route and the handle route offer them, so one type for both is what stops the
+two drifting into offering different sets. The *bit values* are Linux's and are
+a statement about the syscall ABI, so the decode stays with the handlers. The
+re-export rather than a bare move is so that the existing callers and the boot
+self-test in `syscall::linux`, which name it as
+`crate::syscall::handlers::RenameMode`, keep working unchanged.
+
+### What the self-test asserts, and the one assertion the other four did not need
+
+`rename_at_pinned` is the first member of this family that can **destroy**
+something. `mkdirat`, `symlinkat`, `linkat` and `utimensat` can only create or
+stamp, so for them "the call was refused" and "the source is untouched" are the
+same sentence. For rename they are two sentences, and the second is the one
+that matters: a rename that unlinks the source and *then* discovers it must
+refuse has lost the file and returned an error for it, which reads as correct
+in every log.
+
+So every refusal path is checked at both ends — the ten refused containment
+renames, and the refusal on a swapped destination, are each followed by an
+assertion that `src/f` is still there. The `NoReplace`-onto-a-taken-name case
+checks both files' *contents*, not just their existence, for the same reason.

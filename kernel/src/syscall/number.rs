@@ -2854,8 +2854,18 @@ pub const SYS_FS_MKDIR: u64 = 604;
 /// `arg0`: pointer to path string.
 /// `arg1`: path length (bytes).
 /// `arg2`: create mode — the final on-disk permission bits (already
-///   umask-masked by the userspace POSIX layer).  0 means "unspecified" →
-///   the historical 0o755 default.
+///   umask-masked by the userspace POSIX layer), masked to `0o1777`: the nine
+///   permission bits plus sticky.  0 means "unspecified" → the historical
+///   0o755 default.
+///
+/// Ten bits and not twelve, which is Linux's `vfs_mkdir` mask exactly.  A new
+/// directory's setgid bit is inherited from its parent rather than taken from
+/// this argument, so accepting it here would offer an authority `mkdir(2)` does
+/// not have, in the one bit that decides who owns files created in that
+/// directory later.  Sticky is accepted because creating `/tmp`-shaped
+/// directories in two steps leaves a window in which they are world-writable
+/// and not yet sticky.  [`SYS_FS_MKDIRAT_PINNED`] applies the identical mask.
+/// See `design-decisions.md` §663.
 ///
 /// A separate number from [`SYS_FS_MKDIR`] so the 2-argument mkdir ABI is
 /// unchanged for already-built binaries.  Number 660.
@@ -2892,10 +2902,12 @@ pub const SYS_FS_STAT: u64 = 606;
 /// `arg2`: pointer to new link path string.
 /// `arg3`: new link path length (bytes).
 ///
-/// Both paths must resolve to the same mount point.  The existing
-/// path is followed through symlinks (the link points to the underlying
-/// file, not the symlink).  Only regular files can be hard-linked;
-/// directories return `IsADirectory`.
+/// Both paths must resolve to the same mount point; two that do not give
+/// `CrossDevice` (→ `EXDEV`), which is the code POSIX defines for this exact
+/// case and the same one [`SYS_FS_LINKAT_PINNED`] reports — see its note for
+/// why both routes changed together.  The existing path is followed through
+/// symlinks (the link points to the underlying file, not the symlink).  Only
+/// regular files can be hard-linked; directories return `IsADirectory`.
 ///
 /// Returns: 0 on success, negative error code.
 pub const SYS_FS_LINK: u64 = 607;
@@ -3036,8 +3048,51 @@ pub const SYS_FS_HANDLE_PATH: u64 = 646;
 ///     `arg4`: output buffer capacity in bytes.
 ///
 /// Each entry is serialized as:
-///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size`
-///   (entry_type: 0=file, 1=dir, 2=symlink, 3=volume_label)
+///   `u8 entry_type | u32 name_len | u8[name_len] name | u64 size | u64 ino`
+///   (entry_type: 0=file, 1=dir, 2=volume_label, 3=symlink,
+///    4=char_device, 5=block_device)
+///
+/// **`2` is reserved and never emitted.** A volume label is filesystem
+/// metadata that FAT happens to store in a root-directory slot, not an entry
+/// the directory contains, and the VFS drops labels on every listing route
+/// (`Vfs::drop_volume_labels`) — before the offset above is applied, so a
+/// dropped label can never make `entries_written` disagree with how far the
+/// offset advanced. `SYS_FS_LIST_DIR` (603) and [`SYS_FS_GETDENTS_PINNED`]
+/// behave identically; there is no route by which one lists a label and
+/// another does not. Read the label with [`SYS_FS_STATVFS`] instead. The
+/// value is left reserved rather than reused because renumbering the bytes
+/// above it would break every decoder to save one number.
+///
+/// All multi-byte fields are little-endian. A record is therefore
+/// `21 + name_len` bytes, and the same layout is what
+/// [`SYS_FS_GETDENTS_PINNED`] emits — both call one `entry_record_len` so
+/// the two cannot drift.
+///
+/// `ino` is the backing filesystem's inode number for the object the name
+/// refers to, and is the same value [`SYS_FS_GET_META`] reports as `st_ino`
+/// for that object; `0` means the filesystem has no stable per-object
+/// identity (FAT files with no allocated cluster, `procfs`, `sysfs`,
+/// `devfs`, `iso9660`), not that the entry is deleted. It was appended
+/// 2026-08-31, while neither this call nor [`SYS_FS_GETDENTS_PINNED`] had a
+/// decoder outside the kernel — a record layout is only free to change
+/// while nothing decodes it. Callers must use this field rather than
+/// synthesise a number from the path: `d_ino` and `st_ino` are cross-checked
+/// by `find -inum`, by `ls -i` against `stat`, and by the hard-link
+/// detection in `tar`, `rsync` and `du`, so a synthetic value — which by
+/// construction never equals the real inode — makes all of those silently
+/// wrong rather than visibly broken.
+///
+/// This table read `2=symlink, 3=volume_label` until 2026-08-31 and omitted
+/// 4 and 5 entirely. Both handlers have always emitted `2=VolumeLabel,
+/// 3=Symlink`, as have `SYS_FS_LIST_DIR` (603) and `posix`'s
+/// `kernel_type_to_dt`, so the comment was the only thing that disagreed
+/// with the system — and it is the *only* documentation of the type byte for
+/// [`SYS_FS_GETDENTS_PINNED`], whose own note defers to this one. Lane B
+/// caught it before wiring 664 (`requests/b-a-the-647-664-entry-type-table-
+/// has-symlink-and-volume-label-swapped.md`). Worth the paragraph because of
+/// how it fails: a symlink decoded as a volume label is a plausible value
+/// rather than a fault, so a `cp -r` built from this table would have
+/// dereferenced every link it walked and no return code would have said so.
 ///
 /// Returns: packed `(total_entries << 32) | entries_written`.
 /// If the buffer is too small, entries are truncated (not an error).
@@ -3362,10 +3417,23 @@ pub const SYS_FS_FSTATAT_PINNED: u64 = 663;
 /// `InvalidHandle` (§648).
 /// `arg1`: output buffer.  `arg2`: output buffer capacity.
 ///
-/// Entries are packed as `[u8 type][u32 name_len][name bytes][u64 size]`,
-/// the same encoding [`SYS_FS_READDIR_AT`] uses.  A buffer too small for the
-/// whole listing truncates it — at a record boundary, never mid-record —
-/// rather than failing.
+/// Entries are packed as
+/// `[u8 type][u32 name_len][name bytes][u64 size][u64 ino]` — little-endian,
+/// `21 + name_len` bytes per record — the same encoding
+/// [`SYS_FS_READDIR_AT`] uses, whose note is the authority for the meaning
+/// of `type` and `ino` and which both calls compute a record length for with
+/// the same `entry_record_len`.  A buffer too small for the whole listing
+/// truncates it — at a record boundary, never mid-record — rather than
+/// failing.
+///
+/// **This call lists exactly what `SYS_FS_LIST_DIR` (603) and
+/// [`SYS_FS_READDIR_AT`] list.**  That is worth stating rather than leaving
+/// to inference, because this number exists to be the race-free substitute
+/// for a listing taken by path: swapping routes to close a race must not
+/// also change what the directory is said to contain.  In particular no
+/// route emits a volume label (type byte `2` is reserved — see
+/// [`SYS_FS_READDIR_AT`]); the VFS drops them, so a `cp -r` that switches to
+/// this call does not acquire an entry named after the volume.
 ///
 /// Returns: on success, the bytes the *complete* listing occupies, which is
 /// not necessarily the number written.  `ret <= arg2` means the listing is
@@ -3443,9 +3511,15 @@ pub const AT_SYMLINK_FOLLOW_PINNED: u64 = 0x400;
 /// `arg0`: directory handle; `0` is not the cwd and is rejected as
 /// `InvalidHandle` (§648).
 /// `arg1`: name pointer.  `arg2`: name length.
-/// `arg3`: mode — the low nine permission bits, **already umask-masked by the
-/// caller**, since the umask lives in the userspace POSIX layer. Bits above the
-/// nine are masked off rather than rejected, matching [`SYS_FS_MKDIR_MODE`].
+/// `arg3`: mode — masked to `0o1777` (the nine permission bits plus sticky),
+/// **already umask-masked by the caller**, since the umask lives in the
+/// userspace POSIX layer. Bits above those ten are masked off rather than
+/// rejected, matching [`SYS_FS_MKDIR_MODE`], which applies the same `0o1777`.
+/// Ten and not twelve because setuid/setgid have no meaning in a directory
+/// creation mode — Linux's `vfs_mkdir` masks to exactly this — and ten rather
+/// than nine because a sticky directory created in one step has no window in
+/// which it is world-writable but not yet sticky. See `design-decisions.md`
+/// §663.
 /// `arg4`: flags — must be `0`. `mkdirat(2)` defines none, and refusing unknown
 /// bits now keeps the argument free for a later one.
 ///
@@ -3509,12 +3583,23 @@ pub const SYS_FS_SYMLINKAT_PINNED: u64 = 667;
 /// primitive beneath this and for a future caller that needs it.
 ///
 /// Returns: 0 on success; `ESTALE` if either handle no longer denotes the
-/// directory it was opened on; `InvalidArgument` if the two names resolve to
-/// different mounts, since hard links cannot cross one — this matches the
-/// path-based `link`, which reports the same code for the same reason, rather
-/// than the `EXDEV` a POSIX caller expects; translating it is the POSIX layer's
-/// job and is not made harder by the pinned route agreeing with the path one;
+/// directory it was opened on; `CrossDevice` (→ `EXDEV`) if the two names
+/// resolve to different mounts, since hard links cannot cross one — the same
+/// code the path-based [`SYS_FS_LINK`] reports for the same condition;
 /// otherwise a negative error code.
+///
+/// That was `InvalidArgument` (→ `EINVAL`) on both routes until 2026-08-31.
+/// The note here argued that the two routes agreeing mattered more than the
+/// code being right, and that translating it was the POSIX layer's job —
+/// which was true of the first half and wrong about the second: POSIX defines
+/// `[EXDEV]` as *exactly* this case ("the link named by path2 and the file
+/// named by path1 are on different file systems"), so there was nothing to
+/// translate, only a wrong code to pass on. It was observable: lane B's `ln`
+/// printed "Invalid argument" where GNU prints "Invalid cross-device link",
+/// and `errmsg.rs`'s `CrossesDevices` arm was unreachable from `link`.
+/// Nothing branches on it in coreutils, which is the argument *for* fixing it
+/// — an error code nothing branches on is one no test will ever catch. Both
+/// routes were changed in one commit, for the reason the old note gave.
 pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 
 /// Set the timestamps of `name` within the directory a handle was opened on,
@@ -3542,6 +3627,52 @@ pub const SYS_FS_LINKAT_PINNED: u64 = 668;
 /// Returns: 0 on success; `ESTALE` if the handle no longer denotes the
 /// directory it was opened on; otherwise a negative error code.
 pub const SYS_FS_UTIMENSAT_PINNED: u64 = 669;
+
+/// Rename a name in one pinned directory to a name in another, resolving
+/// *both handles* rather than their names.
+///
+/// `arg0`: source directory handle.  `arg1`: source name pointer.
+/// `arg2`: destination directory handle.  `arg3`: destination name pointer.
+/// `arg4`: the two name lengths, packed `(source_len << 32) | dest_len`.
+/// `arg5`: flags, using the same Linux `renameat2` bit values as
+/// [`SYS_FS_RENAME`]: `0` replaces, `1` is `RENAME_NOREPLACE`, `2` is
+/// `RENAME_EXCHANGE`. Any other value is `InvalidArgument`.
+///
+/// Both handles follow the §648 rule: `0` is not the cwd and is rejected as
+/// `InvalidHandle`. Both names must be exactly one component. The two handles
+/// may be the same.
+///
+/// **Why the lengths are packed.** Six registers cannot hold two handles, two
+/// counted names *and* a flags word — the same wall [`SYS_FS_LINKAT_PINNED`]
+/// hit. There it was answered by dropping the flag, because that flag was
+/// `AT_SYMLINK_FOLLOW`, whose whole effect is to leave the pinned directory:
+/// refusing it costs a caller nothing the pin was providing. That argument
+/// does **not** transfer here. `RENAME_NOREPLACE` and `RENAME_EXCHANGE` are
+/// not escapes from the pin — they are atomicity guarantees *within* it, and
+/// they are what the intended caller wants (`mv -n` is `RENAME_NOREPLACE`, and
+/// there is no way to synthesise it from a plain rename without reopening the
+/// race it exists to close). So the flag stays and a register is bought back
+/// by packing instead. Two `u32` lengths in one `u64` is the established
+/// convention in this table — `SYS_FS_READDIR_AT` packs `(offset << 32) |
+/// count` in `arg2`, and the GPU calls pack `width | (height << 32)`.
+/// A garbage packed value is bounded rather than dangerous: each half is read
+/// through `read_user_path`, which caps the read at `PATH_MAX`, and any length
+/// that is not one valid component is then refused by the name check.
+///
+/// **Cross-mount is refused**, with `CrossDevice` (→ `EXDEV`), where the
+/// path-based [`SYS_FS_RENAME`] falls back to copy-then-delete. That is a
+/// deliberate divergence, not an omission: a copy-then-delete is a *sequence*
+/// of independent operations, and a handle whose verification lapses between
+/// them would be a pin in name only. Refusing says so in a code the caller can
+/// act on; POSIX already requires `mv` to handle `EXDEV` by copying, which is
+/// precisely the fallback it would take.
+///
+/// Returns: 0 on success; `ESTALE` if either handle no longer denotes the
+/// directory it was opened on; `AlreadyExists` (→ `EEXIST`) if
+/// `RENAME_NOREPLACE` was asked for and the destination is taken;
+/// `CrossDevice` (→ `EXDEV`) if the two directories are on different mounts;
+/// otherwise a negative error code.
+pub const SYS_FS_RENAMEAT_PINNED: u64 = 670;
 
 /// Close an open file handle.
 ///
@@ -3769,7 +3900,9 @@ pub const SYS_FS_JOURNAL_FLUSH: u64 = 627;
 ///
 /// Output layout (see `FS_META_SIZE`):
 /// - `[0..8]`:   file size (u64 LE)
-/// - `[8]`:      entry type (0=file, 1=dir, 2=vol, 3=symlink)
+/// - `[8]`:      entry type (0=file, 1=dir, 2=volume_label, 3=symlink,
+///   4=char_device, 5=block_device — the encoding [`SYS_FS_READDIR_AT`]
+///   documents in full)
 /// - `[9..16]`:  padding
 /// - `[16..24]`: created_ns (u64 LE)
 /// - `[24..32]`: modified_ns (u64 LE)

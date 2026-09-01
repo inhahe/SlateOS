@@ -14508,7 +14508,12 @@ EROFS). Regression test: Path Z Part 28 (`self_test_linux_link`) hard-links
 `/mnt/lnk-dst` to a pre-staged `/mnt/lnk-src` from ring 3 and reads the byte
 back through it.
 
-**memfs does not support hard links (deferred):** the test runs on the **ext4**
+**memfs does not support hard links (deferred):** *— no longer true as of
+2026-09-01; memfs was refactored to a flat inode table and implements
+`link`/`link_no_follow`. See `design-decisions.md` §665 and
+`A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK`. The paragraph is
+kept because the fidelity-gap history after it is still accurate.* The test
+runs on the **ext4**
 mount at `/mnt`, not the in-memory root (`/`, `/tmp`). memfs stores file data
 inline in by-value tree nodes (`MemFsNodeKind::File(Vec<u8>)` owned by the
 parent's `BTreeMap`), so two directory entries cannot share one inode — which
@@ -49661,6 +49666,42 @@ deserve unrelated budgets — but the first is what any run should do today.
 **Workaround until then.** `python scripts/run-timeout.py --poll 60 2700
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
+
+### CORRECTION 2026-08-31 — the fix landed, and the stated cause was wrong
+
+**Status: CLOSED (fixed), with one paragraph above retracted.**
+
+Two separate things need saying, because only one of them is "this got fixed".
+
+**The fix.** `boot-test.sh` now documents and budgets the outer window itself
+(`scripts/boot-test.sh:30-57`): **7200 s**, derived as ~3000 s observed pre-QEMU
++ 2400 s inner QEMU timeout + headroom. The entry's "Proper fix" offered a
+choice between raising the budget to ~2700 s and splitting build from boot; the
+budget was raised, to nearly 3× what this entry proposed, because the pre-QEMU
+phase was re-measured on 2026-08-31 at ~3000 s with another lane building
+concurrently — so 2700 s would itself have been too tight. The comment there
+also records the reason a *generous* outer budget is not laziness: an outer
+timeout that fires first replaces the inner one's SYSTEM HANG diagnostic
+(faulting RIP over HMP, task table, marker) with an anonymous exit 124, on
+exactly the runs where the diagnostic matters. That destroyed two runs on
+2026-08-31 before the comment was rewritten.
+
+**The retraction.** The paragraph above titled *"Why the cache is cold more
+often than it looks"* — claiming a preceding `cargo clippy` evicts the build's
+fingerprints, so that "lint, then boot-test" guarantees a cold build — **is
+false, and was reasoning rather than measurement.** `cargo clippy` sets
+`RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace unit's
+fingerprint, so clippy's artifacts occupy their own cache entries and leave the
+build's untouched. Measured 2026-08-24 and recorded at
+`scripts/boot-test.sh:4055-4067`: a `cargo build` run *immediately after* a cold
+200 s clippy took **4.7 s** — i.e. not invalidated at all.
+
+That retraction matters beyond this entry, because the same false belief had
+already been used once to *defer* adding the clippy gate on cost grounds. A
+plausible mechanism, asserted without measurement, cost a real gate and then
+survived long enough to be written down here as an explanation for an unrelated
+timeout. The actual cause of the 2026-08-20 overrun was simply that the build
+is long and the budget was short — no eviction required.
 
 ## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
 
@@ -103529,7 +103570,51 @@ of these eight were one line in a helper shared by six crates.
 and a trailing `remove_dir_all` that an unwind skips, were converted to
 `ScratchDir` in the same commit — 264 call sites, 121 cleanup tails removed.
 
-## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK (lane A, 2026-08-31)
+## A-MEMFS-CANNOT-HARD-LINK-SO-NO-BOOT-EVER-TESTS-A-HARD-LINK — FIXED 2026-09-01 (lane A, filed 2026-08-31)
+
+**Status: FIXED.** memfs now keeps a flat inode table (`BTreeMap<ino, node>`)
+with directories holding `name -> ino`, and implements `link` /
+`link_no_follow`. See `design-decisions.md` §665, which also reverses §30's
+June decision to defer exactly this refactor.
+
+What that changed, in the terms this entry was filed in:
+
+- The recorded skip (`pinned linkat: the positive same-inode/nlinks
+  assertion`) is **deleted**, not merely unreached — the assertion is stated
+  unconditionally, so a regression fails the boot rather than restoring the
+  skip.
+- `nlink` and `st_ino` now mean on memfs what the entry below notes they were
+  only half-promising: `nlink` counts the names, and `drop_link` frees the
+  object when the last one goes.
+- `self_test_linux_link` (ring 3) falls back from `/mnt` to `/tmp` when there
+  is no ext4 mount. Insurance, not a repair — see the correction below.
+- `memfs::self_test` gained direct coverage: shared inode, shared data, unlink
+  decrementing rather than deleting, follow vs no-follow, and no inode leak.
+
+**Correction to this entry's own title and premise, 2026-09-01.** The title
+says "NO BOOT EVER TESTS A HARD LINK", and the report below says "no boot has
+ever exercised a hard link". Both are **false**, and were false when filed.
+Checked against the serial log and `scripts/check-boot-skips.py --list`:
+
+- `scripts/boot-test.sh` attaches `rootfs.ext4` as vdb; `main.rs` probes vdb/vdc
+  and mounts the first ext4 it finds at `/mnt`. So `/mnt` exists on every boot
+  the harness runs.
+- `self_test_linux_link` therefore ran, on ext4, in **all 14** boots in the skip
+  window — it records no skip. The serial log for this very boot reads
+  `Running Linux link()/linkat() hard-link test (ring 3, ext4 /mnt)... OK`.
+
+What *was* true is narrower and still worth the fix: the assertions that need
+the **root** filesystem to have hard links could not run. `pinned linkat`'s
+positive same-inode/`nlinks` half skipped in **7 of those 14 boots** because it
+works in `/tmp`, and memfs had no hard-link coverage of its own because it had
+no hard links. That is the gap this refactor closed; "no boot ever tests a hard
+link" overstated it, and the overstatement was in the direction that made the
+work look more necessary than it was. The title is left as filed so the ID
+stays stable and searchable.
+
+The original report follows unedited (including the false sentence above).
+
+---
 
 **What.** `kernel/src/fs/memfs.rs` implements no `link`/`link_no_follow`, so
 `FileSystem::link`'s default applies and every hard link on a memfs mount
@@ -103795,3 +103880,607 @@ so the guard cannot be removed again without a test going red.
 Not fixed in the commit that found it because that commit is the dbviewer
 wiring, and a fault in a different crate found by a scan does not belong inside
 it. It is the next task in the lane after dbviewer's roadmap entry lands.
+
+---
+
+## A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS (lane A, 2026-08-31)
+
+**What:** On the four filesystems that have no per-object identity —
+`procfs`, `sysfs`, `devfs`, `iso9660`, plus FAT files with no allocated
+cluster — the Linux-ABI `getdents64` reports a `d_ino` that a `stat` of the
+same name will not confirm. `stat` answers 0 (`FileMeta::minimal`'s `ino`,
+which those filesystems never override); `getdents64` answers
+`synth_inode`, the FNV-1a hash of the path.
+
+**Where:** `kernel/src/syscall/linux.rs`, the `d_ino` selection in
+`sys_getdents64` and `synth_inode` below it; `fill_stat_from_meta`'s
+`put_u64(buf, 8, meta.ino)` is the other half.
+
+**Why it is here and not fixed:** this is the deliberate residual of §662,
+not an oversight. Making the two agree means emitting a literal `0` for
+`d_ino`, and a `getdents64` caller is entitled to read `d_ino == 0` as a
+deleted entry and skip the name — which would drop entries from
+`readdir("/proc")` and `readdir("/dev")` outright. Losing a name is worse
+than reporting an identity a stat will not confirm, so the hash stays. Every
+filesystem with a real inode (ext4, btrfs, f2fs, zfs, ntfs, memfs, and FAT
+files with a cluster) now agrees exactly, which is where the cross-checks in
+`tar`, `rsync`, `du`, `cp` and `find -inum` actually bite.
+
+**Reproduce:** boot, then compare `ls -i /proc/self` against
+`stat -c %i /proc/self/<name>` for any name in it. The first prints a large
+hash, the second prints 0.
+
+**The proper fix, when it is worth doing:** give the pseudo-filesystems real
+inode numbers. `procfs` and `sysfs` generate their trees from static tables
+(`SYS_DIRS`/`SYS_FILES` and the sysfs equivalents), so a number derived from
+the table index plus the PID for per-process nodes would be stable, unique,
+and reportable from *both* `metadata()` and `readdir()` — which is the actual
+requirement. `devfs` already has a node registry to key off. That closes the
+gap properly rather than choosing which of two wrong answers to give, and it
+is the same shape as the fix for the `nlinks` and `permissions` those
+filesystems also report as placeholders. Until then the disagreement is
+documented rather than silent, which is the difference that matters.
+
+---
+
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN (the three instances are FIXED; the hole that produced them is not)**
+
+**Lane:** A
+
+**What happened.** `FileMeta::permissions` documents itself as twelve bits —
+"setuid setgid sticky rwxrwxrwx", `0o7777`. ext4 delivers twelve
+(`vfs_impl.rs:56`, `i_mode & 0o7777`), iso9660 delivers twelve
+(`iso9660.rs:450`), memfs stores the `u16` whole. btrfs, zfs and f2fs masked
+to `0o777` first and delivered nine.
+
+So the same file, with the same bits on disk, reported a different mode
+depending on which driver read it. `cp -a` and `tar` reading off a
+btrfs/zfs/f2fs mount silently dropped setuid, setgid and sticky from
+everything they copied — silently in the strict sense: there is no error, and
+"the bit is missing" is indistinguishable from "the bit was never set."
+
+Fixed 2026-09-01 in all three (`& 0o7555` — twelve bits minus the three write
+bits the read-only mount genuinely justifies dropping). See
+`design-decisions.md` §663.
+
+**Why this entry exists even though the bug is fixed.** Nothing was wrong in a
+way any *single* backend's tests could detect. Each of the three was
+internally consistent: it masked on read, nothing wrote, and every assertion
+about it used a mode inside `0o777`. The divergence only exists *between*
+implementations, and there is no test that looks between them.
+
+The same is true of every other field `FileMeta` promises. Spot-checked while
+fixing the above and **not** yet run down:
+
+- `nlinks` — procfs/sysfs/devfs report a placeholder (noted in
+  `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS`).
+- `ino` — now uniform by construction after §662, but by inspection of all
+  thirteen backends one at a time, not by a test.
+- `created_ns` / `modified_ns` / `accessed_ns` — units are nanoseconds; each
+  backend converts from its own on-disk representation with its own
+  arithmetic, and a backend that returned seconds would look plausible.
+
+**The proper fix.** One test, parameterised over every registered backend,
+that mounts a fixture image and asserts the *contract* rather than the
+implementation: that a file with known bits on disk reports the same
+`FileMeta` from every driver that can read it. That requires a small fixture
+per filesystem, which is the reason it does not exist yet and the reason it is
+worth doing once rather than thirteen times. Failing that, a much cheaper
+partial: a compile-time or boot-time assertion that no `metadata()`
+implementation masks `permissions` more narrowly than `0o7777` — which would
+have caught this specific class on the day it was written.
+
+**Reproduce (before the fix):** mount any btrfs/zfs/f2fs image containing a
+sticky or setuid file and `stat` it; the special bits read back as 0 while the
+same file on ext4 reports them.
+
+### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
+
+**Status:** OPEN. **Lane:** A. **Found:** 2026-09-01, while making
+"a listing contains no volume label" a VFS invariant.
+
+`FileSystem::readdir_at` (`kernel/src/fs/vfs.rs:483`) is declared with a
+default implementation that calls `readdir` and slices, and the doc comment
+tells implementors that "filesystem implementations with native pagination
+(e.g., ext4 htree) should override for efficiency". Two of them did:
+
+| Override | What it does |
+|---|---|
+| `FatFs::readdir_at` (`fs/fat.rs:3134`) | skips `to_vfs_entry`'s name/date formatting for entries outside the window |
+| `Ext4Fs::readdir_at` (`fs/ext4/vfs_impl.rs:194`) | native paginated walk |
+
+**Nothing calls it.** `Vfs::readdir_at_resolved` — the only path from a
+syscall to a paginated listing — open-codes the default instead: it calls
+`fs.lock().readdir(&relative)`, collects the entire directory, and slices.
+So `SYS_FS_READDIR_AT` (647) on a 100k-entry directory reads and formats all
+100k entries to return 32, and the two overrides written to prevent exactly
+that have never executed.
+
+**Why it is open-coded, which is also why this is not a one-line fix.**
+`readdir_at_resolved` has to inject *submount* directories — a filesystem
+mounted at `/mnt/usb` must appear as an entry in a listing of `/mnt` even
+though the underlying filesystem has no such directory — and it must not
+inject one whose name a real entry already occupies. That dedup is
+`!entries.iter().any(|e| e.name == name)` over the **whole** listing. A
+paginated driver call returns one page, so the dedup cannot be evaluated
+without the rest, and the submounts' position in the combined ordering
+depends on the driver's `total`. Delegating therefore needs a real design:
+either (a) submounts are numbered after the driver's `total` and the dedup is
+resolved by mount-time rejection of a colliding name rather than at listing
+time, or (b) directories with submount children fall back to the unpaginated
+path and everything else delegates.
+
+**The proper fix** is (a): reject a mount whose mount-point name collides
+with an existing entry in the parent, at mount time where it is one lookup,
+and then `readdir_at_resolved` can delegate straight through and pagination
+becomes real. (b) is the cheap version and leaves the pathological case —
+listing `/` — on the slow path forever.
+
+**Until then the doc comment is a trap**: it invites the next filesystem
+author to write a paginated `readdir_at` that will never run. Whichever fix
+lands, that sentence must stop promising something untrue.
+
+### A-READDIR-PINNED-DOES-NOT-INJECT-SUBMOUNTS — ✅ FIXED 2026-09-01
+
+**Status:** FIXED in the commit that logged it. **Lane:** A. **Found:**
+2026-09-01, alongside the above.
+
+**The fix:** `Vfs::finish_listing(path, entries)` — one helper that drops
+volume labels and injects submounts — is now the single route by which a raw
+driver listing becomes a VFS listing, and `readdir`, `readdir_at_resolved` and
+`readdir_pinned` all go through it. `readdir_pinned` scopes its `fs` guard so
+the guard is released before `finish_listing` takes `VFS`, preserving the lock
+order the other two establish. `fat::mkfs_self_test` now mounts a memfs at
+`/_fmt_selftest/MNT` — a mount point with no physical directory behind it, so
+the entry can *only* come from injection — and asserts all three routes list
+it and agree on the whole set of names.
+
+The description below is kept because the failure mode is worth having on
+record: it is the second instance in two days of a rule written down in two
+places and forgotten in a third.
+
+`Vfs::readdir` and `Vfs::readdir_at_resolved` both inject submount
+directories into a listing. `Vfs::readdir_pinned` (`fs/vfs.rs`) does not — it
+verifies the handle and returns `guard.readdir(&dir_rel)` unchanged.
+
+So `SYS_FS_GETDENTS_PINNED` (664) omits a mount point that
+`SYS_FS_READDIR_AT` (647) and `SYS_FS_LIST_DIR` (603) both show. Listing `/`
+by path shows `tmp`, `proc`, `sys`, `dev`; listing the same directory through
+a pinned handle shows only what the root filesystem physically contains.
+
+**This is the same defect class the volume-label work just closed, in the
+same pair of calls, in the opposite direction** — 664 is meant to be the
+race-free substitute for a listing taken by path, so a program that swaps
+routes to close a race must not thereby lose entries. It has no callers yet
+(lane B has not wired 664), which is why nothing has reported it.
+
+**Why the three-route agreement test did not catch it on its own**: the check
+first written for the volume-label work compares `readdir` / `readdir_at` /
+`readdir_pinned` on the FAT volume's root, and that directory had no
+submounts. Three routes that all omit the same thing agree perfectly. The
+test only became able to see this defect once it mounted something — which is
+the same lesson as §663's "a mask can only be tested by a value outside it",
+in a different costume: **an agreement test proves nothing about a case none
+of the parties encounters.**
+
+### A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER
+
+**Status:** OPEN. **Both causes proposed so far are refuted by measurement** —
+the inode table (correction 1) and the heap state (correction 2). The heading
+is kept because it is what the commits and the benchmark's own log lines cite,
+not because it is true. Read the corrections newest-first; the original entry
+at the bottom is retained for its data, not its conclusion. **Lane:** A.
+**Found:** 2026-09-01, by the `--bench` boot run that follows any change under
+`kernel/src/fs/`.
+
+---
+
+## CORRECTION 2, 2026-09-01: heap state is refuted too, and the live suspect is now the *workload*
+
+**In short:** correction 1 (below) cleared the inode table and blamed the
+kernel heap instead. The controlled experiment it proposed has now run, and the
+heap is innocent as well — it accounts for **0.4 %** of the number, where the
+thing being explained moved by **200 %**. Two mechanisms proposed, two
+mechanisms measured, two mechanisms dead. What the same run *did* establish is
+a clean cost model for a listing, and that model points somewhere neither
+hypothesis looked: **the benchmark's own workload is not a constant.**
+
+### The 2×2, resolved
+
+The rebuilt benchmark warms the allocator (create 2048 files, delete them
+again) *before* the small-table arms, so the ballast arm afterwards differs in
+table size **only**. Both variables move one at a time:
+
+| comparison | what it isolates | result |
+|---|---|---|
+| `n64_cold` 39324 ns → `n64` 39473 ns | heap warmth (same dir, same table) | **+149 ns = +0.4 %** |
+| `n64` 39473 ns → `n64_ballasted` 39929 ns | +2048 inodes (both post-warm-up) | **+456 ns = +1.2 %** |
+
+Correction 1's headline — "the ballast made listings 25–46 % *faster*" — was
+itself an artifact: it was measuring the heap warm-up that the first version of
+the benchmark had not controlled for. With the warm-up in place the effect
+vanishes in both directions. Neither number is a mechanism; a hypothesis that
+predicts a *dominating* per-child cost is not supported by 1.2 %.
+
+### What the run did establish: a listing costs ~10 µs + ~0.46 µs/entry
+
+`n0` = 10013 ns for an empty directory; the 8- and 64-entry windows and their
+ballasted twins all sit on a line of about 460 ns per entry. This is stable
+across four of the five windows and is the first solid fact in this entry.
+
+### Where that points
+
+**The scored `vfs_readdir` lists `/`, and nothing pins how many entries `/`
+has.** It is whatever the boot left there — mounts, service directories,
+anything an earlier benchmark created. So a commit that never touches a
+filesystem can change the number, and at 460 ns/entry a root that gained ~70
+entries covers the whole 16.3 µs → 84.3 µs span the history shows, with no
+performance change of any kind.
+
+That is also the only hypothesis so far that explains the shape of the data
+that has defeated the other two: the series is **binary-determined** (A/A pairs
+land 0.5 % apart, and `scripts/bench-history.py` independently reports that the
+fence "separates BINARIES, not runs") yet indifferent to every mechanism inside
+memfs and the allocator. A per-binary difference in *what is being listed* is
+exactly that.
+
+`bench_vfs_readdir` now logs the entry count and the names of `/` before it
+times anything. The next `--bench` boot either shows a count that tracks the
+number — in which case this was never a performance regression and the fix is
+to list a directory the benchmark builds itself — or shows a count identical
+across disagreeing binaries, which kills this hypothesis too and leaves the
+mount walk or `finish_listing` as the place to look.
+
+### A benchmark-harness bug found on the way
+
+`bench_vfs_readdir_breakdown`'s verdict was `d64 > 0 && d64 > d8 * 3`. A
+**negative** `d8` makes that second test vacuously true, so any positive `d64`,
+however tiny, passes it. It duly printed
+
+> `CONFIRMED per-child inode-table lookup dominates — the penalty scales with
+> entry count (456x from 8 to 64 entries)`
+
+from `d8 = −10116 ns` and `d64 = +456 ns` — a "ratio" computed as
+`d64 / d8.max(1)`, i.e. `456 / 1`. **The benchmark asserted the opposite of
+what it measured, in the log line intended to save the next reader from
+re-deriving it.** Fixed: materiality is now tested first (a delta under 5 % of
+its own window is reported as refuting, whichever way it points), the ratio
+test is guarded on `d8 > 0`, and every delta is printed as a percentage
+alongside its nanoseconds. This is the second arithmetic bug in three versions
+of this benchmark — after `saturating_sub` — and both had the same effect:
+letting it print a confident verdict its own numbers did not support.
+
+---
+
+## CORRECTION, 2026-09-01 (same day): the inode table is not the cause, and `vfs_readdir` is not measuring readdir
+
+**In short:** I blamed a refactor of mine for tripling the cost of listing a
+directory, and built a benchmark to prove it. The benchmark disproved it. What
+it found instead is worse and more useful: **the `vfs_readdir` number is
+dominated by the state of the kernel heap, not by the filesystem**, so it
+cannot presently detect a readdir regression at all — and the "3× regression"
+below was never established.
+
+**The experiment.** `bench_vfs_readdir_breakdown` lists directories of 0, 8 and
+64 entries, then creates 2048 files *in a different directory* — growing the
+memfs inode table ~10× while leaving the listed directories byte-identical —
+and lists them again. If per-child lookups into a `BTreeMap` of large values
+were the cost, a 10× bigger table would make the listings slower, and slower in
+proportion to the number of children.
+
+**They got faster.**
+
+| window | before ballast | after ballast |
+|---|---|---|
+| 8 entries | 22497 ns | **16855 ns** (−25 %) |
+| 64 entries | 80891 ns | **43796 ns** (−46 %) |
+
+A per-child search of a larger tree cannot become cheaper. The hypothesis is
+dead, and boxing or slab-allocating `MemFsNode` would have been effort spent
+against a cause that does not exist. (The first version of the benchmark
+printed `NOT CONFIRMED` for the right reason by accident: it computed the
+deltas with `saturating_sub`, which rendered both of these negative results as
+`+0 ns`. Fixed — the deltas are signed now, and there is a third verdict,
+`REFUTED`, for exactly this outcome.)
+
+**What is really going on: the ballast warms the allocator.** `readdir`
+allocates a `Vec<DirEntry>` plus one owned name per entry on *every* iteration,
+and 2048 file creations leave the heap grown and holding a pool of warm,
+right-sized free blocks.
+
+**The evidence is the dispersion, not the mean** — and getting this right
+required a second pass, because the first draft of this correction cited the
+mean/min ratios the harness prints and those turn out to be the wrong statistic.
+Reconstructing each window's distribution from `min`/`mean`/`max`/`iterations`:
+
+| window | max/min | max as % of total | rest, as multiple of min |
+|---|---|---|---|
+| `heap_raw_alloc_free_512` | 179708 | **98.1 %** | 1.7× |
+| `vfs_readdir_n0` | 3775 | **92.5 %** | 1.5× |
+| `vfs_readdir_n8` | 3273 | **92.4 %** | 1.4× |
+| `vfs_readdir_n64` | 1089 | 49.0 % | 5.7× |
+| `vfs_readdir_root` | 878 | 31.0 % | 9.8× |
+| `vfs_readdir_n8_ballasted` | **16** | 3.9 % | 2.0× |
+| `vfs_readdir_n64_ballasted` | **50** | 10.4 % | 2.2× |
+
+So `heap_raw_alloc_free_512`'s alarming 90× mean/min is **one single stall**
+that accounts for 98 % of the window; with it removed the allocator is steady at
+1.7× its min. The kernel heap does *not* have a heavy tail, and an earlier draft
+of this entry said it did. Same for `n0` and `n8` — one outlier each, otherwise
+clean. Those isolated multi-millisecond stalls are consistent with the host
+descheduling the vCPU thread, which inflates an `rdtsc` delta without any guest
+work happening, and they are why `min` is the statistic the harness reports.
+
+**The two windows with a genuinely repeated tail are the two that list many
+entries**: `vfs_readdir_n64` (5.7× min after the max is removed) and
+`vfs_readdir_root` (9.8×). And the ballast collapses it — `n64` goes from
+max/min 1089 and a 5.7× body to max/min **50** and a 2.2× body. The ballast did
+not merely shift the level, it removed the repeated stalls.
+
+That is the shape of **heap growth**: listing 64 entries allocates ~65 times,
+which repeatedly pushes the heap past its high-water mark and forces it to map
+new pages; once the ballast has grown the heap and freed everything back, later
+listings allocate into space that already exists and never pay it. The
+hypothesis is testable and the 2×2's `n64_cold` vs `n64` arms test it directly.
+
+**The corroborating evidence was in the scored number all along**, and I read
+past it: three binaries have now produced **16675 ns, 50216/49970 ns, and
+84331 ns**. The third differs from the second only by code appended *after*
+`vfs_readdir` runs, which cannot affect it causally — but perturbs heap layout,
+which can.
+
+**Why the A/A replication did not catch this, which is the lesson.** Two boots
+of a byte-identical image landed 0.5 % apart, and I took that as proof the
+number was a property of the binary rather than the host. It is — but "property
+of the binary" and "property of the code under test" are not the same claim. A
+deterministic boot reaches an identical heap state at an identical point every
+time, so an A/A pair reproduces heap-derived cost *perfectly*. **A/A
+replication distinguishes binary-determined from host-determined; it says
+nothing about whether the binary-determined part is the thing you named.**
+
+### What is actually wrong, and what the fix is
+
+1. **`vfs_readdir` is scored (target 50 µs) on a number it does not control.**
+   This survives correction 2 and is the one durable conclusion of the whole
+   entry — only the *reason* changed. It is not heap state (0.4 %); it is that
+   the benchmark lists `/`, whose entry count nothing pins. A scored benchmark
+   on the performance-critical path whose workload can change without any code
+   change will keep flagging false regressions and will hide real ones.
+   ~~The fix is to warm the heap before the measured window~~ — superseded:
+   the fix is to list a directory the benchmark **builds itself**, so the
+   workload is fixed by construction. See correction 2.
+2. ~~**The heap's tail is the thing worth chasing.**~~ **Withdrawn — this item
+   was wrong when written, and the table two paragraphs above it already said
+   so.** There is no 90× tail: `heap_raw_alloc_free_512`'s max is 98.1 % of the
+   window's *total* time, i.e. one stall, and with it removed the allocator is
+   steady at 1.7× its min. Those isolated multi-millisecond stalls are the host
+   descheduling the vCPU thread. Correction 2's controlled arms confirm it from
+   the other side: heap state moves a listing by 0.4 %.
+3. **The memfs refactor is unindicted.** Nothing here says it is free — only
+   that no measurement attributes anything to it, now across two controlled
+   experiments. Any future attempt must fix the workload first or it will
+   reproduce this mistake.
+
+---
+
+## Original entry, retained — its conclusion is superseded by the correction above
+
+**In short:** listing a directory in the in-memory filesystem got three times
+slower, and it is my own refactor that did it. The benchmark `vfs_readdir`
+ran 14.7–24.3 µs across twelve prior release runs; it now runs 50.2 µs. That
+is not host noise — see below — and it is over the 50 µs target the benchmark
+is scored against, so every `--bench` run from here on flags it.
+
+**The measurement.** Twelve release runs from `4dd776c46` through `a949c5b38`
+put `vfs_readdir` in a band of 14708–24331 ns, median ~16.3 µs. Two runs at
+commit `0d6ea0bdc` (kernel sha `80256448cb`) read **50216 ns** and
+**49970 ns**.
+
+The second of those two is an **A/A re-run** — `--bench --no-stage`, which
+implies `--no-build` and therefore boots the byte-identical ESP image. The
+harness recognised the matching `kernel_sha` and scored the pair as the host's
+noise floor rather than as movement. The two runs land 0.5 % apart. So the 3×
+is a property of the binary, not of the machine that ran it. (That same
+replication run absolved six *other* benchmarks — `ipc_channel`, `ipc_pipe`
+and four more all flagged together and all fell straight back into range.
+Seven simultaneous regressions across unrelated subsystems is the signature of
+an environmental outlier; `vfs_readdir` was the one that survived it.)
+
+**The cause is commit `3228012a6`** (the memfs flat-inode-table refactor,
+already merged to `main`). It changed
+
+```rust
+children: BTreeMap<PathBuf, MemFsNode>     // node owned by its parent
+```
+
+to
+
+```rust
+children: BTreeMap<PathBuf, u64>          // parent holds inode numbers
+inodes:   BTreeMap<u64, MemFsNode>        // one flat table, node stored by value
+```
+
+**The mechanism is `BTreeMap`'s inline value storage.** Rust's `BTreeMap`
+stores values *in the B-tree nodes themselves*, not behind a pointer. A
+`MemFsNode` is ~130 bytes (kind enum + `ino` + `links` + four `Timestamp`s +
+`uid`/`gid` + `permissions` + `attributes` + an `xattrs` `Vec`), so each
+internal node of `inodes` is multiple kilobytes and a `get` touches several
+cache lines per level.
+
+`memfs::readdir` (`kernel/src/fs/memfs.rs:846`) now pays one such lookup per
+child:
+
+```rust
+children.iter()
+    .filter_map(|(name, child_ino)| self.node(*child_ino).ok().map(|n| n.to_dir_entry(name)))
+```
+
+where before the refactor it iterated nodes its parent already owned and did
+no lookups at all. The benchmark lists `/`, so the cost is per-entry and the
+regression scales with directory size.
+
+Ruled out while diagnosing: `readdir` does **not** clone the children map
+(`children()` returns `&BTreeMap`, `node()` returns `&MemFsNode`, both shared
+borrows); `nlink_of` is O(children) but is reached only from
+`metadata`/`lmetadata`, not from `readdir`; `to_dir_entry` is cheap.
+
+**Candidate fixes, in the order they should be measured** — and per
+`CLAUDE.md` the breakdown benchmark comes *first*, because the above is a
+structural argument and not yet a profile:
+
+1. `BTreeMap<u64, Box<MemFsNode>>` — the B-tree's value array becomes 8-byte
+   pointers, so an internal node holds ~16× more keys and the search touches
+   far less memory. Cheapest change; costs one indirection per hit and one
+   allocation per inode.
+2. `Vec<Option<MemFsNode>>` indexed by inode number — O(1) instead of
+   O(log n), no search at all. Best asymptotics, but inode numbers must stay
+   dense or the vector becomes a leak; needs a free-list for reuse.
+
+**Why the refactor is still right**: the flat table is what makes hard links
+representable at all (two names, one node), which is why it happened. The fix
+is to the table's *layout*, not to the decision to have one.
+
+---
+
+### SHARED-INTEGRATION-WORKTREE-WAS-EMPTIED-BY-A-STRAY-RECURSIVE-DELETE
+
+**Status:** RECOVERED (no work lost), **cause not identified, hazard still
+live**. **Lane:** found by A; the action that caused it was **not** lane A's.
+**Found:** 2026-09-01 ~05:15, incidentally, while preparing a routine
+`lane-a` → `main` merge.
+
+**In short:** the shared integration checkout at `D:\visual studio projects\os`
+— the one every lane merges through — had **every one of its 13,769 tracked
+files deleted from disk** at about 04:23. Git still had all the content, so
+nothing was permanently lost and the tree has been restored byte-for-byte. But
+nobody noticed for ~50 minutes, and the failure mode this was one command away
+from is severe.
+
+**What was found.** `git status` in `os` reported 13,769 paths as ` D`
+(deleted-in-worktree, unstaged). `ls` showed the directory held only two
+entries, both untracked and both stamped 04:23:
+
+```
+d/sym -> real      (a relative symlink)
+real/              (empty)
+```
+
+That pair is a **symlink-resolution test fixture** — the canonical shape for
+exercising `realpath`/`readlink`. It appears in no script in the tree
+(`grep -rn 'd/sym'` finds nothing outside prose), so it was almost certainly
+created ad-hoc by an agent's shell command, in the integration worktree, which
+`CLAUDE.md` says plainly is a merge tree and must not be edited.
+
+**The most probable mechanism**, on that evidence: a recursive delete run to
+clean the fixture up, rooted one directory too high — at `os` itself rather
+than at the scratch directory — which then walked the tree deleting everything
+and bailed out on the one entry it could not handle, the symlink. That is
+exactly the residue observed: the whole tree gone, `d/sym` and its target left
+standing. It also matches the shape of the `rd /s /q` cleanup that project
+convention encourages for build output.
+
+**Why nothing was lost.** `os` is a pure checkout of `main`: it had no
+local-only commits (`git log origin/main..HEAD` empty), nothing staged, and no
+modified tracked file other than `.claude/scheduled_tasks.lock`. So every
+deleted path's content was in `HEAD`, and
+
+```bash
+git ls-files --deleted -z | xargs -0 -n 500 git checkout --
+```
+
+restored all 13,769 with `git diff HEAD` then clean. Only the deletions were
+discarded, which is the point.
+
+**The near miss, and why this is logged rather than shrugged off.** The next
+thing any lane does in this worktree is merge. A merge preceded by a habitual
+`git add -A` would have **staged 13,769 deletions and committed them to
+`main`** as an ordinary-looking commit — and it would have been pushed, because
+pushing after a merge is standing policy here. Recovering *that* means a revert
+on shared history with three lanes building on top of it. The window between
+the delete and someone merging was about 50 minutes and closed only because the
+merge happened to start with `git status`.
+
+**What should change** (not done — the fix belongs to whoever owns the
+convention, and one of these is a cross-lane policy question):
+
+1. **Never create scratch fixtures inside a git worktree**, least of all the
+   shared one. `os` is not a scratch directory. A symlink fixture belongs in a
+   temp dir that no recursive delete can reach a repository from.
+2. **A recursive delete should never be rooted at a path that contains a
+   `.git`.** A three-line guard in whatever cleanup script did this — refuse if
+   the target or any ancestor is a work tree — would have turned a 50-minute
+   silent data loss into an error message.
+3. **The merge procedure should refuse a dirty integration tree.** `os` should
+   be verified clean *before* a merge starts, and a bulk deletion should abort
+   it rather than be swept into it. This is the cheapest of the three and the
+   one that actually caught the incident, by accident, this time.
+
+**Left in place deliberately:** `d/sym` and `real/` still exist and are still
+untracked. They are another lane's, they are harmless (the only symptom is
+`git status` printing `warning: could not open directory 'd/sym/'`), and
+deleting another lane's files is the class of action that caused this. Whoever
+recognises them should remove them — from a shell whose working directory is
+not a repository.
+
+---
+
+## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — OPEN 2026-09-01
+
+**In short:** when `mv` moves a file between two filesystems it cannot rename it,
+so it copies the bytes and deletes the original. Ours copies the bytes and the
+permission bits and *nothing else*: the file arrives with today's date instead of
+the date it was written, and (if run as root) owned by root rather than by
+whoever owned it. GNU's `mv` carries both over, and a user who moves a photo
+directory off one disk onto another does not expect every photo to be re-dated to
+the moment of the move. Nothing user-visible is broken on a single-filesystem
+machine, which is why this has gone unnoticed: no case in `scripts/mv-diff.sh`
+crosses a filesystem boundary, because mounting a second one needs a password the
+harness must not ask for.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs:1601`, in `copy_across_devices`:
+
+```rust
+    fs::copy(src, target)?;
+    fs::remove_file(src)
+```
+
+`std::fs::copy` is documented to copy the permission bits and is documented not
+to copy anything else. It is the whole of the plain-file arm; the symlink arm
+above it (`:1584`) recreates the link's text correctly and is not affected, and
+the directory arm (`:1594`) refuses outright and is its own entry.
+
+**What GNU does.** `copy.c`'s `copy_reg` finishes with `set_owner`, then
+`set_authorized_context`, then `copy_acl`/`set_acl`, then `utimens` from the
+source's `st_atim`/`st_mtim` — in that order, and the order matters, since
+`chown` clears set-user-ID and so must precede the mode. For `mv` the flags that
+select all of this are on unconditionally: `cp_option_init` (`mv.c:100`) sets
+`preserve_timestamps`, `preserve_ownership`, `preserve_mode` and
+`preserve_links`, because a move is supposed to be indistinguishable from a
+rename.
+
+**The proper fix.** Replace the two lines with an explicit sequence in the same
+order upstream uses: create the destination, copy the bytes, `fchown` (ignoring
+`EPERM`, as upstream does when not preserving is merely unprivileged rather than
+an error), `fchmod` from the source's mode including the set-ID bits, then
+`futimens` with the source's `st_atim`/`st_mtim` at full nanosecond resolution —
+and only unlink the source once all of that has succeeded. Nanoseconds rather
+than seconds because the next entry depends on them.
+
+**Two things that fall out of it.** First, `mv -u`'s comparison is currently a
+plain `(mtime)` comparison; upstream passes `UTIMECMP_TRUNCATE_SOURCE` exactly
+and only when the move is cross-device (`copy.c:2379`), which rounds the source's
+stamp down to the destination filesystem's resolution before comparing. That flag
+is unimplemented here — see `destination_is_older`'s doc at `mv.rs:1300` — and it
+is *doubly* unreachable, because a fallback that does not preserve the timestamp
+at all has no preserved timestamp for the truncation to be about. Whoever does
+the fix above should do the truncation in the same change, since that is the
+moment it stops being unreachable. Second, hard links across the fallback: `mv`
+sets `preserve_links`, so a group moved together should arrive as a group, and
+`fs::copy` gives one independent file per name. That is the same shape as the
+directory refusal and belongs with a recursive fallback rather than with this.
+
+**How it would be caught.** It would not be, by anything we have. A regression
+test needs two filesystems. The unit tests in `mv.rs` drive `copy_across_devices`
+directly, so a test that stamps a source, calls the function, and asserts the
+destination's mtime is the source's would catch the timestamp half today without
+any mount at all — and that test does not exist. Write it with the fix.

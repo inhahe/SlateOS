@@ -767,6 +767,11 @@ impl FatDirEntry {
                 EntryType::File
             },
             size: u64::from(self.file_size),
+            // FAT has no inode table; the first cluster is the closest stable
+            // per-file identifier, and is exactly what `metadata` reports as
+            // `st_ino`.  Empty files (cluster 0) report 0 = "not available",
+            // which is the same answer from both routes.
+            ino: u64::from(self.first_cluster),
         }
     }
 }
@@ -3201,6 +3206,12 @@ impl FileSystem for FatFs {
                     name,
                     entry_type: EntryType::Directory,
                     size: 0,
+                    // `resolve_path` yields `None` only for the root, which
+                    // has no directory entry and so no first cluster to use
+                    // as an identity.  `metadata` answers the same path with
+                    // `FileMeta::minimal`, whose `ino` is likewise 0, so both
+                    // routes report "not available" rather than disagreeing.
+                    ino: 0,
                 })
             }
             Some(e) => Ok(e.to_vfs_entry()),
@@ -6035,6 +6046,132 @@ pub fn format_self_test() -> KernelResult<()> {
             serial_println!("[fat]   FAIL: read-back mismatch on formatted volume");
             return Err(KernelError::InternalError);
         }
+
+        // The volume label must be reachable as *metadata* and absent from
+        // every *listing*, on all three routes.
+        //
+        // `mkfs_fat` wrote a real volume-label slot into this root directory
+        // (label "SELFTEST"), which is what makes this a test rather than a
+        // tautology: the `statvfs` check below proves the label exists on the
+        // volume, so its absence from the listings is a filter doing its job
+        // and not a label that was never written.  A test that cannot tell
+        // "filtered" from "never there" asserts nothing — the same trap that
+        // let four mkdir masks disagree for two days (§663).
+        //
+        // All three routes are checked because 664 exists to be the race-free
+        // substitute for a listing taken by path: if the pinned route listed
+        // the label and the path route did not, closing a race would silently
+        // change what the directory contains.
+        let label = crate::fs::Vfs::statvfs(mp)?.volume_label;
+        if label != "SELFTEST" {
+            serial_println!(
+                "[fat]   FAIL: statvfs volume_label = {:?}, want \"SELFTEST\" — the rest of \
+                 this check cannot distinguish a filtered label from an unwritten one",
+                label
+            );
+            return Err(KernelError::InternalError);
+        }
+
+        let pinned = crate::fs::Vfs::pin_dir(mp)?;
+        let routes: [(&str, Vec<DirEntry>); 3] = [
+            ("readdir", crate::fs::Vfs::readdir(mp)?),
+            ("readdir_at", crate::fs::Vfs::readdir_at(mp, 0, 64)?.0),
+            ("readdir_pinned", crate::fs::Vfs::readdir_pinned(&pinned)?),
+        ];
+        for (route, entries) in &routes {
+            for e in entries {
+                if e.entry_type == EntryType::VolumeLabel || e.name.as_bytes() == b"SELFTEST" {
+                    serial_println!(
+                        "[fat]   FAIL: Vfs::{} listed the volume label as {:?} ({:?}) — a label \
+                         is filesystem metadata, not a directory entry",
+                        route,
+                        e.name,
+                        e.entry_type
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+        }
+
+        // And the three agree about the rest, which is the property lane B
+        // actually depends on: same names, same count, whichever route asked.
+        let names = |es: &[DirEntry]| {
+            let mut v: Vec<PathBuf> = es.iter().map(|e| e.name.clone()).collect();
+            v.sort();
+            v
+        };
+        let base = names(&routes[0].1);
+        for (route, entries) in routes.iter().skip(1) {
+            if names(entries) != base {
+                serial_println!(
+                    "[fat]   FAIL: Vfs::{} listed {:?}, but Vfs::readdir listed {:?} — one \
+                     directory must not have two contents depending on which route asked",
+                    route,
+                    names(entries),
+                    base
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+        serial_println!("[fat]   volume label is metadata, not an entry, on all 3 routes: OK");
+
+        // Repeat the agreement check with a *submount* present, which is the
+        // case that was actually broken: `readdir_pinned` injected no mount
+        // points until 2026-09-01, so 664 omitted every directory that 647 and
+        // 603 showed.  The check above could not see it — the volume has no
+        // submounts, and three routes that all forget the same thing agree.
+        //
+        // A mount whose point does not exist as a physical directory is the
+        // whole point: the entry can only come from the injection, so a route
+        // that skips injection is missing a name rather than duplicating one.
+        let sub_mp = "/_fmt_selftest/MNT";
+        let sub_ok = (|| -> KernelResult<()> {
+            crate::fs::Vfs::mount(
+                sub_mp,
+                alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()),
+            )?;
+            let pinned2 = crate::fs::Vfs::pin_dir(mp)?;
+            let with_sub: [(&str, Vec<DirEntry>); 3] = [
+                ("readdir", crate::fs::Vfs::readdir(mp)?),
+                ("readdir_at", crate::fs::Vfs::readdir_at(mp, 0, 64)?.0),
+                ("readdir_pinned", crate::fs::Vfs::readdir_pinned(&pinned2)?),
+            ];
+            for (route, entries) in &with_sub {
+                if !entries.iter().any(|e| e.name.as_bytes() == b"MNT") {
+                    serial_println!(
+                        "[fat]   FAIL: Vfs::{} listed {:?} — the mount point at {} is missing, so \
+                         a walk taking this route would not descend into the mounted filesystem",
+                        route,
+                        names(entries),
+                        sub_mp
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            let base2 = names(&with_sub[0].1);
+            for (route, entries) in with_sub.iter().skip(1) {
+                if names(entries) != base2 {
+                    serial_println!(
+                        "[fat]   FAIL: with a submount present, Vfs::{} listed {:?} but \
+                         Vfs::readdir listed {:?}",
+                        route,
+                        names(entries),
+                        base2
+                    );
+                    return Err(KernelError::InternalError);
+                }
+            }
+            Ok(())
+        })();
+        // Unmount unconditionally, then report: the closure returns early on
+        // failure, and leaving a memfs mounted inside the volume would make
+        // the *unmount of the volume itself* fail and turn one clear failure
+        // into two confusing ones.  The result is discarded because the
+        // failure we care about is `sub_ok`, and a teardown error can only
+        // mean the mount above never succeeded — which `sub_ok` already says.
+        let _ = crate::fs::Vfs::unmount(sub_mp);
+        sub_ok?;
+        serial_println!("[fat]   submount appears in all 3 listings: OK");
         Ok(())
     })();
 

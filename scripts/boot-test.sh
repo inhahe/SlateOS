@@ -571,6 +571,106 @@ check_rootfs_freshness() {
         echo "                python scripts/ctest-fixtures.py build"
         echo "                wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
     fi
+
+    check_sysroot_identity
+}
+
+# Is the `libc.a` these fixtures were LINKED against the same file as the one
+# the checks above VERIFIED?
+#
+# The gate above answers "is our sysroot behind our posix/ sources?".  That is
+# a question about `$PROJECT_ROOT/toolchain/sysroot/lib/libc.a`, because
+# ctest-fixtures.py derives LIBC from its own `REPO` (ctest-fixtures.py:196-198,
+# `Path(__file__).resolve().parent.parent` -- this worktree).  Correct, and not
+# the whole question.
+#
+# fastpy resolves the sysroot independently, and differently.
+# `_find_slateos_sysroot_lib` (fastpy/compiler/toolchain.py:160-186) tries
+# $FASTPY_SLATEOS_SYSROOT first and otherwise falls back to a *sibling* `os`
+# checkout -- `<fastpy>/../os/toolchain/sysroot/lib`, which is the integration
+# worktree, never the lane worktree the build ran from.  Nothing in
+# ctest-fixtures.py sets that variable, so from os-lane-{a,b,c} the fallback is
+# what fires and the fixtures link a libc.a from a different checkout than the
+# one every check in this script reasons about.  Observed 2026-08-31: all three
+# lanes sharing one 11-day-old copy.
+#
+# Note where this is invisible: built from `D:\visual studio projects\os`, the
+# two paths ARE the same directory, so the mismatch cannot occur in the tree we
+# integrate in and occurs in all three we work in.  That is why no existing gate
+# caught it -- each one is individually right about the file it looks at.
+#
+# WHY CONTENT AND NOT PATH.  Two different paths holding identical bytes is not
+# a problem; it is the ordinary case right after everyone rebuilds.  Comparing
+# realpaths would fire on every lane run and be tuned out within a day, which is
+# the failure mode a gate cannot recover from.  Compare the bytes.
+#
+# WHY A WARNING AND NOT A FAILURE.  Same reasoning as the gate above, and it is
+# the reasoning rather than the conclusion that is being reused: the repair is
+# to set FASTPY_SLATEOS_SYSROOT in scripts/ctest-fixtures.py and relink under
+# services/**, both lane B's tree (request filed:
+# requests/a-b-ctest-fixtures-verify-one-libc-and-link-a-different-one.md).
+# Failing here would block every lane-A boot test on a repair lane A must not
+# make.  And the kernel result is unaffected either way -- it is only what the
+# Path-Z rungs prove about *this* posix that is in question, not the kernel
+# under test.  This gate's job is to stop the reader believing something the
+# run did not establish.
+check_sysroot_identity() {
+    local ours="$PROJECT_ROOT/toolchain/sysroot/lib/libc.a"
+    if [ ! -f "$ours" ]; then
+        # Nothing to compare against.  The gate above already covers a missing
+        # sysroot; staying quiet here avoids two warnings for one cause.
+        return 0
+    fi
+
+    # Mirror _find_slateos_sysroot_lib's candidate order exactly.  If this ever
+    # disagrees with fastpy the gate becomes worse than nothing -- it would
+    # report on a file fastpy does not use -- so it is written to be read
+    # side-by-side with that function.
+    local resolved=""
+    local c
+    if [ -n "${FASTPY_SLATEOS_SYSROOT:-}" ]; then
+        for c in "$FASTPY_SLATEOS_SYSROOT/lib" "$FASTPY_SLATEOS_SYSROOT"; do
+            if [ -f "$c/libc.a" ]; then resolved="$c"; break; fi
+        done
+    fi
+    if [ -z "$resolved" ]; then
+        # ctest-fixtures.py locates fastpy as $FASTPY_DIR or a sibling checkout
+        # (ctest-fixtures.py:868-873); fastpy then walks up from there.
+        c="${FASTPY_DIR:-$PROJECT_ROOT/../fastpy}/../os/toolchain/sysroot/lib"
+        if [ -f "$c/libc.a" ]; then resolved="$c"; fi
+    fi
+
+    if [ -z "$resolved" ]; then
+        echo "=== WARNING: fastpy would not resolve any SlateOS sysroot ==="
+        echo "    Neither \$FASTPY_SLATEOS_SYSROOT nor the sibling 'os' checkout"
+        echo "    holds a libc.a.  The fixtures in the image were linked against"
+        echo "    something this host can no longer name, so their Path-Z rungs"
+        echo "    cannot be attributed to any posix/ revision."
+        return 0
+    fi
+
+    if cmp -s "$resolved/libc.a" "$ours"; then
+        return 0
+    fi
+
+    # Normalise for the message only.  The candidate walk above deliberately
+    # does NOT resolve as it goes -- it mirrors fastpy, which does not either --
+    # but the raw fallback reads as `<worktree>/../fastpy/../os/...`, and a
+    # reader who has to unpick that is a reader who skips the warning.
+    local shown
+    shown="$(realpath -m "$resolved/libc.a" 2>/dev/null || echo "$resolved/libc.a")"
+
+    echo "=== WARNING: fixtures link a libc.a from a different checkout ==="
+    echo "    verified: $ours"
+    echo "    linked:   $shown"
+    echo "    These differ in content.  Every check above reasoned about the"
+    echo "    first path; fastpy links the second (see"
+    echo "    fastpy/compiler/toolchain.py _find_slateos_sysroot_lib).  The"
+    echo "    kernel result below is unaffected -- but the Path-Z rungs exercise"
+    echo "    the posix/ that built the *linked* libc, which is not this tree's."
+    echo "    To repair:  set FASTPY_SLATEOS_SYSROOT=$PROJECT_ROOT/toolchain/sysroot"
+    echo "                python scripts/ctest-fixtures.py build"
+    echo "                wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
 }
 
 # Directories whose contents are performance-critical per CLAUDE.md's

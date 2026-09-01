@@ -48,7 +48,19 @@ pub enum EntryType {
     Directory,
     /// Symbolic link.
     Symlink,
-    /// Volume label (FAT-specific, usually hidden).
+    /// Volume label — FAT-specific, and **never present in a listing**.
+    ///
+    /// FAT stores the label in a root-directory slot; that is an encoding
+    /// detail, not a claim that the volume contains a file by that name.
+    /// [`Vfs::drop_volume_labels`] removes it on every route out of the VFS,
+    /// so this variant reaches no caller of `readdir`, `readdir_at` or
+    /// `readdir_pinned` and no syscall's entry-type byte. The label is
+    /// available from [`Vfs::statvfs`]'s `volume_label` instead.
+    ///
+    /// The variant is kept rather than deleted because `FatFs::metadata`
+    /// still classifies a raw on-disk slot with it internally, and because
+    /// deleting it would silently renumber the syscall entry-type bytes
+    /// above it. Byte `2` stays reserved.
     VolumeLabel,
     /// Character device node (`/dev/input/event0`, `/dev/dri/card0`, …).
     ///
@@ -99,6 +111,37 @@ pub struct DirEntry {
     pub entry_type: EntryType,
     /// File size in bytes (0 for directories).
     pub size: u64,
+    /// Inode number of the object this name refers to, or `0` when the
+    /// filesystem has no stable per-object identity to report.
+    ///
+    /// This is the **same number** [`FileMeta::ino`] carries for the same
+    /// object, and that is the whole point of the field: `readdir`'s `d_ino`
+    /// and `stat`'s `st_ino` are cross-checked by real programs, and two
+    /// answers that disagree are worse than one answer that is missing.
+    /// Every backend has the inode bound at the moment it builds a
+    /// `DirEntry` — the ext4 arms take it as a closure parameter and use it
+    /// on the line above — so filling it in costs nothing and makes the two
+    /// agree *by construction* rather than by two implementations
+    /// independently getting it right.
+    ///
+    /// Before this existed the wire record had no such field and both
+    /// consumers invented one. `posix`'s `readdir` used the entry's index in
+    /// the listing, which gives the first entry of every directory
+    /// `d_ino == 0` — the value the ABI reserves for "not available" — and
+    /// makes `/a/foo` and `/b/bar` the same inode, so `du` and `tar`
+    /// coalesce them. The Linux-ABI `getdents64` used an FNV hash of
+    /// `path + "/" + name`, which is stable and collision-resistant but can
+    /// never equal the `st_ino` its own `stat` reports for the same file, so
+    /// `find -inum`, `ls -i` compared against `stat`, and `rsync`'s and
+    /// `tar`'s hard-link detection all cross-check two numbers guaranteed to
+    /// differ. A client cannot manufacture this value; only the filesystem
+    /// knows it.
+    ///
+    /// `0` is honest rather than absent: FAT, ISO9660 and the
+    /// pseudo-filesystems have no inode to report and their [`FileMeta`]
+    /// says `0` as well, so the two still agree. See
+    /// `requests/b-a-664s-record-has-no-inode-and-647-turns-out-to-have-no-callers-either.md`.
+    pub ino: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -278,7 +321,14 @@ pub struct FileMeta {
 
     // --- Link count ---
     /// Number of hard links pointing to the underlying data.
-    /// Always 1 for filesystems that don't support hard links (FAT, memfs).
+    /// Always 1 for filesystems that don't support hard links (FAT).
+    ///
+    /// For a *directory* this is the Unix convention — `2 + immediate
+    /// subdirectory count`, counting `.` and each child's `..` — not the
+    /// number of names the directory has, which is always 1.  `find(1)`'s
+    /// leaf optimisation reads it and stops descending once it has seen
+    /// `nlinks - 2` subdirectories, so reporting the name count instead
+    /// would make `find` skip real directories.
     pub nlinks: u32,
 
     // --- Block count ---
@@ -886,7 +936,8 @@ pub trait FileSystem: Send {
     /// same underlying file data (same inode on ext4).  Both paths must
     /// be on the same filesystem.
     ///
-    /// Default: not supported (FAT, memfs, procfs, devfs, ISO9660).
+    /// Default: not supported (FAT, procfs, devfs, ISO9660).  ext4 and memfs
+    /// override it.
     fn link(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         let _ = (existing, new_path);
         Err(KernelError::NotSupported)
@@ -899,10 +950,10 @@ pub trait FileSystem: Send {
     /// hard-links the symlink inode itself, not its target.
     ///
     /// Default: delegate to [`link`].  This is correct for filesystems that
-    /// either lack hard links entirely (FAT, memfs, procfs, devfs, ISO9660 —
-    /// they return `NotSupported` regardless) or lack symlinks (FAT), where
-    /// the follow/no-follow distinction cannot arise.  ext4 overrides this to
-    /// resolve `existing` without following the final component.
+    /// either lack hard links entirely (FAT, procfs, devfs, ISO9660 — they
+    /// return `NotSupported` regardless) or lack symlinks (FAT), where the
+    /// follow/no-follow distinction cannot arise.  ext4 and memfs override
+    /// this to resolve `existing` without following the final component.
     fn link_no_follow(&mut self, existing: &Path, new_path: &Path) -> KernelResult<()> {
         self.link(existing, new_path)
     }
@@ -1095,6 +1146,30 @@ pub struct FileId {
     pub fs_id: u64,
     /// Filesystem-local inode number (guaranteed non-zero in a `FileId`).
     pub ino: u64,
+}
+
+/// Which of the three renames a caller is asking for.
+///
+/// The VFS owns this rather than the syscall layer because it names a
+/// *filesystem semantic*, not an encoding: the path route
+/// ([`Vfs::rename`], [`Vfs::rename_noreplace`], [`Vfs::rename_exchange`])
+/// and the handle route ([`Vfs::rename_at_pinned`]) offer the same three,
+/// and one type for them is what stops the two routes drifting into
+/// offering different sets.
+///
+/// The *decode* from a flags word lives with the ABI, in
+/// `crate::syscall::handlers` — the bit values are Linux's and are a
+/// statement about the syscall interface, not about the filesystem.  The
+/// split is deliberate: the semantics belong here, the encoding belongs
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameMode {
+    /// Replace the destination if it exists.
+    Replace,
+    /// `RENAME_NOREPLACE` — refuse if the destination exists.
+    NoReplace,
+    /// `RENAME_EXCHANGE` — swap the two entries atomically.
+    Exchange,
 }
 
 /// A directory handle's identity, captured when the handle was opened.
@@ -2195,39 +2270,110 @@ impl Vfs {
     // VFS operations
     // -------------------------------------------------------------------
 
+    /// Drop [`EntryType::VolumeLabel`] entries from a listing.
+    ///
+    /// **A volume label is filesystem metadata, not a directory entry.** FAT
+    /// stores it in a root-directory slot, which is an encoding detail of
+    /// FAT and not a statement that the volume has a file named `MYDISK`.
+    /// The label is reachable through [`Vfs::statvfs`]'s `volume_label` and
+    /// settable through [`Vfs::set_volume_label`], which is where a caller
+    /// that wants it should look; nothing needs it to also appear in `ls`.
+    ///
+    /// **Why this is here and not left to the drivers.** It *was* left to the
+    /// drivers, and it worked: `FatFs::resolve_path`, `FatFs::readdir` and
+    /// `FatFs::readdir_at` each filter labels independently, so no VFS
+    /// listing has ever contained one. Lane B asked (2026-08-31) whether
+    /// `SYS_FS_LIST_DIR` (603), which drops labels, disagreed with
+    /// `SYS_FS_READDIR_AT` (647) and `SYS_FS_GETDENTS_PINNED` (664), which
+    /// pass them through — a `cp -r` of a FAT volume acquiring a spurious
+    /// entry named after the label. It does not, but only because the one
+    /// producer of the variant filters at every route it has.
+    ///
+    /// That is agreement by luck, and the luck is the kind that expires: an
+    /// exFAT driver *does* have a label in its root directory, and whoever
+    /// adds one has no reason to know that three syscalls above depend on
+    /// their filtering it. The guarantee belongs to the layer that states
+    /// it, so this states it — once, before pagination, for every route.
+    /// Drivers may keep filtering (FAT's is cheaper there, and it keeps its
+    /// name-collision checks honest); it is simply no longer load-bearing.
+    ///
+    /// Consequence for the ABI: entry-type byte `2` is **reserved and never
+    /// emitted** on 603/647/664. The match arms that produce it stay, because
+    /// the enum is exhaustive and an unreachable arm is cheaper than an
+    /// `unreachable!()` in a syscall path, but no decoder will see one.
+    fn drop_volume_labels(entries: &mut Vec<DirEntry>) {
+        entries.retain(|e| e.entry_type != EntryType::VolumeLabel);
+    }
+
+    /// Turn a backing filesystem's raw listing of `path` into the listing the
+    /// VFS promises: no volume labels, plus the mount points that are direct
+    /// children of `path`.
+    ///
+    /// **Every route out of the VFS must go through this**, and it exists
+    /// because for a while one of them did not. `readdir` and
+    /// `readdir_at_resolved` each open-coded both steps; `readdir_pinned`
+    /// open-coded neither, so `SYS_FS_GETDENTS_PINNED` (664) omitted every
+    /// mount point that `SYS_FS_READDIR_AT` (647) and `SYS_FS_LIST_DIR` (603)
+    /// showed — listing `/` by path gave `tmp`, `proc`, `sys`, `dev`; listing
+    /// the same directory through a pinned handle gave only what the root
+    /// filesystem physically contained.
+    ///
+    /// That is worse than a cosmetic difference, because 664 exists to be the
+    /// *race-free substitute* for a listing taken by path: a program that
+    /// swaps routes to stop a rename racing its walk would silently have
+    /// stopped descending into mounted filesystems. Two copies of a rule and
+    /// one place that forgot it is the same shape as the four disagreeing
+    /// `mkdir` masks in §663; the fix is the same shape too — one
+    /// implementation, called from everywhere, rather than three that agree
+    /// by inspection.
+    ///
+    /// **Lock order:** takes `VFS` and must therefore be called with no
+    /// backing-filesystem lock held. `readdir_pinned` drops its `fs` guard
+    /// before calling this for exactly that reason.
+    fn finish_listing(path: &Path, mut entries: Vec<DirEntry>) -> Vec<DirEntry> {
+        Self::drop_volume_labels(&mut entries);
+
+        // Mount-point names that are direct children of `path`.  E.g. with
+        // path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"];
+        // a nested mount like "/mnt/usb" is not a direct child of "/".
+        let submount_names: Vec<PathBuf> = {
+            let vfs = VFS.lock();
+            Self::submount_children(&vfs, path)
+        };
+
+        // Inject the ones the underlying filesystem doesn't know about.
+        for name in submount_names {
+            if !entries.iter().any(|e| e.name == name) {
+                let ino = Self::submount_root_ino(path, &name);
+                entries.push(DirEntry {
+                    name,
+                    entry_type: EntryType::Directory,
+                    size: 0,
+                    ino,
+                });
+            }
+        }
+
+        entries
+    }
+
     /// List entries in a directory.
     ///
     /// If other filesystems are mounted at sub-paths of `path`, their
     /// mount points appear as directory entries in the listing (even if
     /// the underlying filesystem doesn't have a physical directory there).
+    ///
+    /// Volume labels are never listed — see [`drop_volume_labels`](Self::drop_volume_labels).
     pub fn readdir(path: impl AsRef<Path>) -> KernelResult<Vec<DirEntry>> {
         let path = path.as_ref();
         let path = Self::resolve_follow(path)?;
         check_path_access(&path, PathAccess::Read)?;
 
-        // Collect mount-point names that are direct children of `path`.
-        // E.g., if path="/", mounts at "/tmp" and "/mnt" produce ["tmp", "mnt"].
-        // Nested mounts like "/mnt/usb" are NOT direct children of "/".
-        let submount_names: Vec<PathBuf> = {
-            let vfs = VFS.lock();
-            Self::submount_children(&vfs, &path)
+        let raw = {
+            let (fs, _id, _opts, relative) = resolve_mount(&path)?;
+            fs.lock().readdir(&relative)?
         };
-
-        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-        let mut entries = fs.lock().readdir(&relative)?;
-
-        // Inject submount directories that the underlying FS doesn't know about.
-        for name in submount_names {
-            if !entries.iter().any(|e| e.name == name) {
-                entries.push(DirEntry {
-                    name,
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                });
-            }
-        }
-
-        Ok(entries)
+        Ok(Self::finish_listing(&path, raw))
     }
 
     /// List entries in a directory with pagination.
@@ -2258,24 +2404,18 @@ impl Vfs {
     ) -> KernelResult<(Vec<DirEntry>, usize)> {
         let path = path.as_ref();
         check_path_access(path, PathAccess::Read)?;
-        let submount_names: Vec<PathBuf> = {
-            let vfs = VFS.lock();
-            Self::submount_children(&vfs, path)
+
+        let raw = {
+            let (fs, _id, _opts, relative) = resolve_mount(path)?;
+            fs.lock().readdir(&relative)?
         };
-
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        let mut entries = fs.lock().readdir(&relative)?;
-
-        // Inject submount directories.
-        for name in submount_names {
-            if !entries.iter().any(|e| e.name == name) {
-                entries.push(DirEntry {
-                    name,
-                    entry_type: EntryType::Directory,
-                    size: 0,
-                });
-            }
-        }
+        // Both steps run *before* `total` is taken and before the page is
+        // sliced.  A label dropped or a mount injected after the slice would
+        // make `entries_written` disagree with how far the offset actually
+        // advanced, so the caller's next page would step over a real
+        // neighbour: filtering belongs where the offset is computed, not
+        // where the record is packed.
+        let entries = Self::finish_listing(path, raw);
 
         let total = entries.len();
         let start = offset.min(total);
@@ -2634,13 +2774,26 @@ impl Vfs {
         Self::mkdir_mode(path, Self::DEFAULT_DIR_MODE)
     }
 
-    /// Create a directory, stamping it with `mode` (masked to the low 9
-    /// permission bits) instead of the 0o755 default.
+    /// Create a directory, stamping it with `mode` (masked to `0o1777` — the
+    /// nine permission bits plus sticky) instead of the 0o755 default.
     ///
     /// `mode` is expected to be **already umask-masked by the caller** — the
     /// umask lives in the userspace POSIX layer, so the kernel treats `mode`
     /// as the final on-disk permission bits (same thin-primitive model as the
     /// file-create path in [`crate::fs::handle::open_with_mode`]).
+    ///
+    /// **Ten bits, not nine and not twelve**, matching Linux's `vfs_mkdir`
+    /// (`mode &= (S_IRWXUGO|S_ISVTX)`) exactly. This is deliberately *narrower*
+    /// than the file-create path's `0o7777`, and Linux draws the same line in
+    /// the same place (`vfs_create` keeps `S_IALLUGO`): setgid on a directory
+    /// is *inherited from the parent*, not requested by the creator, so a mode
+    /// word is the wrong channel for it. See `design-decisions.md` §663.
+    ///
+    /// It is also wider than it was. This masked to `0o777` until 2026-09-01,
+    /// which meant §639's widening of `sys_fs_mkdir_mode` to `0o7777` never
+    /// reached the filesystem — the handler stopped dropping sticky and this
+    /// line dropped it one layer down, so `mkdir(path, 0o1777)` produced a
+    /// `0o777` directory exactly as before and nothing said otherwise.
     pub fn mkdir_mode(path: impl AsRef<Path>, mode: u16) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
@@ -2658,7 +2811,7 @@ impl Vfs {
         // Stamp the caller-supplied (umask-masked) permission bits; the
         // underlying mkdir stamps a 0o755 default, so only override when the
         // requested mode differs.
-        let perm = mode & 0o777;
+        let perm = mode & 0o1777;
         if perm != Self::DEFAULT_DIR_MODE {
             Self::set_permissions(&path, perm)?;
         }
@@ -3013,6 +3166,10 @@ impl Vfs {
     /// Rename or move a file or directory.
     ///
     /// Both paths must be on the same mount point.
+    ///
+    /// See [`RenameMode`] for the three semantics this family offers and
+    /// [`rename_at_pinned`](Self::rename_at_pinned) for the handle-resolved
+    /// form.
     pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> KernelResult<()> {
         let from = from.as_ref();
         let to = to.as_ref();
@@ -3274,6 +3431,28 @@ impl Vfs {
         }
 
         names
+    }
+
+    /// The inode a synthesised submount directory entry should report.
+    ///
+    /// A mount point that the underlying filesystem has no directory for is
+    /// still a real object to a caller: `stat`ting it resolves *through* the
+    /// mount and answers with the mounted filesystem's root inode.  A
+    /// listing that reported 0 for the same name would therefore disagree
+    /// with `stat` on an entry that `stat` can answer for — which is exactly
+    /// the `d_ino` vs `st_ino` mismatch this field exists to prevent.
+    ///
+    /// Returns 0 when the mounted filesystem has no stable identity to
+    /// report, or when its root cannot be statted at all; 0 is the field's
+    /// documented "not available", and it is what `stat` would report in the
+    /// first of those cases anyway.  Errors are deliberately swallowed
+    /// rather than propagated: a filesystem that cannot answer for its own
+    /// root must not make listing the directory *above* it fail.
+    ///
+    /// Callers must not hold the VFS lock or any filesystem lock — this
+    /// re-enters [`resolve_mount`].
+    fn submount_root_ino(dir_path: &Path, name: &Path) -> u64 {
+        Self::metadata_resolved(dir_path.join(name)).map_or(0, |m| m.ino)
     }
 
     // --- Extended metadata VFS methods ---
@@ -3677,7 +3856,11 @@ impl Vfs {
         super::intercept::pre_mkdir(&child)?;
         enforce_quota_create(&child)?;
 
-        let perm = mode & 0o777;
+        // `0o1777`, the same mask `mkdir_mode` applies — see its doc and §663.
+        // One operation with two masks depending on which route ran is worse
+        // than either mask, which is the argument that decided `link`'s error
+        // code the same week.
+        let perm = mode & 0o1777;
         {
             let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
             let mut guard = fs.lock();
@@ -3942,7 +4125,18 @@ impl Vfs {
             let (fs_src, _src_id, _opts, src_rel) = resolve_mount(&source)?;
             let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
             if !Arc::ptr_eq(&fs_src, &fs_new) {
-                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+                // POSIX names this exact case: `link()` gives `[EXDEV]` for
+                // "the link named by path2 and the file named by path1 are on
+                // different file systems and the implementation does not
+                // support links between file systems".  This returned
+                // `InvalidArgument` → `EINVAL` until 2026-08-31, which is not
+                // a near-miss but a different statement — `ln` printed
+                // "Invalid argument" where GNU prints "Invalid cross-device
+                // link", and nothing branched on it, which is why nothing
+                // caught it.  Both this route and the path-based `link` were
+                // changed together: one operation with two error codes
+                // depending on which route ran is worse than either code.
+                return Err(KernelError::CrossDevice);
             }
             let new_rel = new_dir_rel.join(new_name);
 
@@ -3981,18 +4175,205 @@ impl Vfs {
         Ok(())
     }
 
+    /// Rename `old_name` in the directory `old_dir` denotes to `new_name` in
+    /// the directory `new_dir` denotes, refusing if either handle no longer
+    /// denotes the directory it was opened on.
+    ///
+    /// This is the entry point `renameat`/`renameat2` needs, and the last
+    /// member of the pinned family.  Lane B asked for it by naming the race it
+    /// closes: "the destination race was the one that could create a file
+    /// somewhere I never named"
+    /// (`requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`).
+    /// A `mv` that resolves its destination directory by path can have that
+    /// directory swapped under it between the resolve and the rename, and then
+    /// writes the entry into whatever now answers to the name.
+    ///
+    /// ## No symlink following, on either side
+    ///
+    /// Rename operates on *names*, never on what a final component resolves
+    /// to: `mv link other` moves the link, it does not move the link's target.
+    /// So unlike [`link_at_pinned`](Self::link_at_pinned) there is no `follow`
+    /// argument and no branch where the object leaves the pinned directory.
+    /// Both pins are therefore verified under the *write's own lock*, not
+    /// merely by a pre-pass — this is the strongest guarantee any member of the
+    /// family offers, and it comes for free from what rename already is.
+    ///
+    /// ## Cross-mount is refused, where the path route copies
+    ///
+    /// [`rename_inner`](Self::rename_inner) falls back to copy+delete when the
+    /// two paths are on different mounts.  This does not, and returns
+    /// [`KernelError::CrossDevice`] (→ `EXDEV`, which is what Linux returns for
+    /// the whole case).
+    ///
+    /// That is a deliberate divergence rather than an omission.  A copy+delete
+    /// is a *sequence* of independent lock acquisitions — `stat`, `copy`,
+    /// `set_permissions`, `set_owner`, `remove` — and a pin cannot span it: the
+    /// directory could be swapped out between any two of those steps, which is
+    /// the exact condition this call exists to refuse.  Offering it would hand
+    /// the caller a handle-verified operation whose verification quietly lapses
+    /// halfway through, which is worse than not offering it, because the caller
+    /// has no way to tell the two apart.  A caller that genuinely wants the
+    /// convenience copy wants the path route, where the pin was buying it
+    /// nothing anyway.
+    ///
+    /// The refusal also buys the property [`link_at_pinned`](Self::link_at_pinned)
+    /// relies on: in every case that can succeed at all, both directories are
+    /// behind *one* filesystem lock, so there is no lock ordering to get wrong
+    /// because there are never two locks.
+    ///
+    /// ## Returns
+    ///
+    /// `StaleHandle` if either handle no longer denotes its directory;
+    /// `CrossDevice` if the two are on different mounts; `AlreadyExists` for
+    /// [`RenameMode::NoReplace`] onto a taken name; `NotSupported` if the
+    /// filesystem cannot exchange; otherwise whatever the rename itself
+    /// reports.
+    pub fn rename_at_pinned(
+        old_dir: &PinnedDir,
+        old_name: &[u8],
+        new_dir: &PinnedDir,
+        new_name: &[u8],
+        mode: RenameMode,
+    ) -> KernelResult<()> {
+        check_at_name(old_name)?;
+        check_at_name(new_name)?;
+
+        // Pass 1, on both handles: a stale handle is refused before the
+        // intercept hook runs. Each guard is taken and dropped in turn, so
+        // this cannot deadlock even when both directories are on one
+        // filesystem.
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&old_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, old_dir)?;
+        }
+        {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&new_dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, new_dir)?;
+        }
+
+        let old_child = old_dir.path.join(old_name);
+        let new_child = new_dir.path.join(new_name);
+
+        // Both sides are namespace-checked. A rename *removes* the source name
+        // as surely as it creates the destination, so checking only the
+        // destination would let a caller unlink out of a namespace it cannot
+        // write to by renaming within it.
+        crate::ipc::namespace::check_writable(&old_child)?;
+        crate::ipc::namespace::check_writable(&new_child)?;
+        check_path_access(&old_child, PathAccess::Write)?;
+        check_path_access(&new_child, PathAccess::Write)?;
+        check_writable(&old_child)?;
+        check_writable(&new_child)?;
+        super::intercept::pre_rename(&old_child, &new_child)?;
+
+        let dest_inval = {
+            // Every mount-table lookup happens before any filesystem guard is
+            // taken, so no ordering between the VFS lock and a filesystem lock
+            // can arise.
+            let (fs_old, old_fs_id, _opts, old_dir_rel) = resolve_mount(&old_dir.path)?;
+            let (fs_new, new_fs_id, _opts, new_dir_rel) = resolve_mount(&new_dir.path)?;
+            if !Arc::ptr_eq(&fs_old, &fs_new) {
+                return Err(KernelError::CrossDevice);
+            }
+            let old_rel = old_dir_rel.join(old_name);
+            let new_rel = new_dir_rel.join(new_name);
+
+            let mut guard = fs_new.lock();
+            // Pass 2, on both handles, under the guard that performs the
+            // rename. `Arc::ptr_eq` above established that one guard reaches
+            // both directories, so unlike `link_at_pinned` there is no case
+            // where only one of the two can be re-verified here.
+            verify_pinned(&mut guard, new_fs_id, &new_dir_rel, new_dir)?;
+            verify_pinned(&mut guard, old_fs_id, &old_dir_rel, old_dir)?;
+
+            match mode {
+                RenameMode::Exchange => {
+                    guard.rename_exchange(&old_rel, &new_rel)?;
+                    // Both names still exist afterwards, so nothing is
+                    // unlinked and no page cache identity dies.
+                    None
+                }
+                RenameMode::NoReplace => {
+                    // The existence check and the rename run under the *same*
+                    // hold, which is the whole content of the guarantee:
+                    // a separate pre-check would leave exactly the window
+                    // `RENAME_NOREPLACE` exists to close.
+                    match guard.stat(&new_rel) {
+                        Ok(_) => return Err(KernelError::AlreadyExists),
+                        Err(KernelError::NotFound) => {}
+                        Err(e) => return Err(e),
+                    }
+                    guard.rename(&old_rel, &new_rel)?;
+                    // Nothing was displaced -- the check above proved it.
+                    None
+                }
+                RenameMode::Replace => {
+                    // A replacing rename unlinks whatever held the destination
+                    // name, and that inode's number may be reused later, so
+                    // its cached pages must go. Captured before the rename,
+                    // while the name still reaches it.
+                    let id = cache_identity(&mut guard, new_fs_id, &new_rel);
+                    guard.rename(&old_rel, &new_rel)?;
+                    id
+                }
+            }
+        };
+        if let Some((fs_id, ino)) = dest_inval {
+            crate::mm::page_cache::invalidate_identity(fs_id, ino);
+        }
+
+        {
+            let mut dcache = VFS_DCACHE.lock();
+            dcache.invalidate_prefix(&old_child);
+            dcache.invalidate_prefix(&new_child);
+        }
+        // An exchange leaves BOTH names present with swapped contents, so the
+        // indexer must be told they *changed* rather than that one moved --
+        // `on_file_renamed` would drop a path it still needs to track. This is
+        // the same split `rename_exchange` makes on the path route.
+        match mode {
+            RenameMode::Exchange => {
+                super::notify::emit_renamed(&old_child, &new_child);
+                super::notify::emit_renamed(&new_child, &old_child);
+                super::index::on_file_changed(&old_child);
+                super::index::on_file_changed(&new_child);
+            }
+            RenameMode::Replace | RenameMode::NoReplace => {
+                super::notify::emit_renamed(&old_child, &new_child);
+                super::index::on_file_renamed(&old_child, &new_child);
+            }
+        }
+        super::journal::record_rename(&old_child, &new_child);
+        super::audit::log_ok(super::audit::AuditOp::Rename, 0, &old_child);
+        Ok(())
+    }
+
     /// List the directory `dir` denotes, refusing if it no longer denotes the
     /// directory it was opened on.
     ///
     /// This is the entry point `getdents64` needs: it resolves *the handle*,
     /// so a directory renamed out from under an open descriptor is reported
     /// as stale rather than listed from whatever now answers to the old name.
+    ///
+    /// The listing is the same one the path routes give — no volume labels,
+    /// submounts injected; see [`finish_listing`](Self::finish_listing).  That
+    /// matters more here than anywhere else: 664 exists to be the *race-free
+    /// substitute* for a listing taken by path, so swapping routes to close a
+    /// race must not also change what the directory is said to contain.
     pub fn readdir_pinned(dir: &PinnedDir) -> KernelResult<Vec<DirEntry>> {
         check_path_access(&dir.path, PathAccess::Read)?;
-        let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
-        let mut guard = fs.lock();
-        verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
-        guard.readdir(&dir_rel)
+        // The `fs` guard is scoped so it is released before `finish_listing`,
+        // which takes `VFS`.  Holding both would invert the lock order every
+        // other listing route establishes.
+        let raw = {
+            let (fs, fs_id, _opts, dir_rel) = resolve_mount(&dir.path)?;
+            let mut guard = fs.lock();
+            verify_pinned(&mut guard, fs_id, &dir_rel, dir)?;
+            guard.readdir(&dir_rel)?
+        };
+        Ok(Self::finish_listing(&dir.path, raw))
     }
 
     /// Compute the SHA-256 content hash of a file.
@@ -4420,7 +4801,9 @@ impl Vfs {
             let (fs_existing, _id_e, _opts_e, rel_existing) = resolve_mount(&existing)?;
             let (fs_new, _id_n, _opts_n, rel_new) = resolve_mount(&new_path)?;
             if !Arc::ptr_eq(&fs_existing, &fs_new) {
-                return Err(KernelError::InvalidArgument); // Cross-mount hard link.
+                // `EXDEV`, per `link()`'s own POSIX text — see the identical
+                // check in `link_at_pinned` for why this is not `EINVAL`.
+                return Err(KernelError::CrossDevice);
             }
             // The Vfs layer already resolved `existing` per `follow`, but the
             // final on-disk lookup happens inside the FS driver — so route to
@@ -6656,6 +7039,38 @@ pub fn self_test() -> KernelResult<()> {
             total
         );
 
+        // Every listed inode must equal the one `metadata` reports for the
+        // same name.  This is the invariant `DirEntry::ino` exists to hold:
+        // userspace cross-checks `d_ino` against `st_ino` in `find -inum`,
+        // in `ls -i` versus `stat`, and in the hard-link detection of `tar`,
+        // `rsync` and `du`, and a mismatch is silent in all of them — no
+        // error code is produced, the wrong answer is simply believed.  A
+        // listing that reported a *synthesised* number would pass every
+        // other assertion in this test.
+        for entry in &all {
+            let child = format!("{}/{}", pg_dir, entry.name.display());
+            let meta = Vfs::metadata(&child)?;
+            if entry.ino != meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: {} d_ino={} but st_ino={}",
+                    child,
+                    entry.ino,
+                    meta.ino
+                );
+                let _ = Vfs::remove_recursive(pg_dir);
+                return Err(KernelError::InternalError);
+            }
+        }
+        // memfs assigns every node a distinct number at creation, so a zero
+        // here would mean the listing lost it rather than that the backing
+        // filesystem had none to give.
+        if all.iter().any(|e| e.ino == 0) {
+            serial_println!("[vfs]   FAIL: memfs listing reported ino=0");
+            let _ = Vfs::remove_recursive(pg_dir);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[vfs]     readdir_at d_ino == st_ino for all 10 entries OK");
+
         // Read first page (3 entries).
         let (page1, total1) = Vfs::readdir_at(pg_dir, 0, 3)?;
         if page1.len() != 3 || total1 != 10 {
@@ -7707,7 +8122,10 @@ pub fn self_test() -> KernelResult<()> {
                 "/tmp/_pin2/dst/hard",
                 "/tmp/_pin2/dst/link",
                 "/tmp/_pin2/dst/stamped",
+                "/tmp/_pin2/dst/moved",
                 "/tmp/_pin2/src/f",
+                "/tmp/_pin2/src/mv_me",
+                "/tmp/_pin2/src/mv_me2",
             ] {
                 let _ = Vfs::remove(p);
             }
@@ -7723,11 +8141,7 @@ pub fn self_test() -> KernelResult<()> {
         };
         cleanup();
 
-        // Reports whether the filesystem under `/tmp` could actually make the
-        // hard link, so the skip can be recorded outside the closure: `record`
-        // takes `&mut self`, and capturing `skips` here would make `run` an
-        // `FnMut` still borrowing it at the point the skip is written.
-        let run = || -> KernelResult<bool> {
+        let run = || -> KernelResult<()> {
             Vfs::mkdir("/tmp/_pin2")?;
             Vfs::mkdir("/tmp/_pin2/src")?;
             Vfs::mkdir("/tmp/_pin2/dst")?;
@@ -7762,6 +8176,64 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
 
+            // Sticky survives the create, on *both* routes, and the two routes
+            // agree.  This is asserted because the opposite was true and
+            // nothing noticed: §639 widened `sys_fs_mkdir_mode`'s mask on
+            // 2026-08-30, but `mkdir_mode` and `mkdir_at_pinned` both went on
+            // masking to `0o777` one layer below, so the widening reached
+            // nothing.  A test that only checks `0o700` (as the one above does)
+            // cannot see that, because every bit it asserts is inside `0o777`.
+            //
+            // The `!= DEFAULT_DIR_MODE` guard on the stamp is the other reason
+            // to use a mode whose low nine bits are `0o755`: `0o1755` must
+            // still be stamped, and a guard comparing the *masked* value
+            // against the default would skip it and leave a plain 0o755
+            // directory behind.
+            Vfs::mkdir_at_pinned(&dst, b"sticky", 0o1755)?;
+            match Vfs::metadata_at_pinned(&dst, b"sticky", false) {
+                Ok(m) if m.permissions == 0o1755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned(0o1755) read back = {:?}, want mode \
+                         0o1755 — the sticky bit was dropped between the handler and the disk",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            Vfs::mkdir_mode("/tmp/_pin2/dst/sticky_path", 0o1755)?;
+            match Vfs::metadata("/tmp/_pin2/dst/sticky_path") {
+                Ok(m) if m.permissions == 0o1755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_mode(0o1755) read back = {:?}, want mode 0o1755 — \
+                         the path route drops sticky where the pinned route keeps it",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // setgid is refused by both routes, which is the half of §663 that
+            // is a *narrowing*.  `mkdir(2)` takes a new directory's setgid bit
+            // from its parent, never from the mode word; accepting it here
+            // would offer an authority Linux does not, in the bit that decides
+            // who owns files created in the directory later.  Asserted rather
+            // than assumed because the mask that drops it is one character
+            // different from the mask that keeps it.
+            Vfs::mkdir_at_pinned(&dst, b"nosgid", 0o2755)?;
+            match Vfs::metadata_at_pinned(&dst, b"nosgid", false) {
+                Ok(m) if m.permissions == 0o755 => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: mkdir_at_pinned(0o2755) read back = {:?}, want mode \
+                         0o755 — setgid must not be settable from a directory create mode",
+                        other.map(|m| m.permissions)
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
             // symlinkat: the *name* is one component, the *target* is not
             // constrained at all.  This is the asymmetry the design turns on,
             // and it is asserted in both directions -- a target containing `..`
@@ -7789,39 +8261,33 @@ pub fn self_test() -> KernelResult<()> {
             // would pass a content check and be a completely different (and
             // wrong) result.
             //
-            // `NotSupported` is accepted here and *only* here. memfs, which is
-            // what `/tmp` is, stores its tree as owned nodes -- a directory
-            // holds its children by value -- so two names cannot denote one
-            // node and `FileSystem::link`'s default refusal stands. That is a
-            // real gap in memfs rather than a property of this primitive, so
-            // it is recorded as a skip rather than hidden: the rest of the
-            // linkat assertions below (containment, stale refusal) do not
-            // reach the filesystem at all and run unconditionally.
-            let linked = match Vfs::link_at_pinned(&src, b"f", &dst, b"hard", false) {
-                Ok(()) => true,
-                Err(KernelError::NotSupported) => false,
-                Err(e) => return Err(e),
-            };
-            if linked {
-                let src_meta = Vfs::metadata("/tmp/_pin2/src/f")?;
-                let hard_meta = Vfs::metadata("/tmp/_pin2/dst/hard")?;
-                if src_meta.ino == 0 || src_meta.ino != hard_meta.ino {
-                    serial_println!(
-                        "[vfs]   FAIL: link_at_pinned produced ino {} for a link to ino {} — a \
-                         hard link must be the same inode, not a copy",
-                        hard_meta.ino,
-                        src_meta.ino
-                    );
-                    return Err(KernelError::InvalidArgument);
-                }
-                if hard_meta.nlinks < 2 {
-                    serial_println!(
-                        "[vfs]   FAIL: link_at_pinned left nlinks = {}, want at least 2 — `rm` \
-                         uses this to decide whether removing a name destroys the data",
-                        hard_meta.nlinks
-                    );
-                    return Err(KernelError::InvalidArgument);
-                }
+            // This used to accept `NotSupported` as a skip: memfs stored its
+            // tree as owned nodes -- a directory held its children by value --
+            // so two names could not denote one node. memfs now keeps a flat
+            // inode table with directories holding name -> ino, so the skip is
+            // gone and the assertion runs. It is stated unconditionally on
+            // purpose: an assertion that tolerates a filesystem declining to
+            // do the thing is an assertion that passes when the thing stops
+            // working.
+            Vfs::link_at_pinned(&src, b"f", &dst, b"hard", false)?;
+            let src_meta = Vfs::metadata("/tmp/_pin2/src/f")?;
+            let hard_meta = Vfs::metadata("/tmp/_pin2/dst/hard")?;
+            if src_meta.ino == 0 || src_meta.ino != hard_meta.ino {
+                serial_println!(
+                    "[vfs]   FAIL: link_at_pinned produced ino {} for a link to ino {} — a hard \
+                     link must be the same inode, not a copy",
+                    hard_meta.ino,
+                    src_meta.ino
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+            if hard_meta.nlinks < 2 {
+                serial_println!(
+                    "[vfs]   FAIL: link_at_pinned left nlinks = {}, want at least 2 — `rm` uses \
+                     this to decide whether removing a name destroys the data",
+                    hard_meta.nlinks
+                );
+                return Err(KernelError::InvalidArgument);
             }
 
             // utimensat, including the zero-means-unchanged convention: the
@@ -7844,6 +8310,101 @@ pub fn self_test() -> KernelResult<()> {
                         "[vfs]   FAIL: set_times_at_pinned(0, {want_mtime}) gave {:?}, want \
                          mtime {want_mtime} with atime left at {before_atime}",
                         other.map(|m| (m.accessed_ns, m.modified_ns))
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // renameat, all three modes.  Unlike the four above, this one
+            // *removes* a name as well as creating one, so every assertion
+            // below checks both ends: a rename that created the destination
+            // without unlinking the source would leave a copy, and one that
+            // unlinked without creating would lose the file outright.
+            Vfs::write_file("/tmp/_pin2/src/mv_me", b"cargo")?;
+            Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::Replace)?;
+            match (
+                Vfs::metadata("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Err(KernelError::NotFound), Ok(v)) if v == b"cargo" => {}
+                (from, to) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned left source {:?} and destination {:?}, \
+                         want the source gone and the destination holding the payload",
+                        from.map(|_| "present"),
+                        to.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // NoReplace onto a name that is taken.  Both names must survive
+            // untouched: the failure mode worth catching is a primitive that
+            // unlinks the source first and only then discovers the destination
+            // is occupied, which loses the file and reports an error for it.
+            Vfs::write_file("/tmp/_pin2/src/mv_me", b"second")?;
+            match Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::NoReplace) {
+                Err(KernelError::AlreadyExists) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned(NoReplace) onto a taken name = {other:?}, \
+                         want AlreadyExists"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            match (
+                Vfs::read_file("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Ok(a), Ok(b)) if a == b"second" && b == b"cargo" => {}
+                (a, b) => {
+                    serial_println!(
+                        "[vfs]   FAIL: a refused NoReplace rename disturbed the tree — source \
+                         {:?}, destination {:?}, want both exactly as they were",
+                        a.map(|v| v.len()),
+                        b.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // Exchange: both names stay, their contents swap.  Checked by
+            // content in *both* directions, since an implementation that moved
+            // one way and dropped the other would satisfy a one-sided check.
+            Vfs::rename_at_pinned(&src, b"mv_me", &dst, b"moved", RenameMode::Exchange)?;
+            match (
+                Vfs::read_file("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/dst/moved"),
+            ) {
+                (Ok(a), Ok(b)) if a == b"cargo" && b == b"second" => {}
+                (a, b) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned(Exchange) gave source {:?} destination \
+                         {:?}, want the two payloads swapped with both names still present",
+                        a.map(|v| v.len()),
+                        b.map(|v| v.len())
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+
+            // The same handle on both sides -- a rename within one directory,
+            // which is what `mv a b` in a single directory compiles to and the
+            // case where a naive two-lock implementation would deadlock on
+            // itself.
+            Vfs::rename_at_pinned(&src, b"mv_me", &src, b"mv_me2", RenameMode::Replace)?;
+            match (
+                Vfs::metadata("/tmp/_pin2/src/mv_me"),
+                Vfs::read_file("/tmp/_pin2/src/mv_me2"),
+            ) {
+                (Err(KernelError::NotFound), Ok(v)) if v == b"cargo" => {}
+                (from, to) => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned within one pinned directory left source \
+                         {:?} destination {:?}",
+                        from.map(|_| "present"),
+                        to.map(|v| v.len())
                     );
                     return Err(KernelError::InvalidArgument);
                 }
@@ -7910,6 +8471,43 @@ pub fn self_test() -> KernelResult<()> {
                         return Err(KernelError::InvalidArgument);
                     }
                 }
+                // Both of rename's names too, and the source side is the one
+                // that would be the worse bug: an uncontained source name is a
+                // way to *unlink* something outside the pinned directory,
+                // where an uncontained destination merely creates.
+                match Vfs::rename_at_pinned(&src, bad, &dst, b"escaped", RenameMode::Replace) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: rename_at_pinned(src {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+                match Vfs::rename_at_pinned(&src, b"f", &dst, bad, RenameMode::Replace) {
+                    Err(KernelError::InvalidArgument) => {}
+                    other => {
+                        serial_println!(
+                            "[vfs]   FAIL: rename_at_pinned(dst {shown:?}) = {other:?}, want \
+                             InvalidArgument"
+                        );
+                        return Err(KernelError::InvalidArgument);
+                    }
+                }
+            }
+            // The containment loop above asked for 10 renames of `src/f` and
+            // every one had to be refused, so the file is still there. Stated
+            // as an assertion rather than assumed: if any of them had gone
+            // through, the refusals loop would still have passed on the *next*
+            // iteration's `InvalidArgument`, and the missing file would only
+            // surface much later.
+            if Vfs::metadata("/tmp/_pin2/src/f").is_err() {
+                serial_println!(
+                    "[vfs]   FAIL: src/f is gone after ten refused renames — a refusal that still \
+                     unlinked the source is the same bug as one that still created"
+                );
+                return Err(KernelError::InvalidArgument);
             }
 
             // Now the swap, on the destination -- the pin that matters for a
@@ -7959,8 +8557,30 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
 
-            // The half that the return value cannot tell you.  Three of the
-            // four calls above would have *created* `intruder` had they
+            match Vfs::rename_at_pinned(&src, b"f", &dst, b"intruder", RenameMode::Replace) {
+                Err(KernelError::StaleHandle) => {}
+                other => {
+                    serial_println!(
+                        "[vfs]   FAIL: rename_at_pinned into a swapped destination = {other:?}, \
+                         want StaleHandle"
+                    );
+                    return Err(KernelError::InvalidArgument);
+                }
+            }
+            // Rename is the only member of the family whose refusal has to be
+            // checked at the *source* as well: the other four cannot destroy
+            // anything, so for them "refused" and "left the source alone" are
+            // the same statement. Here they are not.
+            if Vfs::metadata("/tmp/_pin2/src/f").is_err() {
+                serial_println!(
+                    "[vfs]   FAIL: a rename refused for a stale destination still unlinked the \
+                     source — the file is now in neither place"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+
+            // The half that the return value cannot tell you.  Four of the
+            // five calls above would have *created* `intruder` had they
             // re-resolved the name, so the impostor being empty is the real
             // assertion and the StaleHandle results are only corroboration.
             match Vfs::readdir("/tmp/_pin2/dst") {
@@ -8008,7 +8628,7 @@ pub fn self_test() -> KernelResult<()> {
                 }
             }
             let _ = Vfs::remove("/tmp/_pin2/dst/x");
-            Ok(linked)
+            Ok(())
         };
 
         let result = run();
@@ -8021,43 +8641,28 @@ pub fn self_test() -> KernelResult<()> {
         for p in [
             "/tmp/_pin2/aside/hard",
             "/tmp/_pin2/aside/link",
+            "/tmp/_pin2/aside/stamped",
+            "/tmp/_pin2/aside/moved",
             "/tmp/_pin2/dst/intruder",
         ] {
             let _ = Vfs::remove(p);
         }
         let _ = Vfs::rmdir("/tmp/_pin2/aside/made");
         cleanup();
-        let linked = result?;
-
-        // Recorded here rather than inside `run` for the borrow reason above.
-        // This is a gap in memfs, not in `link_at_pinned`: everything that
-        // makes the primitive safe -- `check_at_name` and both `verify_pinned`
-        // passes -- runs before the filesystem is reached, so the containment
-        // and stale-handle assertions below were exercised either way. What is
-        // missing is only the proof that a successful link shares an inode.
-        if !linked {
-            skips.record(
-                "pinned linkat: the positive same-inode/nlinks assertion",
-                "/tmp is memfs, whose directories own their children by value, so no two names \
-                 can denote one node and `FileSystem::link` stays at its refusing default",
-            );
-        }
+        result?;
 
         serial_println!(
-            "[vfs]   pinned mkdir/symlink/link/utimens: OK (a swapped destination refuses all \
-             four with StaleHandle and leaves the impostor directory empty; both of linkat's \
-             names are contained; a symlink target keeps `..` and `/` while a link *name* with \
-             them is refused; mkdirat's mode is stamped, utimensat leaves a zero argument \
-             alone{})",
-            if linked {
-                ", linkat shares an inode"
-            } else {
-                ", linkat's same-inode check skipped -- memfs cannot hard-link"
-            }
+            "[vfs]   pinned mkdir/symlink/link/utimens/rename: OK (a swapped destination refuses \
+             all five with StaleHandle and leaves the impostor directory empty; both of linkat's \
+             and both of renameat's names are contained; a symlink target keeps `..` and `/` \
+             while a link *name* with them is refused; mkdirat's mode is stamped, utimensat \
+             leaves a zero argument alone, linkat shares an inode; renameat moves, refuses \
+             NoReplace onto a taken name without disturbing either end, swaps under Exchange, \
+             and never unlinks the source on a path it refuses)"
         );
     } else {
         skips.record(
-            "pinned mkdir/symlink/link/utimens (the set `cp -r` needs)",
+            "pinned mkdir/symlink/link/utimens/rename (the set `cp -r` and `mv` need)",
             "/tmp not mounted",
         );
     }

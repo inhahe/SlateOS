@@ -382,6 +382,7 @@ impl FileSystem for Iso9660Fs {
 
             let name = rec.display_name(joliet);
             entries.push(DirEntry {
+                ino: 0,
                 name: PathBuf::from(name),
                 entry_type: rec.entry_type(),
                 size: u64::from(rec.size),
@@ -431,6 +432,7 @@ impl FileSystem for Iso9660Fs {
         };
 
         Ok(DirEntry {
+            ino: 0,
             name: PathBuf::from(name),
             entry_type: resolved.entry_type(),
             size: total_size,
@@ -1041,6 +1043,7 @@ fn records_to_dir_entries(records: &[IsoDirectoryRecord], joliet: bool) -> Vec<D
         }
         let name = rec.display_name(joliet);
         entries.push(DirEntry {
+            ino: 0,
             name: PathBuf::from(name),
             entry_type: rec.entry_type(),
             size: u64::from(rec.size),

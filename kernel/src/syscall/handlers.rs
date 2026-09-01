@@ -10954,8 +10954,18 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: key pointer (null-terminated).  `arg3`: value pointer.
-/// `arg4`: value length.  `arg5`: flags (bit 0 = `NO_FOLLOW`, i.e.
-/// `lsetxattr` — write to the link inode's own xattrs).
+/// `arg4`: value length.  `arg5`: flags:
+///
+/// | bit | meaning |
+/// |-----|---------|
+/// | 0 | `NO_FOLLOW` — `lsetxattr`: write to the link inode's own xattrs |
+/// | 1 | `XATTR_CREATE` — fail with `EEXIST` if the attribute exists |
+/// | 2 | `XATTR_REPLACE` — fail with `ENODATA` if it does not |
+///
+/// Bits 1 and 2 together are `InvalidArgument`, as is any bit above 2:
+/// Linux rejects unknown `setxattr` flags rather than ignoring them, and
+/// silently ignoring one here would let a caller that asked for
+/// "create, or fail" get an overwrite and never learn of it.
 pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -10982,11 +10992,23 @@ pub fn sys_fs_set_xattr(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // arg5 bit 0 = NO_FOLLOW (lsetxattr: write the link inode's own xattrs).
+    // arg5 bit 0 = NO_FOLLOW, bit 1 = XATTR_CREATE, bit 2 = XATTR_REPLACE.
+    if args.arg5 & !0b111 != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    let mode = match args.arg5 & 0b110 {
+        0b000 => crate::fs::XattrSetMode::Any,
+        0b010 => crate::fs::XattrSetMode::Create,
+        0b100 => crate::fs::XattrSetMode::Replace,
+        // Both at once asks for "fail if present" and "fail if absent",
+        // which no state satisfies.  Linux returns EINVAL; so do we,
+        // rather than picking one and pretending the other was not asked.
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
     let res = if args.arg5 & 1 != 0 {
-        crate::fs::Vfs::set_xattr_no_follow(&path, &key, &value)
+        crate::fs::Vfs::set_xattr_no_follow_with(&path, &key, &value, mode)
     } else {
-        crate::fs::Vfs::set_xattr(&path, &key, &value)
+        crate::fs::Vfs::set_xattr_with(&path, &key, &value, mode)
     };
     match res {
         Ok(()) => SyscallResult::ok(0),

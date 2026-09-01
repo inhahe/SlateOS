@@ -7431,20 +7431,28 @@ fn bench_vfs_readdir_root_cost() {
     });
 
     // Arm 3b, measured while arm 3's mounts are still registered because that
-    // is the only configuration in which it means anything: one call to what
-    // `finish_listing` does per submount.
+    // is the only configuration in which it means anything: one by-path stat of
+    // a directory that IS a mount point.
     //
-    // `submount_root_ino` is `metadata_resolved(dir_path.join(name))`, and
-    // `metadata_resolved` is public, so this is that body minus the `PathBuf`
-    // join -- against a target that IS a mount point, which is the case the
-    // suite has never priced. `vfs_stat_breakdown_resolved` stats an ordinary
-    // file at ~2000ns; if statting a mount root costs the ~16000ns the first
-    // run implied per submount, then the whole of arm 3's delta is these five
-    // calls and the question becomes what inside one of them is expensive. If
-    // it costs ~2000ns like any other stat, then the five stats are NOT arm 3's
-    // delta and the expense is in `finish_listing`'s own loop -- a different
-    // bug in a different place. The two outcomes point at different files,
-    // which is the whole reason to spend an arm on it.
+    // *** This arm no longer measures a step `finish_listing` performs. ***
+    // It was written when `submount_root_ino` was
+    // `metadata_resolved(dir_path.join(name))` and the question was whether
+    // arm 3's delta was those five calls. It was (63%), so `finish_listing` was
+    // changed to stat each root through the `Arc` handle already in the mount
+    // table, and the by-path resolution measured here was removed from the loop.
+    //
+    // The arm is kept, deliberately, because it is now the *yardstick for what
+    // the fix removed*, measured fresh on every boot instead of quoted from a
+    // stale constant -- and a constant quoted instead of measured is precisely
+    // the mistake this whole benchmark exists downstream of. `metadata_resolved`
+    // is still live code and still what any ordinary caller pays to stat a
+    // mount point, so this is a real cost, just no longer one paid per entry of
+    // a listing.
+    //
+    // Read it against the per-submount figure below: while the by-path stat was
+    // inside the loop, one of these had to be *at most* the per-submount cost.
+    // Once it exceeds that cost, it is no longer in the loop -- which is the
+    // post-fix signature the STATS-REMOVED branch keys on.
     let submount_stat = run("vfs_readdir_mp_submount_stat", 200, || {
         let _ = core::hint::black_box(Vfs::metadata_resolved(stat_target));
     });
@@ -7482,16 +7490,35 @@ fn bench_vfs_readdir_root_cost() {
     let d_table = i64::from(elsewhere.min_ns as i32) - i64::from(base.min_ns as i32);
     let d_parent = i64::from(parent.min_ns as i32) - i64::from(elsewhere.min_ns as i32);
 
-    serial_println!(
-        "[bench]   vfs_readdir_root_cost: mount-table size alone moves a {}-entry listing by \
-         {}ns = {}% ({} extra mounts elsewhere: {}ns -> {}ns)",
-        READDIR_MOUNT_ENTRIES,
-        d_table,
-        readdir_signed_pct(d_table, base.min_ns),
-        READDIR_MOUNT_ARM,
-        base.min_ns,
-        elsewhere.min_ns
-    );
+    // A negative `d_table` is not a small result, it is an impossible one:
+    // registering five more mounts cannot make an unrelated listing *faster*,
+    // because `resolve_mount`'s scan is strictly longer. When it happens the
+    // arm has measured host noise, and the honest report is to say so rather
+    // than to print "-26%" in the same voice as a finding -- and to withhold
+    // the per-mount unit price, since the fs-root arm below subtracts it.
+    if d_table < 0 {
+        serial_println!(
+            "[bench]   vfs_readdir_root_cost: mount-table arm VOID — {} extra mounts elsewhere \
+             measured {}ns FASTER ({}ns -> {}ns), which cannot happen: resolve_mount's scan is \
+             strictly longer with more mounts. This arm caught host noise, so no per-mount table \
+             cost is available this boot and the fs-root figure below is not corrected for it.",
+            READDIR_MOUNT_ARM,
+            -d_table,
+            base.min_ns,
+            elsewhere.min_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   vfs_readdir_root_cost: mount-table size alone moves a {}-entry listing by \
+             {}ns = {}% ({} extra mounts elsewhere: {}ns -> {}ns)",
+            READDIR_MOUNT_ENTRIES,
+            d_table,
+            readdir_signed_pct(d_table, base.min_ns),
+            READDIR_MOUNT_ARM,
+            base.min_ns,
+            elsewhere.min_ns
+        );
+    }
     serial_println!(
         "[bench]   vfs_readdir_root_cost: being the PARENT of those same {} mounts moves it by \
          {}ns = {}% ({}ns -> {}ns), i.e. ~{}ns per submount in finish_listing",
@@ -7525,19 +7552,35 @@ fn bench_vfs_readdir_root_cost() {
             // One mount's worth of table growth is subtracted, priced from this
             // boot's own first delta rather than assumed to be negligible.
             let d_fsroot = i64::from(r.min_ns as i32) - i64::from(base.min_ns as i32);
-            let table_1 = d_table / READDIR_MOUNT_ARM as i64;
-            serial_println!(
-                "[bench]   vfs_readdir_root_cost: listing a filesystem's OWN ROOT costs {}ns \
-                 = {}% more than the same {} entries in a plain child ({}ns -> {}ns), or {}ns \
-                 once this boot's per-mount table cost ({}ns) is subtracted",
-                d_fsroot,
-                readdir_signed_pct(d_fsroot, base.min_ns),
-                READDIR_MOUNT_ENTRIES,
-                base.min_ns,
-                r.min_ns,
-                d_fsroot - table_1,
-                table_1
-            );
+            if d_table < 0 {
+                // The correction term came from a void arm, so applying it
+                // would launder noise into a number that looks corrected.
+                serial_println!(
+                    "[bench]   vfs_readdir_root_cost: listing a filesystem's OWN ROOT costs {}ns \
+                     = {}% more than the same {} entries in a plain child ({}ns -> {}ns), \
+                     UNCORRECTED — the mount-table arm was void this boot, so the one mount's \
+                     worth of table growth in this figure could not be priced and is still in it.",
+                    d_fsroot,
+                    readdir_signed_pct(d_fsroot, base.min_ns),
+                    READDIR_MOUNT_ENTRIES,
+                    base.min_ns,
+                    r.min_ns
+                );
+            } else {
+                let table_1 = d_table / READDIR_MOUNT_ARM as i64;
+                serial_println!(
+                    "[bench]   vfs_readdir_root_cost: listing a filesystem's OWN ROOT costs {}ns \
+                     = {}% more than the same {} entries in a plain child ({}ns -> {}ns), or {}ns \
+                     once this boot's per-mount table cost ({}ns) is subtracted",
+                    d_fsroot,
+                    readdir_signed_pct(d_fsroot, base.min_ns),
+                    READDIR_MOUNT_ENTRIES,
+                    base.min_ns,
+                    r.min_ns,
+                    d_fsroot - table_1,
+                    table_1
+                );
+            }
         }
         None => serial_println!(
             "[bench]   vfs_readdir_root_cost: fs-root arm UNAVAILABLE — could not mount a memfs \
@@ -7585,7 +7628,32 @@ fn bench_vfs_readdir_root_cost() {
         0
     };
 
-    if readdir_signed_pct(d_parent, elsewhere.min_ns).abs() < READDIR_MATERIAL_PCT {
+    // Before any of that: did the arms the verdict rests on actually measure
+    // anything? `run` already cross-checks each window's two halves against
+    // each other, and the run-over-run report refuses to score a benchmark
+    // whose halves disagree (its "MEASUREMENT VOID" class). The verdict printed
+    // here must obey the same rule, or the kernel narrates a conclusion from
+    // the same samples the host-side tooling has just thrown out -- which is
+    // worse than silence, because it is a conclusion in the log with no
+    // caveat attached to it.
+    //
+    // This is the third correction to this ladder, and the second of the "state
+    // only what was measured" kind. On the boot that prompted it, `elsewhere`
+    // and `parent` were 82% and 92% split, `elsewhere` landed *below* `base`,
+    // and the verdict still printed a confident STATS-DOMINATE.
+    if base.split.is_unstable() || elsewhere.split.is_unstable() || parent.split.is_unstable() {
+        serial_println!(
+            "[bench]   vfs_readdir_root_cost: VOID — the measurement window moved during the run \
+             (split-half instability: base {}, elsewhere {}, parent {}), so the {}ns parent delta \
+             is not a measurement of anything and no verdict is drawn. Re-run; if the same arm \
+             voids repeatedly on a quiet host it is the benchmark alternating between two \
+             populations, not ambient load.",
+            base.split,
+            elsewhere.split,
+            parent.split,
+            d_parent
+        );
+    } else if readdir_signed_pct(d_parent, elsewhere.min_ns).abs() < READDIR_MATERIAL_PCT {
         serial_println!(
             "[bench]   vfs_readdir_root_cost: REFUTED — being a mount parent costs {}ns, under \
              {}% of the {}ns window. known-issues predicts ~{}ns from {} stats, so \
@@ -7597,22 +7665,49 @@ fn bench_vfs_readdir_root_cost() {
             PREDICTED_PARENT_NS,
             READDIR_MOUNT_ARM
         );
+    } else if explained >= 100 {
+        // The post-fix signature, and the reason `explained` is allowed to
+        // exceed 100 rather than being clamped: while the by-path stat was
+        // inside `finish_listing`'s loop, five of them could not cost more than
+        // the delta they were part of. That they now do is the measurement
+        // saying the call is no longer in the loop. Clamping this to 100 would
+        // have hidden the very transition the arm was added to detect, and
+        // reported it as STATS-DOMINATE -- which is what the first boot after
+        // the fix did print.
+        serial_println!(
+            "[bench]   vfs_readdir_root_cost: STATS-REMOVED — mount parenthood now costs {}ns \
+             ({}ns/submount), which is LESS than the {}ns that one by-path stat of a mount root \
+             still measures ({}% of the delta, and a fraction over 100% is only possible once \
+             that call is out of the loop). This is the fix landing: finish_listing reads each \
+             root through the mount-table handle instead of re-resolving the path. What remains \
+             is its own loop -- the de-dup scan and the per-root filesystem lock -- at {}ns per \
+             submount against the ~{}ns an ordinary file's stat costs.",
+            d_parent,
+            per_submount,
+            stat_ns,
+            explained,
+            per_submount,
+            ORDINARY_STAT_NS
+        );
     } else if explained >= 60 {
         serial_println!(
             "[bench]   vfs_readdir_root_cost: STATS-DOMINATE — mount parenthood costs {}ns \
-             ({}ns/submount) and the {} measured stats account for {}% of it. The known-issues \
-             fix is the right one and should recover most of this. Note the prediction was low \
-             for the right reason and the wrong size: it priced these at an ordinary file's \
-             ~{}ns, but statting a MOUNT ROOT measures {}ns -- {}x -- so 5 of them are {}ns, not \
-             the ~{}ns predicted. The other {}% is finish_listing's own loop (the PathBuf join \
-             and the de-dup scan), and is the remainder to chase after the fix lands.",
+             ({}ns/submount) and {} by-path mount-root stats account for {}% of it. Since the \
+             fix landed this branch should be unreachable: a per-submount cost still large \
+             enough to contain one of these stats means finish_listing is resolving paths again \
+             (a regression) or the arms are noisy enough to be untrustworthy -- check the split \
+             figures before believing it. Sizes: a MOUNT ROOT stat measures {}ns against an \
+             ordinary file's ~{}ns ({}x), so {} of them are {}ns, against the ~{}ns \
+             known-issues.md originally predicted from ordinary-file pricing. The other {}% is \
+             finish_listing's own loop.",
             d_parent,
             per_submount,
             READDIR_MOUNT_ARM,
             explained,
-            ORDINARY_STAT_NS,
             stat_ns,
+            ORDINARY_STAT_NS,
             stat_ns / ORDINARY_STAT_NS,
+            READDIR_MOUNT_ARM,
             stats_total,
             PREDICTED_PARENT_NS,
             100 - explained
@@ -7620,10 +7715,12 @@ fn bench_vfs_readdir_root_cost() {
     } else if explained >= 25 {
         serial_println!(
             "[bench]   vfs_readdir_root_cost: STATS-PARTIAL — mount parenthood costs {}ns \
-             ({}ns/submount); the {} measured stats ({}ns each) are {}% of it. Removing them is \
-             worth doing and is not the whole answer: the majority is in finish_listing's own \
-             loop, so budget a second fix there. (known-issues predicted ~{}ns for the stats \
-             alone.)",
+             ({}ns/submount); {} by-path mount-root stats ({}ns each) would be {}% of it. Like \
+             STATS-DOMINATE this should be unreachable now that finish_listing reads roots from \
+             the mount table: a per-submount cost this large means either a regression back to \
+             path resolution or arms too noisy to read. Check the split figures first. \
+             (known-issues.md predicted ~{}ns for the stats alone, pricing them as ordinary \
+             files.)",
             d_parent,
             per_submount,
             READDIR_MOUNT_ARM,
@@ -7634,15 +7731,18 @@ fn bench_vfs_readdir_root_cost() {
     } else {
         serial_println!(
             "[bench]   vfs_readdir_root_cost: STATS-MINOR — mount parenthood costs a material \
-             {}ns ({}ns/submount), but the {} measured stats ({}ns each) are only {}% of it. The \
-             known-issues fix targets the wrong {}%: the cost is in finish_listing's own loop, \
-             not in submount_root_ino, and that loop is where to look next.",
+             {}ns ({}ns/submount), and {} by-path mount-root stats ({}ns each) would be only \
+             {}% of it. That is far more per submount than either the stat that used to be in \
+             the loop or the ~{}ns an ordinary stat costs, so the cost is something else \
+             entirely: look at finish_listing's own loop -- the de-dup scan over the entry list \
+             and the per-root filesystem lock -- not at path resolution, which is no longer \
+             there to blame.",
             d_parent,
             per_submount,
             READDIR_MOUNT_ARM,
             stat_ns,
             explained,
-            explained
+            ORDINARY_STAT_NS
         );
     }
 }

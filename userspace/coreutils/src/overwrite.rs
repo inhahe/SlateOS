@@ -39,7 +39,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use quoting::{os_bytes, quoteaf_os};
+use quoting::quoteaf_os;
 
 use crate::yesno::{Answers, yesno};
 
@@ -152,15 +152,15 @@ pub fn writable_destination(target: &Path, dest_meta: &fs::Metadata) -> bool {
     if dest_meta.file_type().is_symlink() || can_write_any_file() {
         return true;
     }
-    let mut c_path = os_bytes(target.as_os_str()).into_owned();
-    if c_path.contains(&0) {
+    let Ok(c_path) = crate::pathname::c_path(target) else {
         // A path with an interior NUL cannot be handed to a C function. It also
         // cannot name a file, so the operation is about to fail anyway; say
         // "writable" so the question asked is the plain one rather than one
-        // quoting a mode that was never read.
+        // quoting a mode that was never read. This is the one caller that
+        // *swallows* that error rather than reporting it, because the answer
+        // here only chooses a wording.
         return true;
-    }
-    c_path.push(0);
+    };
     // SAFETY: `c_path` is NUL-terminated, has no interior NUL, and outlives the
     // call. `euidaccess` reads it and does not retain it.
     unsafe { euidaccess(c_path.as_ptr(), 2) == 0 }

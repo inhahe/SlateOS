@@ -618,7 +618,7 @@ fn name_max(dir: &Path) -> usize {
         fn __errno_location() -> *mut i32;
     }
 
-    let Ok(path) = c_path(dir) else {
+    let Ok(path) = crate::pathname::c_path(dir) else {
         return usize::MAX;
     };
     // SAFETY: `__errno_location` is defined to return a valid pointer to this

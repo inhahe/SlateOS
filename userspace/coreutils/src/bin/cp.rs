@@ -249,7 +249,7 @@ use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
-    Copied, EntryId, FileId, entry_id, file_id, is_same_file, same_entry, split_entry,
+    Copied, EntryId, FileId, entry_id, file_id, is_same_file, nlink, same_entry, split_entry,
 };
 use coreutils::fsattr::{
     self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
@@ -2240,24 +2240,6 @@ impl Placed {
     }
 }
 
-/// How many names the file has. GNU's `st_nlink`.
-#[cfg(unix)]
-fn hard_links(meta: &fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.nlink()
-}
-
-/// A host without hard links answers 1 to everything, which switches
-/// `--preserve=links` off by exactly the amount that host cannot honour it: the
-/// `st_nlink > 1` half of the condition never fires, and the dereference half
-/// still does, so `cp --preserve=links -L la lb d` is the only spelling that
-/// reaches [`hardlink::force_link`] — and there it fails with whatever the platform
-/// says about [`fs::hard_link`], which is the honest answer.
-#[cfg(not(unix))]
-fn hard_links(_meta: &fs::Metadata) -> u64 {
-    1
-}
-
 /// Copy one source of a known kind onto a settled destination path: the symlink,
 /// the directory and the regular file, and nothing else.
 ///
@@ -2319,7 +2301,7 @@ fn place_entity<O: Write, E: Write>(
     // points at it.
     let dest_is_dir = dest.metadata().is_some_and(fs::Metadata::is_dir);
     let dest_multiply_linked =
-        job.flags.preserve.links && dest.metadata().is_some_and(|m| hard_links(m) > 1);
+        job.flags.preserve.links && dest.metadata().is_some_and(|m| nlink(m) > 1);
 
     // `-b`: the destination is moved aside rather than written over, and this is
     // GNU's block at `copy.c:2517`. It is the `if` whose `else if` is the unlink
@@ -2404,10 +2386,18 @@ fn place_entity<O: Write, E: Write>(
     // Directories are excluded: their branch of `earlier_file` is the
     // hard-linked-directory refusal, which lives in [`copy_one`] because only
     // an operand can reach it.
+    //
+    // On a host without hard links [`nlink`] answers 1 to everything, which
+    // switches `--preserve=links` off by exactly the amount that host cannot
+    // honour it: the first half of the condition never fires and the dereference
+    // half still does, so `cp --preserve=links -L la lb d` is the only spelling
+    // that reaches [`hardlink::force_link`] there — and it then fails with
+    // whatever the platform says about [`fs::hard_link`], which is the honest
+    // answer.
     let mut recorded = None;
     if !metadata.is_dir()
         && job.flags.preserve.links
-        && (hard_links(metadata) > 1 || job.flags.should_dereference(command_line_arg))
+        && (nlink(metadata) > 1 || job.flags.should_dereference(command_line_arg))
         && let Some(id) = file_id(src_path, metadata)
     {
         if let Some(earlier) = job.copied.remember(&id, target) {
@@ -7350,7 +7340,7 @@ mod tests {
             d.join("lb").symlink_metadata().unwrap().is_symlink(),
             "the link is to the symlink, not through it"
         );
-        assert_eq!(hard_links(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
+        assert_eq!(nlink(&fs::symlink_metadata(d.join("la")).unwrap()), 2);
     }
 
     /// A source that fails to copy is *forgotten*, so the next name for it is

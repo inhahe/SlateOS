@@ -1287,14 +1287,15 @@ struct TcpConn {
     /// an active open completes on a SYN-ACK and emits the final ACK.
     passive: bool,
     /// `true` once `shutdown(SHUT_WR)`/`SHUT_RDWR` has closed the write side: our
-    /// FIN has been emitted and subsequent [`OP_SEND`] submissions are rejected
-    /// with [`ERR_BROKEN_PIPE`](netipc::ring::ERR_BROKEN_PIPE). The read side
-    /// stays open, so `recv` keeps delivering buffered/inbound bytes until the
-    /// peer FIN.
+    /// FIN has been emitted and subsequent [`OP_SEND`](netipc::ring::OP_SEND)
+    /// submissions are rejected with
+    /// [`ERR_BROKEN_PIPE`](netipc::ring::ERR_BROKEN_PIPE). The read side stays
+    /// open, so `recv` keeps delivering buffered/inbound bytes until the peer FIN.
     write_shut: bool,
     /// `true` once `shutdown(SHUT_RD)`/`SHUT_RDWR` has closed the read side:
-    /// subsequent [`OP_RECV`] completes with EOF (`0`) without waiting. The write
-    /// side stays open, so `send` still works until [`OP_CLOSE`].
+    /// subsequent [`OP_RECV`](netipc::ring::OP_RECV) completes with EOF (`0`)
+    /// without waiting. The write side stays open, so `send` still works until
+    /// [`OP_CLOSE`](netipc::ring::OP_CLOSE).
     read_shut: bool,
 }
 
@@ -3384,7 +3385,8 @@ impl RingSession {
 ///   than dropped — then copy the response into the SQE's data window; completion
 ///   `result` = bytes received, or `-1`.
 /// - [`netipc::ring::OP_POLL`]: non-destructively report `sqe.conn_id`'s readiness
-///   via [`ring_tcp_poll`]; completion `result` is a [`POLL_READABLE`]/
+///   via [`ring_tcp_poll`]; completion `result` is a
+///   [`POLL_READABLE`](netipc::ring::POLL_READABLE)/
 ///   [`POLL_WRITABLE`](netipc::ring::POLL_WRITABLE) bitmask, or `-1` (no such conn).
 /// - [`netipc::ring::OP_CLOSE`]: look up and evict `sqe.conn_id`, graceful
 ///   teardown; completion `result = 0`, or `-1` if no such connection.

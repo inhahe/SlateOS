@@ -5202,7 +5202,7 @@ mod tests {
 
     /// The same-file guard keys on the policy and not on `-r`, which is what
     /// changed when `-P` arrived: two distinct links to one file are two
-    /// distinct things to copy, so this is allowed. Under [`PLAIN`] — where
+    /// distinct things to copy, so this is allowed. Under [`plain`] — where
     /// both are followed — the identical command is refused, and the test
     /// above this one in the file pins that half.
     #[cfg(unix)]
@@ -6453,8 +6453,8 @@ mod tests {
     // `cargo test` catches a regression without a GNU userland to compare
     // against.
 
-    /// `--preserve=links` and nothing else. Not folded into the `..OFF` family
-    /// near [`PLAIN`] because it and its two variants are `#[cfg(unix)]`, and an
+    /// `--preserve=links` and nothing else. Not folded into the `..off()` family
+    /// near [`plain`] because it and its two variants are `#[cfg(unix)]`, and an
     /// unused constant is a warning on the development host.
     #[cfg(unix)]
     fn links() -> CpFlags {

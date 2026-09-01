@@ -258,7 +258,7 @@ pub struct Dir {
     /// Packed 664 records, `malloc`'d and owned by this stream.
     ///
     /// Null only between [`alloc_dir`] and the fill that follows it, and
-    /// again after [`Dir::release`].  Read through [`Dir::records`], which is
+    /// again after [`Dir::release`].  Read through [`snapshot`], which is
     /// the one place that turns it into a slice.
     buf: *mut u8,
     /// Bytes of records in `buf`.

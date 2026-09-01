@@ -103895,21 +103895,49 @@ deltas with `saturating_sub`, which rendered both of these negative results as
 
 **What is really going on: the ballast warms the allocator.** `readdir`
 allocates a `Vec<DirEntry>` plus one owned name per entry on *every* iteration,
-and 2048 file creations leave the heap holding a large pool of warm,
-right-sized free blocks. The same boot measured
-`heap_raw_alloc_free_512` at **min 314 ns against a mean of 28786 ns**, with a
-max of 209,898,765 cycles — a ~90× mean/min ratio and a catastrophic tail. Heap
-state is not a small term in this benchmark; on these numbers it is most of it.
+and 2048 file creations leave the heap grown and holding a pool of warm,
+right-sized free blocks.
+
+**The evidence is the dispersion, not the mean** — and getting this right
+required a second pass, because the first draft of this correction cited the
+mean/min ratios the harness prints and those turn out to be the wrong statistic.
+Reconstructing each window's distribution from `min`/`mean`/`max`/`iterations`:
+
+| window | max/min | max as % of total | rest, as multiple of min |
+|---|---|---|---|
+| `heap_raw_alloc_free_512` | 179708 | **98.1 %** | 1.7× |
+| `vfs_readdir_n0` | 3775 | **92.5 %** | 1.5× |
+| `vfs_readdir_n8` | 3273 | **92.4 %** | 1.4× |
+| `vfs_readdir_n64` | 1089 | 49.0 % | 5.7× |
+| `vfs_readdir_root` | 878 | 31.0 % | 9.8× |
+| `vfs_readdir_n8_ballasted` | **16** | 3.9 % | 2.0× |
+| `vfs_readdir_n64_ballasted` | **50** | 10.4 % | 2.2× |
+
+So `heap_raw_alloc_free_512`'s alarming 90× mean/min is **one single stall**
+that accounts for 98 % of the window; with it removed the allocator is steady at
+1.7× its min. The kernel heap does *not* have a heavy tail, and an earlier draft
+of this entry said it did. Same for `n0` and `n8` — one outlier each, otherwise
+clean. Those isolated multi-millisecond stalls are consistent with the host
+descheduling the vCPU thread, which inflates an `rdtsc` delta without any guest
+work happening, and they are why `min` is the statistic the harness reports.
+
+**The two windows with a genuinely repeated tail are the two that list many
+entries**: `vfs_readdir_n64` (5.7× min after the max is removed) and
+`vfs_readdir_root` (9.8×). And the ballast collapses it — `n64` goes from
+max/min 1089 and a 5.7× body to max/min **50** and a 2.2× body. The ballast did
+not merely shift the level, it removed the repeated stalls.
+
+That is the shape of **heap growth**: listing 64 entries allocates ~65 times,
+which repeatedly pushes the heap past its high-water mark and forces it to map
+new pages; once the ballast has grown the heap and freed everything back, later
+listings allocate into space that already exists and never pay it. The
+hypothesis is testable and the 2×2's `n64_cold` vs `n64` arms test it directly.
 
 **The corroborating evidence was in the scored number all along**, and I read
-past it:
-
-- `vfs_readdir`'s own **mean is 14× its min**; `vfs_readdir_n0`'s is 20×. The
-  harness prints this and I did not weigh it.
-- `vfs_readdir_root` max = 275,043,690 cycles — ~74 ms for one listing of `/`.
-- Three binaries have now produced **16675 ns, 50216/49970 ns, and 84331 ns**.
-  The third differs from the second only by code appended *after* `vfs_readdir`
-  runs, which cannot affect it causally — but perturbs heap layout, which can.
+past it: three binaries have now produced **16675 ns, 50216/49970 ns, and
+84331 ns**. The third differs from the second only by code appended *after*
+`vfs_readdir` runs, which cannot affect it causally — but perturbs heap layout,
+which can.
 
 **Why the A/A replication did not catch this, which is the lesson.** Two boots
 of a byte-identical image landed 0.5 % apart, and I took that as proof the

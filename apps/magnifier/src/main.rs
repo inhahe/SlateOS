@@ -2036,23 +2036,52 @@ impl Magnifier {
             stroke(f, swatch_rect, SURFACE1, 1.0, swatch * 0.2);
         }
 
-        // The status line is a second row, so what gets centred is the *stack*
-        // of the rows actually being drawn. It used to be placed by offsetting
-        // from the first row's centring by a whole `line_h`, guarded by
-        // `info.h >= line_h * 2.0 + 2.0` — a guard that admits the second row
-        // and still puts it outside the band, because a centring of one line
-        // starts at `(h - line_h) / 2` and adding two full lines to that
-        // overshoots `h` by `(h - line_h) / 2` short of nothing whenever
-        // `line_h` is more than about two pixels. The guard was checking the
-        // right quantity against the wrong arithmetic.
-        let status_size = (size * 0.92).max(7.0);
+        // The status shares the reading's row rather than stacking under it,
+        // which is what `pick_colour_at`'s doc comment has always claimed
+        // ("the status line beside it") and what the code did not do. The
+        // stacked form was guarded by `line_h + status_h <= info.h`, and that
+        // guard is never true: two rows want `2.55 * size` at this font, and
+        // `Layout` gives the info band at most `2.28 * size` at *every* window
+        // height from 40 to 2160 — the closest it comes is 1.41px short, at
+        // h=309. So the status had never once been drawn at any window size.
+        // A guard that no input satisfies is not a bound, it is a delete
+        // button on the feature behind it, and it reads exactly like a bound;
+        // only a mutation that survived pointed at it. The band is a one-line
+        // strip by construction (16..=30px against a single font), so the room
+        // it actually has is horizontal.
+        //
+        // `.min(size)` is not decoration: the `.max(7.0)` legibility floor
+        // makes the status *taller* than the reading once `size` drops under
+        // 7.6, and centring a taller run inside a shorter one's line box lifts
+        // it out through the top of the band — this campaign's own fault
+        // shape. Capping at `size` makes `status_h <= line_h` hold by
+        // construction, which is what leaves the offset below non-negative.
+        let status_size = (size * 0.92).max(7.0).min(size);
         let status_h = text::line_height(status_size, FontWeightHint::Regular);
-        let two_rows = !self.status.is_empty() && line_h + status_h <= l.info.h;
-        let stack = if two_rows { line_h + status_h } else { line_h };
-        let Some(top) = centre_line(l.info, stack) else {
+        let Some(top) = centre_line(l.info, line_h) else {
             return;
         };
         let left = l.info.x + l.pad;
+        let run_right = swatch_rect.x - l.pad;
+
+        // Right-aligned against the swatch, so that a status arriving or
+        // departing never shifts the reading, and held to its own half of the
+        // run so a long message cannot crowd out the standing state it
+        // annotates. The separating gap comes out of the *status's* half, not
+        // the reading's: charged the other way a maximal status leaves the
+        // reading a padding short of half, which is the losing side of a split
+        // whose whole point is that the standing state is not the transient
+        // one's to spend. `.max(0.0)` twice over because a band narrow enough
+        // for the swatch and the paddings to have eaten the run leaves both
+        // terms negative.
+        let mid = left + ((run_right - left) * 0.5).max(0.0);
+        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular)
+            .min((run_right - mid - l.pad).max(0.0));
+        let status_x = run_right - status_w;
+        // A gap only when there is something to be kept apart from; charging
+        // it unconditionally would narrow the reading by a padding for a
+        // status that is not there.
+        let gap = if status_w > 0.0 { l.pad } else { 0.0 };
         push_text(
             f,
             left,
@@ -2061,20 +2090,18 @@ impl Magnifier {
             size,
             SUBTEXT0,
             FontWeightHint::Regular,
-            (swatch_rect.x - l.pad) - left,
+            status_x - gap - left,
         );
-        if two_rows {
-            push_text(
-                f,
-                left,
-                top + line_h,
-                &self.status,
-                status_size,
-                TEXT_COLOR,
-                FontWeightHint::Regular,
-                (l.info.right() - l.pad) - left,
-            );
-        }
+        push_text(
+            f,
+            status_x,
+            top + (line_h - status_h) / 2.0,
+            &self.status,
+            status_size,
+            TEXT_COLOR,
+            FontWeightHint::Regular,
+            run_right - status_x,
+        );
     }
 
     /// What a control's button says right now.
@@ -5147,6 +5174,104 @@ mod tests {
         assert!(
             cut > 0,
             "no measurement ever put the reading past an edge, so the cut is untested"
+        );
+    }
+
+    /// The status was drawn by no window size at all, and every containment
+    /// test passed throughout: a run that is never emitted is trivially inside
+    /// every band it might have left. Containment is a test of where a thing
+    /// goes, and it says nothing about whether the thing goes anywhere. So the
+    /// band gets a second, blunter obligation — that what the app is told to
+    /// say, it says — and it is asserted at the ordinary sizes rather than the
+    /// squeezed ones, because the claim is about the app working, not about it
+    /// refusing gracefully.
+    #[test]
+    fn a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size() {
+        let mut a = app();
+        a.picked = Some((0x89, 0xB4, 0xFA));
+        a.status = "#89B4FA at 100, 200".to_string();
+
+        let mut shown = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            if !l.shows(l.info) {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            a.draw_info(&mut f, &l);
+            let runs = inked(&f);
+            // Not `contains`: the reading and the status are different runs,
+            // and a test that only asked whether the text appeared somewhere
+            // would be satisfied by the reading alone.
+            let status = runs.iter().find(|(t, _)| t == &a.status);
+            assert!(
+                status.is_some(),
+                "{w}x{h}: the info band drew {} run(s) and none of them was the status {:?}",
+                runs.len(),
+                a.status
+            );
+            if let Some((_, r)) = status {
+                assert!(
+                    inside(l.info, *r),
+                    "{w}x{h}: the status went outside the info band: {r:?} vs {:?}",
+                    l.info
+                );
+                for (text_str, other) in &runs {
+                    assert!(
+                        text_str == &a.status || other.intersect(*r).is_none(),
+                        "{w}x{h}: the status overlaps the reading beside it: \
+                         {r:?} vs {other:?}"
+                    );
+                }
+            }
+            shown += 1;
+        }
+        assert!(
+            shown > 0,
+            "no window in the grid showed an info band, so this asserted nothing"
+        );
+    }
+
+    /// The status is capped at half the run so that it cannot crowd out the
+    /// standing state it annotates. A cap is only a cap where something
+    /// reaches it, so this asserts a message far too long to fit is *cut* and
+    /// the reading still gets its half.
+    #[test]
+    fn a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row() {
+        let mut a = app();
+        a.status = "x".repeat(400);
+
+        let mut cut = 0;
+        for &(w, h) in WINDOWS {
+            let l = Layout::new(w, h, true);
+            if !l.shows(l.info) {
+                continue;
+            }
+            let mut f = Frame::new(w, h);
+            a.draw_info(&mut f, &l);
+            let runs = inked(&f);
+            let Some((_, status)) = runs.iter().find(|(t, _)| t == &a.status) else {
+                continue;
+            };
+            let Some((_, reading)) = runs.iter().find(|(t, _)| t == &a.info_line()) else {
+                continue;
+            };
+            assert!(
+                inside(l.info, *status),
+                "{w}x{h}: an overlong status left the band: {status:?}"
+            );
+            assert!(
+                reading.w >= status.w - 0.01,
+                "{w}x{h}: a 400-character status took more of the row than the \
+                 reading: status {} wide, reading {} wide",
+                status.w,
+                reading.w
+            );
+            cut += 1;
+        }
+        assert!(
+            cut > 0,
+            "the overlong status was never drawn, so the cap went unexercised"
         );
     }
 

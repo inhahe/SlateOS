@@ -8743,4 +8743,54 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn the_pagination_bar_never_rises_above_its_own_header() {
+        // The bar is measured from what is left under the header, not taken off
+        // the bottom of the grid unconditionally. Taken off the bottom, a grid
+        // shorter than a header and a bar together puts the bar *over* the
+        // header: the page count drawn on top of the column names, and the
+        // arrows answering presses aimed at a sort.
+        let mut checked = 0_usize;
+        for step in 0..=400_u32 {
+            let h = f32::from(u16::try_from(step).unwrap_or(u16::MAX)) * 4.0;
+            let l = Layout::solve(1000.0, h);
+            let header = l.grid_header();
+            let bar = l.page_bar();
+            if bar.is_empty() {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                bar.y >= header.bottom() - 0.01,
+                "in a grid {} tall the header ends at {} and the bar starts at {}",
+                l.grid.h,
+                header.bottom(),
+                bar.y
+            );
+        }
+        assert!(checked > 0, "no window in the sweep drew a pagination bar");
+    }
+
+    #[test]
+    fn the_picture_is_drawn_at_the_size_render_is_given() {
+        // `render` is handed the window's size by the platform every frame. A
+        // pass that drew at the size it was *launched* with would look correct
+        // in every test that calls `frame` directly -- which is all of them but
+        // this one -- and be wrong on the screen from the first resize onward.
+        let mut app = DbViewerApp::new();
+        for (w, h) in [(640.0_f32, 480.0_f32), (900.0, 300.0)] {
+            let tree = App::render(&mut app, w, h);
+            let Some(RenderCommand::FillRect { width, height, .. }) = tree.commands.first() else {
+                panic!(
+                    "the frame opens with {:?}, not a background",
+                    tree.commands.first()
+                );
+            };
+            assert!(
+                (*width - w).abs() < 0.01 && (*height - h).abs() < 0.01,
+                "asked for {w}x{h}, drew a {width}x{height} background"
+            );
+        }
+    }
 }

@@ -162,6 +162,22 @@ pub enum KernelError {
     /// directory silently, which is the defect they were built to close.
     /// Maps to `ESTALE`.
     StaleHandle = -513,
+    /// The object exists but carries no extended attribute by that name.
+    ///
+    /// Distinct from [`Self::NotFound`] on purpose, and the distinction is the
+    /// whole point: "this file has no ACL" is an ordinary fact a caller acts
+    /// on quietly, while "this file is gone" is an error it reports.  With one
+    /// code for both, a caller must either complain about a healthy file or
+    /// stay silent about a vanished one — it cannot do both correctly, because
+    /// it cannot tell them apart.
+    ///
+    /// Returned when the *name* is what is missing.  When the **path** does
+    /// not resolve, the answer is still [`Self::NotFound`]; a filesystem knows
+    /// which of the two it hit, because the attribute lookup only happens
+    /// after the inode has been found.  Maps to `ENODATA` (which on Linux is
+    /// the same number as `ENOATTR` — the two spellings are one code, so
+    /// there is no second variant coming).
+    NoAttribute = -514,
 
     // --- Device / I/O (600 - 699) ---
     /// An I/O operation failed at the hardware level.
@@ -244,6 +260,7 @@ impl KernelError {
             Self::FileTooLarge => "file too large",
             Self::CrossDevice => "cross-device operation not permitted",
             Self::StaleHandle => "directory handle no longer denotes the same directory",
+            Self::NoAttribute => "no such extended attribute",
             Self::IoError => "I/O error",
             Self::NoSuchDevice => "no such device",
             Self::DeviceBusy => "device busy",

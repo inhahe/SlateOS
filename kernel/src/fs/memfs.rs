@@ -93,7 +93,10 @@ struct MemFsNode {
     /// File attribute flags.
     attributes: FileAttr,
     /// Extended attributes (key-value pairs).
-    xattrs: Vec<(String, Vec<u8>)>,
+    ///
+    /// The key is bytes, not a `String`: an xattr name is an opaque
+    /// NUL-terminated byte string exactly as a path component is.
+    xattrs: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 // --- Node-level xattr helpers (shared by follow / no-follow variants) ---
@@ -101,7 +104,7 @@ struct MemFsNode {
 // in how the path is resolved (resolve/resolve_mut vs the no-follow pair).
 
 /// Validate an xattr key/value shape before touching the node.
-fn node_validate_xattr(key: &str, value: &[u8]) -> KernelResult<()> {
+fn node_validate_xattr(key: &[u8], value: &[u8]) -> KernelResult<()> {
     // Enforce max key length (255 bytes) and max value size (64 KiB).
     if key.len() > 255 {
         return Err(KernelError::InvalidArgument);
@@ -113,18 +116,20 @@ fn node_validate_xattr(key: &str, value: &[u8]) -> KernelResult<()> {
 }
 
 /// Read an xattr value from a resolved node.
-fn node_get_xattr(node: &MemFsNode, key: &str) -> KernelResult<Vec<u8>> {
+fn node_get_xattr(node: &MemFsNode, key: &[u8]) -> KernelResult<Vec<u8>> {
     for (k, v) in &node.xattrs {
         if k == key {
             return Ok(v.clone());
         }
     }
-    Err(KernelError::NotFound)
+    // The node was found; only the attribute is missing.  `NotFound` here
+    // would tell the caller the *file* is gone.
+    Err(KernelError::NoAttribute)
 }
 
 /// Insert or replace an xattr on a resolved node.  Assumes the key/value have
 /// already passed [`node_validate_xattr`].
-fn node_set_xattr(node: &mut MemFsNode, key: &str, value: &[u8]) -> KernelResult<()> {
+fn node_set_xattr(node: &mut MemFsNode, key: &[u8], value: &[u8]) -> KernelResult<()> {
     let mut found = false;
     for (k, v) in &mut node.xattrs {
         if k == key {
@@ -134,25 +139,25 @@ fn node_set_xattr(node: &mut MemFsNode, key: &str, value: &[u8]) -> KernelResult
         }
     }
     if !found {
-        node.xattrs.push((String::from(key), value.to_vec()));
+        node.xattrs.push((key.to_vec(), value.to_vec()));
     }
     node.changed_ns = metadata_now_ns();
     Ok(())
 }
 
-/// Remove an xattr from a resolved node; `NotFound` if the key is absent.
-fn node_remove_xattr(node: &mut MemFsNode, key: &str) -> KernelResult<()> {
+/// Remove an xattr from a resolved node; `NoAttribute` if the key is absent.
+fn node_remove_xattr(node: &mut MemFsNode, key: &[u8]) -> KernelResult<()> {
     let orig_len = node.xattrs.len();
     node.xattrs.retain(|(k, _)| k != key);
     if node.xattrs.len() == orig_len {
-        return Err(KernelError::NotFound);
+        return Err(KernelError::NoAttribute);
     }
     node.changed_ns = metadata_now_ns();
     Ok(())
 }
 
 /// List all xattr keys on a resolved node.
-fn node_list_xattrs(node: &MemFsNode) -> Vec<String> {
+fn node_list_xattrs(node: &MemFsNode) -> Vec<Vec<u8>> {
     node.xattrs.iter().map(|(k, _)| k.clone()).collect()
 }
 
@@ -1131,22 +1136,22 @@ impl FileSystem for MemFs {
         Ok(())
     }
 
-    fn get_xattr(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         node_get_xattr(self.resolve(path)?, key)
     }
 
-    fn set_xattr(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         // Validation happens before path resolution so a bad key/value shape
         // is rejected identically regardless of follow mode.
         node_validate_xattr(key, value)?;
         node_set_xattr(self.resolve_mut(path)?, key, value)
     }
 
-    fn remove_xattr(&mut self, path: &Path, key: &str) -> KernelResult<()> {
+    fn remove_xattr(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         node_remove_xattr(self.resolve_mut(path)?, key)
     }
 
-    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<String>> {
+    fn list_xattrs(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         Ok(node_list_xattrs(self.resolve(path)?))
     }
 
@@ -1154,20 +1159,20 @@ impl FileSystem for MemFs {
     // Operate on the symlink inode itself rather than its target.  Identical
     // to the following versions but the final component is not followed.
 
-    fn get_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<Vec<u8>> {
+    fn get_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<Vec<u8>> {
         node_get_xattr(self.resolve_no_follow(path)?, key)
     }
 
-    fn set_xattr_no_follow(&mut self, path: &Path, key: &str, value: &[u8]) -> KernelResult<()> {
+    fn set_xattr_no_follow(&mut self, path: &Path, key: &[u8], value: &[u8]) -> KernelResult<()> {
         node_validate_xattr(key, value)?;
         node_set_xattr(self.resolve_no_follow_mut(path)?, key, value)
     }
 
-    fn remove_xattr_no_follow(&mut self, path: &Path, key: &str) -> KernelResult<()> {
+    fn remove_xattr_no_follow(&mut self, path: &Path, key: &[u8]) -> KernelResult<()> {
         node_remove_xattr(self.resolve_no_follow_mut(path)?, key)
     }
 
-    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<String>> {
+    fn list_xattrs_no_follow(&mut self, path: &Path) -> KernelResult<Vec<Vec<u8>>> {
         Ok(node_list_xattrs(self.resolve_no_follow(path)?))
     }
 
@@ -1495,18 +1500,18 @@ pub fn self_test() -> KernelResult<()> {
     fs.set_attributes(Path::new("/meta.txt"), FileAttr::NONE)?;
 
     // Test extended attributes.
-    fs.set_xattr(Path::new("/meta.txt"), "user.tag", b"important")?;
-    let xval = fs.get_xattr(Path::new("/meta.txt"), "user.tag")?;
+    fs.set_xattr(Path::new("/meta.txt"), b"user.tag", b"important")?;
+    let xval = fs.get_xattr(Path::new("/meta.txt"), b"user.tag")?;
     if xval.as_slice() != b"important" {
         crate::serial_println!("[memfs]   FAILED: xattr value mismatch");
         return Err(KernelError::IoError);
     }
     let xkeys = fs.list_xattrs(Path::new("/meta.txt"))?;
-    if xkeys.len() != 1 || xkeys[0] != "user.tag" {
+    if xkeys.len() != 1 || xkeys[0] != b"user.tag" {
         crate::serial_println!("[memfs]   FAILED: xattr list mismatch");
         return Err(KernelError::IoError);
     }
-    fs.remove_xattr(Path::new("/meta.txt"), "user.tag")?;
+    fs.remove_xattr(Path::new("/meta.txt"), b"user.tag")?;
     let xkeys2 = fs.list_xattrs(Path::new("/meta.txt"))?;
     if !xkeys2.is_empty() {
         crate::serial_println!("[memfs]   FAILED: xattr not removed");

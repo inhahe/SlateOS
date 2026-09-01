@@ -4,7 +4,6 @@
 //! reading, and inode lookup.  This is the main entry point for mounting
 //! and reading an ext4 filesystem.
 
-use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -1004,7 +1003,7 @@ impl Ext4Driver {
     /// magic doesn't match.
     ///
     /// Based on Linux `fs/ext4/xattr.c:ext4_xattr_ibody_list()`.
-    fn parse_inline_xattrs(&self, raw: &[u8]) -> Vec<(String, Vec<u8>)> {
+    fn parse_inline_xattrs(&self, raw: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
         // Inline xattrs require inode_size > 128 (need space for the area).
         let inode_size = self.sb.inode_size as usize;
         if inode_size <= 128 {
@@ -1064,14 +1063,14 @@ impl Ext4Driver {
                 Err(_) => break,
             };
 
-            // Read the name.
+            // Read the name.  It is bytes on disk and stays bytes: the
+            // `from_utf8` that used to sit here `break`s out of the loop, so a
+            // single odd name did not merely go unreported — it truncated the
+            // attribute list at that point and hid every attribute after it.
             let name_start = offset.saturating_add(entry_header_size);
             let name_end = name_start.saturating_add(entry.e_name_len as usize);
             let name = match raw.get(name_start..name_end) {
-                Some(bytes) => match core::str::from_utf8(bytes) {
-                    Ok(s) => s,
-                    Err(_) => break,
-                },
+                Some(bytes) => bytes,
                 None => break,
             };
 
@@ -1113,7 +1112,7 @@ impl Ext4Driver {
         &self,
         inode_nr: u32,
         inode: &Ext4Inode,
-    ) -> KernelResult<Vec<(String, Vec<u8>)>> {
+    ) -> KernelResult<Vec<(Vec<u8>, Vec<u8>)>> {
         // Read inline xattrs first.
         let mut attrs = match self.read_inode_raw(inode_nr) {
             Ok(raw) => self.parse_inline_xattrs(&raw),
@@ -3456,7 +3455,7 @@ impl Ext4Driver {
     ///
     /// Returns a list of `(full_key, value)` pairs.  The key is
     /// reconstructed by prepending the namespace prefix (e.g., "user.").
-    pub fn read_xattrs(&self, inode: &Ext4Inode) -> KernelResult<Vec<(String, Vec<u8>)>> {
+    pub fn read_xattrs(&self, inode: &Ext4Inode) -> KernelResult<Vec<(Vec<u8>, Vec<u8>)>> {
         let block_nr = self.xattr_block(inode);
         if block_nr == 0 {
             return Ok(Vec::new());
@@ -3502,10 +3501,14 @@ impl Ext4Driver {
             // Read the name.
             let name_start = offset.saturating_add(entry_header_size);
             let name_end = name_start.saturating_add(entry.e_name_len as usize);
-            let name_bytes = block_data
+            // The name is bytes on disk and stays bytes.  A `from_utf8` used to
+            // sit here with `.map_err(|_| IoError)?`, and the `?` is inside the
+            // loop over *every* attribute — so one name that was not UTF-8
+            // failed the whole inode, taking down `get_xattr`, `set_xattr` and
+            // `list_xattrs` for attributes whose own names were unremarkable.
+            let name = block_data
                 .get(name_start..name_end)
                 .ok_or(KernelError::IoError)?;
-            let name = core::str::from_utf8(name_bytes).map_err(|_| KernelError::IoError)?;
 
             // Build the full key with namespace prefix.
             let full_key = xattr_full_key(entry.e_name_index, name);
@@ -3539,7 +3542,7 @@ impl Ext4Driver {
         &mut self,
         inode: &mut Ext4Inode,
         inode_nr: u32,
-        attrs: &[(String, Vec<u8>)],
+        attrs: &[(Vec<u8>, Vec<u8>)],
     ) -> KernelResult<u64> {
         let old_block = self.xattr_block(inode);
 
@@ -3590,8 +3593,7 @@ impl Ext4Driver {
         let mut value_end = block_size; // values grow backward from end
 
         for (key, value) in attrs {
-            let (name_index, name) = xattr_split_key(key);
-            let name_bytes = name.as_bytes();
+            let (name_index, name_bytes) = xattr_split_key(key);
 
             // Check that entry + value fit.
             let entry_total = entry_header_size.saturating_add(name_bytes.len());
@@ -5139,50 +5141,45 @@ fn read_struct<T: Copy>(data: &[u8]) -> KernelResult<T> {
 
 /// Build a full xattr key from a namespace index and name.
 ///
-/// For example, index=1 + name="myattr" → "user.myattr".
-fn xattr_full_key(name_index: u8, name: &str) -> String {
+/// For example, index=1 + name=`b"myattr"` → `b"user.myattr"`.
+///
+/// Both halves are bytes, and neither is inspected as text.  The namespace
+/// prefix is ASCII and is compared byte-wise; the name after it is whatever
+/// the filesystem holds.  See `design-decisions.md` §660 — a name that is not
+/// UTF-8 is unusual, but it is a name the disk can hold and therefore one we
+/// have to be able to return.
+fn xattr_full_key(name_index: u8, name: &[u8]) -> Vec<u8> {
     use super::ondisk::xattr_index;
-    match name_index {
-        xattr_index::USER => {
-            let mut key = String::from("user.");
-            key.push_str(name);
-            key
-        }
-        xattr_index::TRUSTED => {
-            let mut key = String::from("trusted.");
-            key.push_str(name);
-            key
-        }
-        xattr_index::SECURITY => {
-            let mut key = String::from("security.");
-            key.push_str(name);
-            key
-        }
-        xattr_index::SYSTEM => {
-            let mut key = String::from("system.");
-            key.push_str(name);
-            key
-        }
-        _ => {
-            // Unknown namespace — store with raw index prefix.
-            String::from(name)
-        }
-    }
+    let prefix: &[u8] = match name_index {
+        xattr_index::USER => b"user.",
+        xattr_index::TRUSTED => b"trusted.",
+        xattr_index::SECURITY => b"security.",
+        xattr_index::SYSTEM => b"system.",
+        // Unknown namespace — the name stands alone, with no prefix to
+        // reconstruct.  `xattr_split_key` maps it back to `NONE`.
+        _ => b"",
+    };
+    let mut key = Vec::with_capacity(prefix.len().saturating_add(name.len()));
+    key.extend_from_slice(prefix);
+    key.extend_from_slice(name);
+    key
 }
 
 /// Split a full xattr key into namespace index and bare name.
 ///
-/// For example, "user.myattr" → (1, "myattr").
+/// For example, `b"user.myattr"` → (1, `b"myattr"`).
 /// Unknown prefixes get index 0 (raw).
-fn xattr_split_key(key: &str) -> (u8, &str) {
+fn xattr_split_key(key: &[u8]) -> (u8, &[u8]) {
     use super::ondisk::xattr_index;
-    if let Some(rest) = key.strip_prefix("user.") {
+    // `[u8]::strip_prefix` takes a `&[u8; N]` pattern, so each arm names its
+    // literal directly rather than going through a `&[u8]` slice.
+    if let Some(rest) = key.strip_prefix(b"user.") {
         (xattr_index::USER, rest)
-    } else if let Some(rest) = key.strip_prefix("trusted.") {
+    } else if let Some(rest) = key.strip_prefix(b"trusted.") {
         (xattr_index::TRUSTED, rest)
-    } else if let Some(rest) = key.strip_prefix("security.") {
+    } else if let Some(rest) = key.strip_prefix(b"security.") {
         (xattr_index::SECURITY, rest)
-    } else if let Some(rest) = key.strip_prefix("system.") {
+    } else if let Some(rest) = key.strip_prefix(b"system.") {
         (xattr_index::SYSTEM, rest)
     } else {
         (xattr_index::NONE, key)
@@ -5850,45 +5847,81 @@ fn test_xattr_key_roundtrip() -> KernelResult<()> {
     use super::ondisk::xattr_index;
 
     // user namespace.
-    let full = xattr_full_key(xattr_index::USER, "myattr");
-    if full != "user.myattr" {
-        crate::serial_println!("[ext4-driver]   FAIL: user key = '{}'", full);
+    let full = xattr_full_key(xattr_index::USER, b"myattr");
+    if full.as_slice() != b"user.myattr".as_slice() {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: user key = '{}'",
+            crate::fs::escape::escape_octal(&full, &[])
+        );
         return Err(KernelError::InternalError);
     }
-    let (idx, bare) = xattr_split_key("user.myattr");
-    if idx != xattr_index::USER || bare != "myattr" {
+    let (idx, bare) = xattr_split_key(b"user.myattr");
+    if idx != xattr_index::USER || bare != b"myattr".as_slice() {
         crate::serial_println!("[ext4-driver]   FAIL: split user key");
         return Err(KernelError::InternalError);
     }
 
     // trusted namespace.
-    let full = xattr_full_key(xattr_index::TRUSTED, "overlay.opaque");
-    if full != "trusted.overlay.opaque" {
-        crate::serial_println!("[ext4-driver]   FAIL: trusted key = '{}'", full);
+    let full = xattr_full_key(xattr_index::TRUSTED, b"overlay.opaque");
+    if full.as_slice() != b"trusted.overlay.opaque".as_slice() {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: trusted key = '{}'",
+            crate::fs::escape::escape_octal(&full, &[])
+        );
         return Err(KernelError::InternalError);
     }
-    let (idx, bare) = xattr_split_key("trusted.overlay.opaque");
-    if idx != xattr_index::TRUSTED || bare != "overlay.opaque" {
+    let (idx, bare) = xattr_split_key(b"trusted.overlay.opaque");
+    if idx != xattr_index::TRUSTED || bare != b"overlay.opaque".as_slice() {
         crate::serial_println!("[ext4-driver]   FAIL: split trusted key");
         return Err(KernelError::InternalError);
     }
 
     // security namespace.
-    let full = xattr_full_key(xattr_index::SECURITY, "selinux");
-    if full != "security.selinux" {
-        crate::serial_println!("[ext4-driver]   FAIL: security key = '{}'", full);
+    let full = xattr_full_key(xattr_index::SECURITY, b"selinux");
+    if full.as_slice() != b"security.selinux".as_slice() {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: security key = '{}'",
+            crate::fs::escape::escape_octal(&full, &[])
+        );
         return Err(KernelError::InternalError);
     }
 
     // Unknown namespace → raw name.
-    let full = xattr_full_key(99, "weird");
-    if full != "weird" {
-        crate::serial_println!("[ext4-driver]   FAIL: unknown key = '{}'", full);
+    let full = xattr_full_key(99, b"weird");
+    if full.as_slice() != b"weird".as_slice() {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: unknown key = '{}'",
+            crate::fs::escape::escape_octal(&full, &[])
+        );
         return Err(KernelError::InternalError);
     }
-    let (idx, bare) = xattr_split_key("noprefix");
-    if idx != xattr_index::NONE || bare != "noprefix" {
+    let (idx, bare) = xattr_split_key(b"noprefix");
+    if idx != xattr_index::NONE || bare != b"noprefix".as_slice() {
         crate::serial_println!("[ext4-driver]   FAIL: split unknown key");
+        return Err(KernelError::InternalError);
+    }
+
+    // A name that is not UTF-8, which is the case the whole byte-typing
+    // change exists for (§660).  `0xff` cannot begin a UTF-8 sequence, so
+    // this key is exactly what the old `from_utf8` rejected — and rejecting
+    // it did not cost one attribute, it failed every attribute on the inode.
+    // Nothing asserted this before, which is how the defect survived.
+    let odd_name: &[u8] = b"od\xffd";
+    let full = xattr_full_key(xattr_index::USER, odd_name);
+    if full.as_slice() != b"user.od\xffd".as_slice() {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: non-UTF-8 key = '{}'",
+            crate::fs::escape::escape_octal(&full, &[])
+        );
+        return Err(KernelError::InternalError);
+    }
+    let (idx, bare) = xattr_split_key(&full);
+    if idx != xattr_index::USER || bare != odd_name {
+        crate::serial_println!(
+            "[ext4-driver]   FAIL: split non-UTF-8 key gave ({}, '{}')",
+            idx,
+            crate::fs::escape::escape_octal(bare, &[])
+        );
         return Err(KernelError::InternalError);
     }
 

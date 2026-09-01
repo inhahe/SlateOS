@@ -463,4 +463,6 @@ pub mod zip;
 pub mod zramstat;
 pub mod zstd;
 
-pub use vfs::{DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, Vfs};
+pub use vfs::{
+    DirEntry, EntryType, FileAttr, FileId, FileMeta, LockType, PinnedDir, Vfs, XattrSetMode,
+};

@@ -57428,3 +57428,188 @@ and a hang is not a behaviour a user can be bug-compatible with. The deviation
 is written down at the code, at the loop, so that a later reader comparing
 against `backupfile.c` finds the reason before concluding it is a porting
 mistake.
+
+## 660. An xattr name is bytes, and "no such attribute" is not "no such file"
+
+**Date:** 2026-08-31 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** A file can carry little labels alongside its contents — an
+"extended attribute", used for things like access-control lists or the tags
+our own `fs::tags` stores. Two things about them were wrong. First, the kernel
+insisted the *name* of such a label be valid text, even though the disk stores
+it as raw bytes and a disk written by Linux may well hold a name that is not;
+worse, the check ran inside the loop that reads *every* label on a file, so one
+odd name made the whole file's labels unreadable. Second, asking for a label
+that isn't there gave the same answer as asking about a file that doesn't
+exist, so a program could not tell "this file has no ACL" (ordinary, act
+quietly) from "this file is gone" (report it). Both are now fixed: names are
+bytes end to end, and a missing label answers `NoAttribute` (`ENODATA`) while a
+missing file still answers `NotFound` (`ENOENT`).
+
+Filed by lane B, whose `getfattr`/`setfattr` work needed both.
+
+### The name is bytes, for the same reason a path is
+
+`design.txt` already settles the general question: paths allow every byte
+except `/` and NUL, and the OS-boundary rule in `CLAUDE.md` §7 says never to
+force UTF-8 on data crossing that boundary. An xattr name is the same kind of
+object — a NUL-terminated byte string the kernel stores and returns but does
+not interpret. The namespace prefix (`user.`, `trusted.`, `security.`,
+`system.`) is ASCII and is compared byte-wise, which needs no text type.
+
+What made this more than a purity argument is **where** the rejection sat:
+
+```rust
+// kernel/src/fs/ext4/driver.rs:3508, before
+let name = core::str::from_utf8(name_bytes).map_err(|_| KernelError::IoError)?;
+```
+
+That `?` is inside the loop over every attribute on the inode, so a single
+non-UTF-8 name did not merely make *that* attribute unreachable — it returned
+`EIO` for `read_all_xattrs`, and therefore failed `get_xattr`, `set_xattr`,
+`remove_xattr` and `list_xattrs` for the whole file, including for attributes
+whose own names were entirely ordinary. The inline-xattr parser had the same
+defect in a quieter form: it `break`s out of the loop instead, silently
+truncating the list at the first odd name, so the caller was told the file has
+fewer attributes than it has and could not tell that anything was hidden.
+
+The alternative — keep `&str` and reject odd names at the syscall boundary —
+was rejected because it does not describe a filesystem we can actually mount.
+We can be handed an ext4 volume written by Linux; refusing to read it correctly
+is our bug, not the volume's.
+
+### `NoAttribute` is a separate variant, not a reuse of `NotFound`
+
+Linux spends two errno values here — `ENODATA` for the attribute, `ENOENT` for
+the path — and it does so because programs branch on the difference. With one
+code for both, a caller must either complain about a healthy file or stay
+silent about a vanished one; it cannot do both correctly, because it cannot
+tell them apart.
+
+Our own tree already had a victim. `kernel/src/fs/tags.rs`'s `read_tags` had:
+
+```rust
+Err(KernelError::NotFound) => Ok(Vec::new()),
+```
+
+meaning a mistyped path reported "this file has no tags" rather than "there is
+no such file" — `list` printed nothing and `has` answered a confident `false`.
+That arm is now `Err(KernelError::NoAttribute)`, and a genuine `NotFound`
+propagates. The same correction applies to `write_tags`'s "already gone" arm.
+
+`NoAttribute` is `-514`, mapped to `ENODATA` in `syscall/linux.rs`. Note that
+Linux makes `ENOATTR` an alias of `ENODATA` — the two spellings are one number,
+so there is no second variant coming.
+
+**Where the boundary sits:** the attribute lookup only happens *after* the
+inode has been resolved, so the filesystem always knows which of the two it
+hit. `NotFound` continues to mean the path did not resolve; `NoAttribute` means
+it resolved and carried no such name.
+
+### What this cost elsewhere
+
+`read_user_cstring` was the only thing forcing UTF-8 at the syscall boundary,
+and all three of its callers were xattr keys, so it became `read_user_cbytes`
+and the `String::from_utf8` went with it. No ABI changed: `sys_fs_list_xattrs`
+already packed NUL-terminated bytes into the user buffer.
+
+`kshell`'s `xattr list` now writes keys with `shell_write_bytes` rather than
+formatting them as text — deliberately not `from_utf8_lossy`, which maps every
+undecodable byte to the same U+FFFD, so two distinct attributes would list
+under one displayed name and neither could be fetched by what was printed.
+That is the same reasoning already recorded for `diff` and `column`.
+
+### Testing
+
+The `fs::handle` no-follow xattr self-test asserted only that reading the
+target's attribute returned *some* error, which is precisely the assertion that
+cannot see this bug. It now requires `NoAttribute` for an existing file with no
+such attribute, and `NotFound` for a path that does not resolve — the two calls
+that were indistinguishable before.
+
+---
+
+## §661 — `XATTR_CREATE`/`XATTR_REPLACE` are decided in the kernel, and `SYS_FS_RENAME` grows a flags word
+
+**Date:** 2026-08-31 · **Decided by:** Claude (autonomous) · **Lane:** A
+
+**In short:** Two of our syscalls made userspace fake a guarantee it could not
+actually provide. "Create this attribute, but fail if it already exists" was
+being spelled as two separate system calls — look, then write — and anything
+can happen in between, so the "fail if it exists" part was a wish rather than a
+promise. The same held for "rename this file, but fail if the new name is
+taken". Both now take a flag telling the kernel what was wanted, so the check
+and the action happen together and cannot be split apart.
+
+### The problem
+
+`posix/src/xattr.rs` implemented `XATTR_CREATE` and `XATTR_REPLACE` by issuing
+`SYS_FS_GET_XATTR` and reading "did that succeed?" as "does the attribute
+exist?", then issuing `SYS_FS_SET_XATTR` regardless. Two syscalls are two
+acquisitions of the filesystem lock, with a window between them: a writer
+arriving in that window turns `XATTR_CREATE` into an overwrite and
+`XATTR_REPLACE` into a create — the two outcomes the flags exist to forbid.
+
+The probe was also wrong in a way that has nothing to do with timing. It read
+*every* negative return as "the attribute is not there", so
+`setxattr("/no/such/file", …, XATTR_REPLACE)` answered `ENODATA` — a statement
+about an attribute — when the truth was `ENOENT`, a statement about the file.
+It could not do better while the kernel spent one code on both; §660 is what
+makes the distinction available, and this entry is what consumes it.
+
+`SYS_FS_RENAME` had the same shape one level up: `Vfs::rename_noreplace` and
+`Vfs::rename_exchange` already existed and were already reachable through the
+Linux-ABI `renameat2`, but the native syscall ignored `arg4` entirely, so a
+native caller had no way to ask for either.
+
+### The decision
+
+Both flags words are decoded in the kernel, and in both cases the check runs
+on the same side of the lock as the write.
+
+For xattrs, `Vfs::set_xattr_with` takes an `XattrSetMode` and holds **one**
+`fs.lock()` guard across the probe and the set. No filesystem changed: the
+atomicity comes from the guard, not from new trait methods, because the mount
+lock is what the two-syscall version was dropping between its halves.
+
+Only `NoAttribute` is read as absence. Every other error propagates —
+`NotFound` above all — which is the correction to the probe's second bug, not
+merely a reimplementation of its first.
+
+For rename, `arg4` decodes via `RenameMode::from_flags` using Linux's bit
+values (`1` = `RENAME_NOREPLACE`, `2` = `RENAME_EXCHANGE`), so libc's constants
+pass through unchanged.
+
+### Unknown bits are refused, not ignored
+
+Both decoders reject any bit they do not define, and both reject the two
+"do these at once" combinations that no state can satisfy. This is Linux's
+behaviour, and the reason is worth stating: a kernel that ignores a flag it
+does not understand performs the *default* action and reports success. A
+caller that asked to be refused an overwrite would get the overwrite and be
+told it worked. Refusing is loud, recoverable, and lets a flag be added later
+without an older kernel silently doing the wrong thing.
+
+### The ordering hazard, and why it is already safe
+
+`arg4` travels in `r8`, which nothing zeroes. The day the kernel starts
+*reading* it, a libc still issuing `syscall4` would hand over whatever the last
+call left in that register — turning ordinary renames into `EINVAL` or, worse,
+exchanges. Lane B landed `posix: pass an explicit flags word to SYS_FS_RENAME`
+(`e8fec2292`) first, and `SYS_FS_RENAME` has exactly one call site in the tree,
+so the register is now written explicitly at every call. That commit was
+verified present on `origin/main` before this one was written; the kernel half
+must not be merged ahead of it.
+
+### Testing
+
+`fs::handle` gains a mode test that pins what the probe got *wrong* rather than
+what it got racy — a single-threaded test cannot observe the race, but it can
+observe which error each refusal spends, that a refused `CREATE` leaves the old
+value intact, that a refused `REPLACE` does not create, and that `REPLACE`
+against a missing path is `NotFound` and not `NoAttribute`.
+
+The rename decode is tested as a pure function rather than through the handler,
+because the rest of that handler reads user pointers and cannot run from kernel
+space. That is a deliberate split: the decode is the part where an error would
+be silent, so it is the part worth isolating to make testable.

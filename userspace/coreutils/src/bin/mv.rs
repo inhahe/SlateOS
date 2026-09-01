@@ -210,12 +210,13 @@
 //! impossible.
 
 use coreutils::backup::{self, BackupType};
+use coreutils::copy::{self, Made, ModeDebt, chown_to_source, preserve_attributes};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
     self, Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry,
 };
-use coreutils::fsattr::{self, GroupRetry, Link, On, Ownership};
+use coreutils::fsattr::{self, Link, On};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
@@ -445,6 +446,67 @@ struct Job<'a, O: Write, E: Write> {
     /// operand — that is the whole point of it, and it is why it lives on the
     /// `Job` rather than inside [`move_one`]. See the `earlier_file` block there.
     copied: &'a mut Copied,
+    /// The process's file-mode creation mask, read once at startup.
+    ///
+    /// Not a flag — nothing on the command line sets it — but on the `Job` for
+    /// the same reason `cp.rs` puts it there: it is an input to the shared copy
+    /// engine, and [`copy::Opts`] is where the engine's inputs live. Upstream
+    /// reaches it through a function-static cache (`cached_umask()`), which is a
+    /// global because `copy.c` has nowhere better; we have the struct that is
+    /// already threaded to every step that could want it.
+    ///
+    /// No step a *move* reaches actually reads it, and that is worth stating
+    /// rather than exploiting: `settle_mode` consults the mask only in its
+    /// `--no-preserve=mode` branch and in the settle-up subtraction, and
+    /// `preserve_mode` — which `cp_option_init` sets unconditionally
+    /// (`mv.c:136`) — returns before either. Carrying the real value anyway is
+    /// what keeps that a fact about the flags rather than a dependency on it:
+    /// were the short-circuit ever to stop holding, the engine would find the
+    /// right mask rather than a zero that quietly widens every copy.
+    umask: u32,
+}
+
+impl<O: Write, E: Write> Job<'_, O, E> {
+    /// This job as the shared copy engine sees it.
+    ///
+    /// Every field is a constant, because `mv` has no option that changes any of
+    /// them: `cp_option_init` (`mv.c:119`) sets them and mv's getopt writes none
+    /// of them back. That is the whole reason `mv` can drive the same engine
+    /// `cp` does without a single branch inside it that names a program — the
+    /// two differ only in what they put in this struct.
+    ///
+    /// Written out one field per line with its citation rather than as a
+    /// `Default`, because the point of the list is that it is *checkable*
+    /// against upstream. A default would hide which of these are upstream's
+    /// choices and which are Rust's zero values.
+    fn run(&mut self) -> copy::Run<'_, E> {
+        copy::Run {
+            opts: mv_opts(self.umask),
+            err: self.err,
+        }
+    }
+}
+
+/// `cp_option_init` (`mv.c:119`), as much of it as the copy engine reads.
+///
+/// A free function rather than a body inside [`Job::run`] so that the tests
+/// which call [`copy_across_devices`] directly go through *this* list and not a
+/// second one written beside it. A duplicated options list is a test that
+/// passes against itself: it would keep passing after a change to the real one,
+/// which is precisely the change a test of the preserve tail exists to catch.
+fn mv_opts(umask: u32) -> copy::Opts {
+    copy::Opts {
+        prog: "mv",
+        preserve_mode: true,              // mv.c:136
+        preserve_timestamps: true,        // mv.c:137
+        preserve_ownership: true,         // mv.c:134
+        preserve_xattr: true,             // mv.c:145
+        require_preserve: false,          // mv.c:143
+        require_preserve_xattr: false,    // mv.c:146
+        reduce_diagnostics: false,        // mv.c:141
+        explicit_no_preserve_mode: false, // mv.c:138
+        umask,
+    }
 }
 
 /// The funnel. A diagnostic that could not be written turns the earned
@@ -487,6 +549,7 @@ fn run_main() -> ExitCode {
                     err: &mut err,
                     answers: &mut answers,
                     copied: &mut copied,
+                    umask: coreutils::umask::current(),
                 };
                 if move_all(&mut job, &dest, &paths) {
                     ExitCode::SUCCESS
@@ -1529,7 +1592,7 @@ fn move_one<O: Write, E: Write>(
     // red.
     announce(job, "copied", src, target, moved_aside.as_deref());
 
-    if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut *job.err) {
+    if let Err(failure) = copy_across_devices(src, target, &src_meta, &mut job.run()) {
         // Upstream's `un_backup:` label forgets too, guarded by `earlier_file ==
         // nullptr` (`copy.c:3361`) — "unless we've just failed to create a hard
         // link", because *that* failure leaves the earlier entry legitimately
@@ -2481,7 +2544,7 @@ fn copy_across_devices<E: Write>(
     src: &Path,
     target: &Path,
     metadata: &fs::Metadata,
-    err: &mut E,
+    run: &mut copy::Run<'_, E>,
 ) -> Result<(), Failed> {
     let kind = metadata.file_type();
 
@@ -2499,7 +2562,38 @@ fn copy_across_devices<E: Write>(
                 e,
             )
         })?;
-        preserve_onto_link(src, target, metadata, err);
+        // The link's owner is taken *here*, where the link was made, and not by
+        // the tail below — whose ownership step skips a symlink destination
+        // outright. That is GNU's arrangement rather than this file's: the
+        // `lchownat` is inline in `copy_internal`'s symlink arm (`copy.c:3175`)
+        // and the shared tail's is guarded by `!dest_is_symlink`, so dropping
+        // this call in favour of the tail's would leave a moved link unable to
+        // keep its owner at all. [`Made::Symlink`] is what tells the engine
+        // which of the two it is being asked for; it also selects the bare
+        // `lchownat` with no group-only retry, and the unquoted name upstream
+        // prints for this one sentence alone.
+        //
+        // Unconditional, where the tail's is guarded by "the owner differs":
+        // the link was made a line ago, so it is new by construction, and it is
+        // `new_dst ||` that makes the tail's guard true for a new destination
+        // in any case.
+        let source = copy::Source::new(On::Path(src, Link::NoFollow), src, metadata);
+        let on = On::Path(target, Link::NoFollow);
+        // The result is discarded rather than propagated, and that is a fact
+        // about `mv`'s options rather than a shortcut: [`Chowned::Failed`] is
+        // produced only under `require_preserve`, which `cp_option_init` leaves
+        // false (`mv.c:143`). A refused `lchown` on a link is therefore always
+        // [`Chowned::Disowned`] — reported, and not fatal — and there is no
+        // mode for the narrowing it would otherwise force, a symlink having
+        // none. See [`Job::run`].
+        let _ = chown_to_source(source, on, target, Made::Symlink, true, run);
+        // Zero debt: nothing was withheld from a link, which has no mode to
+        // withhold from. The engine returns before consulting it in any case —
+        // see the note on [`Job::umask`] for why the value is still built
+        // honestly rather than relied on to go unread.
+        let mut debt = ModeDebt::default();
+        // Always `true` for a move; see the discard above and [`Job::run`].
+        let _ = preserve_attributes(source, on, target, Made::Symlink, true, &mut debt, run);
         return remove_source(src);
     }
 
@@ -2510,7 +2604,7 @@ fn copy_across_devices<E: Write>(
     let mode = fsattr::permission_bits(metadata);
     let mut source = fs::File::open(src)
         .map_err(|e| Failed::new(format!("cannot open {} for reading", quoteaf_os(src)), e))?;
-    let mut dest = create_destination(target, mode).map_err(|e| {
+    let (mut dest, mut debt) = create_destination(target, mode).map_err(|e| {
         Failed::new(
             format!("cannot create regular file {}", quoteaf_os(target)),
             e,
@@ -2538,7 +2632,29 @@ fn copy_across_devices<E: Write>(
     io::copy(&mut source, &mut dest)
         .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
 
-    preserve_onto_file(&source, &dest, src, target, metadata, mode, err);
+    // The same tail `cp` runs, out of the same code: times, then ownership, then
+    // the extended attributes, then the mode — an order that is correctness
+    // rather than arrangement, and whose two reasons GNU leaves written above
+    // the steps. See [`copy::preserve_attributes`].
+    //
+    // Both handles rather than both names, which is [`On`]'s reason and not a
+    // saved syscall: the mode restored last carries the set-user-ID bit, and
+    // writing it by *name* after the bytes are down leaves a window in which the
+    // name can be made to mean a different file.
+    //
+    // Always `true` for a move — see [`Job::run`] — so the discard says only
+    // that `mv` has no fatal preservation step, which is `require_preserve` and
+    // `require_preserve_xattr` both being false.
+    let source_view = copy::Source::new(On::File(&source), src, metadata);
+    let _ = preserve_attributes(
+        source_view,
+        On::File(&dest),
+        target,
+        Made::Regular,
+        true,
+        &mut debt,
+        run,
+    );
     remove_source(src)
 }
 
@@ -2580,11 +2696,12 @@ fn copy_across_devices<E: Write>(
 /// fallback can take it off again; nothing here has to, because a move never
 /// reaches that branch. `if (x->preserve_mode || x->move_mode)` (`copy.c:1672`)
 /// claims the chain first and calls `copy_acl` with `src_mode`, which writes the
-/// mode absolutely. The final [`fsattr::copy_permissions`] in
-/// [`preserve_onto_file`] is that call, and it starts with the same absolute
-/// `set_mode`, so the extra bit leaves with the rest of the temporary mode.
+/// mode absolutely. The `copy_permissions` that closes
+/// [`copy::preserve_attributes`] is that call, and it starts with the same
+/// absolute `set_mode`, so the extra bit leaves with the rest of the temporary
+/// mode.
 #[cfg_attr(not(unix), allow(unused_variables))]
-fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
+fn create_destination(target: &Path, mode: u32) -> io::Result<(fs::File, ModeDebt)> {
     let extra = if fsattr::chown_privileges() {
         0
     } else {
@@ -2599,7 +2716,18 @@ fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
     }
     let file = opts.open(target)?;
     top_up_extra(&file, extra);
-    Ok(file)
+    // Returned rather than reconstructed by the caller, because this is the one
+    // place that knows both halves. Nothing a *move* does reads it — the mode
+    // step takes `preserve_mode`'s branch and returns before the settle-up — but
+    // an honest value costs a struct and a wrong one would be a landmine for
+    // whoever changes that; see the note on [`Job::umask`], which is the same
+    // argument about the same short-circuit.
+    let debt = ModeDebt {
+        omitted: mode & GROUP_AND_OTHER,
+        forced: None,
+        extra,
+    };
+    Ok((file, debt))
 }
 
 /// Put the extra owner-write bit on if the `open` did not manage it.
@@ -2620,8 +2748,8 @@ fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
 /// make possible reports its own failure with a better sentence than this
 /// function could.
 ///
-/// Nothing has to take the bit off again. [`preserve_onto_file`]'s closing
-/// [`fsattr::copy_permissions`] writes the source's mode absolutely, so the
+/// Nothing has to take the bit off again. The `copy_permissions` that closes
+/// [`copy::preserve_attributes`] writes the source's mode absolutely, so the
 /// temporary widening leaves with the rest of the temporary mode — that is
 /// `copy.c:1672`'s `if (x->preserve_mode || x->move_mode)` claiming the chain
 /// before GNU's own `extra_permissions` branch can be reached.
@@ -2650,191 +2778,6 @@ const GROUP_AND_OTHER: u32 = 0o077;
 /// can be written onto a read-only file, and [`top_up_extra`] re-adds if the
 /// umask took it off again.
 const OWNER_WRITE: u32 = 0o200;
-
-/// Carry the source's times, owner and mode onto the copy, reporting what would
-/// not go and failing at none of it.
-///
-/// Every write is aimed at the two *descriptors* rather than at the two names,
-/// which is [`fsattr::On`]'s reason and not a convenience: the mode being
-/// restored last includes the set-user-ID bit, and restoring it by name after
-/// the bytes are written leaves a window in which the name can be made to mean
-/// a different file. A descriptor names an inode and cannot be re-pointed.
-fn preserve_onto_file<E: Write>(
-    source: &fs::File,
-    dest: &fs::File,
-    src: &Path,
-    target: &Path,
-    metadata: &fs::Metadata,
-    mode: u32,
-    err: &mut E,
-) {
-    let on = On::File(dest);
-    let mut mode = mode;
-
-    // `and_then` because a source whose stamps cannot even be read leaves the
-    // copy with the wrong times just as surely as one that cannot be stamped,
-    // and `preserving times for` is the sentence for that.
-    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
-        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
-    }
-
-    // GNU's `!SAME_OWNER_AND_GROUP (*src_sb, sb)` (`copy.c:1645`), and the skip
-    // is worth having rather than a `chown` that would be a no-op: it is still a
-    // write, it can still fail, and on most kernels it clears the set-ID bits —
-    // which the ordinary case, a user moving their own file, would then have to
-    // put back.
-    if fsattr::owner_differs(on, metadata) {
-        match fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::Yes) {
-            Ownership::Taken => {}
-            // Both of the other two drop the set-ID and sticky bits, which is
-            // GNU's single `case 0` for the reported and the silent refusal
-            // alike: a set-user-ID bit on a file that could not be given to its
-            // source's owner is a privilege granted to whoever holds it now.
-            Ownership::Denied => mode &= !SET_ID_AND_STICKY,
-            Ownership::Failed(e) => {
-                preserve_failed(
-                    err,
-                    "failed to preserve ownership for",
-                    quoteaf_os(target),
-                    &e,
-                );
-                mode &= !SET_ID_AND_STICKY;
-            }
-        }
-    }
-
-    // `copy.c:1662`, and the position is upstream's comment rather than an
-    // arrangement of convenience: "Set ownership before xattrs as changing
-    // owners will clear capabilities" (`copy.c:1643`). A file capability lives
-    // in `security.capability`, and the kernel drops that attribute when the
-    // file changes hands — so a `chown` after this call would silently undo it,
-    // and the copy would arrive without the privilege its source carried.
-    preserve_xattrs(On::File(source), on, src, target, err);
-
-    // GNU's `copy_acl (src_name, source_desc, dst_name, dest_desc, src_mode)`,
-    // reached because `x->move_mode` is true — the mode *and* the access-control
-    // lists, because on this kernel an ACL entry grants access no mode bit shows
-    // and a move that carried only the bits would produce a file the kernel
-    // treats differently from the one that was moved.
-    //
-    // Its diagnostic is the one in this family that uses the unquoted `quotef`
-    // style. Matched rather than tidied, for `cp`'s reason: a utility that
-    // differs from GNU only in the punctuation of a diagnostic is still one
-    // whose output a script cannot match on.
-    if let Err(e) = fsattr::copy_permissions(On::File(source), on, mode) {
-        preserve_failed(err, "preserving permissions for", quotef_os(target), &e);
-    }
-}
-
-/// Carry the source link's owner and times onto the recreated link.
-///
-/// Two steps rather than three, and in the other order from
-/// [`preserve_onto_file`]'s, both of which are upstream's shape. A symbolic link
-/// has no mode of its own that any permission check consults, and Linux has no
-/// working `lchmod` to write one with, so `copy_internal` returns before its
-/// mode block whenever the destination is a link (`copy.c:3285`). The `lchown`
-/// comes first because it is done where the link is *made* (`copy.c:3178`),
-/// while the `utimensat` is in the shared tail below that.
-///
-/// The `lchown` gets no group-only retry, which is the same asymmetry `cp` has
-/// to reproduce: that call is a bare `lchownat` while `copy_reg`'s and the
-/// tail's both retry. It is visible in `ls -l` on the moved link.
-///
-/// The extended attributes *are* carried, which reads like a contradiction of
-/// the paragraph above and is not. `copy_attr` sits at `copy.c:3280`, *before*
-/// the `if (dest_is_symlink) return delayed_ok;` that ends the tail early at
-/// 3285–3286 — so a symlink passes through it on the way to the return. The
-/// mode block is after the return and a link therefore never reaches it. Whether
-/// a link can hold an attribute at all is the filesystem's business: on Linux
-/// only the `trusted.` and `security.` namespaces may be set on one, so the
-/// ordinary case copies nothing and the call is free.
-fn preserve_onto_link<E: Write>(src: &Path, target: &Path, metadata: &fs::Metadata, err: &mut E) {
-    let on = On::Path(target, Link::NoFollow);
-
-    if let Ownership::Failed(e) =
-        fsattr::take_ownership(on, fsattr::owner_of(metadata), GroupRetry::No)
-    {
-        // GNU prints this one *unquoted* — `error (0, errno, _("failed to
-        // preserve ownership for %s"), dst_name)` with no `quoteaf` at all,
-        // unlike every other use of the same sentence. Reproduced as written;
-        // it is upstream's inconsistency and a script that matched on it would
-        // be matching on what upstream prints.
-        preserve_failed(
-            err,
-            "failed to preserve ownership for",
-            target.display().to_string(),
-            &e,
-        );
-    }
-
-    if let Err(e) = fsattr::times_of(metadata).and_then(|times| fsattr::set_times(on, times)) {
-        preserve_failed(err, "preserving times for", quoteaf_os(target), &e);
-    }
-
-    // After the times and not before, because that is the order of the shared
-    // tail: `utimensat` at `copy.c:3254`, `copy_attr` at 3280. Both sides are
-    // named `l*`, which for a symlink destination is the whole meaning of the
-    // call — following it would put the source's attributes on whatever the
-    // link points at.
-    preserve_xattrs(On::Path(src, Link::NoFollow), on, src, target, err);
-}
-
-/// Carry the source's extended attributes onto the copy, reporting what would
-/// not go and failing at none of it.
-///
-/// [`fsattr::Xattrs::Ordinary`] and not the permission class, because the two
-/// halves have separate owners here: `system.posix_acl_access` and its default
-/// counterpart are the file's *permissions* on this kernel, and they are carried
-/// by the [`fsattr::copy_permissions`] that follows this call in
-/// [`preserve_onto_file`]. Copying them here as well would write the access
-/// list twice and — worse — write it before the mode that must precede it.
-///
-/// **Which failures are printed is a three-way choice upstream, and `mv` cannot
-/// leave the row it is on.** gnulib's `attr_copy_*` takes a callback deciding
-/// per-attribute whether an error is worth a word, and coreutils supplies three:
-///
-/// | Caller | Prints | Exit |
-/// |---|---|---|
-/// | `cp --preserve=xattr` (`require_preserve_xattr`) | every failure | 1 |
-/// | `cp --preserve=all`, **and all of `mv`** | all but `ENOTSUP`/`ENODATA` | 0 |
-/// | `cp -a` (`reduce_diagnostics`) | nothing | 0 |
-///
-/// `mv` is the middle row by construction: `cp_option_init` sets
-/// `require_preserve_xattr = false` (`mv.c:146`) and `reduce_diagnostics = false`
-/// (`mv.c:141`), and mv's getopt writes neither — there is no option that moves
-/// it. So the two flags that `cp` has to carry are absent here, and the row is
-/// spelled out in code rather than looked up: report unless
-/// [`fsattr::errno_unsupported`], and never touch the exit status.
-///
-/// The suppressed pair is not a courtesy. `ENOTSUP` is what a filesystem with no
-/// extended-attribute support answers — every attempt on it fails, so reporting
-/// would turn one move onto a FAT volume into a screenful — and `ENODATA` is the
-/// attribute vanishing between the listing and the read, which is a race with
-/// another process rather than a fault of this one.
-fn preserve_xattrs<E: Write>(from: On<'_>, to: On<'_>, src: &Path, target: &Path, err: &mut E) {
-    for failure in fsattr::copy_xattrs(from, to, fsattr::Xattrs::Ordinary) {
-        if !fsattr::errno_unsupported(&failure.err) {
-            let what = failure.at.sentence(src, target);
-            let why = strerror(&failure.err);
-            let _ = writeln!(err, "mv: {what}: {why}");
-        }
-    }
-}
-
-/// `S_ISUID | S_ISGID | S_ISVTX`, the bits a refused `chown` costs.
-const SET_ID_AND_STICKY: u32 = 0o7000;
-
-/// Report a preservation step that would not go, without failing the move.
-///
-/// A separate function so that the "and does not fail" half is stated once: the
-/// three call sites in [`preserve_onto_file`] and the two in
-/// [`preserve_onto_link`] all return `()`, and `mv` leaves `require_preserve`
-/// false (`mv.c:143`), so there is no arm anywhere that turns one of these into
-/// a non-zero exit.
-fn preserve_failed<E: Write>(err: &mut E, what: &str, name: String, e: &io::Error) {
-    let why = strerror(e);
-    let _ = writeln!(err, "mv: {what} {name}: {why}");
-}
 
 /// Unlink the source once the copy is complete, with GNU's `rm` sentence.
 ///
@@ -2878,6 +2821,21 @@ mod tests {
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    /// What [`copy_across_devices`] is handed by a test: `err`, plus the options
+    /// `mv` actually runs with.
+    ///
+    /// Through [`mv_opts`] rather than an options list written here, which is
+    /// the difference between a test of the preserve tail and a test of a copy
+    /// of the preserve tail's arguments. The umask is read per call for the
+    /// same reason [`Job`] reads it per command: a test that sets the mask
+    /// around a move must get the mask it set.
+    fn cross_device_run<E: Write>(err: &mut E) -> copy::Run<'_, E> {
+        copy::Run {
+            opts: mv_opts(coreutils::umask::current()),
+            err,
+        }
     }
 
     /// The operands of a successful parse, or a panic naming what came back.
@@ -3495,6 +3453,11 @@ mod tests {
                 err: &mut err,
                 answers: &mut answers,
                 copied: &mut copied,
+                // Read here, once per `mv(…)` rather than once per process, so
+                // that a test which sets the mask around a move gets the mask it
+                // set. `cp.rs`'s test helper reads it in the same place for the
+                // same reason.
+                umask: coreutils::umask::current(),
             };
             move_all(&mut job, &dest, &owned)
         };
@@ -3741,6 +3704,7 @@ mod tests {
             err: &mut err,
             answers: &mut answers,
             copied: &mut copied,
+            umask: coreutils::umask::current(),
         };
         announce(
             &mut job,
@@ -3773,6 +3737,7 @@ mod tests {
             err: &mut err,
             answers: &mut answers,
             copied: &mut copied,
+            umask: coreutils::umask::current(),
         };
         announce(&mut job, "renamed", Path::new("a"), Path::new("b"), None);
         announce(&mut job, "copied", Path::new("a"), Path::new("b"), None);
@@ -4417,7 +4382,7 @@ mod tests {
         let moved = dir.path("moved");
 
         let meta = fs::symlink_metadata(&link).unwrap();
-        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
+        copy_across_devices(&link, &moved, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
 
         let moved_meta = fs::symlink_metadata(&moved).unwrap();
         assert!(
@@ -4436,7 +4401,7 @@ mod tests {
         let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
         assert!(!a.exists());
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
     }
@@ -4463,7 +4428,7 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let want = meta.modified().unwrap();
-        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
 
         let got = fs::symlink_metadata(&b).unwrap().modified().unwrap();
         assert_eq!(got, want, "the copy must keep the source's stamp");
@@ -4485,7 +4450,7 @@ mod tests {
         fs::set_permissions(&a, fs::Permissions::from_mode(0o4741)).unwrap();
 
         let meta = fs::symlink_metadata(&a).unwrap();
-        copy_across_devices(&a, &b, &meta, &mut Vec::new()).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
 
         let got = fs::symlink_metadata(&b).unwrap().permissions().mode() & 0o7777;
         assert_eq!(got, 0o4741, "every bit, set-user-ID included");
@@ -4528,7 +4493,7 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let mut err = Vec::new();
-        copy_across_devices(&a, &b, &meta, &mut err).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut err)).unwrap();
 
         assert_eq!(String::from_utf8_lossy(&err), "");
         assert_eq!(
@@ -4566,7 +4531,7 @@ mod tests {
 
         let meta = fs::symlink_metadata(&a).unwrap();
         let mut err = Vec::new();
-        copy_across_devices(&a, &b, &meta, &mut err).unwrap();
+        copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut err)).unwrap();
 
         assert_eq!(String::from_utf8_lossy(&err), "");
         assert_eq!(
@@ -4601,7 +4566,7 @@ mod tests {
         let meta = fs::symlink_metadata(&link).unwrap();
         let want = meta.modified().unwrap();
         let moved = dir.path("moved");
-        copy_across_devices(&link, &moved, &meta, &mut Vec::new()).unwrap();
+        copy_across_devices(&link, &moved, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
 
         let got = fs::symlink_metadata(&moved).unwrap().modified().unwrap();
         assert_eq!(got, want, "the link's own stamp must come across");
@@ -4691,8 +4656,13 @@ mod tests {
         fs::create_dir(&sub).unwrap();
         fs::write(sub.join("inside"), b"x").unwrap();
         let meta = fs::symlink_metadata(&sub).unwrap();
-        let e =
-            copy_across_devices(&sub, &dir.path("elsewhere"), &meta, &mut Vec::new()).unwrap_err();
+        let e = copy_across_devices(
+            &sub,
+            &dir.path("elsewhere"),
+            &meta,
+            &mut cross_device_run(&mut Vec::new()),
+        )
+        .unwrap_err();
         assert_eq!(e.err.kind(), io::ErrorKind::Unsupported);
         assert!(sub.join("inside").is_file(), "nothing may be moved");
     }

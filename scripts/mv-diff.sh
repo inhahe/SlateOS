@@ -970,7 +970,149 @@ run_case -t dir -T file.txt
 run_case -T -t nosuchdir file.txt
 
 # =============================================================================
-# 17. --help and --version
+# 17. -u and --update
+# =============================================================================
+# `STAMPS` on throughout, because the whole option is a comparison of two
+# modification times and a harness that did not print them would agree with a
+# `mv` that compared the sizes instead.
+#
+# The fixture stamps `file.txt` at 2004 (`mkstamped`), so a `dst` touched to
+# 1999 is *older* than the source and one touched to 2009 is newer, with no
+# clock and no ordering left to chance. `dst` is given bytes as well as a time
+# so that "the move happened" is visible in the contents column too — an empty
+# `dst` and a `dst` that was replaced by an empty file look alike.
+#
+# Three things make this section bigger than the option looks. First,
+# `--update`'s three words write *two* fields — `all` and `none` both turn the
+# newer-only comparison off, and `none` turns `interactive` to a fifth value
+# that skips *and succeeds* — so the observable outcomes are four, not two.
+# Second, those fields are the same ones `-i`/`-f`/`-n` write, so order on the
+# command line decides, and the pairs are the cases. Third, upstream guards the
+# `-n`-wins rule on the **long form only** (`mv.c:378`) and puts the argument
+# lookup *inside* that guard (`mv.c:381`), which makes `-n --update=older` and
+# `-n -u` differ, and makes `-n --update=nosuchword` a silently accepted line.
+# None of those three is guessable; each is pinned below.
+
+# The comparison itself. Newer destination: nothing moves, and it is a success —
+# the difference from `-n`, which prints and exits 1.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case -u file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case -u file.txt dst
+# `--update` bare and `--update=older` are the same thing spelled at length.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=older file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case --update=older file.txt dst
+# Equal times are *not* older, so an unchanged file is left alone. This is the
+# case a whole-second truncation would still pass and a reversed comparison
+# would not, and the fixture's nanoseconds are what make it exact.
+TREE='mkstamped; printf old > dst; touch -r file.txt dst'; STAMPS=1
+run_case -u file.txt dst
+# No destination at all: an ordinary move, since there is nothing to compare.
+STAMPS=1
+run_case -u file.txt new.txt
+STAMPS=1
+run_case -u file.txt dir
+# A directory source is exempt from the comparison (`copy.c:2353`'s
+# `! S_ISDIR (src_mode)`), so this is the ordinary refusal and not a skip.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case -u tree dst
+run_case -u nosuchfile dst
+
+# `--update=all` is "replace whatever is there", which is what no option at all
+# already means — it exists to *cancel* an earlier `-u` or `-i`, so both orders
+# are cases.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=all file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case -u --update=all file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=all -u file.txt dst
+# It writes `interactive` too, so it cancels a `-i` before it and not after.
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case -i --update=all file.txt dst
+TREE='mktree; printf old > dst'; ANSWERS=$'n\n'
+run_case --update=all -i file.txt dst
+
+# `--update=none` is the skip that succeeds: same effect on the tree as `-n`,
+# opposite exit status and no diagnostic. The pair is the point.
+TREE='mktree; printf old > dst'
+run_case --update=none file.txt dst
+TREE='mktree; printf old > dst'
+run_case -n file.txt dst
+# It is checked before the directory sentence and before the same-file check,
+# exactly where `-n` is — so it swallows both of those diagnostics rather than
+# printing them, which is the only way to see that it took the same branch.
+TREE='mktree; printf old > dst'
+run_case --update=none tree dst
+run_case --update=none file.txt file.txt
+# And it beats a `-u` that came earlier, being the later of the two.
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case -u --update=none file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case --update=none -u file.txt dst
+
+# gnulib's `argmatch` is a prefix match, so a unique prefix of any of the three
+# words resolves — the same rule that makes `--up` resolve to `--update`,
+# applied one level down to its argument. An unknown word is refused with the
+# list; an empty one is *ambiguous* rather than unknown, since it is a prefix of
+# all three.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=o file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=n file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1
+run_case --update=a file.txt dst
+run_case --update=nosuchword file.txt dst
+run_case --update= file.txt dst
+# The option name in the diagnostic is the long spelling even when the short one
+# was typed — but `-u` takes no argument, so the only way to reach it is
+# `--update=`.
+run_case --up=nosuchword file.txt dst
+
+# The `-n` precedence rule, and the two places it is narrower than it reads.
+# `mv.c:378` guards the whole argument branch on `interactive != I_ALWAYS_NO`,
+# and `mv.c:509` clears `update` after the loop — so a `-n` on either side of
+# the option wins, but by different mechanisms.
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case -n --update=all file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case --update=all -n file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case -u -n file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "1999-09-09" dst'; STAMPS=1
+run_case -n -u file.txt dst
+# The asymmetry `--help` denies. `--update[=older]` is documented as what `-u`
+# means, but the guard is on the long form alone: a later `-i` re-enables the
+# skip that `-n` had disabled, and then `-n -u -i` still compares times while
+# `-n --update=older -i` does not.
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1; ANSWERS=$'n\n'
+run_case -n --update=older -i file.txt dst
+TREE='mkstamped; printf old > dst; touch -d "2009-09-09" dst'; STAMPS=1; ANSWERS=$'n\n'
+run_case -n -u -i file.txt dst
+# And, from the lookup being inside the guard: with `-n` first the word is never
+# read, so a word that is otherwise an error is accepted in silence.
+TREE='mktree; printf old > dst'
+run_case -n --update=nosuchword file.txt dst
+TREE='mktree; printf old > dst'
+run_case --update=nosuchword -n file.txt dst
+
+# A hard-link pair. `--update=none` reaches the same `abandon_move` branch `-n`
+# does, before the same-file check, so the group is left whole and unmentioned;
+# `-u` gets there by the time comparison instead. Either way a skip must not
+# unlink the source — upstream sets `*rename_succeeded` on the skip path
+# (`copy.c:2394`) precisely so it does not, and this column is where getting
+# that wrong would show as one file where there were two.
+TREE='mkstamped; printf hl > a; ln a b; touch -d "2009-09-09" a b'; STAMPS=1
+run_case -u a b
+TREE='mktree; printf hl > a; ln a b'
+run_case --update=none a b
+
+# =============================================================================
+# 18. --help and --version
 # =============================================================================
 # The family's two deliberate differences: `--help` omits the GNU project's
 # `Report bugs to:` block, and `--version` names SlateOS.
@@ -982,7 +1124,7 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help file.txt dst
 xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 
 # =============================================================================
-# 18. Options GNU has and this mv has not
+# 19. Options GNU has and this mv has not
 # =============================================================================
 # An inventory, not a permission. Each entry names its option and turns into an
 # XPASS the moment the option lands, which is what forces it to be promoted to a
@@ -990,21 +1132,9 @@ xfail_case "our --help omits GNU's 'Report bugs to' block" --help --nosuchoption
 # ignoring an option that decides whether a file is destroyed is how data is
 # lost. `-v` was promoted this way and became §14; `-i`/`-f`/`-n` became §15;
 # `-t`/`-T` became §16, where the eleven entries that were here turned into
-# thirty-three.
-
-# -u, --update: move only when the source is newer. The fixture pins both times
-# so `older` has a fixed answer.
-TREE='mkstamped; touch -d "2009-09-09" dst'; STAMPS=1
-missing -u file.txt dst
-TREE='mkstamped; touch -d "1999-09-09" dst'; STAMPS=1
-missing -u file.txt dst
-TREE='mkstamped; touch -d "2009-09-09" dst'; STAMPS=1
-missing --update=older file.txt dst
-TREE='mkstamped; touch -d "2009-09-09" dst'; STAMPS=1
-missing --update=all file.txt dst
-TREE='mkstamped; touch -d "1999-09-09" dst'; STAMPS=1
-missing --update=none file.txt dst
-missing --update=nosuchword file.txt dst
+# thirty-three; `-u`/`--update` became §17, where six turned into thirty-seven —
+# nearly all of them about the *order* two options were given in, because
+# `--update`'s three words write the same two fields `-i`/`-f`/`-n` do.
 
 # -b, --backup, -S, and the two environment variables they override.
 TREE='mktree; printf old > dst'

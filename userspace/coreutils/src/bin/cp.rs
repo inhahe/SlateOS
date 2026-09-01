@@ -1776,6 +1776,18 @@ fn overwrite_allowed<O: Write, E: Write>(
             refuse_no_clobber(target, job);
             false
         }
+        // `AlwaysSkip` is `--update=none`, which `mv` has and this `cp` does
+        // not, so its parser cannot produce this either. The arm is spelled out
+        // rather than folded into a catch-all so that adding `cp --update` is a
+        // compile error here — and it has to be, because the `bool` this
+        // function returns cannot say what `AlwaysSkip` means. Upstream's
+        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2429`) is a
+        // *skip that succeeds*, so implementing `cp -u` means widening this
+        // return type, exactly as `mv`'s [`Verdict`] was widened. Answering
+        // `false` in the meantime would be the same wrong exit status `mv` had
+        // before that change. Silent, at least, because that half of
+        // `AlwaysSkip` this signature *can* express.
+        Interactive::AlwaysSkip => false,
         Interactive::AskUser => overwrite_ok(target, dest.metadata(), job),
     }
 }

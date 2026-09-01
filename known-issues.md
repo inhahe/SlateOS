@@ -103909,3 +103909,64 @@ test only became able to see this defect once it mounted something — which is
 the same lesson as §663's "a mask can only be tested by a value outside it",
 in a different costume: **an agreement test proves nothing about a case none
 of the parties encounters.**
+
+## B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER — OPEN 2026-09-01
+
+**In short:** when `mv` moves a file between two filesystems it cannot rename it,
+so it copies the bytes and deletes the original. Ours copies the bytes and the
+permission bits and *nothing else*: the file arrives with today's date instead of
+the date it was written, and (if run as root) owned by root rather than by
+whoever owned it. GNU's `mv` carries both over, and a user who moves a photo
+directory off one disk onto another does not expect every photo to be re-dated to
+the moment of the move. Nothing user-visible is broken on a single-filesystem
+machine, which is why this has gone unnoticed: no case in `scripts/mv-diff.sh`
+crosses a filesystem boundary, because mounting a second one needs a password the
+harness must not ask for.
+
+**Where.** `userspace/coreutils/src/bin/mv.rs:1601`, in `copy_across_devices`:
+
+```rust
+    fs::copy(src, target)?;
+    fs::remove_file(src)
+```
+
+`std::fs::copy` is documented to copy the permission bits and is documented not
+to copy anything else. It is the whole of the plain-file arm; the symlink arm
+above it (`:1584`) recreates the link's text correctly and is not affected, and
+the directory arm (`:1594`) refuses outright and is its own entry.
+
+**What GNU does.** `copy.c`'s `copy_reg` finishes with `set_owner`, then
+`set_authorized_context`, then `copy_acl`/`set_acl`, then `utimens` from the
+source's `st_atim`/`st_mtim` — in that order, and the order matters, since
+`chown` clears set-user-ID and so must precede the mode. For `mv` the flags that
+select all of this are on unconditionally: `cp_option_init` (`mv.c:100`) sets
+`preserve_timestamps`, `preserve_ownership`, `preserve_mode` and
+`preserve_links`, because a move is supposed to be indistinguishable from a
+rename.
+
+**The proper fix.** Replace the two lines with an explicit sequence in the same
+order upstream uses: create the destination, copy the bytes, `fchown` (ignoring
+`EPERM`, as upstream does when not preserving is merely unprivileged rather than
+an error), `fchmod` from the source's mode including the set-ID bits, then
+`futimens` with the source's `st_atim`/`st_mtim` at full nanosecond resolution —
+and only unlink the source once all of that has succeeded. Nanoseconds rather
+than seconds because the next entry depends on them.
+
+**Two things that fall out of it.** First, `mv -u`'s comparison is currently a
+plain `(mtime)` comparison; upstream passes `UTIMECMP_TRUNCATE_SOURCE` exactly
+and only when the move is cross-device (`copy.c:2379`), which rounds the source's
+stamp down to the destination filesystem's resolution before comparing. That flag
+is unimplemented here — see `destination_is_older`'s doc at `mv.rs:1300` — and it
+is *doubly* unreachable, because a fallback that does not preserve the timestamp
+at all has no preserved timestamp for the truncation to be about. Whoever does
+the fix above should do the truncation in the same change, since that is the
+moment it stops being unreachable. Second, hard links across the fallback: `mv`
+sets `preserve_links`, so a group moved together should arrive as a group, and
+`fs::copy` gives one independent file per name. That is the same shape as the
+directory refusal and belongs with a recursive fallback rather than with this.
+
+**How it would be caught.** It would not be, by anything we have. A regression
+test needs two filesystems. The unit tests in `mv.rs` drive `copy_across_devices`
+directly, so a test that stamps a source, calls the function, and asserts the
+destination's mtime is the source's would catch the timestamp half today without
+any mount at all — and that test does not exist. Write it with the fix.

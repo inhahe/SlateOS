@@ -6758,46 +6758,60 @@ fn bench_vfs_readdir() {
 /// boot time creating files nothing ever reads.
 const READDIR_BALLAST: usize = 2048;
 
-/// Decompose `vfs_readdir` into fixed cost, per-entry cost, and the part of
-/// the per-entry cost that depends on the size of the filesystem's inode
-/// table.
+/// Separate the two things that were suspected of making `vfs_readdir` slow:
+/// the size of the memfs inode table, and the state of the kernel heap.
 ///
-/// # Why this exists
+/// # Why this exists, and what its first run found
 ///
-/// `vfs_readdir` regressed ~3x (16.3us -> 50.2us) at the memfs flat-inode-table
-/// refactor, replicated on an A/A re-run of the identical image — see
-/// `known-issues.md` A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER. The
-/// *structural* explanation is that `MemFsNode` is now stored by value in a
+/// `vfs_readdir` moved 16.3us -> 50.2us at the memfs flat-inode-table refactor
+/// — see `known-issues.md` A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER. The
+/// hypothesis was structural: `MemFsNode` is now stored by value in a
 /// `BTreeMap<u64, MemFsNode>`, `BTreeMap` keeps values inline in its B-tree
-/// nodes, and `memfs::readdir` therefore performs one search of that
-/// large-valued tree per child where previously it iterated nodes its parent
-/// already owned.
+/// nodes, and `memfs::readdir` therefore searches that large-valued tree once
+/// per child where it used to iterate nodes its parent already owned.
 ///
-/// That is an argument, not a measurement, and this file's standing rule is
-/// that you do not optimise against an argument. So the benchmark is built to
-/// be able to *falsify* it.
+/// That was an argument, not a measurement, so the first version of this
+/// benchmark was built to falsify it — and did. Creating [`READDIR_BALLAST`]
+/// files elsewhere, which grows the inode table ~10x, made the listings
+/// **faster**, not slower: 22497 -> 16855 ns at 8 entries and 80891 -> 43796 ns
+/// at 64. A per-child search of a bigger tree cannot get cheaper. The
+/// hypothesis is dead.
 ///
-/// # The experiment
+/// What that leaves is the confound the first version did not control: the
+/// ballast does not only add inodes, it performs 2048 allocations, and
+/// `readdir` allocates a `Vec<DirEntry>` plus one owned name per entry on every
+/// iteration. The same run measured `heap_raw_alloc_free_512` at min 314 ns
+/// against a mean of 28786 ns, so heap state is not a small term here. The
+/// ballast was warming the allocator, and that swamped whatever the inode table
+/// was doing.
 ///
-/// Three directories of 0, 8 and 64 entries give the intercept and the slope:
+/// # The experiment, as it now stands
+///
+/// A 2x2 that moves one variable at a time.
+///
+/// | | small table | big table |
+/// |---|---|---|
+/// | **cold heap** | `vfs_readdir_n64_cold` | — |
+/// | **warm heap** | `vfs_readdir_n{0,8,64}` | `vfs_readdir_n{8,64}_ballasted` |
+///
+/// The warm-up is the ballast created and then *deleted* again: the same 2048
+/// allocations and frees, leaving the inode table the size it started. So
+///
+/// - `n64_cold` vs `n64` differ **only in heap warmth** — same directory, same
+///   table — and price it.
+/// - `n64` vs `n64_ballasted` differ **only in table size**, because both run
+///   after the churn. This is the comparison the first version thought it was
+///   making.
+///
+/// Three directories of 0, 8 and 64 entries give the intercept and slope:
 /// whatever `finish_listing` and the mount walk cost is paid by the empty
 /// directory too, so it cancels out of the slope.
 ///
-/// Then [`READDIR_BALLAST`] files are created **in a different directory**,
-/// and the 8- and 64-entry listings are repeated. The listed directories are
-/// unchanged; the only thing that moved is the number of inodes in the table
-/// their children have to be looked up in. That makes the two hypotheses give
-/// visibly different answers:
-///
-/// - **If the cost is the inode-table search**, the ballast slows both
-///   listings, and it slows the 64-entry one about eight times as much as the
-///   8-entry one, because the penalty is paid once per child.
-/// - **If the cost is per-entry work that does not touch the table** —
-///   `DirEntry` construction, the name clone, the `Vec` growth — the ballast
-///   changes nothing measurable, and boxing or slab-allocating the node would
-///   be effort spent in the wrong place.
-///
-/// Only the first outcome licenses the fix proposed in `known-issues.md`.
+/// The verdict is printed from **signed** deltas. The first version used
+/// `saturating_sub`, which rendered both of the negative results above as
+/// `+0ns` and let it print a conclusion — "inode-table size does not scale the
+/// per-entry cost" — that was true only by accident, since the data said
+/// something considerably stronger that the arithmetic could not represent.
 fn bench_vfs_readdir_breakdown() {
     use crate::fs::vfs::Vfs;
 
@@ -6845,6 +6859,30 @@ fn bench_vfs_readdir_breakdown() {
         }
     }
 
+    // The cold arm, taken *before* anything warms the heap. This is the state
+    // the scored `vfs_readdir` is measured in, so it is the number that has to
+    // be explained; every window after it runs on a churned allocator and is
+    // therefore not comparable to it.
+    let n64_cold = run("vfs_readdir_n64_cold", 200, || {
+        let _ = core::hint::black_box(Vfs::readdir(dir_64));
+    });
+
+    // Warm-up: create the ballast and delete it again. The allocator sees the
+    // same 2048 allocations and frees the ballast arm will later perform, but
+    // the inode table ends the size it started, so everything measured from
+    // here on differs from the ballast arm in table size *only*.
+    let mut warm_ok = Vfs::mkdir_all(dir_ballast).is_ok();
+    if warm_ok {
+        for i in 0..READDIR_BALLAST {
+            let leaf = alloc::format!("{}/b{:05}", dir_ballast, i);
+            if Vfs::write_file(&leaf, b"").is_err() {
+                warm_ok = false;
+                break;
+            }
+        }
+    }
+    readdir_breakdown_cleanup_dir(dir_ballast);
+
     let n0 = run("vfs_readdir_n0", 200, || {
         let _ = core::hint::black_box(Vfs::readdir(dir_empty));
     });
@@ -6855,8 +6893,9 @@ fn bench_vfs_readdir_breakdown() {
         let _ = core::hint::black_box(Vfs::readdir(dir_64));
     });
 
-    // Now inflate the inode table without touching either measured directory.
-    let mut ballast_ok = Vfs::mkdir_all(dir_ballast).is_ok();
+    // Now inflate the inode table without touching either measured directory,
+    // and this time leave it inflated.
+    let mut ballast_ok = warm_ok && Vfs::mkdir_all(dir_ballast).is_ok();
     if ballast_ok {
         for i in 0..READDIR_BALLAST {
             let leaf = alloc::format!("{}/b{:05}", dir_ballast, i);
@@ -6867,22 +6906,48 @@ fn bench_vfs_readdir_breakdown() {
         }
     }
 
+    track("vfs_readdir_n64_cold", &n64_cold);
+    track("vfs_readdir_n0", &n0);
+    track("vfs_readdir_n8", &n8);
+    track("vfs_readdir_n64", &n64);
+
+    // The heap arm. Same directory, same inode table, different allocator
+    // state — so this difference is attributable to nothing else, and it is
+    // the one the first version of this benchmark mistook for the table.
+    let heap_delta = i64::from(n64.min_ns as i32) - i64::from(n64_cold.min_ns as i32);
+    serial_println!(
+        "[bench]   vfs_readdir_breakdown: heap state alone moves n64 by {}ns \
+         (cold {}ns -> after {} alloc/free {}ns)",
+        heap_delta,
+        n64_cold.min_ns,
+        READDIR_BALLAST,
+        n64.min_ns
+    );
+
+    // Slope over the 56-entry gap, in picoseconds so integer division does not
+    // round a real per-entry cost down to zero. Signed, because `n0 > n8`
+    // happens — the fixed cost is not reliably below the 8-entry cost — and a
+    // clamped negative slope would read as "free".
+    let per_entry_ps = (i64::from(n64.min_ns as i32) - i64::from(n8.min_ns as i32)) * 1000 / 56;
+    serial_println!(
+        "[bench]   vfs_readdir_breakdown: fixed {}ns (empty dir) + ~{}ps/entry \
+         (n8 {}ns -> n64 {}ns)",
+        n0.min_ns,
+        per_entry_ps,
+        n8.min_ns,
+        n64.min_ns
+    );
+
     if !ballast_ok {
-        // Report rather than skip silently: the three numbers above are still
-        // a valid decomposition, and saying so is different from saying the
+        // Report rather than skip silently: the four numbers above are still a
+        // valid decomposition, and saying so is different from saying the
         // ballast arm agreed with the hypothesis.
         serial_println!(
-            "[bench]   vfs_readdir_breakdown: n0 {}ns, n8 {}ns, n64 {}ns \
-             (ballast arm UNAVAILABLE — could not create {} files under {})",
-            n0.min_ns,
-            n8.min_ns,
-            n64.min_ns,
+            "[bench]   vfs_readdir_breakdown: table arm UNAVAILABLE — could not create {} \
+             files under {}, so inode-table size is untested this boot",
             READDIR_BALLAST,
             dir_ballast
         );
-        track("vfs_readdir_n0", &n0);
-        track("vfs_readdir_n8", &n8);
-        track("vfs_readdir_n64", &n64);
         readdir_breakdown_cleanup(ROOT);
         return;
     }
@@ -6896,31 +6961,16 @@ fn bench_vfs_readdir_breakdown() {
 
     readdir_breakdown_cleanup(ROOT);
 
-    // Recorded, not merely printed. Each of these five is a listing of a
-    // directory of known size and so means something on its own next boot —
-    // which is `track`'s criterion, not `run_diagnostic`'s.
-    track("vfs_readdir_n0", &n0);
-    track("vfs_readdir_n8", &n8);
-    track("vfs_readdir_n64", &n64);
     track("vfs_readdir_n8_ballasted", &n8_b);
     track("vfs_readdir_n64_ballasted", &n64_b);
 
-    // Slope over the 56-entry gap, in picoseconds so integer division does not
-    // round a real per-entry cost down to zero.
-    let per_entry_ps = n64.min_ns.saturating_sub(n8.min_ns).saturating_mul(1000) / 56;
+    // Signed. The first version used `saturating_sub` here and so could not
+    // express the result it actually got, which was negative on both arms.
+    let d8 = i64::from(n8_b.min_ns as i32) - i64::from(n8.min_ns as i32);
+    let d64 = i64::from(n64_b.min_ns as i32) - i64::from(n64.min_ns as i32);
     serial_println!(
-        "[bench]   vfs_readdir_breakdown: fixed {}ns (empty dir) + ~{}ps/entry \
-         (n8 {}ns -> n64 {}ns)",
-        n0.min_ns,
-        per_entry_ps,
-        n8.min_ns,
-        n64.min_ns
-    );
-
-    let d8 = n8_b.min_ns.saturating_sub(n8.min_ns);
-    let d64 = n64_b.min_ns.saturating_sub(n64.min_ns);
-    serial_println!(
-        "[bench]   vfs_readdir_breakdown: +{} inodes elsewhere costs n8 +{}ns, n64 +{}ns",
+        "[bench]   vfs_readdir_breakdown: +{} inodes elsewhere moves n8 by {}ns, n64 by {}ns \
+         (both arms post-warm-up, so this is table size and not heap state)",
         READDIR_BALLAST,
         d8,
         d64
@@ -6931,22 +6981,54 @@ fn bench_vfs_readdir_breakdown() {
     // table search must scale with the number of children, so 64 entries
     // should pay about 8x what 8 entries pay. A fixed cost that happens to
     // land on both would show d64 ~= d8 and would not support the fix.
-    if d64 > d8.saturating_mul(3) && d64 > 0 {
+    if d64 > 0 && d64 > d8.saturating_mul(3) {
         serial_println!(
             "[bench]   vfs_readdir_breakdown: CONFIRMED per-child inode-table lookup dominates \
-             — the ballast penalty scales with entry count ({}x from 8 to 64 entries). \
+             — the penalty scales with entry count ({}x from 8 to 64 entries). \
              See known-issues.md A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER.",
             d64 / d8.max(1)
+        );
+    } else if d64 < 0 {
+        // A bigger table cannot make a per-child search of it cheaper, so this
+        // outcome does not merely fail to confirm the hypothesis — it says the
+        // warm-up above did not fully equalise the two arms, and the residual
+        // is still allocator state rather than anything to do with memfs.
+        serial_println!(
+            "[bench]   vfs_readdir_breakdown: REFUTED — a 10x larger inode table made the \
+             listing FASTER ({}ns at 64 entries). A per-child search cannot get cheaper as \
+             the tree grows, so the remaining difference is heap state the warm-up did not \
+             equalise, not the table.",
+            d64
         );
     } else {
         serial_println!(
             "[bench]   vfs_readdir_breakdown: NOT CONFIRMED — inode-table size does not scale \
-             the per-entry cost (n8 +{}ns vs n64 +{}ns). The per-entry cost is elsewhere; \
+             the per-entry cost (n8 {}ns vs n64 {}ns). The per-entry cost is elsewhere; \
              boxing the node would not fix it.",
             d8,
             d64
         );
     }
+}
+
+/// Delete every file in `dir` and then `dir` itself. Best-effort throughout —
+/// see [`readdir_breakdown_cleanup`], which this is factored out of so the
+/// warm-up phase can drop the ballast without disturbing the three measured
+/// directories.
+fn readdir_breakdown_cleanup_dir(dir: &str) {
+    use crate::fs::vfs::Vfs;
+
+    if let Ok(entries) = Vfs::readdir(dir) {
+        for e in entries {
+            // Joined as bytes rather than formatted through a string: a
+            // directory entry's name is arbitrary bytes, and rendering it
+            // lossily to build the path to delete would target the wrong file
+            // for any name that is not UTF-8.
+            let leaf = crate::fs::path::Path::new(dir).join(&e.name);
+            let _ = Vfs::remove(&leaf); // Best-effort: see fn doc.
+        }
+    }
+    let _ = Vfs::rmdir(dir); // Best-effort: see fn doc.
 }
 
 /// Remove the tree [`bench_vfs_readdir_breakdown`] builds, if any of it exists.
@@ -6962,18 +7044,7 @@ fn readdir_breakdown_cleanup(root: &str) {
 
     // Depth-first by construction: the four leaf directories, then the root.
     for sub in ["n0", "n8", "n64", "ballast"] {
-        let dir = alloc::format!("{}/{}", root, sub);
-        if let Ok(entries) = Vfs::readdir(&dir) {
-            for e in entries {
-                // Joined as bytes rather than formatted through a string: a
-                // directory entry's name is arbitrary bytes, and rendering it
-                // lossily to build the path to delete would target the wrong
-                // file for any name that is not UTF-8.
-                let leaf = crate::fs::path::Path::new(&dir).join(&e.name);
-                let _ = Vfs::remove(&leaf); // Best-effort: see fn doc.
-            }
-        }
-        let _ = Vfs::rmdir(&dir); // Best-effort: see fn doc.
+        readdir_breakdown_cleanup_dir(&alloc::format!("{}/{}", root, sub));
     }
     let _ = Vfs::rmdir(root); // Best-effort: see fn doc.
 }

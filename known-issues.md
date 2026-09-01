@@ -103854,8 +103854,91 @@ of the parties encounters.**
 
 ### A-MEMFS-INODE-TABLE-MADE-VFS-READDIR-3X-SLOWER
 
-**Status:** OPEN. **Lane:** A. **Found:** 2026-09-01, by the `--bench` boot
-run that follows any change under `kernel/src/fs/`.
+**Status:** OPEN, **but the cause named in this heading is refuted** — see the
+correction immediately below, which is now the substance of the entry. The
+heading is kept because it is what the commits and the benchmark's own log
+lines cite. **Lane:** A. **Found:** 2026-09-01, by the `--bench` boot run that
+follows any change under `kernel/src/fs/`.
+
+---
+
+## CORRECTION, 2026-09-01 (same day): the inode table is not the cause, and `vfs_readdir` is not measuring readdir
+
+**In short:** I blamed a refactor of mine for tripling the cost of listing a
+directory, and built a benchmark to prove it. The benchmark disproved it. What
+it found instead is worse and more useful: **the `vfs_readdir` number is
+dominated by the state of the kernel heap, not by the filesystem**, so it
+cannot presently detect a readdir regression at all — and the "3× regression"
+below was never established.
+
+**The experiment.** `bench_vfs_readdir_breakdown` lists directories of 0, 8 and
+64 entries, then creates 2048 files *in a different directory* — growing the
+memfs inode table ~10× while leaving the listed directories byte-identical —
+and lists them again. If per-child lookups into a `BTreeMap` of large values
+were the cost, a 10× bigger table would make the listings slower, and slower in
+proportion to the number of children.
+
+**They got faster.**
+
+| window | before ballast | after ballast |
+|---|---|---|
+| 8 entries | 22497 ns | **16855 ns** (−25 %) |
+| 64 entries | 80891 ns | **43796 ns** (−46 %) |
+
+A per-child search of a larger tree cannot become cheaper. The hypothesis is
+dead, and boxing or slab-allocating `MemFsNode` would have been effort spent
+against a cause that does not exist. (The first version of the benchmark
+printed `NOT CONFIRMED` for the right reason by accident: it computed the
+deltas with `saturating_sub`, which rendered both of these negative results as
+`+0 ns`. Fixed — the deltas are signed now, and there is a third verdict,
+`REFUTED`, for exactly this outcome.)
+
+**What is really going on: the ballast warms the allocator.** `readdir`
+allocates a `Vec<DirEntry>` plus one owned name per entry on *every* iteration,
+and 2048 file creations leave the heap holding a large pool of warm,
+right-sized free blocks. The same boot measured
+`heap_raw_alloc_free_512` at **min 314 ns against a mean of 28786 ns**, with a
+max of 209,898,765 cycles — a ~90× mean/min ratio and a catastrophic tail. Heap
+state is not a small term in this benchmark; on these numbers it is most of it.
+
+**The corroborating evidence was in the scored number all along**, and I read
+past it:
+
+- `vfs_readdir`'s own **mean is 14× its min**; `vfs_readdir_n0`'s is 20×. The
+  harness prints this and I did not weigh it.
+- `vfs_readdir_root` max = 275,043,690 cycles — ~74 ms for one listing of `/`.
+- Three binaries have now produced **16675 ns, 50216/49970 ns, and 84331 ns**.
+  The third differs from the second only by code appended *after* `vfs_readdir`
+  runs, which cannot affect it causally — but perturbs heap layout, which can.
+
+**Why the A/A replication did not catch this, which is the lesson.** Two boots
+of a byte-identical image landed 0.5 % apart, and I took that as proof the
+number was a property of the binary rather than the host. It is — but "property
+of the binary" and "property of the code under test" are not the same claim. A
+deterministic boot reaches an identical heap state at an identical point every
+time, so an A/A pair reproduces heap-derived cost *perfectly*. **A/A
+replication distinguishes binary-determined from host-determined; it says
+nothing about whether the binary-determined part is the thing you named.**
+
+### What is actually wrong, and what the fix is
+
+1. **`vfs_readdir` is scored (target 50 µs) on a number it does not control.**
+   A benchmark on the performance-critical path whose value swings 5× on heap
+   state will keep flagging false regressions and will hide real ones. The fix
+   is to give it a defined allocator state: warm the heap immediately before
+   the measured window, as `bench_vfs_readdir_breakdown` now does for its own
+   arms, so run-to-run comparison means something.
+2. **The heap's tail is the thing worth chasing.** A 512-byte alloc/free with a
+   90× mean/min ratio and a 210-million-cycle worst case is a real finding
+   about the kernel allocator, independent of readdir, and it is the more
+   valuable of the two. It wants its own investigation.
+3. **The memfs refactor is unindicted.** Nothing here says it is free — only
+   that no measurement currently attributes anything to it. Any future attempt
+   must control heap state first or it will reproduce this mistake.
+
+---
+
+## Original entry, retained — its conclusion is superseded by the correction above
 
 **In short:** listing a directory in the in-memory filesystem got three times
 slower, and it is my own refactor that did it. The benchmark `vfs_readdir`

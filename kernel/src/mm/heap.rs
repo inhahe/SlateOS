@@ -106,6 +106,64 @@ pub fn poison_violations() -> u32 {
 /// "cold start" period after poisoning is enabled.
 const POISON_MAGIC: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCE];
 
+/// Number of return addresses of the *freeing* call site recorded into a
+/// poisoned slot, at bytes 12..`FREE_TRACE_END`.
+///
+/// A double-free report names the second free — it is on the stack, so a
+/// backtrace at detection time gets it for nothing. The first free is the
+/// interesting one and is long gone by then, so the only place it can be
+/// preserved is the slot itself, which is exactly the memory nobody else may
+/// touch between the two frees. Eight frames clears the allocator and `alloc`'s
+/// drop glue (poison_free, slab_dealloc, dealloc, `__rust_dealloc`,
+/// `Global::deallocate`, `RawVecInner::deallocate`, `RawVec::drop`,
+/// `drop_in_place`) and reaches the owning function.
+const FREE_TRACE_FRAMES: usize = 8;
+
+/// End of the recorded-trace region: bytes 12..76 of the slot.
+///
+/// `check_poison` scans for `FREE_POISON` from here, not from 12, so the
+/// recorded addresses are not mistaken for a use-after-free write. That costs
+/// UAF coverage of 64 bytes per slot in classes >= 128; the trade is deliberate
+/// and temporary — see `known-issues.md`
+/// `A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT`.
+const FREE_TRACE_END: usize = 12 + FREE_TRACE_FRAMES * 8;
+
+/// Store return address `addr` as frame `i` of a poisoned slot's free trace.
+///
+/// # Safety
+///
+/// `ptr` must point to a slab slot of at least `FREE_TRACE_END` bytes that the
+/// caller has exclusive access to, and `i` must be < `FREE_TRACE_FRAMES`.
+// The offsets are bounded by the preconditions: the largest is
+// 12 + (FREE_TRACE_FRAMES - 1) * 8 + 7 = FREE_TRACE_END - 1, so no overflow and
+// no out-of-bounds byte is possible.
+#[allow(clippy::arithmetic_side_effects)]
+#[inline]
+unsafe fn free_trace_write(ptr: *mut u8, i: usize, addr: u64) {
+    for (b, byte) in addr.to_le_bytes().iter().enumerate() {
+        // SAFETY: 12 + i*8 + b < FREE_TRACE_END <= class_size (precondition).
+        unsafe {
+            rawmem::write_u8(ptr.add(12 + i * 8 + b), *byte);
+        }
+    }
+}
+
+/// Read back frame `i` of a poisoned slot's free trace.
+///
+/// # Safety
+///
+/// Same preconditions as [`free_trace_write`].
+#[allow(clippy::arithmetic_side_effects)]
+#[inline]
+unsafe fn free_trace_read(ptr: *const u8, i: usize) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (b, out) in bytes.iter_mut().enumerate() {
+        // SAFETY: 12 + i*8 + b < FREE_TRACE_END <= class_size (precondition).
+        *out = unsafe { rawmem::read_u8(ptr.add(12 + i * 8 + b)) };
+    }
+    u64::from_le_bytes(bytes)
+}
+
 /// Fill bytes 8..class_size with FREE_POISON, prefixed by POISON_MAGIC.
 ///
 /// Skips the first 8 bytes (used by the FreeSlot::next pointer).
@@ -177,6 +235,16 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
         for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
             serial_println!("[heap]   double-free frame {i}: {:#x}", f.return_addr);
         }
+        // And the *first* free, recovered from the slot's own trace region.
+        // Both frees are needed to tell the two shapes apart: one owner
+        // dropping twice, versus two owners each dropping once.
+        if class_size >= FREE_TRACE_END {
+            for i in 0..FREE_TRACE_FRAMES {
+                // SAFETY: class_size >= FREE_TRACE_END and i < FREE_TRACE_FRAMES.
+                let addr = unsafe { free_trace_read(ptr, i) };
+                serial_println!("[heap]   first-free frame {i}: {addr:#x}");
+            }
+        }
         return true;
     }
 
@@ -202,6 +270,28 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     // actually saturate here.
     unsafe {
         rawmem::fill_u8(ptr.add(12), FREE_POISON, class_size.saturating_sub(12));
+    }
+
+    // Record who freed it, over the poison just written. This runs on every
+    // free, not just suspect ones, because a double-free is only recognisable
+    // *after* the fact — by then the first freer's stack frame is gone, and the
+    // slot is the one place it can have been kept. `capture` allocates nothing
+    // and takes no lock, so it cannot re-enter the allocator whose lock this
+    // may be running under.
+    if class_size >= FREE_TRACE_END {
+        let bt = crate::backtrace::capture();
+        for i in 0..FREE_TRACE_FRAMES {
+            let addr = bt
+                .frames
+                .get(i)
+                .filter(|_| i < bt.count)
+                .map_or(0u64, |f| f.return_addr);
+            // SAFETY: class_size >= FREE_TRACE_END and i < FREE_TRACE_FRAMES;
+            // the slot is being freed, so we have exclusive access to it.
+            unsafe {
+                free_trace_write(ptr, i, addr);
+            }
+        }
     }
     false
 }
@@ -358,11 +448,18 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
         return; // Virgin slot — never been through poison_free.
     }
 
-    // Magic is intact.  Now check the poison zone (bytes 12..class_size).
-    if class_size <= 12 {
+    // Magic is intact.  Now check the poison zone — which starts after the
+    // recorded free-trace region when the slot is big enough to hold one, since
+    // those bytes are deliberately not FREE_POISON.
+    let scan_start = if class_size >= FREE_TRACE_END {
+        FREE_TRACE_END
+    } else {
+        12
+    };
+    if class_size <= scan_start {
         return;
     }
-    for i in 12..class_size {
+    for i in scan_start..class_size {
         // SAFETY: ptr is valid for class_size bytes (precondition) and
         // i < class_size, so ptr.add(i) is in-bounds.
         let byte = unsafe { rawmem::read_u8(ptr.add(i)) };

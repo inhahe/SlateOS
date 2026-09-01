@@ -1266,6 +1266,18 @@ fn gen_cmdline() -> Vec<u8> {
 /// scheduler; for now, the snapshot is useful for monitoring.
 fn gen_loadavg() -> Vec<u8> {
     let tasks = crate::sched::task_list();
+    // TEMPORARY (A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT): the
+    // buffer this Vec drops at the end of the function is the one the allocator
+    // reports double-freed.  Printing the buffer's identity here says whether
+    // the Vec was born pointing at already-freed memory (address matches the
+    // reported slot) or acquired it legitimately.  Remove once the bug is fixed.
+    crate::serial_println!(
+        "[loadavg-dbg] tasks ptr={:#x} len={} cap={} elem={}",
+        tasks.as_ptr() as usize,
+        tasks.len(),
+        tasks.capacity(),
+        core::mem::size_of::<crate::sched::TaskInfo>(),
+    );
 
     use crate::sched::task::TaskState;
 

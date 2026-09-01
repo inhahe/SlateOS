@@ -105351,6 +105351,33 @@ crossing a filesystem boundary, because a directory cannot cross one yet
 (`B-MVS-CROSS-DEVICE-DIRECTORY-MOVES-ARE-REFUSED`). mv-diff section 23 names the
 case to add when it can.
 
+**Extended to access-control lists, 2026-09-01 (same day).** The half about the
+reference turned out to have a second instance: without libacl, gnulib compiles
+`copy_acl` down to a plain `chmod`, so the reference carries a file's mode bits
+and silently drops its ACL entries. That failure is *quieter* than the libattr
+one — a reference without libattr refuses `--preserve=xattr` outright, which is
+loud, while this one copies happily and is merely wrong — so it is the shape
+more likely to be mistaken for a bug in the subject. `diff-wsl.sh`'s libattr
+block was generalised into a pair (`diff_dep_links`, `diff_dep_build`) that
+builds any small autotools dependency into one shared prefix, and libacl 2.3.2
+goes through it; `DIFF_ACL_REF` is read back from `config.h`'s `USE_ACL 1`, and
+`DIFF_SETFACL` is the separate fact of having a tool that can *make* one.
+
+No new comparison was needed: on Linux an ACL is stored as the extended
+attribute `system.posix_acl_access`, so `diff_xattrs_in` already reads it byte
+for byte. There is deliberately no `diff_getfacl` — a second, weaker view of a
+thing already compared exactly is worse than one that cannot disagree with
+itself.
+
+Cases: cp-diff section 17, seven (four requiring the list to arrive, two
+requiring it *not* to — `--preserve=xattr` alone and bare `cp` — and one with an
+ACL and an ordinary attribute on the same file); mv-diff section 24, six.
+Measured: short-circuiting the permission-attribute copy in
+`fsattr::copy_permissions`, which is exactly a gnulib built without libacl,
+takes cp-diff from 572/0 to 567/5 and mv-diff from 357/0 to 353/4, and in both
+the cases that move are exactly the ones that should. The same directory gap
+applies: mv's cross-device directory default-ACL case waits on the same issue.
+
 ---
 
 ## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — OPEN 2026-09-01

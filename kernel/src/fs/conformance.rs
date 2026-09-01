@@ -49,6 +49,8 @@
 //! image that has already been constructed, and it exercises the driver rather
 //! than a re-implementation of it.
 
+use alloc::vec::Vec;
+
 use crate::error::KernelResult;
 use crate::fs::path::{Path, PathBuf};
 use crate::fs::selftest::{Setup, Skips};
@@ -101,6 +103,15 @@ pub struct Report {
     /// over zero objects is not a pass — it is a fixture that produced nothing,
     /// and without this number the two are indistinguishable in the log.
     pub objects: u32,
+    /// Clauses that were *void* rather than held or broken: the object changed
+    /// underneath the two readings being compared, so the comparison was
+    /// between two different states and proves nothing either way.
+    ///
+    /// Counted separately from `passed` on purpose. Folding these in would be
+    /// claiming a promise was kept when what actually happened is that it could
+    /// not be tested, and the whole point of this harness is that a check which
+    /// silently declines to run is worse than no check — it reads as coverage.
+    pub voided: u32,
 }
 
 impl Report {
@@ -111,7 +122,21 @@ impl Report {
             passed: 0,
             failed: 0,
             objects: 0,
+            voided: 0,
         }
+    }
+
+    /// Record one clause that could not be judged because the object moved
+    /// underneath it. `why` states what was observed to move, so the log can be
+    /// read as evidence rather than as an excuse.
+    fn void(&mut self, backend: &str, subject: &Path, why: &str) {
+        self.voided = self.voided.saturating_add(1);
+        serial_println!(
+            "[fsconform] VOID {}:{} — {}; the clause is void, not passed",
+            backend,
+            subject.display(),
+            why
+        );
     }
 
     /// Record one check. `what` names the *contract clause*, not the value, so
@@ -264,19 +289,152 @@ fn check_meta(
         "readdir and stat disagree about the entry type",
     );
 
-    // Only for regular files: `DirEntry::size` is documented as "0 for
-    // directories", while `FileMeta::size` for a directory is whatever the
-    // backend charges for the directory's own storage. Those are two different
-    // quantities and asserting they match would be asserting a contract that
-    // was never written.
-    if meta.entry_type == EntryType::File {
-        r.check(
-            entry.size == meta.size,
-            backend,
-            subject,
-            "readdir and stat disagree about a regular file's size",
-        );
+    // The regular-file size clause is deliberately *not* here. It is the one
+    // cross-route check whose two readings can be separated by enough work for
+    // the object to change between them, so it needs a window this function
+    // does not have. `check_sizes_bracketed` runs it.
+    //
+    // (It applies only to regular files in any case: `DirEntry::size` is
+    // documented as "0 for directories", while `FileMeta::size` for a directory
+    // is whatever the backend charges for the directory's own storage. Those are
+    // two different quantities, and asserting they match would be asserting a
+    // contract that was never written.)
+}
+
+/// Cross-route size agreement for regular files — *established*, not assumed.
+///
+/// `DirEntry::size` and `FileMeta::size` are the same quantity by two routes, so
+/// they must agree — but only for an object that held still between the two
+/// readings, and this harness cannot freeze one. On a filesystem that synthesises
+/// content per call they legitimately differ: `/proc/heapinfo` prints
+/// `slab_allocs` and `total_allocs`, which the harness's *own* allocations
+/// increment between the `readdir` and the `stat`, so a decimal digit rolls over
+/// and the byte length changes. procfs is not wrong there — each size it returned
+/// was true when it was taken. The clause was wrong, because it asserted an
+/// invariant that holds only for a stable object without ever establishing that
+/// the object was stable.
+///
+/// So bracket the stat between two listings: `d1` from the walk's `readdir`, then
+/// the stat, then a second `readdir` giving `d2`.
+///
+/// - **`d1 == d2`** — the size did not move across a window that *contains* the
+///   stat, so the stat must have seen that same value. A difference is then a
+///   genuine cross-route disagreement, and is failed.
+/// - **`d1 != d2`** — the object changed size while we were looking. The two
+///   readings are of different states, so the comparison proves nothing; the
+///   clause is voided and named in the log rather than silently skipped.
+///
+/// This is *exact* for a size that only ever grows, which is the `heapinfo`
+/// case. It is not exact for one that can return to an earlier value —
+/// `slab_active` is allocs-minus-frees and can fall back — so a `d1 == d2`
+/// mismatch is confirmed by one tight re-reading of that single name before it
+/// is failed. That costs nothing on the common path, because it runs only where
+/// a failure was about to be reported, and it is the difference between a
+/// harness that occasionally cries wolf and one whose failures are evidence.
+fn check_sizes_bracketed(
+    backend: &'static str,
+    fs: &mut dyn FileSystem,
+    dir: &Path,
+    entries: &[DirEntry],
+    stat_sizes: &[(usize, u64)],
+    r: &mut Report,
+) {
+    if stat_sizes.is_empty() {
+        return;
     }
+    let after = match fs.readdir(dir) {
+        Ok(e) => e,
+        Err(e) => {
+            // The first listing succeeded; a second that refuses is the same
+            // shape of self-contradiction the rest of this harness fails on.
+            // Treating it as "no second reading, so skip the clause" would let a
+            // backend switch the check off by breaking.
+            r.failed = r.failed.saturating_add(1);
+            serial_println!(
+                "[fsconform] FAIL {}:{} — readdir succeeded once and then returned {:?}; \
+                 the second listing is what establishes whether sizes held still",
+                backend,
+                dir.display(),
+                e
+            );
+            return;
+        }
+    };
+
+    for &(idx, stat_size) in stat_sizes {
+        let Some(entry) = entries.get(idx) else {
+            continue;
+        };
+        let child = dir.join(&entry.name);
+        let subject: &Path = &child;
+
+        // A name that listed, statted, then stopped listing has changed more
+        // than its size; the clause is void for it either way.
+        let Some(again) = after.iter().find(|e| e.name == entry.name) else {
+            r.void(backend, subject, "listed before the stat and gone after it");
+            continue;
+        };
+
+        if entry.size != again.size {
+            r.void(backend, subject, "size moved across the walk");
+            continue;
+        }
+
+        if stat_size == entry.size {
+            r.check(true, backend, subject, "");
+            continue;
+        }
+
+        // The bracket says the size held, but the stat disagrees. Either that is
+        // a real cross-route defect, or the size left and came back inside the
+        // window. Ask again, tightly, before accusing anyone.
+        match tight_reread(fs, dir, &entry.name) {
+            Some((d3, m2, d4)) if d3 == d4 && m2 != d3 => {
+                r.check(
+                    false,
+                    backend,
+                    subject,
+                    "readdir and stat disagree about a regular file's size, and a \
+                     second, tightly-taken pair of readings disagrees the same way",
+                );
+            }
+            Some(_) => {
+                r.void(
+                    backend,
+                    subject,
+                    "readdir and stat disagreed once, but a tight re-reading did not \
+                     reproduce it, so the size returned to an earlier value inside the \
+                     window",
+                );
+            }
+            None => {
+                // The object answered three times and then would not. That is
+                // not a size disagreement, so do not report one; it is still a
+                // backend contradicting itself, so do not stay silent either.
+                r.failed = r.failed.saturating_add(1);
+                serial_println!(
+                    "[fsconform] FAIL {}:{} — could not be re-read to confirm a size \
+                     disagreement (readdir said {}, stat said {})",
+                    backend,
+                    subject.display(),
+                    entry.size,
+                    stat_size
+                );
+            }
+        }
+    }
+}
+
+/// Re-read one name's size by both routes, as close together as the interface
+/// allows: `readdir`, `metadata`, `readdir`.
+///
+/// Returns `None` if any of the three refused — a different failure from a size
+/// disagreement, and reported as one by the caller.
+fn tight_reread(fs: &mut dyn FileSystem, dir: &Path, name: &PathBuf) -> Option<(u64, u64, u64)> {
+    let d3 = fs.readdir(dir).ok()?.iter().find(|e| e.name == *name)?.size;
+    let m2 = fs.metadata(&dir.join(name)).ok()?.size;
+    let d4 = fs.readdir(dir).ok()?.iter().find(|e| e.name == *name)?.size;
+    Some((d3, m2, d4))
 }
 
 /// Run the contract over one live filesystem, starting at `dir`.
@@ -343,10 +501,20 @@ pub fn check_tree(
         }
     }
 
-    for entry in &entries {
+    // Sizes the stats reported, for regular files only, kept until the second
+    // listing below can say whether the object held still while we read it.
+    // See `check_sizes_bracketed`.
+    let mut stat_sizes: Vec<(usize, u64)> = Vec::new();
+
+    for (idx, entry) in entries.iter().enumerate() {
         let child: PathBuf = dir.join(&entry.name);
         match fs.metadata(&child) {
-            Ok(meta) => check_meta(backend, &child, &meta, Some(entry), r),
+            Ok(meta) => {
+                if meta.entry_type == EntryType::File && entry.entry_type == EntryType::File {
+                    stat_sizes.push((idx, meta.size));
+                }
+                check_meta(backend, &child, &meta, Some(entry), r);
+            }
             Err(e) => {
                 // A name that lists but does not stat is itself a cross-route
                 // disagreement, and a real one: it is what a caller sees as a
@@ -364,6 +532,8 @@ pub fn check_tree(
             }
         }
     }
+
+    check_sizes_bracketed(backend, fs, dir, &entries, &stat_sizes, r);
 }
 
 /// Run the contract over every backend the boot can reach.
@@ -441,23 +611,40 @@ pub fn self_test() -> KernelResult<()> {
 
     skips.report("[fsconform]");
 
+    // Voided clauses belong on the closing line for the same reason the skips
+    // do: a clause that could not be judged is not a clause that held, and a
+    // reader who scrolled to the bottom must not be told otherwise. The count
+    // is also the thing that would make a *regression* visible — a backend that
+    // started churning every file's size would void its way to a clean run, and
+    // this number is what shows that happening.
+    let voided = if r.voided == 0 {
+        ""
+    } else {
+        " — see the VOID lines above"
+    };
+
     if r.failed == 0 {
         // The suffix, not just the `report` above: the closing line is the one a
         // reader believes, so a run that reached four of five mounts must not
         // read as a full pass to someone who scrolled to the bottom.
         serial_println!(
-            "[fsconform] Conformance passed ({} clause(s) over {} object(s)){}.",
+            "[fsconform] Conformance passed ({} clause(s) over {} object(s), {} voided{}){}.",
             r.passed,
             r.objects,
+            r.voided,
+            voided,
             skips.suffix()
         );
         return Ok(());
     }
 
     serial_println!(
-        "[fsconform] Conformance FAILED: {} clause(s) held, {} broke, over {} object(s){}.",
+        "[fsconform] Conformance FAILED: {} clause(s) held, {} broke, {} voided{}, over {} \
+         object(s){}.",
         r.passed,
         r.failed,
+        r.voided,
+        voided,
         r.objects,
         skips.suffix()
     );

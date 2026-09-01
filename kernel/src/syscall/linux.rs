@@ -43171,8 +43171,32 @@ fn sys_getdents64(args: &SyscallArgs) -> SyscallResult {
             break;
         }
 
-        // d_ino: FNV-1a over path + "/" + name.
-        let d_ino = synth_inode(&entry_path_for_handle(handle), &ent.name);
+        // d_ino: the backing filesystem's own inode, so that it equals the
+        // `st_ino` a `stat` of the same name reports.  Userspace treats
+        // those two numbers as one fact and cross-checks them — `find
+        // -inum` matches a listing against a stat, `ls -i` prints `d_ino`
+        // where `stat` prints `st_ino`, and `tar`, `rsync`, `du` and `cp`
+        // recognise two names for one file by comparing them.  None of
+        // those report an error when the numbers disagree; they simply
+        // believe the wrong one, so `du` and `tar` coalesce a tree into a
+        // single file and `find -inum` matches nothing.
+        //
+        // This was `synth_inode` unconditionally until 2026-08-31, which
+        // guaranteed the mismatch: an FNV hash of the path is stable and
+        // collision-resistant, and *never* equal to the real inode.  The
+        // hash survives only as the fallback for filesystems that report
+        // no identity of their own (`procfs`, `sysfs`, `devfs`,
+        // `iso9660`, and FAT files with no allocated cluster) — there,
+        // `st_ino` is 0 too, but emitting a literal 0 as `d_ino` is worse
+        // than a hash, because a readdir loop is entitled to read 0 as a
+        // deleted entry and skip the name entirely.  A caller that needs
+        // the two to agree on those filesystems has to stat, which is what
+        // it must do for `d_type == DT_UNKNOWN` there anyway.
+        let d_ino = if ent.ino != 0 {
+            ent.ino
+        } else {
+            synth_inode(&entry_path_for_handle(handle), &ent.name)
+        };
         // d_off: cursor immediately after this entry.
         let after_cursor = start_cursor
             .saturating_add(consumed as u64)
@@ -43240,6 +43264,14 @@ fn entry_path_for_handle(handle: u64) -> PathBuf {
 /// Uses FNV-1a over the concatenation `dir_path + "/" + name`.  The
 /// result is non-zero (we OR in 1 if it lands on zero) so userspace
 /// loops that treat 0 as "deleted" don't drop entries.
+///
+/// **This is a fallback, not the normal path.**  `getdents64` uses the
+/// filesystem's own [`DirEntry::ino`](crate::fs::vfs::DirEntry::ino)
+/// whenever there is one, because a hash is by construction never equal to
+/// the `st_ino` a `stat` of the same name reports and userspace cross-checks
+/// the two.  Only filesystems with no per-object identity at all reach here,
+/// and for those the choice is between this and a literal 0 that a readdir
+/// loop may read as a deleted entry.
 fn synth_inode(dir_path: &Path, name: &Path) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in dir_path.as_bytes() {

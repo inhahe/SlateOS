@@ -604,6 +604,16 @@ pub struct Layout {
     pub footer: Rect,
     /// The grid, gaps included, centred in `body`.
     pub board: Rect,
+    /// The mat the grid is laid on: `board` grown by one `gap` on every side.
+    ///
+    /// A field rather than four arithmetic terms inside `draw_board`, because
+    /// this is the rectangle that actually decides whether the pass stays in
+    /// its band, and a region no test can name is a region no test checks a
+    /// pass against. It was written as a bare offset, and it overran the body
+    /// by a gap on whichever axis the cell size came from: `cell` was solved so
+    /// that the *grid* filled the body exactly, and then the mat was drawn a
+    /// gap wider than the thing that already filled it.
+    pub board_frame: Rect,
     /// The side of one cell.
     pub cell: f32,
     /// The gap between adjacent cells.
@@ -681,26 +691,33 @@ impl Layout {
         // dimensions at once is what stops a warehouse from being stretched to
         // fill a band that is not its shape — a stretched grid is one whose
         // cells are no longer where a square hit box says they are.
-        let (cell, gap, board) = if cols > 0 && rows > 0 {
-            let per_w = cols as f32 + (cols as f32 - 1.0) * GAP_PER_CELL;
-            let per_h = rows as f32 + (rows as f32 - 1.0) * GAP_PER_CELL;
+        // The mat, not the grid, is what has to fit: the grid is drawn on a
+        // surround one gap wide, so `cols + GAP_PER_CELL * (cols + 1)` cells'
+        // worth of width is what the body has to hold — `cols - 1` interior
+        // gaps plus the two at the ends. Solving for the grid alone made the
+        // cell exactly large enough for the grid to fill the body and then drew
+        // a mat a gap larger on all four sides of it.
+        let (cell, gap, board, board_frame) = if cols > 0 && rows > 0 {
+            let per_w = cols as f32 + (cols as f32 + 1.0) * GAP_PER_CELL;
+            let per_h = rows as f32 + (rows as f32 + 1.0) * GAP_PER_CELL;
             let cell = (body.w / per_w).min(body.h / per_h).max(0.0);
             let gap = cell * GAP_PER_CELL;
             let grid_w = cols as f32 * cell + (cols as f32 - 1.0) * gap;
             let grid_h = rows as f32 * cell + (rows as f32 - 1.0) * gap;
-            let board = if cell > 0.0 {
-                Rect::new(
-                    body.x + (body.w - grid_w) / 2.0,
-                    body.y + (body.h - grid_h) / 2.0,
-                    grid_w,
-                    grid_h,
-                )
+            if cell > 0.0 {
+                let frame = Rect::new(
+                    body.x + (body.w - grid_w - gap * 2.0) / 2.0,
+                    body.y + (body.h - grid_h - gap * 2.0) / 2.0,
+                    grid_w + gap * 2.0,
+                    grid_h + gap * 2.0,
+                );
+                let board = Rect::new(frame.x + gap, frame.y + gap, grid_w, grid_h);
+                (cell, gap, board, frame)
             } else {
-                Rect::EMPTY
-            };
-            (cell, gap, board)
+                (cell, gap, Rect::EMPTY, Rect::EMPTY)
+            }
         } else {
-            (0.0, 0.0, Rect::EMPTY)
+            (0.0, 0.0, Rect::EMPTY, Rect::EMPTY)
         };
 
         Self {
@@ -710,6 +727,7 @@ impl Layout {
             controls,
             footer,
             board,
+            board_frame,
             cell,
             gap,
             row: (font * 2.1).max(1.0),
@@ -1294,10 +1312,15 @@ impl Sokoban {
         let title_h = text::line_height(l.big, FontWeightHint::Bold);
         let sub_h = text::line_height(l.small, FontWeightHint::Regular);
         let two_lines = title_h + sub_h <= l.header.h;
-        let top = if two_lines {
-            l.header.y + (l.header.h - title_h - sub_h) / 2.0
-        } else {
-            l.header.y + (l.header.h - title_h) / 2.0
+        // The one-line branch was the unbounded one. `two_lines` is itself a
+        // fit check, so the two-line stack was bounded by the thing that chose
+        // it -- but falling back to one line does not make one line fit, and
+        // the header wants `(h * 0.11).clamp(26.0, 58.0)` while `big` clamps at
+        // 28, whose bold line height is taller than 26. A 260-point-tall window
+        // drew "Sokoban" above the bar it is supposed to sit in.
+        let stack = if two_lines { title_h + sub_h } else { title_h };
+        let Some(top) = centre_line(l.header, stack) else {
+            return;
         };
 
         label(
@@ -1418,9 +1441,14 @@ impl Sokoban {
 
             let size = (r.h * 0.44).clamp(7.0, l.font);
             let lh = text::line_height(size, FontWeightHint::Bold);
-            if lh > r.h {
+            // The row's own baseline, asked for once. Both runs below sit on
+            // it, so a row too short for its type draws its stripe and its
+            // background and no words -- rather than words half a line above
+            // the stripe. `size` is clamped up to 7 points, so a row 4 points
+            // tall does not merely get small type: it gets none.
+            let Some(y) = centre_line(r, lh) else {
                 continue;
-            }
+            };
             let done = self.is_completed(index);
             let mark = if done { "done" } else { "" };
             // The name starts after the widest mark either row could carry, so
@@ -1428,7 +1456,6 @@ impl Sokoban {
             // measured, not the old hard-coded 60 pixels.
             let mark_w = text::measure("done", size, FontWeightHint::Bold);
             let gutter = l.pad * 2.0 + mark_w;
-            let y = r.y + (r.h - lh) / 2.0;
             if !mark.is_empty() {
                 label(
                     f,
@@ -1468,17 +1495,7 @@ impl Sokoban {
         if l.board.is_empty() {
             return;
         }
-        fill(
-            f,
-            Rect::new(
-                l.board.x - l.gap,
-                l.board.y - l.gap,
-                l.board.w + l.gap * 2.0,
-                l.board.h + l.gap * 2.0,
-            ),
-            CRUST,
-            CornerRadii::all(l.gap.max(1.0)),
-        );
+        fill(f, l.board_frame, CRUST, CornerRadii::all(l.gap.max(1.0)));
 
         let radius = CornerRadii::all((l.cell * 0.08).max(1.0));
         for row in 0..self.rows {
@@ -1610,19 +1627,20 @@ impl Sokoban {
                 if live { SURFACE1 } else { SURFACE0 },
                 CornerRadii::all(l.pad.max(1.0)),
             );
+            // No `line_height(size) <= r.h` here, and there was: `centre_line`
+            // inside `label_centred` answers exactly that question, and a guard
+            // a callee already makes is a line no test can own (lesson 92).
             let size = (r.h * 0.45).clamp(7.0, l.font);
-            if text::line_height(size, FontWeightHint::Regular) <= r.h {
-                label_centred(
-                    f,
-                    &Label {
-                        text: name,
-                        size,
-                        weight: FontWeightHint::Regular,
-                        color: if live { TEXT_COLOR } else { OVERLAY0 },
-                    },
-                    r,
-                );
-            }
+            label_centred(
+                f,
+                &Label {
+                    text: name,
+                    size,
+                    weight: FontWeightHint::Regular,
+                    color: if live { TEXT_COLOR } else { OVERLAY0 },
+                },
+                r,
+            );
             f.hit(target, r);
         }
     }
@@ -1633,11 +1651,14 @@ impl Sokoban {
         }
         fill(f, l.footer, MANTLE, CornerRadii::ZERO);
         let lh = text::line_height(l.small, FontWeightHint::Regular);
-        if lh > l.footer.h {
-            return;
-        }
+        // Two lines if two fit, otherwise one -- and `centre_line` is what says
+        // whether even the one does. The `lh > l.footer.h` bail this opened
+        // with is exactly what `centre_line` answers for `shown == 1`, so it
+        // was a guard in front of a rule that already held.
         let shown = if lh * 2.0 <= l.footer.h { 2 } else { 1 };
-        let top = l.footer.y + (l.footer.h - lh * shown as f32) / 2.0;
+        let Some(top) = centre_line(l.footer, lh * shown as f32) else {
+            return;
+        };
         f.clip(l.footer);
         for (i, line) in self.footer_lines().iter().take(shown).enumerate() {
             push_text(
@@ -1704,10 +1725,9 @@ impl Sokoban {
         let line_h = text::line_height(l.font, FontWeightHint::Regular);
         let btn_h = (panel.h * 0.26).clamp(0.0, 44.0);
         let stack = title_h + line_h + btn_h;
-        if stack > panel.h {
+        let Some(top) = centre_line(panel, stack) else {
             return;
-        }
-        let top = panel.y + (panel.h - stack) / 2.0;
+        };
 
         label_centred(
             f,
@@ -1742,18 +1762,16 @@ impl Sokoban {
             let r = Rect::new(panel.x + l.pad + i as f32 * (bw + l.pad), by, bw, btn_h);
             fill(f, r, SURFACE1, CornerRadii::all(l.pad.max(1.0)));
             let size = (r.h * 0.4).clamp(7.0, l.font);
-            if text::line_height(size, FontWeightHint::Regular) <= r.h {
-                label_centred(
-                    f,
-                    &Label {
-                        text: name,
-                        size,
-                        weight: FontWeightHint::Regular,
-                        color: TEXT_COLOR,
-                    },
-                    r,
-                );
-            }
+            label_centred(
+                f,
+                &Label {
+                    text: name,
+                    size,
+                    weight: FontWeightHint::Regular,
+                    color: TEXT_COLOR,
+                },
+                r,
+            );
             f.hit(target, r);
         }
     }
@@ -1993,6 +2011,24 @@ fn label_right(f: &mut Frame<Target>, l: &Label, left: f32, right: f32, y: f32) 
     push_text(f, l, (right - w).max(left), y, Some(room));
 }
 
+/// The top edge of a run `height` tall centred in `band`, or `None` when the
+/// band cannot hold it.
+///
+/// This is the whole of `known-issues.md` lesson 109 in four lines.
+/// `band.y + (band.h - height) / 2.0` is not wrong when it fits and slightly
+/// wrong when it does not: the moment `height > band.h` it is *above* the band
+/// by half the shortfall, and hangs the same distance below the bottom. Every
+/// vertical centring in this file goes through here, so the refusal is written
+/// once instead of being remembered at six call sites — and it *was* remembered
+/// at four of the six, which is why only two of them were faults.
+///
+/// `height` is a line height and not a font size, because that is what the rest
+/// of this file measures with: `push_text` puts the top-left corner where it is
+/// told, so the extent a run occupies below `y` is `text::line_height`.
+fn centre_line(band: Rect, height: f32) -> Option<f32> {
+    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)
+}
+
 /// Centred in `r` — horizontally from the measured width, vertically from the
 /// line height — **and limited to `r`**.
 ///
@@ -2008,18 +2044,19 @@ fn label_right(f: &mut Frame<Target>, l: &Label, left: f32, right: f32, y: f32) 
 /// wider than `r.w`, `(r.w - w) / 2.0` is never negative and the clamp was an
 /// arm nothing could enter.
 fn label_centred(f: &mut Frame<Target>, l: &Label, r: Rect) {
-    if l.text.is_empty() || r.is_empty() {
+    if l.text.is_empty() {
         return;
     }
-    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    // `centre_line` subsumes the `r.is_empty()` this used to open with: a box
+    // with no height cannot hold a line, and one with no width is refused
+    // outright. The horizontal half needs no such bail, because `w` is clamped
+    // to `r.w` and a run of nought points wide starts at `r.x`.
     let lh = text::line_height(l.size, l.weight);
-    push_text(
-        f,
-        l,
-        r.x + (r.w - w) / 2.0,
-        r.y + (r.h - lh) / 2.0,
-        Some(r.w),
-    );
+    let Some(y) = centre_line(r, lh) else {
+        return;
+    };
+    let w = text::measure(l.text, l.size, l.weight).min(r.w);
+    push_text(f, l, r.x + (r.w - w) / 2.0, y, Some(r.w));
 }
 
 // ── Window plumbing ─────────────────────────────────────────────────
@@ -2550,18 +2587,43 @@ mod tests {
                 l.board.right(),
                 l.board.bottom()
             );
-            // Solved from both dimensions at once means the grid runs out of
+            // The mat is what has to fit and what has to touch, because the mat
+            // is what is painted. It is the grid grown by one gap on every
+            // side, so a grid that fills the body exactly is a mat that hangs
+            // a gap over each edge of it — which is what this drew before the
+            // surround was named and solved for.
+            assert!(
+                (l.board.x - l.board_frame.x - l.gap).abs() <= 0.01
+                    && (l.board.y - l.board_frame.y - l.gap).abs() <= 0.01
+                    && (l.board_frame.right() - l.board.right() - l.gap).abs() <= 0.01
+                    && (l.board_frame.bottom() - l.board.bottom() - l.gap).abs() <= 0.01,
+                "at {w}x{h} the mat {:?} is not the board {:?} grown by one \
+                 {}-point gap on every side",
+                l.board_frame,
+                l.board,
+                l.gap
+            );
+            assert!(
+                l.board_frame.x >= l.body.x - 0.01
+                    && l.board_frame.y >= l.body.y - 0.01
+                    && l.board_frame.right() <= l.body.right() + 0.01
+                    && l.board_frame.bottom() <= l.body.bottom() + 0.01,
+                "at {w}x{h} the mat {:?} does not fit its body {:?}",
+                l.board_frame,
+                l.body
+            );
+            // Solved from both dimensions at once means the mat runs out of
             // room on exactly one axis and is centred on the other. If it
             // touches neither, the cell size came from something other than
             // the body and the level's shape, and the warehouse is drawn
             // smaller than the space it was given.
-            let fills_w = (l.board.w - l.body.w).abs() <= 0.01;
-            let fills_h = (l.board.h - l.body.h).abs() <= 0.01;
+            let fills_w = (l.board_frame.w - l.body.w).abs() <= 0.01;
+            let fills_h = (l.board_frame.h - l.body.h).abs() <= 0.01;
             assert!(
                 fills_w || fills_h,
-                "at {w}x{h} the board {:?} touches neither edge of its body \
+                "at {w}x{h} the mat {:?} touches neither edge of its body \
                  {:?}, so it is not as large as the body allows",
-                l.board,
+                l.board_frame,
                 l.body
             );
             // Centred on whichever axis had room left over.

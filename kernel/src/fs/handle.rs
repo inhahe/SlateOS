@@ -2297,6 +2297,96 @@ pub fn self_test() -> KernelResult<()> {
         crate::fs::Vfs::remove(nfx_target).ok();
     }
 
+    // -- §20c: XATTR_CREATE / XATTR_REPLACE are decided in the kernel --
+    // The mode is checked under the same filesystem lock that performs the
+    // write, so "create, or fail" cannot be turned into an overwrite by a
+    // writer arriving between a probe and a set.  A single-threaded test
+    // cannot observe the race, so what it pins is the part that made the
+    // old userspace probe *wrong* rather than merely racy: which error each
+    // refusal spends, and above all that REPLACE on a missing PATH is
+    // `NotFound` and not `NoAttribute` — the probe read every negative
+    // return as "no such attribute" and so answered ENODATA for a file that
+    // did not exist.
+    let xm_path = "/handle_xmode.txt";
+    let xm_key: &[u8] = b"user.xmode";
+    crate::fs::Vfs::remove(xm_path).ok();
+    let xm_ready = crate::selftest_setup!(
+        skips,
+        "[fs::handle]",
+        "xattr create/replace modes",
+        "no xattr support",
+        crate::fs::Vfs::write_file(xm_path, b"xm"),
+        crate::fs::Vfs::set_xattr(xm_path, xm_key, b"seed"),
+        crate::fs::Vfs::remove_xattr(xm_path, xm_key),
+    );
+    if xm_ready {
+        let xm_cleanup = || {
+            crate::fs::Vfs::remove(xm_path).ok();
+        };
+        let xm_fail = |what: &str| {
+            crate::serial_println!("[fs::handle]   FAIL: xattr mode: {}", what);
+            xm_cleanup();
+            KernelError::InternalError
+        };
+        use crate::fs::XattrSetMode;
+
+        // CREATE on an absent attribute succeeds and stores the value.
+        if crate::fs::Vfs::set_xattr_with(xm_path, xm_key, b"first", XattrSetMode::Create).is_err()
+        {
+            return Err(xm_fail("CREATE on absent attribute was refused"));
+        }
+        // CREATE on a present attribute is EEXIST, and must not overwrite.
+        if !matches!(
+            crate::fs::Vfs::set_xattr_with(xm_path, xm_key, b"second", XattrSetMode::Create),
+            Err(KernelError::AlreadyExists)
+        ) {
+            return Err(xm_fail("CREATE on present attribute was not AlreadyExists"));
+        }
+        if !matches!(crate::fs::Vfs::get_xattr(xm_path, xm_key), Ok(ref v) if v == b"first") {
+            return Err(xm_fail("refused CREATE still overwrote the value"));
+        }
+        // REPLACE on a present attribute succeeds and does overwrite.
+        if crate::fs::Vfs::set_xattr_with(xm_path, xm_key, b"third", XattrSetMode::Replace).is_err()
+        {
+            return Err(xm_fail("REPLACE on present attribute was refused"));
+        }
+        if !matches!(crate::fs::Vfs::get_xattr(xm_path, xm_key), Ok(ref v) if v == b"third") {
+            return Err(xm_fail("REPLACE did not store the new value"));
+        }
+        // REPLACE on an absent attribute is ENODATA, and must not create.
+        if crate::fs::Vfs::remove_xattr(xm_path, xm_key).is_err() {
+            return Err(xm_fail("remove_xattr failed"));
+        }
+        if !matches!(
+            crate::fs::Vfs::set_xattr_with(xm_path, xm_key, b"fourth", XattrSetMode::Replace),
+            Err(KernelError::NoAttribute)
+        ) {
+            return Err(xm_fail("REPLACE on absent attribute was not NoAttribute"));
+        }
+        if !matches!(
+            crate::fs::Vfs::get_xattr(xm_path, xm_key),
+            Err(KernelError::NoAttribute)
+        ) {
+            return Err(xm_fail("refused REPLACE created the attribute anyway"));
+        }
+        // REPLACE against a path that does not exist is about the PATH.
+        if !matches!(
+            crate::fs::Vfs::set_xattr_with(
+                "/handle_xmode_absent.txt",
+                xm_key,
+                b"x",
+                XattrSetMode::Replace
+            ),
+            Err(KernelError::NotFound)
+        ) {
+            return Err(xm_fail("REPLACE on a missing path was not NotFound"));
+        }
+        xm_cleanup();
+        crate::serial_println!("[fs::handle]   xattr create/replace modes: OK");
+    } else {
+        crate::fs::Vfs::remove(xm_path).ok();
+    }
+
     // -- §21: no-follow chmod operates on the LINK inode, not target --
     // fchmodat2(AT_SYMLINK_NOFOLLOW) must set the symlink's own mode bits.
     // Prove that:

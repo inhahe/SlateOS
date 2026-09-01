@@ -1480,6 +1480,49 @@ impl VfsDcache {
 /// Global VFS path resolution cache.
 static VFS_DCACHE: Mutex<VfsDcache> = Mutex::new(VfsDcache::new());
 
+/// What [`Vfs::set_xattr_with`] does when the attribute already exists.
+///
+/// The kernel takes this rather than leaving userspace to probe first
+/// because the probe cannot be made atomic from outside: see
+/// [`Vfs::set_xattr_with`] and `design-decisions.md` §661.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XattrSetMode {
+    /// Create the attribute or overwrite it — plain `setxattr`.
+    Any,
+    /// Fail with [`KernelError::AlreadyExists`] (`EEXIST`) if the attribute
+    /// is already present — `XATTR_CREATE`.
+    Create,
+    /// Fail with [`KernelError::NoAttribute`] (`ENODATA`) if the attribute
+    /// is not already present — `XATTR_REPLACE`.
+    Replace,
+}
+
+impl XattrSetMode {
+    /// Decide whether a set may proceed, given the result of probing for
+    /// the attribute.
+    ///
+    /// Only [`KernelError::NoAttribute`] is read as absence.  Any other
+    /// error means the filesystem could not *answer* — most importantly
+    /// `NotFound`, which is about the path and not the attribute — and is
+    /// propagated rather than quietly treated as "not there", which is
+    /// exactly the mistake the userspace probe made: it read every
+    /// negative return as absence, so `XATTR_REPLACE` on a nonexistent
+    /// file reported `ENODATA` instead of `ENOENT`.
+    fn check(self, probe: KernelResult<Vec<u8>>) -> KernelResult<()> {
+        let present = match probe {
+            Ok(_) => true,
+            Err(KernelError::NoAttribute) => false,
+            Err(e) => return Err(e),
+        };
+        match self {
+            Self::Any => Ok(()),
+            Self::Create if present => Err(KernelError::AlreadyExists),
+            Self::Replace if !present => Err(KernelError::NoAttribute),
+            Self::Create | Self::Replace => Ok(()),
+        }
+    }
+}
+
 /// Public VFS interface.
 ///
 /// All methods are static — they operate on the global VFS singleton.
@@ -4124,8 +4167,27 @@ impl Vfs {
         fs.lock().get_xattr(&relative, key)
     }
 
-    /// Set an extended attribute.
+    /// Set an extended attribute, creating it or overwriting it.
     pub fn set_xattr(path: impl AsRef<Path>, key: &[u8], value: &[u8]) -> KernelResult<()> {
+        Self::set_xattr_with(path, key, value, XattrSetMode::Any)
+    }
+
+    /// Set an extended attribute, subject to an [`XattrSetMode`].
+    ///
+    /// The existence check and the write happen under a **single** hold of
+    /// the filesystem lock, which is the whole reason the mode belongs in
+    /// the kernel: userspace used to spell `XATTR_CREATE` as `getxattr`
+    /// followed by `setxattr`, and two syscalls are two lock acquisitions
+    /// with a window between them.  A second writer landing in that window
+    /// turned "create, or fail" into a silent overwrite and "replace, or
+    /// fail" into a create — the two outcomes the flags exist to forbid.
+    /// See `design-decisions.md` §661.
+    pub fn set_xattr_with(
+        path: impl AsRef<Path>,
+        key: &[u8],
+        value: &[u8],
+        mode: XattrSetMode,
+    ) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_follow(path)?;
@@ -4133,7 +4195,9 @@ impl Vfs {
         check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().set_xattr(&relative, key, value)?;
+            let mut guard = fs.lock();
+            mode.check(guard.get_xattr(&relative, key))?;
+            guard.set_xattr(&relative, key, value)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);
@@ -4184,6 +4248,16 @@ impl Vfs {
         key: &[u8],
         value: &[u8],
     ) -> KernelResult<()> {
+        Self::set_xattr_no_follow_with(path, key, value, XattrSetMode::Any)
+    }
+
+    /// No-follow analogue of [`set_xattr_with`](Self::set_xattr_with).
+    pub fn set_xattr_no_follow_with(
+        path: impl AsRef<Path>,
+        key: &[u8],
+        value: &[u8],
+        mode: XattrSetMode,
+    ) -> KernelResult<()> {
         let path = path.as_ref();
         crate::ipc::namespace::check_writable(path)?;
         let path = Self::resolve_no_follow(path)?;
@@ -4191,7 +4265,9 @@ impl Vfs {
         check_path_access(&path, PathAccess::Write)?;
         {
             let (fs, _id, _opts, relative) = resolve_mount(&path)?;
-            fs.lock().set_xattr_no_follow(&relative, key, value)?;
+            let mut guard = fs.lock();
+            mode.check(guard.get_xattr_no_follow(&relative, key))?;
+            guard.set_xattr_no_follow(&relative, key, value)?;
         }
         super::notify::emit_metadata(&path);
         super::journal::record(super::journal::JournalEventType::Modified, &path);

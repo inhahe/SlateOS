@@ -49662,6 +49662,42 @@ deserve unrelated budgets — but the first is what any run should do today.
 ./scripts/boot-test.sh`, backgrounded via the Bash tool's `run_in_background`,
 with no pipe on the command.
 
+### CORRECTION 2026-08-31 — the fix landed, and the stated cause was wrong
+
+**Status: CLOSED (fixed), with one paragraph above retracted.**
+
+Two separate things need saying, because only one of them is "this got fixed".
+
+**The fix.** `boot-test.sh` now documents and budgets the outer window itself
+(`scripts/boot-test.sh:30-57`): **7200 s**, derived as ~3000 s observed pre-QEMU
++ 2400 s inner QEMU timeout + headroom. The entry's "Proper fix" offered a
+choice between raising the budget to ~2700 s and splitting build from boot; the
+budget was raised, to nearly 3× what this entry proposed, because the pre-QEMU
+phase was re-measured on 2026-08-31 at ~3000 s with another lane building
+concurrently — so 2700 s would itself have been too tight. The comment there
+also records the reason a *generous* outer budget is not laziness: an outer
+timeout that fires first replaces the inner one's SYSTEM HANG diagnostic
+(faulting RIP over HMP, task table, marker) with an anonymous exit 124, on
+exactly the runs where the diagnostic matters. That destroyed two runs on
+2026-08-31 before the comment was rewritten.
+
+**The retraction.** The paragraph above titled *"Why the cache is cold more
+often than it looks"* — claiming a preceding `cargo clippy` evicts the build's
+fingerprints, so that "lint, then boot-test" guarantees a cold build — **is
+false, and was reasoning rather than measurement.** `cargo clippy` sets
+`RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace unit's
+fingerprint, so clippy's artifacts occupy their own cache entries and leave the
+build's untouched. Measured 2026-08-24 and recorded at
+`scripts/boot-test.sh:4055-4067`: a `cargo build` run *immediately after* a cold
+200 s clippy took **4.7 s** — i.e. not invalidated at all.
+
+That retraction matters beyond this entry, because the same false belief had
+already been used once to *defer* adding the clippy gate on cost grounds. A
+plausible mechanism, asserted without measurement, cost a real gate and then
+survived long enough to be written down here as an explanation for an unrelated
+timeout. The actual cause of the 2026-08-20 overrun was simply that the build
+is long and the budget was short — no eviction required.
+
 ## `[A]` The bench gate names `fs/zfs` as perf-critical, but no benchmark can see it
 
 **Status:** OPEN (2026-08-20)

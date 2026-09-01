@@ -1997,20 +1997,22 @@ impl AutomatorApp {
                     if selected { SURFACE0 } else { CRUST },
                     CornerRadii::all(CORNER_RADIUS),
                 );
-                centred(
-                    f,
-                    rect.x,
-                    rect.w,
-                    rect.y + (rect.h - l.font) / 2.0,
-                    tab.label(),
-                    if selected { BLUE } else { SUBTEXT0 },
-                    l.font,
-                    if selected {
-                        FontWeightHint::Bold
-                    } else {
-                        FontWeightHint::Regular
-                    },
-                );
+                if let Some(ty) = centre_line(rect, l.font) {
+                    centred(
+                        f,
+                        rect.x,
+                        rect.w,
+                        ty,
+                        tab.label(),
+                        if selected { BLUE } else { SUBTEXT0 },
+                        l.font,
+                        if selected {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
+                    );
+                }
                 f.hit(Target::Tab(*tab), rect);
             }
         }
@@ -2018,19 +2020,24 @@ impl AutomatorApp {
         // Everything on the left marches from a measurement, not a literal.
         let room_end = tabs_x - l.pad;
         let mut cx = head.x + l.pad;
-        let ty = head.y + (head.h - l.heading) / 2.0;
-        bounded(
-            f,
-            (cx, ty),
-            room_end - cx,
-            TITLE,
-            TEXT,
-            l.heading,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(head, l.heading) {
+            bounded(
+                f,
+                (cx, ty),
+                room_end - cx,
+                TITLE,
+                TEXT,
+                l.heading,
+                FontWeightHint::Bold,
+            );
+        }
+        // `cx` advances whether or not the title was inked. It is the left edge
+        // of the strip the title occupies, and the title occupies it either
+        // way: a header too short to show the words is not a header with room
+        // to start the indicators further left.
         cx += text::measure(TITLE, l.heading, FontWeightHint::Bold) + l.pad * 1.5;
 
-        let sy = head.y + (head.h - l.font) / 2.0;
+        let sy = centre_line(head, l.font);
         if self.recording_state.is_recording() {
             let dot = l.small * 0.9;
             let pulse = u64_f32(self.elapsed_ms % RECORDING_PULSE_PERIOD_MS)
@@ -2038,6 +2045,11 @@ impl AutomatorApp {
             // A triangle wave: bright at the half-period, dark at both ends.
             let level = 1.0 - (pulse * 2.0 - 1.0).abs();
             let alpha = f32_u8(level * 255.0);
+            // The dot shrinks to the header rather than being centred in it at
+            // its nominal size: it is a fill, and a fill is pushed exactly as
+            // asked whatever the clip, so a dot centred in a header shorter
+            // than itself really does paint over the toolbar below.
+            let dot = dot.min(head.h);
             if cx + dot <= room_end {
                 fill(
                     f,
@@ -2047,18 +2059,22 @@ impl AutomatorApp {
                 );
                 cx += dot + l.pad * 0.5;
             }
-            bounded(
-                f,
-                (cx, sy),
-                room_end - cx,
-                "REC",
-                RED,
-                l.font,
-                FontWeightHint::Bold,
-            );
+            if let Some(sy) = sy {
+                bounded(
+                    f,
+                    (cx, sy),
+                    room_end - cx,
+                    "REC",
+                    RED,
+                    l.font,
+                    FontWeightHint::Bold,
+                );
+            }
             cx += text::measure("REC", l.font, FontWeightHint::Bold) + l.pad;
         }
-        if self.playback_state.is_playing() {
+        if self.playback_state.is_playing()
+            && let Some(sy) = sy
+        {
             let label = format!("PLAYING ({})", self.playback_state.label());
             bounded(
                 f,
@@ -2097,16 +2113,18 @@ impl AutomatorApp {
             }
             let rect = Rect::new(bx, btn_y, w, btn_h);
             fill(f, rect, bg, CornerRadii::all(CORNER_RADIUS));
-            centred(
-                f,
-                rect.x,
-                rect.w,
-                rect.y + (rect.h - l.small) / 2.0,
-                &label,
-                fg,
-                l.small,
-                FontWeightHint::Regular,
-            );
+            if let Some(ty) = centre_line(rect, l.small) {
+                centred(
+                    f,
+                    rect.x,
+                    rect.w,
+                    ty,
+                    &label,
+                    fg,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+            }
             f.hit(Target::Button(button), rect);
             bx += w + l.pad * 0.6;
         }
@@ -2182,26 +2200,30 @@ impl AutomatorApp {
         let (head, body, foot) = l.sidebar_split();
 
         fill(f, head, CRUST, CornerRadii::ZERO);
-        bounded(
-            f,
-            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
-            head.w - l.pad * 2.0,
-            &format!("Macros ({})", self.library.count()),
-            TEXT,
-            l.font,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(head, l.font) {
+            bounded(
+                f,
+                (head.x + l.pad, ty),
+                head.w - l.pad * 2.0,
+                &format!("Macros ({})", self.library.count()),
+                TEXT,
+                l.font,
+                FontWeightHint::Bold,
+            );
+        }
 
         let macros = self.library.list();
         // An empty library must say it is empty. A blank panel under a heading
         // reading "Macros (0)" is indistinguishable from a panel that failed
         // to draw, and it does not tell the user that New is what to press.
-        if macros.is_empty() {
+        if macros.is_empty()
+            && let Some(ty) = centre_line(body, l.small)
+        {
             centred(
                 f,
                 body.x + l.pad,
                 (body.w - l.pad * 2.0).max(0.0),
-                body.y + (body.h - l.small) / 2.0,
+                ty,
                 "No macros yet -- press New",
                 OVERLAY0,
                 l.small,
@@ -2233,15 +2255,17 @@ impl AutomatorApp {
             let count = format!("{}", mac.action_count());
             let count_w = text::measure(&count, l.small, FontWeightHint::Regular);
             let mut right = rect.right() - l.pad * 0.5;
-            bounded(
-                f,
-                (right - count_w, rect.y + (rect.h - l.small) / 2.0),
-                count_w,
-                &count,
-                OVERLAY0,
-                l.small,
-                FontWeightHint::Regular,
-            );
+            if let Some(ty) = centre_line(rect, l.small) {
+                bounded(
+                    f,
+                    (right - count_w, ty),
+                    count_w,
+                    &count,
+                    OVERLAY0,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+            }
             right -= count_w + l.pad * 0.5;
             if mac.trigger.is_some() {
                 let dot = l.small * 0.8;
@@ -2254,19 +2278,21 @@ impl AutomatorApp {
                 right -= dot + l.pad * 0.5;
             }
             let name_x = rect.x + l.pad * 0.6;
-            bounded(
-                f,
-                (name_x, rect.y + (rect.h - l.font) / 2.0),
-                right - name_x,
-                &mac.name,
-                if selected { TEXT } else { SUBTEXT1 },
-                l.font,
-                if selected {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-            );
+            if let Some(ty) = centre_line(rect, l.font) {
+                bounded(
+                    f,
+                    (name_x, ty),
+                    right - name_x,
+                    &mac.name,
+                    if selected { TEXT } else { SUBTEXT1 },
+                    l.font,
+                    if selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
+                );
+            }
             f.hit(Target::Macro(i), rect);
         }
 
@@ -2305,16 +2331,18 @@ impl AutomatorApp {
                 _ => (SURFACE1, TEXT),
             };
             fill(f, rect, bg, CornerRadii::all(CORNER_RADIUS));
-            centred(
-                f,
-                rect.x,
-                rect.w,
-                rect.y + (rect.h - l.small) / 2.0,
-                &faced(*button),
-                fg,
-                l.small,
-                FontWeightHint::Bold,
-            );
+            if let Some(ty) = centre_line(rect, l.small) {
+                centred(
+                    f,
+                    rect.x,
+                    rect.w,
+                    ty,
+                    &faced(*button),
+                    fg,
+                    l.small,
+                    FontWeightHint::Bold,
+                );
+            }
             f.hit(Target::Button(*button), rect);
         }
     }
@@ -2329,18 +2357,20 @@ impl AutomatorApp {
         let (head, body, foot) = l.list_split();
 
         fill(f, head, SURFACE0, CornerRadii::ZERO);
-        bounded(
-            f,
-            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
-            head.w - l.pad * 2.0,
-            match self.active_tab {
-                ActiveTab::Editor => "Actions",
-                ActiveTab::Script => "Script",
-            },
-            TEXT,
-            l.font,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(head, l.font) {
+            bounded(
+                f,
+                (head.x + l.pad, ty),
+                head.w - l.pad * 2.0,
+                match self.active_tab {
+                    ActiveTab::Editor => "Actions",
+                    ActiveTab::Script => "Script",
+                },
+                TEXT,
+                l.font,
+                FontWeightHint::Bold,
+            );
+        }
 
         match self.active_tab {
             ActiveTab::Editor => {
@@ -2375,29 +2405,33 @@ impl AutomatorApp {
             return;
         }
         let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id)) else {
-            centred(
-                f,
-                body.x + l.pad,
-                (body.w - l.pad * 2.0).max(0.0),
-                body.y + (body.h - l.font) / 2.0,
-                "Select a macro to edit",
-                OVERLAY0,
-                l.font,
-                FontWeightHint::Regular,
-            );
+            if let Some(ty) = centre_line(body, l.font) {
+                centred(
+                    f,
+                    body.x + l.pad,
+                    (body.w - l.pad * 2.0).max(0.0),
+                    ty,
+                    "Select a macro to edit",
+                    OVERLAY0,
+                    l.font,
+                    FontWeightHint::Regular,
+                );
+            }
             return;
         };
         if mac.actions.is_empty() {
-            centred(
-                f,
-                body.x + l.pad,
-                (body.w - l.pad * 2.0).max(0.0),
-                body.y + (body.h - l.font) / 2.0,
-                "No actions. Start recording or add manually.",
-                OVERLAY0,
-                l.font,
-                FontWeightHint::Regular,
-            );
+            if let Some(ty) = centre_line(body, l.font) {
+                centred(
+                    f,
+                    body.x + l.pad,
+                    (body.w - l.pad * 2.0).max(0.0),
+                    ty,
+                    "No actions. Start recording or add manually.",
+                    OVERLAY0,
+                    l.font,
+                    FontWeightHint::Regular,
+                );
+            }
             return;
         }
 
@@ -2419,9 +2453,14 @@ impl AutomatorApp {
             if let PlaybackState::Playing { action_idx, .. } = &self.playback_state
                 && *action_idx == i
             {
+                // Three points wide, or the row's whole width if the row is
+                // narrower than that. A literal width is the one thing in a row
+                // that no other measurement bounds, so in a panel squeezed to a
+                // couple of points the marker was the only thing that painted
+                // past the row's right edge.
                 fill(
                     f,
-                    Rect::new(rect.x, rect.y, 3.0, rect.h),
+                    Rect::new(rect.x, rect.y, 3.0_f32.min(rect.w), rect.h),
                     GREEN,
                     CornerRadii::ZERO,
                 );
@@ -2432,7 +2471,12 @@ impl AutomatorApp {
             // bounded by `w - 160`, and the delay at `x + w - 70` -- five
             // literals that between them assume a particular font at a
             // particular size in a particular panel width.
-            let ty = rect.y + (rect.h - l.small) / 2.0;
+            // A row too short for its own text draws nothing rather than
+            // spilling above and below itself; `continue` and not `break`,
+            // because the row heights here are not monotonic in `i`.
+            let Some(ty) = centre_line(rect, l.small) else {
+                continue;
+            };
             let mut cx = rect.x + l.pad * 0.6;
 
             // The right-hand column is placed first, because it is what tells
@@ -2495,15 +2539,17 @@ impl AutomatorApp {
             }
             cx += badge_w + l.pad * 0.6;
 
-            bounded(
-                f,
-                (cx, rect.y + (rect.h - l.font) / 2.0),
-                right - cx,
-                &timed.action.label(),
-                if selected { TEXT } else { SUBTEXT1 },
-                l.font,
-                FontWeightHint::Regular,
-            );
+            if let Some(ly) = centre_line(rect, l.font) {
+                bounded(
+                    f,
+                    (cx, ly),
+                    right - cx,
+                    &timed.action.label(),
+                    if selected { TEXT } else { SUBTEXT1 },
+                    l.font,
+                    FontWeightHint::Regular,
+                );
+            }
             f.hit(Target::Action(i), rect);
         }
     }
@@ -2569,9 +2615,19 @@ impl AutomatorApp {
         }
 
         if let Some(err) = self.script_error.as_ref() {
+            // The strip is measured from the *body's* bottom edge, not from the
+            // text area's. The two look interchangeable -- the text area was
+            // sized to leave exactly `err_h` below it -- and they are not, because
+            // that height is clamped at zero. In a body shorter than the four
+            // points of padding the clamp swallows the subtraction, the text area
+            // ends up notionally taller than the body it came from, and a strip
+            // hung off its bottom lands below the body's own bottom edge. The
+            // window's clip tidies the ink away, which is why nothing looked
+            // wrong; the pass still overran, and the day this body has a sibling
+            // beneath it the strip paints on top of it.
             let strip = Rect::new(
                 body.x + 2.0,
-                text_area.bottom(),
+                body.bottom() - err_h,
                 (body.w - 4.0).max(0.0),
                 err_h,
             );
@@ -2581,15 +2637,21 @@ impl AutomatorApp {
                 Color::rgba(RED.r, RED.g, RED.b, 40),
                 CornerRadii::all(CORNER_RADIUS),
             );
-            bounded(
-                f,
-                (strip.x + l.pad * 0.5, strip.y + (strip.h - l.small) / 2.0),
-                strip.w - l.pad,
-                err,
-                RED,
-                l.small,
-                FontWeightHint::Regular,
-            );
+            // Centred in the strip, and only when the strip can hold a whole
+            // line. Centring on its own is not a bound: a strip shorter than the
+            // line puts half the line above the strip's top edge and the rest
+            // below its bottom, and the strip's bottom is the body's bottom.
+            if let Some(ty) = centre_line(strip, l.small) {
+                bounded(
+                    f,
+                    (strip.x + l.pad * 0.5, ty),
+                    strip.w - l.pad,
+                    err,
+                    RED,
+                    l.small,
+                    FontWeightHint::Regular,
+                );
+            }
         }
     }
 
@@ -2610,15 +2672,17 @@ impl AutomatorApp {
         let (head, body, pads) = l.props_split();
 
         fill(f, head, CRUST, CornerRadii::ZERO);
-        bounded(
-            f,
-            (head.x + l.pad, head.y + (head.h - l.font) / 2.0),
-            head.w - l.pad * 2.0,
-            "Properties",
-            TEXT,
-            l.font,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(head, l.font) {
+            bounded(
+                f,
+                (head.x + l.pad, ty),
+                head.w - l.pad * 2.0,
+                "Properties",
+                TEXT,
+                l.font,
+                FontWeightHint::Bold,
+            );
+        }
 
         let mut cy = body.y + l.pad * 0.5;
 
@@ -2701,56 +2765,55 @@ impl AutomatorApp {
         let selected = self.selected_macro_id.and_then(|id| self.library.get(id));
         let speed = selected.map_or(PlaybackSpeed::Normal, |m| m.speed);
         let repeat = selected.map_or(RepeatMode::Once, |m| m.repeat_mode);
+        // The strip is four bands of equal height, and each is written down as
+        // a rectangle rather than as an offset from `pads.y`. A heading placed
+        // by offset is a heading nothing measures: `pads.y + (quarter - small)
+        // / 2.0` is above `pads.y` whenever a quarter of the strip is shorter
+        // than one line, and that is every properties panel the layout has had
+        // to squeeze.
         let quarter = pads.h / 4.0;
+        let speed_head = Rect::new(pads.x, pads.y, pads.w, quarter);
+        let speed_row = Rect::new(pads.x, pads.y + quarter, pads.w, quarter);
+        let repeat_head = Rect::new(pads.x, quarter.mul_add(2.0, pads.y), pads.w, quarter);
+        let repeat_row = Rect::new(pads.x, quarter.mul_add(3.0, pads.y), pads.w, quarter);
 
-        bounded(
-            f,
-            (pads.x + l.pad, pads.y + (quarter - l.small) / 2.0),
-            pads.w - l.pad * 2.0,
-            "Playback Speed",
-            TEXT,
-            l.small,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(speed_head, l.small) {
+            bounded(
+                f,
+                (speed_head.x + l.pad, ty),
+                speed_head.w - l.pad * 2.0,
+                "Playback Speed",
+                TEXT,
+                l.small,
+                FontWeightHint::Bold,
+            );
+        }
         let speeds = PlaybackSpeed::all();
-        pad_row(
-            f,
-            l,
-            Rect::new(pads.x, pads.y + quarter, pads.w, quarter),
-            speeds.len(),
-            |f, i, rect| {
-                let Some(&s) = speeds.get(i) else { return };
-                let on = s == speed;
-                paint_pad(f, l, rect, s.label(), on, BLUE);
-                f.hit(Target::Speed(s), rect);
-            },
-        );
+        pad_row(f, l, speed_row, speeds.len(), |f, i, rect| {
+            let Some(&s) = speeds.get(i) else { return };
+            let on = s == speed;
+            paint_pad(f, l, rect, s.label(), on, BLUE);
+            f.hit(Target::Speed(s), rect);
+        });
 
-        bounded(
-            f,
-            (
-                pads.x + l.pad,
-                quarter.mul_add(2.0, pads.y) + (quarter - l.small) / 2.0,
-            ),
-            pads.w - l.pad * 2.0,
-            "Repeat Mode",
-            TEXT,
-            l.small,
-            FontWeightHint::Bold,
-        );
+        if let Some(ty) = centre_line(repeat_head, l.small) {
+            bounded(
+                f,
+                (repeat_head.x + l.pad, ty),
+                repeat_head.w - l.pad * 2.0,
+                "Repeat Mode",
+                TEXT,
+                l.small,
+                FontWeightHint::Bold,
+            );
+        }
         let modes = [RepeatMode::Once, RepeatMode::Times(5), RepeatMode::Forever];
-        pad_row(
-            f,
-            l,
-            Rect::new(pads.x, quarter.mul_add(3.0, pads.y), pads.w, quarter),
-            modes.len(),
-            |f, i, rect| {
-                let Some(&m) = modes.get(i) else { return };
-                let on = m == repeat;
-                paint_pad(f, l, rect, &m.label(), on, LAVENDER);
-                f.hit(Target::Repeat(m), rect);
-            },
-        );
+        pad_row(f, l, repeat_row, modes.len(), |f, i, rect| {
+            let Some(&m) = modes.get(i) else { return };
+            let on = m == repeat;
+            paint_pad(f, l, rect, &m.label(), on, LAVENDER);
+            f.hit(Target::Repeat(m), rect);
+        });
     }
 
     /// The one line of prose along the bottom.
@@ -2760,7 +2823,12 @@ impl AutomatorApp {
             return;
         }
         fill(f, bar, CRUST, CornerRadii::ZERO);
-        let ty = bar.y + (bar.h - l.small) / 2.0;
+        // A status bar too short for its own line paints the bar and nothing
+        // else. It is the last band the layout takes, so it is the first one a
+        // short window squeezes to a sliver.
+        let Some(ty) = centre_line(bar, l.small) else {
+            return;
+        };
 
         // The right-hand read-out is placed by measuring it, and the left-hand
         // message is bounded by what the read-out leaves. The old bar drew the
@@ -2820,16 +2888,25 @@ impl AutomatorApp {
         outline(f, card, SURFACE2);
 
         let mut y = card.y + l.pad;
-        centred(
-            f,
-            card.x + l.pad,
-            (card.w - l.pad * 2.0).max(0.0),
-            y,
-            "Keys",
-            TEAL,
-            l.font,
-            FontWeightHint::Bold,
-        );
+        // The heading is measured against the card, exactly as the rows below
+        // it are. It was not: it went in at a fixed inset from the card's top
+        // edge and was inked whatever the card measured. The card is clamped to
+        // the window, so in a window shorter than the padding the heading landed
+        // below the card *and* below the window -- and neither window test saw
+        // it, because both bound a run's left and right edges and neither binds
+        // its top and bottom.
+        if y + l.font <= card.bottom() {
+            centred(
+                f,
+                card.x + l.pad,
+                (card.w - l.pad * 2.0).max(0.0),
+                y,
+                "Keys",
+                TEAL,
+                l.font,
+                FontWeightHint::Bold,
+            );
+        }
         y += line * 1.5;
         let key_w = (card.w - l.pad * 2.0) * 0.3;
         for button in rows {
@@ -3267,6 +3344,25 @@ fn outline(f: &mut Frame<Target>, r: Rect, color: Color) {
     });
 }
 
+/// The top of one line of `size`, centred down `band` -- or `None` when `band`
+/// is too short to hold the line.
+///
+/// Centring is not a bound, and every run in this file was placed by centring
+/// alone. `band.y + (band.h - size) / 2.0` sits *above* the band's top edge the
+/// moment the band is shorter than the line, and hangs the same distance below
+/// its bottom, so a heading strip squeezed by a small window puts its run
+/// outside the strip in both directions at once. In the window that showed up
+/// as a title floating over the toolbar above it; nothing in the suite could
+/// see it, because both window-level text tests bound a run's left and right
+/// edges and neither binds its top and bottom.
+///
+/// The refusal lives here, in the one place every caller already goes through,
+/// rather than as eighteen copies of the same comparison -- which is how the
+/// rule would have come to hold in seventeen places and not the eighteenth.
+fn centre_line(band: Rect, size: f32) -> Option<f32> {
+    (band.h + 0.01 >= size).then(|| band.y + (band.h - size) / 2.0)
+}
+
 /// One run of text, cut with an ellipsis rather than allowed to run on.
 fn bounded(
     f: &mut Frame<Target>,
@@ -3414,20 +3510,22 @@ fn paint_pad(f: &mut Frame<Target>, l: &Layout, rect: Rect, label: &str, on: boo
         if on { accent } else { SURFACE1 },
         CornerRadii::all(CORNER_RADIUS),
     );
-    centred(
-        f,
-        rect.x,
-        rect.w,
-        rect.y + (rect.h - l.small) / 2.0,
-        label,
-        if on { CRUST } else { TEXT },
-        l.small,
-        if on {
-            FontWeightHint::Bold
-        } else {
-            FontWeightHint::Regular
-        },
-    );
+    if let Some(ty) = centre_line(rect, l.small) {
+        centred(
+            f,
+            rect.x,
+            rect.w,
+            ty,
+            label,
+            if on { CRUST } else { TEXT },
+            l.small,
+            if on {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
+        );
+    }
 }
 
 /// A button's face: what it does, and the key that does the same thing.
@@ -4775,7 +4873,15 @@ mod tests {
     /// capped and the list takes the rest.
     const GRID_W: [f32; 8] = [0.0, 20.0, 60.0, 130.0, 260.0, 520.0, 1000.0, 1400.0];
     /// The window heights every layout claim is checked at.
-    const GRID_H: [f32; 6] = [0.0, 18.0, 55.0, 140.0, 700.0, 1100.0];
+    ///
+    /// The 6 is not a rounding of the 18 next to it. Between zero and one line
+    /// of text there is a band of heights at which a strip exists but cannot
+    /// show anything, and it is a band with its own bugs: the header's
+    /// recording dot is a fill of a fixed size centred in the header, so at six
+    /// points tall it painted over the toolbar below. Zero does not find that
+    /// -- every pass returns early on an empty box -- and eighteen does not
+    /// either, because by then everything fits.
+    const GRID_H: [f32; 7] = [0.0, 6.0, 18.0, 55.0, 140.0, 700.0, 1100.0];
 
     /// Every window size the layout claims sweep.
     fn sizes() -> impl Iterator<Item = (f32, f32)> {
@@ -5078,6 +5184,192 @@ mod tests {
                         inside(window, r),
                         "{name}: a rect at ({x},{y}) {width}x{height} escapes a {w}x{h} window"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        // The window test above is the coarsest bound there is, and it is the
+        // only bound this program had. Every pass in the picture is inside the
+        // window by a wide margin, so a pass that overruns its own region by a
+        // few points paints on top of a *sibling* and the window test sees
+        // nothing at all. The regression that prompted this test is exactly
+        // that shape: the script tab's error strip was hung off the bottom of
+        // the text area rather than measured from the bottom of the body, and
+        // in a body too short for its own padding the text area's clamped-at-
+        // zero height put the strip below the body.
+        //
+        // The sub-passes are listed alongside their parents on purpose. Holding
+        // `draw_list` to `l.list` says nothing about `draw_script`, whose
+        // overrun lands on the button row underneath -- still inside the list,
+        // and so still correct from out here. A pass held to its caller's box is
+        // not held to its own; the guard being tested lives in the sub-pass, so
+        // the sub-pass is what has to be handed its box and measured.
+        /// Everything one pass drew, measured against the box it was given.
+        fn check(state: &str, pass: &str, region: Rect, f: &Frame<Target>) {
+            for c in f.commands() {
+                let (x, y, width, height) = match c {
+                    RenderCommand::FillRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    }
+                    | RenderCommand::StrokeRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                        ..
+                    } => (*x, *y, *width, *height),
+                    _ => continue,
+                };
+                assert!(
+                    inside(region, Rect::new(x, y, width, height)),
+                    "{state}: the {pass} pass, given {region:?}, filled ({x},{y}) {width}x{height}"
+                );
+            }
+            // A fill is a complete witness -- it is pushed exactly as asked --
+            // so its absence out here really does mean the pass stayed inside.
+            // Runs and hit boxes are added because whole passes here paint no
+            // fill at all: a script line is two runs and nothing else, so a
+            // walk past the bottom of the text area pushes nothing a fill
+            // assertion could see.
+            for c in f.commands() {
+                let RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } = c
+                else {
+                    continue;
+                };
+                let bound =
+                    max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                let run = Rect::new(*x, *y, bound, *font_size);
+                assert!(
+                    inside(region, run),
+                    "{state}: the {pass} pass, given {region:?}, inked {text:?} at {run:?}"
+                );
+            }
+            for (target, rect) in f.hits() {
+                assert!(
+                    inside(region, *rect),
+                    "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+                );
+            }
+        }
+
+        /// `r`, and `r` squeezed to boxes the layout does not currently hand out.
+        ///
+        /// A sub-pass's contract is "stay inside the box you are given" for any
+        /// box, not for the boxes today's `Layout::solve` happens to produce.
+        /// The script tab's error strip overran only for a body between zero and
+        /// about seven points tall, and no window in the size grid splits the
+        /// list into a body that short -- so the fault sat in the tree with a
+        /// sweep over it that could not reach it. A sub-pass takes its box as an
+        /// argument, which means the test can simply hand it one.
+        fn squeezes(r: Rect) -> Vec<Rect> {
+            let mut out = vec![r];
+            for h in [0.0, 1.0, 3.0, 6.0, 12.0] {
+                if h < r.h {
+                    out.push(Rect::new(r.x, r.y, r.w, h));
+                }
+            }
+            for w in [1.0, 5.0, 30.0] {
+                if w < r.w {
+                    out.push(Rect::new(r.x, r.y, w, r.h));
+                }
+            }
+            out
+        }
+
+        for (name, app) in states() {
+            for (w, h) in sizes() {
+                let l = Layout::solve(w, h);
+                let (_, list_body, list_foot) = l.list_split();
+                let (_, _, props_pads) = l.props_split();
+                let state = format!("{name} at {w}x{h}");
+
+                // The passes whose box is a field of the layout. There is no
+                // squeezing these: the box is whatever `Layout::solve` decided,
+                // and the pass reads it back off the layout for itself.
+                type Panel = Box<dyn Fn(&AutomatorApp, &mut Frame<Target>)>;
+                let panels: Vec<(&'static str, Rect, Panel)> = vec![
+                    (
+                        "header",
+                        l.header,
+                        Box::new(move |a, f| a.draw_header(f, &l)),
+                    ),
+                    (
+                        "toolbar",
+                        l.toolbar,
+                        Box::new(move |a, f| a.draw_toolbar(f, &l)),
+                    ),
+                    (
+                        "sidebar",
+                        l.sidebar,
+                        Box::new(move |a, f| a.draw_sidebar(f, &l)),
+                    ),
+                    ("list", l.list, Box::new(move |a, f| a.draw_list(f, &l))),
+                    ("props", l.props, Box::new(move |a, f| a.draw_props(f, &l))),
+                    (
+                        "status",
+                        l.status,
+                        Box::new(move |a, f| a.draw_status(f, &l)),
+                    ),
+                    ("help", l.window, Box::new(move |a, f| a.draw_help(f, &l))),
+                ];
+                for (pass, region, draw) in panels {
+                    let mut f = Frame::new(w, h);
+                    draw(&app, &mut f);
+                    check(&state, pass, region, &f);
+                }
+
+                // And the passes that are *handed* their box. These are the
+                // ones the parent's own bound says nothing about -- an overrun
+                // of the script body lands on the button row underneath, still
+                // inside the list, and so still correct from the list's point
+                // of view. A pass held to its caller's box is not held to its
+                // own.
+                type Sub = Box<dyn Fn(&AutomatorApp, &mut Frame<Target>, Rect)>;
+                let subs: Vec<(&'static str, Rect, Sub)> = vec![
+                    (
+                        "actions",
+                        list_body,
+                        Box::new(move |a, f, r| a.draw_actions(f, &l, r)),
+                    ),
+                    (
+                        "script",
+                        list_body,
+                        Box::new(move |a, f, r| a.draw_script(f, &l, r)),
+                    ),
+                    (
+                        "button row",
+                        list_foot,
+                        Box::new(move |a, f, r| {
+                            a.draw_button_row(f, &l, r, &[Button::ApplyScript]);
+                        }),
+                    ),
+                    (
+                        "pads",
+                        props_pads,
+                        Box::new(move |a, f, r| a.draw_pads(f, &l, r)),
+                    ),
+                ];
+                for (pass, base, draw) in subs {
+                    for region in squeezes(base) {
+                        let mut f = Frame::new(w, h);
+                        draw(&app, &mut f, region);
+                        check(&state, pass, region, &f);
+                    }
                 }
             }
         }

@@ -2972,13 +2972,12 @@ pub(crate) fn resolve_dirfd_path(
 // on the failure path where nobody is looking.  Only "this kernel does not
 // have the call" falls back.
 //
-// Each call gets its **own** "have I seen this one answer?" latch rather than
-// sharing one.  Lane A landed 662 and 663 in separate changes, and will land
-// the rest of the family the same way, so a kernel that has one and not the
-// next is not hypothetical — it is every kernel built between two of those
-// commits.  One shared latch would let 662's first success vouch for 663,
-// after which 663's honest "no such syscall" would be taken as a real error
-// and returned to the caller as `ENOTSUP` from a `stat`.
+// "This kernel does not have the call" is now something the kernel *says*
+// rather than something this side infers.  An empty dispatch slot answers
+// `NoSuchSyscall` (-10); a registered handler that refuses answers
+// `NotSupported` (-2).  Both were -2 until 2026-08-31, and `pinned_answer`
+// carried a per-syscall latch to guess between them — see `pinned_answer` for
+// what that guess cost and why the seven latches are gone.
 //
 // 663 was refused here until 2026-08-31, and the reason is worth keeping: it
 // used to write the 64-byte `FS_META_SIZE` record, which carries no inode
@@ -3030,81 +3029,39 @@ pub(crate) fn is_pinnable_component(name: &[u8]) -> bool {
         && name != b".."
 }
 
-/// Have we ever seen syscall 662 answer as something other than "no such
-/// syscall"?  See [`pinned_answer`] for what that question is for.
-static PINNED_UNLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 663.  Separate from
-/// [`PINNED_UNLINKAT_ANSWERED`] on purpose — see the "own latch" paragraph in
-/// "The pinned `*at` fast path" above.
-static PINNED_FSTATAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 665.
-static PINNED_FCHMODAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 666.
-static PINNED_MKDIRAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 667.
-static PINNED_SYMLINKAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 668.
-static PINNED_LINKAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
-/// The same question for syscall 669.
-///
-/// Gated where the other three are not, because [`utimensat`]'s whole syscall
-/// half already is: the timestamps it forwards come from `wall_clock_ns` and
-/// `utimens_pair_to_kernel`, which exist only on the target and under `test`.
-/// The `test` arm is what keeps the gate below testable on the host.
-#[cfg(any(target_os = "none", test))]
-static PINNED_UTIMENSAT_ANSWERED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-
 /// Turn a raw pinned-syscall return into either a final answer or a fallback.
 ///
 /// `Some(ret)` is the call's answer, translated to a libc return, and is final
 /// — including its errors. `None` means this kernel does not have the call and
 /// the caller must take the path-based route.
 ///
-/// `answered` is that one syscall's latch: `false` until the syscall comes back
-/// with anything but `NotSupported`/[`HOST_ENOSYS`], then `true` forever. On a
-/// host build it is never set, because the raw `SYSCALL` instruction is
-/// compiled out there and every attempt reports `HOST_ENOSYS` — which is what
-/// keeps the host test suite meaningful: the `*at` wrappers under `cargo test`
-/// behave exactly as they did before this fast path existed.
+/// # The two facts that used to be one number
 ///
-/// The latch exists because `NotSupported` (-2) is ambiguous, and dangerously
-/// so. `dispatch.rs` returns it for an *unregistered slot* — a kernel predating
-/// the syscall — but a registered handler may also return it for a *filesystem*
-/// that cannot perform the operation. Treating every -2 as "kernel too old"
-/// would mean a filesystem-level refusal silently downgrades the call to the
-/// racy path-based route, which is the one outcome this whole fast path exists
-/// to prevent, and it would do it on the failure path where nobody looks.
+/// `NoSuchSyscall` (-10) is an **empty dispatch slot**: the kernel has never
+/// heard of this number. `NotSupported` (-2) is a *registered handler* that ran
+/// and refused — this filesystem cannot do the thing. The caller's correct
+/// response differs completely: the first means "fall back to the older route",
+/// the second means "this is the answer, stop".
 ///
-/// The latch disambiguates by observation rather than by guessing. On a kernel
-/// that *has* the call, the first invocation returns success or a real error,
-/// the flag flips, and every later -2 is honoured as the real answer it is. On
-/// a kernel that lacks it, every invocation returns -2, the flag never flips,
-/// and the fallback stays available — which is exactly the transitional
-/// behaviour wanted.
+/// Both were -2 until 2026-08-31, and this function could only guess between
+/// them. It guessed with a per-syscall latch — fall back until the first
+/// non-`-2` answer proves the slot is wired, honour every later -2 as real —
+/// which was sound but wrong for exactly as long as no answer had yet arrived.
+/// The first call on a filesystem that genuinely refuses was silently
+/// downgraded to the racy path-based route, on the failure path, where nobody
+/// is looking; that is the one outcome this whole fast path exists to prevent.
+/// Lane A split the codes in `dispatch.rs`'s unregistered-slot arm, so the
+/// question is now answered rather than estimated, and the latch — with its
+/// seven statics and its dependence on call ordering — is gone.
 ///
-/// Racy only in the benign direction: two threads may both observe `false` and
-/// both fall back once. There is no ordering requirement, hence `Relaxed`.
-fn pinned_answer(ret: i64, answered: &core::sync::atomic::AtomicBool) -> Option<i32> {
-    use core::sync::atomic::Ordering;
-    if ret == crate::errno::native::NOT_SUPPORTED || ret == crate::syscall::HOST_ENOSYS {
-        if !answered.load(Ordering::Relaxed) {
-            return None;
-        }
-    } else {
-        answered.store(true, Ordering::Relaxed);
+/// [`HOST_ENOSYS`] joins `NoSuchSyscall` as a fallback because the raw
+/// `SYSCALL` instruction is compiled out on a host build and every attempt
+/// reports it. That is what keeps the host test suite meaningful: the `*at`
+/// wrappers under `cargo test` behave exactly as they did before this fast path
+/// existed.
+fn pinned_answer(ret: i64) -> Option<i32> {
+    if ret == crate::errno::native::NO_SUCH_SYSCALL || ret == crate::syscall::HOST_ENOSYS {
+        return None;
     }
     Some(errno::translate(ret) as i32)
 }
@@ -3182,7 +3139,7 @@ unsafe fn try_pinned_unlinkat(dirfd: i32, path: *const u8, flags: i32) -> Option
         name.len() as u64,
         pinned_flags,
     );
-    pinned_answer(ret, &PINNED_UNLINKAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// Stat `path` under `dirfd` through syscall 663, if that is possible here.
@@ -3237,7 +3194,7 @@ unsafe fn try_pinned_fstatat(
         pinned_flags,
         raw.as_mut_ptr() as u64,
     );
-    let ret = pinned_answer(ret, &PINNED_FSTATAT_ANSWERED)?;
+    let ret = pinned_answer(ret)?;
     if ret == 0 {
         // SAFETY: `buf` was checked non-null above, and the caller guarantees
         // it points to a writable `Stat`.  `raw` is `KERNEL_STAT_LEN` bytes,
@@ -3292,7 +3249,7 @@ unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i
         u64::from(mode & 0o7777),
         pinned_flags,
     );
-    pinned_answer(ret, &PINNED_FCHMODAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// Create a directory `path` under `dirfd` through syscall 666, if that is
@@ -3330,7 +3287,7 @@ unsafe fn try_pinned_mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> Option
         // `mkdirat(2)` has no flags, and 666 rejects any non-zero word.
         0,
     );
-    pinned_answer(ret, &PINNED_MKDIRAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// Create a symlink named `linkpath` under `newdirfd`, containing `target`,
@@ -3386,7 +3343,7 @@ unsafe fn try_pinned_symlinkat(
         target as u64,
         target_len as u64,
     );
-    pinned_answer(ret, &PINNED_SYMLINKAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// Hard-link `oldpath` under `olddirfd` to `newpath` under `newdirfd` through
@@ -3435,7 +3392,7 @@ unsafe fn try_pinned_linkat(
         new_name.as_ptr() as u64,
         new_name.len() as u64,
     );
-    pinned_answer(ret, &PINNED_LINKAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// Stamp `path` under `dirfd` with `(accessed_ns, modified_ns)` through syscall
@@ -3485,7 +3442,7 @@ unsafe fn try_pinned_utimensat(
         modified_ns,
         pinned_flags,
     );
-    pinned_answer(ret, &PINNED_UTIMENSAT_ANSWERED)
+    pinned_answer(ret)
 }
 
 /// AT_FDCWD: use the current working directory.
@@ -14931,44 +14888,47 @@ mod tests {
             assert!(fdtable::close_fd(dir_fd).is_some());
         }
 
-        /// What the per-syscall latch does, exercised directly.
+        /// The whole of the fallback rule: an *empty slot* falls back, and
+        /// nothing else does.
         ///
-        /// This logic used to be inline in `try_pinned_unlinkat`, where the
-        /// only arm a host test could reach was the `HOST_ENOSYS` one — and
-        /// the arm that actually matters, a real `-2` arriving *after* the
-        /// syscall has proved it exists, was unreachable from any test at all.
-        /// Extracting it so each call could have its own latch also made it
-        /// reachable, which is the larger of the two gains.
+        /// The second assertion is the one with history. `NotSupported` (-2) is
+        /// a registered handler that ran and refused, and treating it as
+        /// "kernel too old" would retry by path and reintroduce the very race
+        /// the call exists to close — silently, on the failure path, where
+        /// nobody is looking. It shared -2 with the empty-slot answer until
+        /// lane A split them, and this function could only guess between them
+        /// with a latch that was wrong for exactly as long as no call had yet
+        /// succeeded. Now it is a comparison, and this test is the statement of
+        /// it rather than a probe of a heuristic.
+        ///
+        /// Note the test does **not** depend on call order any more, which is
+        /// itself the fix: the latched version's behaviour differed between the
+        /// first invocation and every later one, so a test could only pin one
+        /// of the two at a time.
         #[test]
-        fn a_fresh_latch_falls_back_and_a_proven_one_does_not() {
-            use core::sync::atomic::{AtomicBool, Ordering};
-            let latch = AtomicBool::new(false);
-            let not_supported = crate::errno::native::NOT_SUPPORTED;
+        fn only_an_empty_dispatch_slot_falls_back() {
+            // The kernel has never heard of the number: take the path route.
+            assert_eq!(pinned_answer(crate::errno::native::NO_SUCH_SYSCALL), None);
+            // Same on a host build, where the SYSCALL instruction is compiled
+            // out and every attempt reports this instead.
+            assert_eq!(pinned_answer(crate::syscall::HOST_ENOSYS), None);
 
-            // Nothing has answered yet, so -2 means "this kernel is older
-            // than the syscall" and the caller must take the path route.
-            assert_eq!(pinned_answer(not_supported, &latch), None);
-            assert_eq!(pinned_answer(crate::syscall::HOST_ENOSYS, &latch), None);
-            assert!(!latch.load(Ordering::Relaxed), "a decline proves nothing");
-
-            // A real error proves the slot is registered just as well as a
-            // success does — the handler had to run to produce it.
-            assert_eq!(
-                pinned_answer(crate::errno::native::NOT_FOUND, &latch),
-                Some(-1)
-            );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
-            assert!(latch.load(Ordering::Relaxed));
-
-            // From here a -2 is a filesystem that cannot do the thing, not a
-            // kernel that has never heard of it. Falling back now would retry
-            // by path and reintroduce the race the call exists to close.
-            assert_eq!(pinned_answer(not_supported, &latch), Some(-1));
+            // A registered handler that refused. This is an *answer*, and
+            // retrying it by path would undo the point of the call.
+            assert_eq!(pinned_answer(crate::errno::native::NOT_SUPPORTED), Some(-1));
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOTSUP);
+
+            // Any other error is likewise final, on the first call as much as
+            // the hundredth.
+            assert_eq!(pinned_answer(crate::errno::native::NOT_FOUND), Some(-1));
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
+            assert_eq!(pinned_answer(crate::errno::native::STALE_HANDLE), Some(-1));
+            assert_eq!(crate::errno::get_errno(), crate::errno::ESTALE);
 
             // Success is passed through unchanged, not folded to 0 by
             // `translate` — 664 will want a byte count here.
-            assert_eq!(pinned_answer(7, &latch), Some(7));
+            assert_eq!(pinned_answer(7), Some(7));
+            assert_eq!(pinned_answer(0), Some(0));
         }
 
         /// `mkdirat`'s gate, which is the plainest of the family: one name, and

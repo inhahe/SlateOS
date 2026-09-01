@@ -2205,9 +2205,10 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
 
 /// Create a directory.
 ///
-/// The new directory's permission bits are `mode & ~umask` (masked to the
-/// low 9 bits), computed here and passed to the kernel as the 3rd syscall
-/// argument (the kernel is a thin create primitive — see `Vfs::mkdir_mode`).
+/// The new directory's permission bits are `mode & ~umask`, masked to the low
+/// **ten** — the nine permission bits plus `S_ISVTX` — by
+/// [`apply_umask_mkdir`], and passed to the kernel as the 3rd syscall argument
+/// (the kernel is a thin create primitive; see `Vfs::mkdir_mode`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
     if path.is_null() {
@@ -2974,11 +2975,22 @@ pub(crate) fn resolve_dirfd_path(
 // destination directory partway through the walk is a write primitive rather
 // than a disclosure: every remaining entry in the tree is created somewhere the
 // caller never named.  With those four wired, the destination side is closed.
-// The **source** side is not: the walk still re-derives each source directory by
-// name, because `SYS_FS_GETDENTS_PINNED` (664) has no caller yet.  That is a
-// read-side race — you read the wrong file — rather than a write-side one, which
-// is why it is the remaining half rather than the urgent one.  Tracked in
-// known-issues.md.
+//
+// The **source** side closed on 2026-09-01, when `SYS_FS_GETDENTS_PINNED` (664)
+// got its caller: every directory stream in [`crate::dirent`] — `opendir`,
+// `fdopendir` and the raw `getdents64` alike — now lists *through* the
+// descriptor rather than through the path the descriptor once had.  A recursive
+// walk therefore no longer re-derives a source directory by name between
+// deciding to descend into it and reading it.  This was a read-side race — you
+// read the wrong file, rather than writing one — which is why it was the
+// remaining half rather than the urgent one.
+//
+// The one thing 664 does not pin is [`pinned_base`]'s own precondition: it
+// translates an fd to a handle, so a stream over an fd this libc did not open
+// still works, but an fd with no kernel handle behind it (a pipe, a socket, an
+// emulated descriptor) is reported `ENOTDIR` rather than falling back to a
+// path.  Refusing is the point — a fallback there would reintroduce the race on
+// the exact descriptors least able to justify it.
 //
 // The fallback is narrow on purpose.  A pinned call that answers `ESTALE`, or
 // `EACCES`, or anything else, has *answered*; retrying it by path would
@@ -3093,7 +3105,12 @@ fn pinned_answer(ret: i64) -> Option<i32> {
 /// working directory" — and the kernel's working directory is not this libc's
 /// (see [`openat2_forward`]). Real file handles are never 0, so this can only
 /// fire on a corrupt fd table, where falling back is the safe answer.
-fn pinned_base(dirfd: i32) -> Option<u64> {
+///
+/// `pub(crate)` because [`crate::dirent`] needs the same translation to hand a
+/// directory fd to `SYS_FS_GETDENTS_PINNED`. There the `None` case *is*
+/// diagnosed — as `ENOTDIR`, since no kernel handle means nothing the kernel
+/// can list — but the rule above still holds: this function does not set it.
+pub(crate) fn pinned_base(dirfd: i32) -> Option<u64> {
     let entry = crate::fdtable::get_fd(dirfd)?;
     if entry.kind != HandleKind::File || entry.handle == 0 {
         return None;
@@ -3281,11 +3298,12 @@ unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i
 /// function is what makes the two routes agree by construction rather than by
 /// two mask constants that have to be kept equal by hand.
 ///
-/// 666 masks to **nine** bits where 665 masks to twelve, and the difference is
-/// not an inconsistency to paper over: a directory that is setgid or sticky
-/// from the instant it exists is a policy decision. See [`apply_umask_mkdir`]
-/// for why nine is right for a directory even though twelve is right for a
-/// file, and for the one bit (`S_ISVTX`) that may yet move.
+/// 666 masks to **ten** bits where 665 masks to twelve, and the difference is
+/// not an inconsistency to paper over: a directory that is setgid from the
+/// instant it exists is a policy decision, and Linux's answer is that it comes
+/// from the parent rather than from the mode word. Sticky is the tenth bit and
+/// went in on 2026-09-01, once the kernel's routes stopped discarding it. See
+/// [`apply_umask_mkdir`].
 ///
 /// # Safety
 ///
@@ -4361,32 +4379,40 @@ pub(crate) fn apply_umask_create(mode: ModeT) -> ModeT {
     apply_umask_keeping(mode, 0o7777)
 }
 
-/// Apply the process umask to `mkdir`'s mode: **nine** bits.
+/// Apply the process umask to `mkdir`'s mode: **ten** bits.
 ///
 /// `mkdir(2)`, DESCRIPTION: "in the absence of a default ACL, the mode of the
 /// created directory is `(mode & ~umask & 0777)`. Whether other mode bits are
 /// honored for the created directory depends on the operating system." Nine is
-/// therefore the portable answer, and — unlike the nine [`apply_umask_create`]
-/// used to use — it is a decision rather than an oversight.
+/// the portable floor; the tenth bit is Linux's one extension, `S_ISVTX`
+/// (VERSIONS: "apart from the permission bits, the `S_ISVTX` mode bit is also
+/// honored"), and it is worth having because it is the one bit where a
+/// race-free create means something — a sticky directory made in one step never
+/// exists in the window where it is world-writable but not yet sticky.
 ///
-/// Linux's one extension is `S_ISVTX` (VERSIONS: "apart from the permission
-/// bits, the `S_ISVTX` mode bit is also honored"), which would let a sticky
-/// directory be created without the window in which it exists world-writable
-/// but not yet sticky. We do not send it, because the kernel would drop it
-/// anyway: `Vfs::mkdir_mode` and `mkdir_at_pinned` both compute `mode & 0o777`.
-/// Asked of lane A in
-/// `requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`;
-/// widen this to `0o1777` in the same change that widens those and not before,
-/// since a libc that sends a bit the kernel discards has moved the silent drop
-/// rather than fixed it.
+/// This masked to nine until 2026-09-01, deliberately: the kernel discarded the
+/// bit (`Vfs::mkdir_mode` and `mkdir_at_pinned` both computed `mode & 0o777`),
+/// and a libc that sends a bit the kernel drops has *moved* the silent drop
+/// rather than fixed it. Lane A widened both routes plus `SYS_FS_MKDIR_MODE`
+/// (660) and `SYS_FS_MKDIRAT_PINNED` (666) to `0o1777` in one commit
+/// (design-decisions.md §663, `requests/a-b-mkdirs-mode-is-ten-bits-now-move-apply-umask-mkdir-to-1777.md`),
+/// which is what makes the bit reachable and this widening honest.
 ///
-/// setuid/setgid are not the extension to make here even then. Linux does not
-/// take a directory's setgid bit from `mkdir`'s mode argument — it inherits it
-/// from the parent ("If the parent directory has the set-group-ID bit set, then
-/// so will the newly created directory"). Accepting it from the mode word would
-/// let a caller produce a directory that `mkdir(2)` on Linux could not.
+/// **The umask stays narrowed to nine**, in [`apply_umask_keeping`], and that
+/// is what lets sticky through rather than an oversight: `umask(2)` says only
+/// the file permission bits of the mask are used, so `~(umask & 0o777)` has bit
+/// `0o1000` set and cannot clear `S_ISVTX` — exactly as it cannot clear setuid.
+/// Masking the umask to ten instead would let `umask(01000)` silently strip the
+/// sticky bit off `mkdir(p, 0o1777)`, which no Unix does.
+///
+/// setuid/setgid stay out. Linux does not take a directory's setgid bit from
+/// `mkdir`'s mode argument — it inherits it from the parent ("If the parent
+/// directory has the set-group-ID bit set, then so will the newly created
+/// directory"). Accepting it from the mode word would let a caller produce a
+/// directory that `mkdir(2)` on Linux could not; 660 and 666 refuse it on the
+/// kernel side too, so this is agreement rather than a second opinion.
 pub(crate) fn apply_umask_mkdir(mode: ModeT) -> ModeT {
-    apply_umask_keeping(mode, 0o777)
+    apply_umask_keeping(mode, 0o1777)
 }
 
 // ---------------------------------------------------------------------------
@@ -7498,7 +7524,7 @@ mod tests {
         umask(0o022);
     }
 
-    /// A create keeps twelve bits; a `mkdir` keeps nine.
+    /// A create keeps twelve bits; a `mkdir` keeps ten.
     ///
     /// One function masked both to `0o777` until 2026-08-31, so a caller's
     /// `open("s", O_CREAT, 0o4755)` produced a plain `0755` file with no error
@@ -7507,11 +7533,21 @@ mod tests {
     /// stamps `create_mode & 0o7777`, citing §639). The widening reached
     /// nothing, because this side narrowed the word first.
     ///
-    /// The `mkdir` half is deliberately still nine: `mkdir(2)` states the
-    /// result is `(mode & ~umask & 0777)`, and the kernel's two mkdir routes
-    /// both compute `mode & 0o777`, so sending more would only move the drop.
+    /// The `mkdir` half was nine until 2026-09-01 and is now ten: sticky is
+    /// Linux's one documented extension to `(mode & ~umask & 0777)`, and lane A
+    /// widened both kernel routes to `0o1777` (§663) so the bit now survives the
+    /// whole way. setuid and setgid stay out on both sides — Linux takes a
+    /// directory's setgid from its parent, not from the mode word.
+    ///
+    /// Note the shape of every assertion here: each uses a mode with a bit
+    /// *outside* the mask being tested. That is not stylistic. A mask can only
+    /// be tested by a value it would change, and asserting `0o755` survives
+    /// tells you nothing about whether the mask is `0o777`, `0o1777` or
+    /// `0o7777` — which is precisely how lane A's `Vfs::mkdir_mode` went on
+    /// narrowing to nine for two days after 660 was widened, with every test
+    /// green.
     #[test]
-    fn a_create_keeps_the_special_bits_and_a_mkdir_does_not() {
+    fn a_create_keeps_the_special_bits_and_a_mkdir_keeps_only_sticky() {
         let _g = lock_umask_for_test();
         umask(0o022);
 
@@ -7519,9 +7555,14 @@ mod tests {
         assert_eq!(apply_umask_create(0o4755), 0o4755);
         assert_eq!(apply_umask_create(0o2755), 0o2755);
         assert_eq!(apply_umask_create(0o1777), 0o1755);
-        // ... and the same words lose them on a directory create.
+        // A directory create keeps sticky and drops the other two.
         assert_eq!(apply_umask_mkdir(0o4755), 0o0755);
-        assert_eq!(apply_umask_mkdir(0o1777), 0o0755);
+        assert_eq!(apply_umask_mkdir(0o2755), 0o0755);
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1755);
+        // The canonical caller: /tmp. `mkdir(p, 0o1777)` under the usual
+        // umask must not come back as a plain 0o755 directory.
+        umask(0o000);
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1777);
 
         // The umask still only ever clears permission bits. `umask` itself
         // narrows its argument to nine, so this is belt-and-braces against a
@@ -7530,6 +7571,9 @@ mod tests {
         umask(0o7777);
         assert_eq!(get_umask(), 0o777);
         assert_eq!(apply_umask_create(0o4755), 0o4000);
+        // ... and neither must a sticky bit, which is the whole reason
+        // `apply_umask_keeping` narrows the mask and not just the mode.
+        assert_eq!(apply_umask_mkdir(0o1777), 0o1000);
 
         // A file-type bit in the mode word is the kernel's business, not
         // something to forward — this is what `0o7777` buys over no mask.

@@ -58346,3 +58346,181 @@ So every refusal path is checked at both ends — the ten refused containment
 renames, and the refusal on a swapped destination, are each followed by an
 assertion that `src/f` is still there. The `NoReplace`-onto-a-taken-name case
 checks both files' *contents*, not just their existence, for the same reason.
+
+---
+
+## 740. `readdir`'s `d_ino` is whatever the kernel put in the record, including `0` — libc does not manufacture an inode number for a filesystem that has none
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** Every directory listing carries, for each file, a number that is
+supposed to identify that file uniquely on its disk — the "inode number". Tools
+use it to notice that two names are the same file: that is how `tar` and `rsync`
+recreate hard links instead of copying the data twice, and how `find -samefile`
+works. Some filesystems genuinely have no such number (the ones that are not
+really disks — `/proc`, `/dev`, a CD-ROM), and for those our kernel reports `0`.
+The question was what libc should hand to a program in that case: the honest
+`0`, which means "unknown", or an invented number that at least looks unique.
+We hand over the `0`.
+
+### What this replaced
+
+Until 2026-09-01 the value in `d_ino` was not an inode number at all: directory
+streams listed via `SYS_FS_LIST_DIR` (603), whose record has no room for one, so
+`readdir` reported *the entry's position in the listing* — 0, 1, 2, 3 — and the
+raw `getdents64` did the same. That is never the file's real inode, and it is
+worse than `0` in a specific way: it is plausible. `0` makes a caller say "I
+don't know"; `4` makes it say "I know, and it's 4", and then the third and fourth
+entries of any directory look like hard links to each other. Every same-file test
+in userspace was quietly wrong rather than visibly unavailable.
+
+`SYS_FS_GETDENTS_PINNED` (664) carries the same value `SYS_FS_GET_META` reports
+as `st_ino`, so the choice below only exists now that there is a real number to
+pass through.
+
+### The decision
+
+Pass the kernel's value through untouched, `0` included.
+
+*What changes:* on `/proc`, `/dev`, `/sys` and iso9660, `ls -i` prints `0` and
+`tar` treats every file as unlinked, rather than printing distinct-looking
+numbers that mean nothing.
+
+### The alternative, and who is doing it
+
+Lane A's own `getdents64` (in the kernel-side compatibility path) substitutes an
+FNV hash of the entry's name when the record's inode is `0`, so that callers see
+*something* distinct per entry. Lane A logged the divergence itself
+(`A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS` in
+known-issues.md) and, in `requests/a-b-664s-record-now-has-an-inode-and-so-does-647.md`,
+said plainly which side it would rather we took:
+
+> Do not synthesise a replacement for a `0` you receive. […] If your loop does
+> not treat `0` as deleted, passing the kernel's `0` straight through is strictly
+> more honest than anything either of us can invent, and I would prefer that.
+> Just don't reach for `pos`.
+
+**For synthesising (lane A's current behaviour):** `ls -i` shows distinct
+numbers; naive code that uses `d_ino` as a cheap per-entry key in a set keeps
+working; nothing appears "broken" to a casual look.
+
+**For passing `0` through (ours):**
+
+- A synthesised inode **disagrees with `stat`**. `st_ino` for the same file comes
+  from `SYS_FS_GET_META`, which reports the real `0`. So `find -inum $(stat -c
+  %i f)` finds nothing, and any program that cross-checks the two sees a file
+  whose identity changes depending on which call it asked. That is a harder bug
+  to find than an absent number.
+- It is **not stable across a rename** (the hash is of the name) and **not unique
+  across directories**, so it does not actually deliver the property the caller
+  wanted; it only delivers the appearance of it.
+- `0` is what these filesystems mean. POSIX does not promise `d_ino` is
+  meaningful on every filesystem, and the well-behaved callers — GNU `tar`,
+  `rsync`, `du` — already skip hard-link detection when the inode is `0`,
+  because Linux's own `/proc` and overlayfs corner cases taught them to.
+- A libc that invents data is the wrong place to put a workaround. If the answer
+  ever needs improving, it should improve in the kernel, where the filesystem is
+  known, and then both routes get it at once.
+
+The cost we accept: on pseudo-filesystems, tools that *do* rely on `d_ino`
+without a `0` check see every entry as identical rather than as distinct. This
+is the ordinary shape of "unknown" and is what those tools would see on Linux
+against a filesystem that reports `0`.
+
+### Reversal
+
+One line in `fill_dirent64_batch` and one in `readdir`. If it ever turns out
+that a real workload breaks on `0` where it would have survived a fake number,
+the substitution belongs in the kernel's record — not in two libc call sites
+that would then have to agree with each other forever.
+
+---
+
+## 741. `mv`'s cross-device copy uses `io::copy` and gives up telling a read failure from a write failure, rather than a hand-written loop that would give up sparse files
+
+**Date:** 2026-09-01
+**Decided by:** Claude (autonomous)
+**Lane:** B
+
+**In short:** When `mv` cannot rename a file — because the two names are on
+different disks — it has to copy the bytes and delete the original. There are
+two ways to move those bytes. One asks the kernel to do it (`copy_file_range`),
+which never brings the data into the program at all and, crucially, notices when
+a file has *holes* in it — the unwritten regions of a "sparse" file, which is how
+a 4 GB disk image can occupy 200 MB — and reproduces them as holes. The other is
+a loop: read a block, write a block, repeat. The loop is slower and turns every
+hole into gigabytes of literal zeroes, but it knows which of the two files failed
+when something goes wrong, because it does the two calls itself.
+
+We take the kernel's copy, and accept that a failure part-way through is
+reported as `error writing 'dst'` even when it was really the source that failed.
+
+### The thing being traded
+
+GNU distinguishes them. `copy_reg` has its own `error reading %s` and
+`error writing %s` sites (`copy.c:1287`, `copy.c:1300`) because it does the read
+and the write itself. It *also* reaches for `copy_file_range` first and only
+falls back to the loop — so upstream gets both, at the cost of writing the
+fast path and the slow path and the code that chooses between them.
+
+Rust's `std::io::copy` is specialised to `copy_file_range` when both sides are
+files. That specialisation is the whole reason to use it, and it is also why the
+error comes back undifferentiated: one call, one `io::Error`, no field saying
+which descriptor it was about.
+
+### Why the kernel copy wins
+
+**The sparse-file loss is silent and permanent; the diagnostic loss is loud and
+recoverable.** A user who moves a sparse file across a filesystem boundary with a
+read/write loop gets a file that is byte-for-byte identical and takes twenty
+times the disk space, and nothing tells them — the copy "succeeded". A user who
+hits an I/O error gets a diagnostic naming one of the two files, an errno, and a
+non-zero exit status; if the errno is ambiguous they can look at both. One of
+those is a data-density regression nobody will attribute to `mv`; the other is a
+sentence that is less specific than it could be.
+
+**The errno usually settles it anyway.** `ENOSPC`, `EDQUOT`, `EFBIG` are write
+failures and cannot be anything else. The genuinely ambiguous case is `EIO`, and
+`EIO` is rare.
+
+**The side we name is the side that fails.** A full destination is the ordinary
+failure of a cross-device move. A read error means the *source* medium is dying,
+which is rarer, and which the user is usually already aware of.
+
+### What was rejected
+
+**Writing the loop.** Correct diagnostics, no `copy_file_range`, sparse files
+expanded. Rejected on the paragraph above.
+
+**Writing both, as GNU does.** Two code paths and a chooser, to recover a
+sentence in a case nothing in the harness can reach — `scripts/mv-diff.sh` has
+cases for a source that will not *open* and a destination that cannot be
+*created*, but a failure part-way through the bytes needs a device that can be
+made to fail on demand. Building the second path to serve an untested case is
+how a fallback path rots: it would be exercised by nothing.
+
+**Guessing from the errno.** A table mapping `ENOSPC` and friends to "write" and
+everything else to "read" is right in the easy cases, which are the ones where
+the errno already told the user, and wrong exactly where it matters, since `EIO`
+would have to be assigned to one side arbitrarily. A diagnostic that is
+confidently wrong is worse than one that is honestly imprecise.
+
+### The recoverable version, if it is ever wanted
+
+Keep `io::copy` and learn the side *after* it fails, from the descriptors rather
+than from the error: attempt a zero-length read on the source. If the source is
+no longer readable, the failure was the read. One extra syscall, on a path that
+has already failed, and no second copy loop. Logged as
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE` rather
+than done, because it should land with the fixture that can test it — a
+destination filesystem small enough to fill, which several other unmeasured cases
+also want.
+
+### Reversal
+
+One statement. `io::copy(&mut source, &mut dest)` in `copy_across_devices` is the
+whole of the decision; replacing it with a loop changes nothing else, since the
+open, the create, the four preservation steps and the two error sentences around
+it are already separate and already correct.

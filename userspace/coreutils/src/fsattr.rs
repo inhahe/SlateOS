@@ -1,5 +1,6 @@
-//! Writing a file's metadata *by path*: its timestamps, its mode, its owner and
-//! its extended attributes.
+//! Writing a file's metadata *by path* — its timestamps, its mode, its owner and
+//! its extended attributes — and reading the same four off the source they are
+//! being copied from.
 //!
 //! `std` can read all three and write almost none of them. [`fs::set_permissions`]
 //! is the one exception, and even it takes the mode through an opaque
@@ -29,6 +30,26 @@
 //! symbolic link rather than on what it names, because `cp -P -p` stamps the
 //! link it just made. One enum answers that question for all of them rather
 //! than four booleans spelled four ways.
+//!
+//! # The read half is here because it is the write half's argument
+//!
+//! [`times_of`], [`owner_of`] and [`permission_bits`] read a source's
+//! attributes; the rest of the module writes them. They belong together because
+//! each exists solely to produce what one of the writes consumes, and because
+//! each is a *portability* question with the same two answers as its write:
+//! `MetadataExt::mode` and `MetadataExt::uid` do not exist off unix, so both
+//! come in a `#[cfg]` pair whose non-unix arm has to agree with the non-unix arm
+//! of [`set_mode`] and [`set_owner`] about what a host with no modes and no uids
+//! should do. Splitting them would put the two halves of that agreement in two
+//! files. [`is_denied_ownership`] and [`chown_privileges`] are here for the same
+//! reason from the other end: they interpret [`set_owner`]'s failure, and an
+//! `EPERM` from a `chown` means "you are not root", which is a fact about the
+//! syscall rather than about any one caller.
+//!
+//! They were `cp`'s private functions until `mv` needed them: its cross-device
+//! fallback is a copy, so it preserves exactly what `cp -p` does and must get
+//! the same ordering and the same non-unix answers. Copying five functions into
+//! a second binary would have been five more chances for the two to drift.
 //!
 //! The one asymmetry is that the mode is written *twice* where ACLs are
 //! involved, and deliberately: [`Xattrs::Permissions`] carries the access ACL,
@@ -178,6 +199,24 @@ impl Times {
         }
         times
     }
+}
+
+/// The two timestamps of `meta`, in the form [`set_times`] takes.
+///
+/// GNU reads these out of the `struct stat` it is already holding, where they
+/// cannot fail. `std` hands them back as a `Result` because a platform can
+/// genuinely lack one, so the failure is reported rather than turned into
+/// [`When::Omit`] — a copy silently keeping *its own* modification time is
+/// exactly the wrong answer `-p` was given to prevent.
+///
+/// # Errors
+///
+/// Whatever `std` said about reading either stamp.
+pub fn times_of(meta: &std::fs::Metadata) -> io::Result<Times> {
+    Ok(Times {
+        accessed: When::Set(meta.accessed()?),
+        modified: When::Set(meta.modified()?),
+    })
 }
 
 /// Write a file's timestamps.
@@ -382,6 +421,205 @@ pub fn set_owner(on: On<'_>, owner: Owner) -> io::Result<()> {
 #[allow(clippy::unnecessary_wraps)]
 pub fn set_owner(_on: On<'_>, _owner: Owner) -> io::Result<()> {
     Ok(())
+}
+
+/// The owner and group of `meta`, as [`set_owner`] wants them.
+#[cfg(unix)]
+#[must_use]
+pub fn owner_of(meta: &std::fs::Metadata) -> Owner {
+    use std::os::unix::fs::MetadataExt;
+    Owner::of(meta.uid(), meta.gid())
+}
+
+/// Windows files have no numeric owner. An empty [`Owner`] is one [`set_owner`]
+/// returns from without a syscall, which is the honest answer on a host where
+/// there is nothing to set.
+#[cfg(not(unix))]
+#[must_use]
+pub fn owner_of(_meta: &std::fs::Metadata) -> Owner {
+    Owner::default()
+}
+
+/// Whether the destination's owner or group is not already the source's.
+///
+/// GNU's `SAME_OWNER_AND_GROUP`, negated, and it is an optimisation with teeth:
+/// the `chown` it skips would strip the set-user-ID bit off a destination that
+/// needed no change at all.
+#[cfg(unix)]
+#[must_use]
+pub fn owner_differs(on: On<'_>, src_meta: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let dst = match on {
+        On::File(f) => f.metadata(),
+        On::Path(path, Link::Follow) => std::fs::metadata(path),
+        On::Path(path, Link::NoFollow) => std::fs::symlink_metadata(path),
+    };
+    // A destination that cannot be stat'd counts as differing: the `chown` is
+    // then attempted and reports its own failure, which says more than skipping
+    // it silently on the strength of a lookup that failed.
+    !dst.is_ok_and(|d| d.uid() == src_meta.uid() && d.gid() == src_meta.gid())
+}
+
+/// See [`owner_of`]'s non-unix arm: there is no ownership to compare.
+#[cfg(not(unix))]
+#[must_use]
+pub fn owner_differs(_on: On<'_>, _src_meta: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Whether a refused `chown` is followed by the half of it that needs no
+/// privilege.
+///
+/// Not a `bool`, for [`Link`]'s reason: `take_ownership(on, want, true)` reads
+/// as neither the question nor the answer, and the two things it could be read
+/// as — "retry" and "this is a symlink" — happen to be opposites here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(test, derive(Debug))]
+pub enum GroupRetry {
+    /// After both halves were refused, try `chown(-1, gid)`. An ordinary user
+    /// may not *give a file away* but may put it in a group they belong to, so
+    /// this recovers the half that was never the privileged one. GNU does it in
+    /// `set_owner` (`copy.c:932` and `:947`), ignoring the result and keeping
+    /// the original `errno`, because whether it worked changes nothing about
+    /// what to say next.
+    Yes,
+    /// Do not. GNU's symlink arm (`copy.c:3178`) is a bare `lchownat` with no
+    /// retry, unlike `copy_reg` and the shared tail, and the difference is
+    /// visible in `ls -l` on the copied link.
+    No,
+}
+
+/// What an attempt to give a copy its source's owner came to.
+///
+/// GNU's `set_owner` returns 1, 0 or -1 and the three are three different
+/// things rather than a success and a failure. The -1 arm is not here: upstream
+/// reaches it only under `require_preserve`, which is the *caller's* policy —
+/// `cp --preserve=ownership` sets it and `mv` never does — so this reports what
+/// happened and the caller decides whether that ends the copy.
+#[cfg_attr(test, derive(Debug))]
+pub enum Ownership {
+    /// The owner and group are the source's now. GNU's 1.
+    Taken,
+    /// They are not, and the kernel was right: an ordinary user cannot give a
+    /// file away, and this is the overwhelmingly common outcome of `cp -p`.
+    /// Nothing to report — a diagnostic here would print on every `cp -p` any
+    /// non-root user has ever run.
+    ///
+    /// **The caller must drop the set-user-ID, set-group-ID and sticky bits**
+    /// from the mode it is about to restore (GNU's `src_mode &= ~(S_ISUID |
+    /// S_ISGID | S_ISVTX)`): a set-user-ID bit on a file that is now *theirs*
+    /// would be a privilege nobody granted.
+    Denied,
+    /// It failed for a reason worth a diagnostic — either this process is root,
+    /// for whom "not permitted" is a real fault, or the errno was not a refusal
+    /// at all. The caller writes the sentence, which is not the same in the two
+    /// programs that need one. The set-ID bits must be dropped for this outcome
+    /// too; GNU falls through to the same `return 0`.
+    Failed(io::Error),
+}
+
+/// Give `on` the owner and group in `want`, with GNU's retry and GNU's reading
+/// of what a refusal means.
+///
+/// The whole of `set_owner` (`copy.c:895`) bar two things the caller keeps: the
+/// diagnostic, whose wording differs between programs, and the narrowing of an
+/// *existing* destination's mode before the handover, which `cp` alone reaches
+/// — `mv`'s cross-device fallback has always just unlinked the destination, so
+/// its `new_dst` is unconditionally true.
+///
+/// Shared rather than written twice for the reason the readers above it are:
+/// the retry, the `EPERM`-or-`EINVAL` test and the root check are one decision
+/// with three moving parts, and a second copy of it would be three more chances
+/// for `cp -p` and `mv` across devices to disagree about who owns the result.
+pub fn take_ownership(on: On<'_>, want: Owner, retry: GroupRetry) -> Ownership {
+    let Err(e) = set_owner(on, want) else {
+        return Ownership::Taken;
+    };
+    if is_denied_ownership(&e) {
+        if retry == GroupRetry::Yes {
+            // Deliberately discarded, and the original error deliberately kept:
+            // see [`GroupRetry::Yes`].
+            let _ = set_owner(on, want.group_only());
+        }
+        if !chown_privileges() {
+            return Ownership::Denied;
+        }
+    }
+    Ownership::Failed(e)
+}
+
+/// Whether a [`set_owner`] was refused for want of privilege rather than for a
+/// reason worth reporting.
+///
+/// GNU tests `errno == EPERM || errno == EINVAL` in both `chown_failure_ok` and
+/// `owner_failure_ok`. `EINVAL` is there because some systems answer a request
+/// to set an unsupported owner that way rather than with `EPERM`.
+///
+/// Deliberately not [`io::ErrorKind::PermissionDenied`], which also covers
+/// `EACCES` — and `EACCES` from a `chown` means a directory on the path is not
+/// searchable, which is a real fault and must be reported.
+#[must_use]
+pub fn is_denied_ownership(e: &io::Error) -> bool {
+    /// `EPERM`.
+    const OPERATION_NOT_PERMITTED: i32 = 1;
+    /// `EINVAL`.
+    const INVALID_ARGUMENT: i32 = 22;
+    matches!(
+        e.raw_os_error(),
+        Some(OPERATION_NOT_PERMITTED | INVALID_ARGUMENT)
+    )
+}
+
+/// GNU's `chown_privileges` and `owner_privileges`, which on anything but
+/// Solaris are one question: is this root?
+///
+/// It decides whether a refused [`set_owner`] is reported. As root it is a real
+/// failure — root's `chown` does not fail for want of permission — and for
+/// everyone else it is the ordinary state of affairs.
+///
+/// Its own `geteuid` binding, rather than a call to
+/// [`can_write_any_file`](crate::overwrite::can_write_any_file), because
+/// upstream keeps them apart too — this is `copy.c:3018` and that is
+/// `lib/write-any-file.c`, each with its own `geteuid () == ROOT_UID`. The
+/// expressions coincide; the questions do not, and folding them would make a
+/// future divergence in either one silently change the other.
+#[cfg(unix)]
+#[must_use]
+pub fn chown_privileges() -> bool {
+    unsafe extern "C" {
+        fn geteuid() -> u32;
+    }
+
+    // SAFETY: `geteuid` takes no arguments, dereferences nothing, and cannot
+    // fail — POSIX gives it no error return.
+    unsafe { geteuid() == 0 }
+}
+
+/// Windows has no `chown` for [`set_owner`] to fail at, so nothing consults
+/// this. Answering "not privileged" keeps any future caller on the quiet path
+/// rather than the reporting one.
+#[cfg(not(unix))]
+#[must_use]
+pub fn chown_privileges() -> bool {
+    false
+}
+
+/// The permission and special bits — `07777` — of `meta`.
+#[cfg(unix)]
+#[must_use]
+pub fn permission_bits(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    meta.mode() & 0o7777
+}
+
+/// Windows has no mode bits. `0o777` rather than `0` so that the arithmetic in
+/// `cp`'s directory walk — withhold group/other write, put it back if the
+/// directory did not get it — cancels out to no change at all, which is the
+/// right answer on a host where every `chmod` is a no-op anyway.
+#[cfg(not(unix))]
+#[must_use]
+pub fn permission_bits(_meta: &std::fs::Metadata) -> u32 {
+    0o777
 }
 
 /// Write a file's permission and setuid/setgid/sticky bits — `chmod(2)`'s

@@ -299,14 +299,14 @@ MUTATIONS = [
     ),
     (
         "the library does not name the macros it lists",
-        "                &mac.name,\n                if selected { TEXT } else { SUBTEXT1 },",
-        '                "",\n                if selected { TEXT } else { SUBTEXT1 },',
+        "                    &mac.name,\n                    if selected { TEXT } else { SUBTEXT1 },",
+        '                    "",\n                    if selected { TEXT } else { SUBTEXT1 },',
         ["the_sidebar_names_every_macro_it_has_room_for"],
     ),
     (
         "a script that does not parse says nothing about where it went wrong",
-        "                err,\n                RED,",
-        '                "",\n                RED,',
+        "                    err,\n                    RED,",
+        '                    "",\n                    RED,',
         ["a_script_that_does_not_parse_says_where_it_went_wrong"],
     ),
     (
@@ -342,8 +342,8 @@ MUTATIONS = [
     ),
     (
         "the speed pads are hit-boxed where they are not drawn",
-        "                f.hit(Target::Speed(s), rect);",
-        "                f.hit(Target::Speed(s), rect.translated(0.0, -rect.h));",
+        "            f.hit(Target::Speed(s), rect);",
+        "            f.hit(Target::Speed(s), rect.translated(0.0, -rect.h));",
         ["every_hit_box_has_ink_painted_at_exactly_that_rectangle"],
     ),
     (
@@ -354,8 +354,8 @@ MUTATIONS = [
     ),
     (
         "the repeat pads are not clickable at all",
-        "                f.hit(Target::Repeat(m), rect);",
-        "                let _ = rect;",
+        "            f.hit(Target::Repeat(m), rect);",
+        "            let _ = rect;",
         ["every_control_that_is_painted_can_be_clicked"],
     ),
     # The `pads.is_empty()` and `each <= 0.0` guards below were mutated away in
@@ -453,8 +453,8 @@ MUTATIONS = [
     ),
     (
         "the wheel scrolls whatever it is over, including the header",
-        "                } else {\n                    EventResult::Ignored\n                }\n            }\n            _ => EventResult::Ignored,\n        }\n    }",
-        "                } else {\n                    self.scroll_actions(rows)\n                }\n            }\n            _ => EventResult::Ignored,\n        }\n    }",
+        "                    self.scroll_actions(rows)\n                } else {\n                    EventResult::Ignored\n                }",
+        "                    self.scroll_actions(rows)\n                } else {\n                    self.scroll_actions(rows)\n                }",
         ["a_wheel_over_nothing_scrolls_nothing"],
     ),
     (
@@ -504,6 +504,65 @@ MUTATIONS = [
         "        let next = step(self.selected_action_idx, delta, n);",
         "        let next = self\n            .selected_action_idx\n            .map_or(0, |i| i.saturating_add_signed(delta));",
         ["the_selection_never_names_a_row_that_does_not_exist"],
+    ),
+    # --- The three faults the per-pass containment sweep turned up (lesson 108).
+    # None of them is visible to the window-level tests: the window bounds a
+    # run's left and right edges and never its top and bottom, and it bounds a
+    # fill against the *window*, which every pass is well inside.
+    (
+        "the script error strip is hung off the text area instead of the body",
+        "                body.bottom() - err_h,",
+        "                text_area.bottom(),",
+        # The two agree exactly until `text_area`'s height clamps at zero, which
+        # is what a body shorter than its own four points of padding does.
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the help card's heading is inked whether or not the card has room",
+        "        if y + l.font <= card.bottom() {",
+        "        if true {",
+        # The card is clamped to the window, so this one escapes the window too
+        # -- and still no window test sees it, because it is a *run* and the
+        # only vertical bound in the suite is on fills.
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a line is centred in a band too short to hold it",
+        "fn centre_line(band: Rect, size: f32) -> Option<f32> {\n    (band.h + 0.01 >= size).then(|| band.y + (band.h - size) / 2.0)\n}",
+        "fn centre_line(band: Rect, size: f32) -> Option<f32> {\n    Some(band.y + (band.h - size) / 2.0)\n}",
+        # Centring alone puts half the line above the band's top edge and the
+        # rest below its bottom, in every heading strip, footer button and row
+        # in the program at once.
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the recording dot is centred in the header at its nominal size",
+        "            let dot = dot.min(head.h);",
+        "",
+        # A fill, and therefore the one fault of these six that a *window* test
+        # could in principle have caught -- except that the header is nowhere
+        # near the window's bottom edge, so it paints on the toolbar and the
+        # window is none the wiser. It needed the sliver height in `GRID_H`:
+        # between an empty header and one a whole line tall there is a band of
+        # sizes the grid did not sample at all.
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the pads' headings are placed by offset instead of measured in a band",
+        "        if let Some(ty) = centre_line(speed_head, l.small) {",
+        "        if let Some(ty) = Some(pads.y + (quarter - l.small) / 2.0) {",
+        # This is the form the two headings were written in. It reads as a
+        # centring and is not one: a quarter of a squeezed properties panel is
+        # shorter than a line, and the heading then sits above the strip.
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the playing marker is three points wide whatever the row measures",
+        "                    Rect::new(rect.x, rect.y, 3.0_f32.min(rect.w), rect.h),",
+        "                    Rect::new(rect.x, rect.y, 3.0, rect.h),",
+        # A literal width, and the only thing in an action row that no other
+        # measurement bounds.
+        ["no_pass_paints_outside_the_region_it_owns"],
     ),
 ]
 

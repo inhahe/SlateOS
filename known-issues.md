@@ -103043,6 +103043,136 @@ top edge, in an early-return arm for the empty case. Those arms are written
 first, before anyone has thought about small windows, and they are the only
 paint in the pass, so no sibling ever collides with them and reveals the fault.
 
+**Result of that grep (2026-09-01).** It ran over all 76 wired apps and found
+exactly one candidate outside dbviewer, in `apps/automator`. Following it up
+turned into Lesson 109.
+
+---
+
+### Lesson 109: centring is not a bound, and a sub-pass's box is the test's to choose (lane C, 2026-09-01)
+
+**In short:** Lesson 108's grep pointed at automator, which had no per-pass
+containment test at all — only a window-level one. Adding one found *six*
+faults, none of which any of automator's 157 existing tests could see. Five of
+the six are the same mistake written five ways: a line of text placed by
+*centring* it in a strip, with nothing checking that the strip is as tall as the
+line. The sixth was found only after the test was taught to hand a sub-pass a
+box the layout does not currently produce.
+
+**Rule 1 — vertical centring is not a vertical bound.** `band.y + (band.h -
+size) / 2.0` is *above* `band.y` the instant `band.h < size`, and hangs the same
+distance below `band.bottom()`. Every heading strip, footer button, list row and
+status bar in a resizable layout has a window size at which it is squeezed to
+less than one line, so this is not a corner case; it is what every small window
+does. The campaign already knew the horizontal form of this (`centred` clamps
+its offset at zero — automator had that fix already, and a mutation row for it).
+The vertical form went unnoticed because **both** window-level text tests in
+this program bound a run's left and right edges and neither binds its top and
+bottom — a run has no height in the command stream, so you have to supply
+`font_size` as its height yourself before the question can even be asked.
+
+The fix is one helper, `centre_line(band, size) -> Option<f32>`, returning
+`None` when the band cannot hold the line, with all eighteen call sites going
+through it. **Not** eighteen copies of the comparison — which is exactly how the
+rule would come to hold in seventeen places and not the eighteenth.
+
+Two variants of the same fault that the helper does not cover, and which are
+worth looking for separately:
+
+- **A fill of a literal size, centred.** The header's recording dot is
+  `l.small * 0.9` square, centred in the header; in a header shorter than that
+  it painted over the toolbar. Fix: `dot.min(head.h)` — shrink to the band
+  rather than centre in it. Being a fill, this one *is* a complete witness, so
+  a window-level fill test could have caught it — except the header is nowhere
+  near the window's edge, so it never escaped the window.
+- **A band written as an offset rather than as a rectangle.** `draw_pads` split
+  its strip into quarters by writing `pads.y + (quarter - small) / 2.0` inline.
+  There is no band there for a helper to be given. Fix: name the four quarters
+  as `Rect`s, then centre in them.
+
+**Rule 2 — a sub-pass's contract is "stay inside the box you are given", for
+*any* box.** The script tab's error strip was hung off the bottom of its text
+area instead of the bottom of its body; the two agree exactly until the text
+area's height clamps at zero, which needs a body under about seven points tall.
+No window in the size grid splits the list into a body that short — so the fault
+sat in the tree with a containment sweep over it that could not reach it, and
+its mutation row survived.
+
+A sub-pass *takes its box as an argument*, which means the test can simply hand
+it one. `squeezes(r)` yields `r` plus `r` with heights `[0, 1, 3, 6, 12]` and
+widths `[1, 5, 30]`, and every Rect-taking pass is swept over all of them. That
+found the strip immediately, and then two more faults on the next two runs: the
+pads' headings above, and an action row's playing marker, a fill of a literal
+three points' width — the one thing in a row that no other measurement bounds.
+
+**Rule 3 — sample the sliver.** automator's height grid was
+`[0, 18, 55, 140, 700, 1100]`. Zero finds nothing, because every pass returns
+early on an empty box; eighteen finds nothing, because by then everything fits.
+The band *between* them — a strip that exists but cannot show anything — is
+where the recording dot's fault lived. A `6.0` was added. **Any size grid that
+jumps from zero straight to a comfortable size is missing its most productive
+sample.**
+
+**Where else to look.** The other 46 unwired apps get their containment sweep
+when they are wired, and it should be written with `squeezes` from the start.
+Of the wired apps, the grep to run is for vertical centring that is not clamped:
+
+```
+(\w+)\.y \+ \(\1\.h - <size>\) / 2\.0
+```
+
+That grep, run over `apps/*/src/main.rs` on 2026-09-01, reports **109 sites in
+42 apps** (automator itself still accounts for 8 of them — the *clamped* forms,
+`dot.min(head.h)` and `l.button.min(bar.h)`, which are correct and match the
+same shape). So it is a candidate list, not a fault list, and each site has to
+be read: the question is whether anything guarantees the band is at least as
+tall as what is being centred in it. Where nothing does, the fix is
+`centre_line` for a run and `.min(band.h)` for a fill.
+
+Also grep for a literal-sized fill centred in a band. Both shapes are cheap to
+check and, on this evidence, usually present.
+
+**Tracked as C-CENTRING-IS-NOT-A-BOUND below.**
+
+---
+
+## C-CENTRING-IS-NOT-A-BOUND (lane C)
+
+**Status:** OPEN 2026-09-01
+
+**In short:** In 42 of the campaign's apps, a line of text (or a fixed-size
+square) is positioned by centring it in a strip, with nothing checking the strip
+is as tall as the thing being centred. When the window is small enough that the
+strip is squeezed below one line's height, the centred thing sits partly above
+the strip and partly below it — painting on whatever is next door. automator had
+six such faults and none of its 157 tests could see any of them; see Lesson 109
+for why (no window-level test in the campaign binds a run's *top and bottom*
+edges, because a run has no height in the command stream).
+
+**Where.** `apps/*/src/main.rs`, the shape `x.y + (x.h - <size>) / 2.0`. The
+2026-09-01 count is 109 sites in 42 apps, largest first: automator 8 (already
+fixed — the 8 remaining are the clamped, correct form), taskscheduler 8, hangman
+6, sokoban 6, emojipicker 5, snippets 5, asteroids/camera/magnifier/maze 4 each,
+calculator/klotski/pipes/rush/sliding/snake 3 each, and 26 apps with 1–2.
+
+**It is a candidate list, not a fault list.** A site is fine if something
+guarantees the band is at least as tall as the line — a `l.button.min(bar.h)`
+clamp, or a row height with a floor that exceeds the font. Each site has to be
+read.
+
+**The proper fix, per app:** add `centre_line(band, size) -> Option<f32>` (see
+`apps/automator/src/main.rs`), route every unclamped site through it, shrink
+literal-sized *fills* with `.min(band.h)` instead, name any band that is
+currently written as a bare offset as a `Rect`, and — this is the part that
+makes it stick — give the app a `no_pass_paints_outside_the_region_it_owns`
+test with `squeezes()`, plus a sliver entry in its height grid. Without the
+test the fix is unverified and the next edit reintroduces it.
+
+**If never fixed:** nothing is corrupted and nothing crashes; a user who makes a
+window very small sees text overlapping the panel next door. It does not get
+worse with time, but every newly wired app adds sites at the current rate of
+roughly two or three per app.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

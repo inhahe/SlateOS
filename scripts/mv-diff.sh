@@ -1892,6 +1892,57 @@ FAR='printf hello > f'
 ANSWERS=$'n\n'
 run_case -iv @FAR@/f g
 
+# `-u` across the boundary, which is a *different comparison* from §17's, not
+# just the same one in a new place. GNU passes `utimecmp` a "truncate the
+# source" flag whenever the move crosses a filesystem (`copy.c:2358`:
+# `preserve_timestamps && !(move_mode && same st_dev)`, and `mv` sets both of
+# those unconditionally), because the source's time is about to be *written*
+# onto the far side rather than carried by a rename — so what the destination
+# will end up holding is the source's time as that filesystem can store it, and
+# comparing against the untruncated one makes a repeated `mv -u` never settle.
+#
+# The five cases below are the comparison's shapes: equal, outside the
+# two-second quick exit in each direction, and inside it differing only below
+# the second, both ways round.
+#
+# What this cannot measure, and it is most of it: both filesystems here keep
+# nanoseconds. The deduced resolution is therefore one nanosecond, truncation
+# is the identity, and — because upstream skips the whole deduction when the
+# resolution is already the syscall's — control never reaches the part of
+# `utimecmp` that the flag exists for. Breaking that part outright leaves all
+# five of these passing; only the unit tests in `utimecmp.rs` catch it.
+# Measuring it here would need a destination that stores whole seconds — a FAT
+# image — which the harness cannot mount without root. What these five do pin
+# is that turning the flag on changed nothing on a filesystem that loses
+# nothing, which is a real regression risk: the deduction reads the
+# destination's stamps and writes a probe onto it, and `STAMPS=1` here would
+# catch a probe left behind or a destination disturbed by a comparison.
+TREE='printf old > g; touch -d "2009-09-09 09:09:09.987654321" g'
+FAR='printf hello > f; touch -d "2004-04-04 04:04:04.123456789" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+TREE='printf old > g; touch -d "1999-09-09 09:09:09.987654321" g'
+FAR='printf hello > f; touch -d "2004-04-04 04:04:04.123456789" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+# Same instant on both sides: equal is not older, so nothing moves.
+TREE='printf old > g; touch -d "2004-04-04 04:04:04.123456789" g'
+FAR='printf hello > f; touch -d "2004-04-04 04:04:04.123456789" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+# Inside the two-second window and differing only below the second, in both
+# directions — past the quick exits, so the resolution gets deduced. A
+# comparison that rounded to whole seconds would call these equal and stop
+# moving the file in the second case.
+TREE='printf old > g; touch -d "2004-04-04 04:04:04.500000000" g'
+FAR='printf hello > f; touch -d "2004-04-04 04:04:04.400000000" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+TREE='printf old > g; touch -d "2004-04-04 04:04:04.400000000" g'
+FAR='printf hello > f; touch -d "2004-04-04 04:04:04.500000000" f'
+STAMPS=1
+run_case -uv @FAR@/f g
+
 # `--no-copy` is the option that turns this whole section off: across a
 # boundary it makes the `EXDEV` an error instead of a fallback, which is the
 # only place it has any behaviour at all. This is §20's entry given the one

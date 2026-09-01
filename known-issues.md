@@ -104715,13 +104715,25 @@ target was *not* stamped through the link. Six `xfail_case`s in
 `scripts/mv-diff.sh` §22 became XPASS on the first run after the fix and are now
 plain `run_case`s.
 
-**Two things that did not fall out of it, and are still open.** The
-`UTIMECMP_TRUNCATE_SOURCE` half of `-u`'s comparison is now *reachable* — there
-is a preserved timestamp for the truncation to be about — and is still not
-implemented; see `destination_is_older`'s doc. And `preserve_links` across the
-fallback is untouched; that half has been split out into its own entry below,
-because leaving it under a heading marked FIXED would make a reader who found
-the §22 case believe it was already dealt with.
+**Two things that did not fall out of it.** The `UTIMECMP_TRUNCATE_SOURCE` half
+of `-u`'s comparison became *reachable* with this fix — there is a preserved
+timestamp for the truncation to be about — and was still not implemented when
+this paragraph was first written. **It was implemented the same day**, in
+`userspace/coreutils/src/utimecmp.rs`: a port of gnulib's `lib/utimecmp.c` that
+deduces the destination filesystem's resolution from the trailing zeros of its
+three stamps and, when that is not decisive, measures it by writing a probe
+timestamp and reading back which digits survived. `mv.rs`'s
+`destination_is_older` became `destination_is_up_to_date` and passes the flag as
+`!fileid::same_device(src, dst)`, which is what upstream's expression reduces to
+for `mv`. Five `-u` cases were added to §22 — with the caveat, stated there,
+that they cannot *measure* the truncation: both filesystems the harness can
+reach keep nanoseconds, so the resolution deduces to one nanosecond, the
+truncation is the identity, and upstream's own `SYSCALL_RESOLUTION < res` guard
+skips the interesting code entirely. Breaking that code leaves all five passing;
+only the unit tests catch it. And `preserve_links` across the fallback is
+untouched; that half has been split out into its own entry below, because
+leaving it under a heading marked FIXED would make a reader who found the §22
+case believe it was already dealt with.
 
 ---
 

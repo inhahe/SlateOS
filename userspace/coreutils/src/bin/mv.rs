@@ -212,7 +212,9 @@
 use coreutils::backup::{self, BackupType};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
-use coreutils::fileid::{Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry};
+use coreutils::fileid::{
+    self, Copied, FileId, file_id, nlink, same_entry, same_inode, split_entry,
+};
 use coreutils::fsattr::{self, GroupRetry, Link, On, Ownership};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
@@ -220,6 +222,7 @@ use coreutils::overwrite::{self, Interactive};
 use coreutils::pathname::strip_trailing_slashes;
 use coreutils::quote::{os_bytes, os_from_bytes, quoteaf_os, quotef_os};
 use coreutils::stdfd::{self, Stream};
+use coreutils::utimecmp;
 use coreutils::yesno::{Answers, StdinAnswers};
 use std::borrow::Cow;
 use std::ffi::OsString;
@@ -1807,7 +1810,10 @@ fn refuse_overwrite_checks<O: Write, E: Write>(
 
     // 2. Is the destination already at least as new as the source? (`-u`,
     //    `copy.c:2353`.) Silent, and a success.
-    if job.flags.update && !src_meta.is_dir() && !destination_is_older(src_meta, dst_meta) {
+    if job.flags.update
+        && !src_meta.is_dir()
+        && destination_is_up_to_date(src_meta, target, dst_meta)
+    {
         // …but not *quite* a no-op, because a skipped pair still goes into the
         // table (`copy.c:2380`). Upstream explains it and then flags what it
         // costs, in two comments a dozen lines apart:
@@ -2054,46 +2060,45 @@ fn make_backup<O: Write, E: Write>(
     }
 }
 
-/// `-u`'s question: is the destination **older** than the source, and so worth
-/// replacing? GNU asks it as `0 <= utimecmpat (…)` and skips when that holds,
-/// which is the same question with the sign flipped (`copy.c:2378`).
+/// `-u`'s question: is the destination already at least as new as the source,
+/// and so not worth replacing? GNU asks it as `0 <= utimecmpat (…)` and skips
+/// when that holds (`copy.c:2378`).
 ///
 /// Modification times only — `-u` has never consulted `st_ctime` or the size —
-/// and equal counts as **not** older, so `mv -u a b` between two files stamped
-/// the same second-and-nanosecond leaves `b` alone. That is the case `touch -r`
-/// produces and the one a rerun of the same `mv` produces, so it is the common
-/// one rather than a corner.
+/// and equal counts as at least as new, so `mv -u a b` between two files
+/// stamped the same second-and-nanosecond leaves `b` alone. That is the case
+/// `touch -r` produces and the one a rerun of the same `mv` produces, so it is
+/// the common one rather than a corner.
 ///
-/// # What this leaves out, and when it would matter
+/// # The truncation, and why the flag is exactly "crosses a filesystem"
 ///
-/// Upstream passes `UTIMECMP_TRUNCATE_SOURCE` when the move is **across
-/// devices** (`mv` sets `preserve_timestamps`, so the flag is on unless
-/// `move_mode && dst_sb.st_dev == src_sb.st_dev`). Under it, gnulib rounds the
-/// source's timestamp down to the destination filesystem's resolution before
-/// comparing, so a source at `.5` seconds does not count as newer than a
-/// destination at `.0` on a filesystem that cannot store the half. Discovering
-/// that resolution means writing timestamps to the destination and reading them
-/// back (`lib/utimecmp.c`), and it can only change the answer when the two
-/// stamps are already within two seconds of each other *and* the filesystems'
-/// resolutions differ.
+/// Upstream computes the flag as
 ///
-/// It is not implemented here, and it is now **reachable**, which it was not
-/// before 2026-09-01: until then the cross-device fallback was `fs::copy` and
-/// carried no timestamp at all, so there was no preserved stamp for the
-/// truncation to be about. [`copy_across_devices`] carries both stamps now, so
-/// the second `mv -u` of the same pair across a boundary asks the question
-/// upstream asks — and answers it without the rounding. See `known-issues.md` →
+/// ```c
+/// x->preserve_timestamps && ! (x->move_mode && dst_sb.st_dev == src_sb.st_dev)
+/// ```
+///
+/// `mv` sets both `preserve_timestamps` (`mv.c:137`) and `move_mode`
+/// (`mv.c:119`) unconditionally, so for this program the whole expression
+/// reduces to `dst_dev != src_dev` — the move is going to be a copy rather than
+/// a rename. That is the only case in which the destination's timestamp is a
+/// *rounded* version of the source's rather than the same bytes, and rounding is
+/// the thing [`coreutils::utimecmp`] corrects for; see that module for what it
+/// costs and when it touches the disk.
+///
+/// The correction became reachable on 2026-09-01. Until then the cross-device
+/// fallback was `fs::copy` and carried no timestamp at all, so there was no
+/// preserved stamp for a truncation to be about; [`copy_across_devices`] carries
+/// both stamps now. See `known-issues.md` →
 /// `B-MVS-CROSS-DEVICE-FALLBACK-THROWS-AWAY-THE-TIMES-AND-THE-OWNER`, whose fix
-/// is what made this the last unimplemented half.
-fn destination_is_older(src_meta: &fs::Metadata, dst_meta: &fs::Metadata) -> bool {
-    match (dst_meta.modified(), src_meta.modified()) {
-        (Ok(dst), Ok(src)) => dst < src,
-        // A filesystem that cannot say when a file changed cannot answer `-u`'s
-        // question, so nothing is skipped for want of an answer: the move goes
-        // ahead, which is what `mv` without `-u` would have done. Preferring the
-        // skip would silently discard a source on no evidence.
-        _ => true,
-    }
+/// is what made this half necessary.
+fn destination_is_up_to_date(
+    src_meta: &fs::Metadata,
+    target: &Path,
+    dst_meta: &fs::Metadata,
+) -> bool {
+    let crosses_filesystem = !fileid::same_device(src_meta, dst_meta);
+    utimecmp::utimecmp(target, dst_meta, src_meta, crosses_filesystem).at_least_as_new()
 }
 
 /// GNU's `abandon_move` (`copy.c:2062`): should this move be given up rather

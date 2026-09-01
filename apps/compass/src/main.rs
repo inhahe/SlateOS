@@ -398,10 +398,19 @@ impl Layout {
         let body_h = (h - header_h - status_h).max(0.0);
         let body = Rect::new(0.0, header_h, w, body_h);
 
-        // The readouts column is worth having only if it leaves the rose more
-        // room than the column takes. Below that the rose keeps the window.
+        // The readouts column is worth having only if what it holds still fits
+        // in it. A column too narrow for its own numbers is a column of
+        // ellipses, and the rose is the better use of that width.
+        //
+        // The second half of this test used to be `w - wanted_panel >=
+        // wanted_panel` -- "the panel must not take more than it leaves". The
+        // mutation sweep could not make that clause matter, and it cannot: the
+        // panel is 32% of the window, so what it leaves is 68%, and above the
+        // 300-point clamp the window is already wider than 600. It was a
+        // condition that had never once been false. Taking 32% is what keeps
+        // the panel the smaller half, and that is what the test asserts now.
         let wanted_panel = (w * 0.32).clamp(0.0, 300.0);
-        let panel_w = if wanted_panel >= small * 8.0 && w - wanted_panel >= wanted_panel {
+        let panel_w = if wanted_panel >= small * 8.0 {
             wanted_panel
         } else {
             0.0
@@ -3001,10 +3010,15 @@ mod tests {
                     continue;
                 }
                 for (target, rect) in app.frame(w, h).hits() {
+                    // The *bottom* edge, not the top. Asking only where a
+                    // control starts lets one through that starts above the
+                    // line and ends below it, which is the whole shape of the
+                    // bug: the visible half is what the user aims at and the
+                    // hidden half is what takes the press.
                     assert!(
-                        rect.y < l.status.y + 0.01,
-                        "{name} at {w}x{h}: {target:?} at {rect:?} sits under the status \
-                         line, which is drawn after it"
+                        rect.bottom() < l.status.y + 0.01,
+                        "{name} at {w}x{h}: {target:?} at {rect:?} reaches under the \
+                         status line, which is drawn after it"
                     );
                 }
             }
@@ -3326,6 +3340,30 @@ mod tests {
             (app.heading - 58.0).abs() < 0.5,
             "declination was not taken off the pressed bearing: magnetic {}",
             app.heading
+        );
+
+        // 45 degrees is the one bearing a compass that measured its angle from
+        // east rather than from north would still get right, because the two
+        // offsets are equal there. So press somewhere they are not: 20 degrees
+        // reads back as 70 from a rose whose axes are swapped, and 20 is not a
+        // multiple of 30, so the rose's own degree labels cannot supply it.
+        let (cx, cy) = rose_centre(&app, SIZE);
+        let n = point(&app, SIZE, "N");
+        let ring = ((n.0 - cx).powi(2) + (n.1 - cy).powi(2)).sqrt();
+        let twenty = 20.0_f32.to_radians();
+        press(
+            &mut app,
+            (cx + ring * twenty.sin(), cy - ring * twenty.cos()),
+            SIZE,
+        );
+        assert!(
+            (app.true_heading() - 20.0).abs() < 0.5,
+            "pressing 20 degrees round the rose gave {}",
+            app.true_heading()
+        );
+        assert!(
+            shows(&app, SIZE, "20"),
+            "the heading readout did not follow the press"
         );
     }
 
@@ -3654,5 +3692,101 @@ mod tests {
             View::Waypoints,
             "the resize did not reach the hit boxes"
         );
+    }
+
+    #[test]
+    fn the_picture_is_drawn_at_the_size_render_is_given() {
+        // `render` is the only door the compositor draws through. Drawing a
+        // constant-sized picture there would leave the window a border of
+        // whatever was on the screen before.
+        let mut app = default_app();
+        let tree = App::render(&mut app, OTHER.0, OTHER.1);
+        let want = app.frame(OTHER.0, OTHER.1).into_tree();
+        assert_eq!(
+            format!("{:?}", tree.commands),
+            format!("{:?}", want.commands),
+            "render drew something other than the picture for {OTHER:?}"
+        );
+    }
+
+    #[test]
+    fn the_close_button_closes_the_window_and_nothing_else_does() {
+        let mut app = default_app();
+        assert!(matches!(
+            App::on_event(&mut app, &Event::CloseRequested),
+            Response::Exit
+        ));
+        for event in [
+            Event::FocusIn,
+            Event::FocusOut,
+            Event::Tick { elapsed_ms: 16 },
+        ] {
+            assert!(
+                matches!(App::on_event(&mut app, &event), Response::Redraw),
+                "{event:?} was answered with something other than a redraw"
+            );
+        }
+    }
+
+    #[test]
+    fn every_clickable_row_is_a_whole_row() {
+        // `Frame::hit` trims a hit box to the clip in force, so a row the list
+        // only half has room for answers presses over the half of it that
+        // shows -- a row painted with its lower half cut off and clickable
+        // anyway. Every row is recorded at the same pitch, so a hit box
+        // shorter than its neighbours is a row that did not fit.
+        for size in [SIZE, SHORT, (620.0, 250.0), (900.0, 200.0)] {
+            let app = listed(MAX_WAYPOINTS);
+            let frame = app.frame(size.0, size.1);
+            let heights: Vec<f32> = frame
+                .hits()
+                .iter()
+                .filter(|(t, _)| matches!(t, Target::Waypoint(_)))
+                .map(|(_, r)| r.h)
+                .collect();
+            let Some(first) = heights.first().copied() else {
+                continue;
+            };
+            for h in &heights {
+                assert!(
+                    (h - first).abs() < 0.01,
+                    "{size:?}: rows answer over {heights:?} -- one of them is a part row"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_panel_narrow_enough_to_squeeze_its_readouts_is_not_taken() {
+        // The heading is the one thing a compass exists to show. A panel too
+        // narrow to spell it is worse than no panel at all: the heading strip
+        // that replaces it gets the whole width of the window.
+        let mut app = default_app();
+        app.heading = 217.0;
+        app.declination = -13.0;
+        // 204 -- not a multiple of 30, so the rose's own degree labels cannot
+        // be mistaken for the readout.
+        let reading = format!("{:.0}", app.true_heading());
+
+        let mut seen = 0;
+        for (w, h) in GRID {
+            if Layout::solve(w, h).panel.is_empty() {
+                continue;
+            }
+            seen += 1;
+            let frame = app.frame(w, h);
+            let run = text_runs(&frame)
+                .into_iter()
+                .find(|(t, ..)| *t == reading)
+                .unwrap_or_else(|| panic!("{w}x{h}: a panel is drawn without the heading in it"));
+            let (_, _, _, size, max_width) = run;
+            let need = text::measure(&reading, size, FontWeightHint::Bold);
+            let have = max_width.unwrap_or(0.0);
+            assert!(
+                have + 0.01 >= need,
+                "{w}x{h}: the heading reads {reading} in {have} points of room and needs {need}"
+            );
+        }
+        assert!(seen > 0, "no size in the grid draws a panel");
     }
 }

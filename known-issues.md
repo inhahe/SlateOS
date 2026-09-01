@@ -102783,6 +102783,106 @@ an index or an enum payload.
 
 ---
 
+### Lesson 105: a probe placed at a symmetry of the thing under test cannot see the symmetry break (lane C, 2026-08-31)
+
+**In short:** the compass turns when you press its rose — press up and to the
+right, and the needle points north-east. The test pressed at exactly 45°,
+checked the compass read 45, and passed over a rose that measured its angle
+**from east instead of from north**. 45° is precisely the bearing where those
+two conventions agree: `atan2(dx, dy)` and `atan2(dy, dx)` return the same
+number when `dx == dy`. The test had picked the one point on the circle that
+cannot tell the two apart.
+
+The mutation was `dx.atan2(dy)` → `dy.atan2(dx)`, which turns every bearing
+into its complement: 20° reads 70°, 10° reads 80°, 120° reads −30°. The whole
+face is wrong. One press, at one angle, saw none of it.
+
+**The rule.** *When a test probes a function at a single input, ask what
+symmetries that input sits on — and move off them.* The convenient input is
+usually the symmetric one: it is the round number, the diagonal, the middle,
+the square. Those are exactly the inputs at which a swapped pair of arguments,
+a transposed pair of axes, or a flipped sign is invisible.
+
+The catalogue is short and worth memorising:
+
+| Probe | Blind to |
+|---|---|
+| 45° on a circle, or any point where `x == y` | swapping the two axes |
+| the centre of anything | a sign flip on either axis |
+| a **square** window (`600×600`) | width used where height was meant |
+| `0` or `1` as a factor | a multiply that should be an add, or vice versa |
+| an empty list, or a list of one | an off-by-one in an index or a count |
+| a palindrome, or a string of one repeated character | a reversal |
+| the identity element of any operation | that operation being replaced |
+
+Two of these were already load-bearing here and are the reason the fault was
+narrow rather than total: the window-size grid is deliberately made of
+*non-square* shapes (`1600×300` and `480×900` sit next to `900×720`), and the
+state list carries a list of one, a full list and an empty one. The rose test
+was the one place a single convenient point had been used, and it was the one
+place the sweep found a hole.
+
+**The fix is not a better assertion, it is a second point.** The 45° press
+stays — it is the clearest statement of what the control does, and it is the
+one that proves declination is taken off the pressed bearing. A press at 20° is
+added beside it, chosen because it is not a multiple of 30 (so the rose's own
+degree labels cannot supply the number the readout is checked against) and
+because sin 20 ≠ cos 20 (so a rose with swapped axes reads 70 and is caught).
+
+**Where else to look.** Any test that presses "the middle" of a control and
+asserts a coordinate came back; any layout test run at a single size; any
+geometry helper tested at 0°, 45°, 90° and nowhere else. Mechanically: grep the
+app suites for `0.5` used to derive a probe point from a pair of edges, and for
+size constants whose width equals their height.
+
+---
+
+### Lesson 106: when a mutation moves both sides of a comparison, the comparison is blind (lane C, 2026-08-31)
+
+**In short:** the waypoint list draws as many rows as fit and records a hit box
+for each. A test asserted the honest thing — *the rows that are drawn are
+exactly the rows that can be clicked* — and it passed over a list that counted
+a **half-fitting row as a row** (`floor` changed to `ceil`), which paints a row
+with its lower half cut off and lets the user click the visible sliver.
+
+It passed because the mutation adds the part row to *both* sides. It is drawn,
+so it is in the "drawn" set; it is hit-boxed, so it is in the "clickable" set.
+The two sets stayed equal while both were wrong.
+
+**The rule.** *A test that compares two quantities derived from the same
+expression proves only that the expression is used consistently — never that it
+is right.* This is the same family as lesson 104's closed loop, but the loop is
+between two **assertions** rather than between a lookup and a click, so it
+survives the lesson-104 fix (both sets here are already read from the picture).
+To break it, at least one side must come from somewhere the mutation cannot
+reach.
+
+**What broke it here was shape, not membership.** Every row is recorded at the
+same pitch, and `Frame::hit` trims a hit box to the clip in force — so the row
+that only half fits answers over a box measurably shorter than its neighbours'.
+The replacement test asserts that *every waypoint hit box has the same height*,
+which is a property of the picture that the row count cannot fake: to pass it,
+the last row must genuinely fit.
+
+The general move is to find a second, independent consequence of the fault:
+
+| the fault | the blind comparison | the independent consequence |
+|---|---|---|
+| a part row is counted | drawn set vs. clickable set | the hit box is short |
+| every row shifted by one | label found vs. label asserted (lesson 104) | the words drawn in the row |
+| a pane sized from the wrong axis | pane vs. its own contents | the pane vs. the *window* |
+| an off-by-one scroll offset | first visible vs. first drawn | the selected row is on screen |
+
+**Where else to look.** Any assertion of the form `assert_eq!(a(), b())` where
+`a` and `b` are both computed from the frame the code just drew. In the wiring
+campaign specifically: every test that pairs "is it drawn?" with "is it
+clickable?", and every one that compares a count against a count. Neither is
+wrong to have — they catch a real class of fault, where one side is updated and
+the other is not — but neither can stand alone as the owner of a mutation to
+the shared expression underneath them.
+
+---
+
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
 **Status:** OPEN 2026-08-31

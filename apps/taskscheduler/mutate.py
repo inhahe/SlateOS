@@ -46,6 +46,38 @@ handed to a sub-pass.  The two tests that hold it are
 deliberately squeezed box, because a sub-pass's contract is "stay inside the box
 you are given" for *any* box, not for the boxes today's `Layout::new` happens to
 produce.
+
+The first run of this table scored 21 of 29 and the eight survivors were worth
+more than the twenty-one kills, because they were all one of two things and
+neither was visible by reading the code:
+
+  * **Bounds nothing could squeeze.**  The two list rows lived inside their
+    loops, and the only rectangle they ever saw came from
+    `scroll_window::visible`, which counts *whole* rows -- so the row's own
+    `intersect`, the checkbox's `.min(row.h)` and every cell's `run_in` were
+    exercised at exactly one height, 32 points, and could each be deleted with
+    the suite still green.  The fix is not another assertion: it is
+    `draw_task_row` / `draw_history_row` as functions *of the row*, so the
+    sweep can hand them a three-point one.  Extracting them immediately turned
+    up a real fault the containment assertions could not see -- a row squeezed
+    to nothing still painted its background and still recorded a `TaskRow`
+    click target.
+  * **Clamps a stronger guard already dominated.**  The caret's
+    `1.5_f32.min(rect.right() - caret_x)` and `FONT_SIZE.min(rect.h)` read like
+    prudence, but the caret is drawn only where `centre_line` and `span` have
+    both answered, and those two already say the field is at least FONT_SIZE
+    tall with three points to spare on the right.  No input could make either
+    `.min` bind.  A clamp no test can reach is not a guard, it is a claim; both
+    are gone and the row that stood for them now mutates the `.min` that does
+    bind.
+
+The third survivor was the mirror-image failure, and it is why
+`a_dialog_with_room_still_shows_its_buttons` exists: every bound in this app is
+an intersection, and an intersection is just as happy to return nothing at all.
+Placing the dialog's buttons by the nominal 380 points rather than by the
+dialog's own cut-down height puts them below it, where the cut *deletes* them --
+and containment is delighted, because ink that does not exist is inside
+everything.  Containment on its own can always be satisfied by drawing nothing.
 """
 
 import sys
@@ -163,21 +195,59 @@ MUTATIONS = [
         CONTAINMENT,
     ),
     (
-        "a task row is measured without reference to the area it is in",
-        "            let Some(row) = Rect::new(area.x, row_y, area.w, ROW_HEIGHT).intersect(area) else {\n"
-        "                continue;\n"
-        "            };\n"
-        "\n"
-        "            // Row background.",
-        "            let row = Rect::new(area.x, row_y, area.w, ROW_HEIGHT);\n"
-        "\n"
-        "            // Row background.",
+        "a task row squeezed to nothing still paints and still answers clicks",
+        "        // See `render_text_field`: no area means no ink and no hit box. A row\n"
+        "        // squeezed to nothing that still records `TaskRow` is a click target\n"
+        "        // for a task the user cannot see.\n"
+        "        if row.is_empty() {\n"
+        "            return;\n"
+        "        }\n",
+        "",
+        # Not a containment fault -- a zero-sized fill is inside every region
+        # there is -- which is why the sweep asks separately that a control
+        # given an empty box draws nothing at all.
         CONTAINMENT,
     ),
     (
-        "the checkbox is drawn at its nominal size in a row of any height",
-        "            let cb_h = CHECKBOX_SIZE.min(row.h);",
-        "            let cb_h = CHECKBOX_SIZE;",
+        "the checkbox is cut to the world instead of to its row",
+        "            CHECKBOX_SIZE,\n"
+        "            CHECKBOX_SIZE,\n"
+        "        )\n"
+        "        .intersect(row)",
+        "            CHECKBOX_SIZE,\n"
+        "            CHECKBOX_SIZE,\n"
+        "        )\n"
+        "        .intersect(Rect::new(-10_000.0, -10_000.0, 20_000.0, 20_000.0))",
+        # Reachable only because `draw_task_row` takes its row as an argument:
+        # inside the loop it lived in, the row was always 32 points and a
+        # centred 16-point box always fit.  This replaces a row that mutated a
+        # `CHECKBOX_SIZE.min(row.h)` shrink -- which survived, because the
+        # `intersect` below it made the shrink redundant in every case.
+        CONTAINMENT,
+    ),
+    (
+        "a task row's cells are placed against the list, not against the row",
+        "        ] {\n"
+        "            run_in(frame, row, run, text);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /// Draw the History tab.",
+        "        ] {\n"
+        "            run_in(frame, Rect::new(row.x, row.y, row.w, ROW_HEIGHT), run, text);\n"
+        "        }\n"
+        "    }\n"
+        "\n"
+        "    /// Draw the History tab.",
+        CONTAINMENT,
+    ),
+    (
+        "a history row squeezed to nothing still paints",
+        "        // See `Self::draw_task_row`.\n"
+        "        if row.is_empty() {\n"
+        "            return;\n"
+        "        }\n",
+        "",
         CONTAINMENT,
     ),
     (
@@ -314,7 +384,10 @@ MUTATIONS = [
         "        let btn_y = dy + dialog_h - BUTTON_HEIGHT - PADDING;\n"
         "        let cancel_x = dx + dialog_w - PADDING - BUTTON_WIDTH;\n"
         "        let save_x = cancel_x - 8.0 - BUTTON_WIDTH;",
-        CONTAINMENT,
+        # The one fault in this table that containment cannot see: the buttons
+        # land below the cut-down dialog, `cut` deletes them, and a frame with
+        # no buttons in it paints outside nothing.
+        ["a_dialog_with_room_still_shows_its_buttons"],
     ),
     # -- the three controls ------------------------------------------------
     (
@@ -345,18 +418,14 @@ MUTATIONS = [
         CONTAINMENT,
     ),
     (
-        "the caret is 1.5 x FONT_SIZE whatever the field measures",
-        "                width: 1.5_f32.min(rect.right() - caret_x),\n"
-        "                height: FONT_SIZE.min(rect.h),",
-        "                width: 1.5,\n"
-        "                height: FONT_SIZE,",
-        CONTAINMENT,
-    ),
-    (
-        "the caret is placed left of the field it belongs to",
-        "                .min(rect.right() - 3.0)\n"
-        "                .max(rect.x);",
+        "the caret follows the unelided value off the field's right edge",
+        "            let caret_x = (x + text::measure(value, FONT_SIZE, FontWeightHint::Regular))\n"
         "                .min(rect.right() - 3.0);",
+        "            let caret_x = x + text::measure(value, FONT_SIZE, FontWeightHint::Regular);",
+        # The clamp that replaced two that could not be reached.  `text::measure`
+        # sizes the value before eliding, so a value wider than the field puts
+        # the caret past its right edge -- which is what the sweep's "a value far
+        # wider than the field" state is for.
         CONTAINMENT,
     ),
     (

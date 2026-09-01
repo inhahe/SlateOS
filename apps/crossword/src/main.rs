@@ -2164,7 +2164,15 @@ mod tests {
     /// than tall, taller than wide, exactly square, one so short the three
     /// bars have already spent the height, and one so narrow the clue panel
     /// cannot exist at all.
-    const SIZES: [(f32, f32); 12] = [
+    /// The last four are the slivers, and they are here for a reason the
+    /// others cannot cover. `pad` follows the window's *shorter* side and the
+    /// type sizes follow its *height*, so a tall narrow window drives them
+    /// apart -- and the bands are all `type + k * pad` tall. 133x600 is the
+    /// case where the header ends up shorter than the title it carries; the
+    /// three around it are its neighbours on both sides of that boundary, so a
+    /// change that moves the boundary shows up as a failure rather than as a
+    /// probe that quietly stops probing.
+    const SIZES: [(f32, f32); 16] = [
         (860.0, 580.0),
         (320.0, 240.0),
         (240.0, 320.0),
@@ -2177,6 +2185,10 @@ mod tests {
         (140.0, 140.0),
         (900.0, 60.0),
         (60.0, 900.0),
+        (133.0, 600.0),
+        (160.0, 900.0),
+        (110.0, 1000.0),
+        (900.0, 26.0),
     ];
 
     /// An app with puzzle `index` open, driven to the size a probe uses.
@@ -2472,6 +2484,348 @@ mod tests {
                 l.grid
             );
         }
+    }
+
+    // ── Every pass stays inside the band it owns ───────────────────
+
+    /// Boxes the layout would never hand a pass, so that a bound is checked
+    /// where it is meant to bite rather than only where it was never going to.
+    ///
+    /// Both axes: the vertical squeezes are what `centre_line` is for, and the
+    /// horizontal ones are what the `limit` argument to `text_at` is for. A run
+    /// bounded on one axis and not the other leaves the band by the other one.
+    fn squeezes(r: Rect) -> Vec<Rect> {
+        let mut out = vec![r];
+        let mut push_h = |h: f32| {
+            if h < r.h {
+                out.push(Rect::new(r.x, r.y, r.w, h));
+            }
+        };
+        for h in [0.0, 1.0, 3.0, 7.0, 13.0, 26.0] {
+            push_h(h);
+        }
+        for k in 1..16_u8 {
+            push_h(r.h * f32::from(k) / 16.0);
+        }
+        let mut push_w = |w: f32| {
+            if w < r.w {
+                out.push(Rect::new(r.x, r.y, w, r.h));
+            }
+        };
+        for w in [0.0, 1.0, 5.0, 30.0, 120.0] {
+            push_w(w);
+        }
+        for k in 1..16_u8 {
+            push_w(r.w * f32::from(k) / 16.0);
+        }
+        out
+    }
+
+    type Pass = fn(&Crossword, &mut Frame<Target>, &Layout);
+    type Band = fn(&mut Layout) -> &mut Rect;
+    type Region = fn(&Layout) -> Rect;
+
+    /// Every drawing pass and the region it is entitled to paint in.
+    ///
+    /// `menu`, `help` and `completed` own the **window**: each of the three
+    /// covers the screen -- the menu is a screen in its own right, and the
+    /// other two scrim what is behind them before drawing a card, so the window
+    /// really is the region they paint. That means this test says nothing about
+    /// the help card's or the end card's own box, which is what
+    /// `every_run_a_card_draws_stays_inside_the_card` below is for.
+    const PASSES: [(&str, Pass, Region); 7] = [
+        ("menu", Crossword::draw_menu, |l| l.window),
+        ("header", Crossword::draw_header, |l| l.header),
+        ("banner", Crossword::draw_banner, |l| l.banner),
+        ("grid", Crossword::draw_grid, |l| l.grid),
+        ("panel", Crossword::draw_panel, |l| l.panel),
+        ("footer", Crossword::draw_footer, |l| l.footer),
+        ("help", Crossword::draw_help, |l| l.window),
+        // `draw_completed` is absent on purpose: it is `View::Completed`'s
+        // whole screen and is covered by the `window` sweep in
+        // `nothing_is_painted_outside_the_window`, and by the card test below.
+    ];
+
+    /// The bands a test may replace with one the layout would not have given.
+    ///
+    /// The **grid** is not among them, and that is not an oversight. Every cell
+    /// is placed from `l.cell` rather than from `l.grid.h`, so a grid squeezed
+    /// on its own is a grid the cells were never solved for: the overrun would
+    /// be the test's own doing and would say nothing about the drawing. The
+    /// grid's containment is checked from real layouts, where `grid.h` and
+    /// `cell` agree because `Layout::solve` derived them together.
+    const SQUEEZABLE: [(&str, Band, Pass); 4] = [
+        ("header", |l| &mut l.header, Crossword::draw_header),
+        ("banner", |l| &mut l.banner, Crossword::draw_banner),
+        ("panel", |l| &mut l.panel, Crossword::draw_panel),
+        ("footer", |l| &mut l.footer, Crossword::draw_footer),
+    ];
+
+    /// Every run of type, as the box the renderer may fill with it.
+    ///
+    /// The height is `text::line_height`, not the font size: a run's *top-left*
+    /// corner is what is placed, so it occupies a whole line below `y`. The
+    /// difference is a third of the size, and measuring runs by their font size
+    /// is precisely the mistake this app's twelve centrings all made -- a test
+    /// that repeated it would pass against the code that has it.
+    fn inked(f: &Frame<Target>) -> Vec<(String, Rect)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let w =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    Some((
+                        text.clone(),
+                        Rect::new(*x, *y, w, text::line_height(*font_size, *font_weight)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every rectangle a frame filled.
+    fn filled(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A box with no area is inside anything: it is a thing that was not drawn.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    fn check_containment(state: &str, pass: &str, region: Rect, f: &Frame<Target>) {
+        for r in filled(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, painted {r:?}"
+            );
+        }
+        for (s, r) in inked(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
+            );
+        }
+        for (target, rect) in f.hits() {
+            assert!(
+                inside(region, *rect),
+                "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative() {
+        let band = Rect::new(10.0, 100.0, 80.0, 20.0);
+        assert_eq!(
+            centre_line(band, 20.0),
+            Some(100.0),
+            "a run exactly as tall as its band sits at the band's top"
+        );
+        assert_eq!(
+            centre_line(band, 10.0),
+            Some(105.0),
+            "and one half as tall sits half the slack down"
+        );
+        assert_eq!(
+            centre_line(band, 20.001),
+            None,
+            "a run taller than its band has nowhere to go, and the answer is \
+             not a negative offset above the band's top edge"
+        );
+        assert_eq!(
+            centre_line(band, 0.0),
+            None,
+            "a run of no height is not a run"
+        );
+        assert_eq!(
+            centre_line(Rect::EMPTY, 1.0),
+            None,
+            "a band with no area holds nothing"
+        );
+        assert_eq!(
+            centre_line(Rect::new(0.0, 0.0, 0.0, 50.0), 10.0),
+            None,
+            "and a band with height but no width is still a band with no area"
+        );
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        for (w, h) in SIZES {
+            for (state, app) in every_screen((w, h)) {
+                let l = Layout::solve(w, h, app.width, app.height);
+                for (name, pass, region) in PASSES {
+                    let mut f = Frame::new(w, h);
+                    pass(&app, &mut f, &l);
+                    check_containment(&format!("{state} at {w}x{h}"), name, region(&l), &f);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out() {
+        // The window list on its own is not enough. `Layout::solve` mostly
+        // gives each band room for the type it carries, so a bound checked only
+        // against the layout's own answers is checked where it was never going
+        // to bite. The counter below is what says this sweep reached the cases
+        // it exists for: bands with area, too short for the line they carry.
+        let mut tight = 0_u32;
+        for (w, h) in SIZES {
+            for (state, app) in every_screen((w, h)) {
+                let base = Layout::solve(w, h, app.width, app.height);
+                for (name, band, pass) in SQUEEZABLE {
+                    for squeezed in squeezes(*band(&mut base.clone())) {
+                        let mut l = base;
+                        *band(&mut l) = squeezed;
+                        let mut f = Frame::new(w, h);
+                        pass(&app, &mut f, &l);
+                        check_containment(
+                            &format!("{state} at {w}x{h} with {name} squeezed to {squeezed:?}"),
+                            name,
+                            squeezed,
+                            &f,
+                        );
+                        if !squeezed.is_empty()
+                            && squeezed.h < text::line_height(l.small, FontWeightHint::Regular)
+                        {
+                            tight += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tight > 50,
+            "only {tight} squeezed bands were shorter than the line they carry; \
+             a sweep that never squeezes a band past its own type checks nothing"
+        );
+    }
+
+    #[test]
+    fn a_header_too_short_for_its_title_drops_the_name_rather_than_spilling_it() {
+        // Not a hypothetical, and not squeezed by the test: `Layout::solve`
+        // itself produces this. `header.h` is `title + pad * 1.6` and a run is
+        // `line_height` -- about `1.33 * title` -- tall, so the band is shorter
+        // than the run it carries whenever `title > 4.85 * pad`. `pad` follows
+        // the *shorter* side of the window and `title` the *taller*, so a tall
+        // narrow window separates them: at 133x600 the band is 28.5 and the
+        // run 29.4. Before `centre_line` the title was drawn at a negative
+        // offset from the band's top and spilled out of both of its ends.
+        let (w, h) = (133.0, 600.0);
+        let app = playing(0);
+        let l = Layout::solve(w, h, app.width, app.height);
+        assert!(
+            l.header.h < text::line_height(l.title, FontWeightHint::Bold),
+            "this probe is pointless unless the header really is too short: \
+             {} against {}",
+            l.header.h,
+            text::line_height(l.title, FontWeightHint::Bold)
+        );
+        let mut f = Frame::new(w, h);
+        app.draw_header(&mut f, &l);
+        let names: Vec<String> = inked(&f)
+            .into_iter()
+            .map(|(s, _)| s)
+            .filter(|s| s.contains(app.puzzle_name()))
+            .collect();
+        assert!(
+            names.is_empty(),
+            "the title does not fit this header and must not be drawn in it, \
+             yet {names:?} was"
+        );
+        check_containment("the 133x600 header", "header", l.header, &f);
+    }
+
+    #[test]
+    fn every_run_a_card_draws_stays_inside_the_card() {
+        // The help and end cards own the window in `PASSES`, because both scrim
+        // it. That makes the window sweep silent about the card itself, which
+        // is the box that actually holds the type -- and the box that used to
+        // be a fixed 360x280 whatever the window was. The card is found the
+        // only way that cannot re-derive a fault: it is the largest thing the
+        // pass filled.
+        //
+        // Both counters below matter. `cards` says the card was found at all --
+        // a run of `continue`s would otherwise turn this into a test of
+        // nothing. `runs` says the cards had type in them: a card located
+        // correctly and drawn empty passes every assertion here and is exactly
+        // the failure a size sweep is meant to catch.
+        let mut cards = 0_u32;
+        let mut runs = 0_u32;
+        for (w, h) in SIZES {
+            for (name, mut app, help) in
+                [("help", playing(1), true), ("completed", playing(2), false)]
+            {
+                app.size = (w, h);
+                app.show_help = help;
+                let l = Layout::solve(w, h, app.width, app.height);
+                let mut f = Frame::new(w, h);
+                if help {
+                    app.draw_help(&mut f, &l);
+                } else {
+                    app.draw_completed(&mut f, &l);
+                }
+                // The scrim is the whole window; the card is the next largest.
+                let mut boxes = filled(&f);
+                boxes.sort_by(|a, b| {
+                    (b.w * b.h)
+                        .partial_cmp(&(a.w * a.h))
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                });
+                let Some(card) = boxes.into_iter().find(|r| r.w < w || r.h < h) else {
+                    // Every fill covers the window: there is no card to be
+                    // outside of, which a window with no room for one is
+                    // entitled to produce.
+                    continue;
+                };
+                cards += 1;
+                for (s, r) in inked(&f) {
+                    runs += 1;
+                    assert!(
+                        inside(card, r),
+                        "the {name} card at {w}x{h} is {card:?} and inked {s:?} at {r:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            cards > 20,
+            "only {cards} of the sizes drew a card at all; this sweep has to \
+             find one at nearly every size or it is testing the `continue`"
+        );
+        assert!(
+            runs > 100,
+            "only {runs} runs were checked against a card; a card drawn empty \
+             passes every assertion above and is the fault this exists to find"
+        );
     }
 
     #[test]

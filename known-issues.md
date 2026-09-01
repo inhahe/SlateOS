@@ -103510,6 +103510,70 @@ and a `label_centred` whose doc comment claims it is "**limited to `r`**" while
 passing `Some(r.w)` from a run inset by half the slack — fault 16's twin, one
 app on.
 
+**rush** (2026-09-01) — done: 124 tests, 89/89 mutation rows caught. The
+prediction was exact: every fault named above was there, in those words, and the
+whole of klotski's fix transferred. Shapes 14 and 15 recurred — the board's
+solve sized the grid and not the mat and exit strip drawn around it, and the
+halo's `(gap * 0.8).max(1.0)` floor was the same outward-growing "visibility
+floor" character-for-character — and shapes 17 and 18 with them, so `board_band`
+is a field here too. That is the campaign working as intended: the second app
+costs a fraction of the first, and the sweep is what proves it rather than the
+resemblance.
+
+Two things this app added that klotski could not have shown.
+
+22. **A modal that scrims the window owns the window, so the containment test
+    is structurally blind to the modal's own panel.** `PASSES` gives the sheet
+    `window`, correctly — it darkens the whole screen — and therefore
+    `no_pass_paints_outside_the_region_it_owns` has nothing whatever to say
+    about the panel the sheet's contents belong to. A heading hanging off its
+    panel onto the scrim is still inside the window. Nor can `centre_line`
+    object: the heading's box is a *nominal* `pad` below the panel's top and
+    exactly one line tall, and a one-line box always fits itself — a bound on a
+    run is only as good as the box it is measured against, and the box with the
+    claim on it is the panel. Both the heading's and the hint's boxes are cut to
+    the panel with `Rect::intersect` now (which bounds all four edges and
+    answers `None` for a panel with no room, the same shape `centre_line`
+    answers in), and `every_run_the_sheet_draws_stays_inside_its_panel` is the
+    test. It must sweep **squeezed** windows as well as real ones for the reason
+    `SQUEEZABLE` exists at all: at every size in `WINDOWS` the panel is generous
+    enough that the nominal offsets land inside it, so a bound only those sizes
+    exercise is a bound that has not been exercised. **Every app with a modal,
+    an overlay or a dialog has this hole**, and it does not show up in a
+    read-through, because the containment test it hides behind is present and
+    green.
+23. **When a guard has two halves, check whether one of them already has a
+    backstop — because the half that does is the half that hides the other.**
+    The guard dropping a car's letter when it will not fit the car reads as one
+    condition and is really two, and replacing the whole of it with `true`
+    survived all 124 tests. The height half is not its own bound: `centre_line`
+    refuses whenever the box is shorter than a line, which is that half word for
+    word, so deleting the guard still draws nothing at a size where the cells
+    are short — shape 19 again, the check that blanks rather than spills. The
+    old test stood on one small window, which was exactly such a size. The width
+    half has no backstop, since `label_centred` clamps a run to the box and
+    ellipsises it rather than refusing, so it is the half that had to be
+    reached — and reaching it needs a car *tall* enough for its letter and too
+    *narrow* for it, which only a vertical car can be. A brute-force probe over
+    the 40..900 square found 2580 such sizes; 40x55 is one. The lesson for the
+    remaining apps: **a guard whose halves bind on different axes needs a size
+    per axis**, found by probe rather than by argument (the analytic estimate
+    here said the width half was unreachable, and it was wrong), and the
+    contract asserted as a biconditional with a coverage assertion per half —
+    "drawn only if it fits" alone is satisfied by a program that draws nothing.
+
+And the counts to date, remeasured 2026-09-01 after this app: **45 apps and 126
+sites remain**, with automator, taskscheduler, hangman, sokoban, klotski and
+rush carrying `no_pass_paints_outside_the_region_it_owns`. The largest remaining
+is **magnifier at 7**, then spades and snippets at 6, then maze, hearts,
+emojipicker and asteroids at 5. magnifier is next. It is *not* another
+board-game clone — it has no solve to get wrong, so shapes 14/17/18 may not
+apply — but a first read shows ten centring sites of the familiar kind
+(`apps/magnifier/src/main.rs:862, 895, 1860, 1871, 1889, 1910, 1930, 1941, 1955,
+2179`), including a pair at 1860/1871 that offset *from* a centre by
+`± line_h` and `+ line_h * 0.4`, which is a centring with an unbounded second
+term and so is worse than a bare centring, not better.
+
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)

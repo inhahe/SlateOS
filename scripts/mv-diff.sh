@@ -328,7 +328,19 @@ ENVV=()
 # both filesystems, so the path cannot be a constant, and a case that named
 # `$far_root` directly would name whichever side happened to be set up last.
 FAR=
-reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); FAR=''; }
+# The umask `mv` runs under, when a case needs one other than the harness's.
+# Applied to the move and not to either half of the fixture, which [`run_one`]
+# builds in subshells of its own — so a case can give a source a mode the umask
+# would not have allowed and still see what the move does with it.
+#
+# Empty means "whatever this shell has", which is every case but the read-only
+# pair in §23. Those set `0222`, a umask that strips the owner-write bit — the
+# bit a cross-device move grants its new destination *on purpose*, so that a
+# read-only file's extended attributes can still be written onto it. Nothing
+# else in the suite can tell a `mv` that repairs that stripping from one that
+# merely asked for the bit and did not check.
+UMASK=
+reset_knobs() { TREE='mktree'; ANSWERS=''; STAMPS=''; ENVV=(); FAR=''; UMASK=''; }
 reset_knobs
 
 # A fixture whose every path carries a pinned time, for the `STAMPS` cases.
@@ -387,6 +399,9 @@ run_one() {
     # for a reason that has nothing to do with either program. Prepended rather
     # than replacing `PATH`, so `timeout` is still findable.
     PATH="$bindir/$side:$PATH"
+    # After the `cd` and before the run, so it reaches `mv` and nothing else —
+    # neither half of the fixture above, nor the snapshot afterwards.
+    [ -z "$UMASK" ] || umask "$UMASK"
     # `env` and not an assignment prefix, so that [`ENVV`] can hold a variable
     # whose *name* is chosen by the case rather than by this line.
     diff_run timeout -k 2 30 env "${ENVV[@]}" mv "${args[@]}" >"$out" 2>"$err"
@@ -440,6 +455,7 @@ compare() {
   [ "$TREE" = mktree ] || label="$label   [tree: $TREE]"
   [ -z "$FAR" ] || label="$label   [far: $FAR]"
   [ ${#ENVV[@]} -eq 0 ] || label="$label   [env: ${ENVV[*]}]"
+  [ -z "$UMASK" ] || label="$label   [umask: $UMASK]"
   run_one ours "$o_dir" "$o_out" "$o_err" "$o_rc" "$o_far" "$@"
   run_one gnu  "$g_dir" "$g_out" "$g_err" "$g_rc" "$g_far" "$@"
   judge "$o_dir" "$g_dir" "$o_out" "$g_out" \
@@ -2002,12 +2018,26 @@ fi
 # as the section; before it, every case below would have passed with the
 # attributes thrown away.
 #
-# Measured, not assumed: with `preserve_xattrs` in `mv.rs` short-circuited to
-# `return` and nothing else changed, this run went from 351/0 to 348/3 — the
-# three cross-boundary cases below went red and the two same-filesystem ones did
-# not, which is exactly right, since a `rename(2)` carries attributes whatever
-# our code does. Three of five is the honest ceiling for this section until a
-# directory can cross.
+# Measured, not assumed, and re-measured when the section grew to eight cases:
+# with `preserve_xattrs` in `mv.rs` short-circuited to `return` and nothing else
+# changed, this run went from 360/0 to 353/7. Six of the seven are the six
+# cross-boundary cases below; both same-filesystem ones stayed green, which is
+# exactly right, since a `rename(2)` carries attributes whatever our code does.
+# Six of eight is the honest ceiling for this section until a directory can
+# cross.
+#
+# The seventh is in §24 — the case that sets an ACL *and* a `user.tag` on one
+# file — and it is worth knowing that the two sections overlap there rather than
+# being surprised by it later. That case is the only one in the suite holding
+# both attribute classes at once, so it is the only one outside this section
+# that a change to the ordinary-attribute path can move.
+#
+# A second probe, narrower, certifies the last two cases specifically: with only
+# `top_up_extra` short-circuited — the repair that re-adds owner-write when the
+# umask ate it, everything else including the creation-time grant left alone —
+# the run went 360/0 to 358/2, and the two reds were exactly the `[umask: 0222]`
+# pair. The `chmod 444` case without a umask stayed green, so the grant and the
+# repair are each carrying their own case and neither is decoration.
 #
 # A same-filesystem `mv` is a `rename(2)`: it moves a directory entry and never
 # touches the inode, so the attributes cannot be lost and the first case is a
@@ -2067,6 +2097,36 @@ run_case -v @FAR@/f g
 # plus the source's.
 TREE='printf XXXXXXXXXX > g; diff_setxattr g user.old keepme'
 FAR='printf hello > f; diff_setxattr f user.new v'
+run_case -v @FAR@/f g
+
+# A *read-only* source, whose copy is a file no `setxattr` can reach unless the
+# move goes out of its way. Linux's `xattr_permission` (`fs/xattr.c`) demands
+# write access to the inode before it will set an attribute on it, so a copy
+# created at the source's `0444` cannot be given the source's attributes — and
+# `mv` would report each refusal, turning a silent move into a screenful.
+#
+# GNU's answer is to create the destination with `S_IWUSR` added (`copy.c:1451`)
+# and let the closing `copy_acl` take it off with the rest of the temporary
+# mode. This case is the control for that: the bit is asked for, it arrives, and
+# the attribute crosses.
+TREE=''
+FAR='printf hello > f; diff_setxattr f user.tag v1; chmod 444 f'
+run_case -v @FAR@/f g
+
+# And the same move under a umask that strips the very bit being asked for.
+# `umask 0222` takes owner-write off everything the kernel creates, so the mode
+# handed to `open` is not the mode that arrives, and asking is not having. GNU
+# re-adds it with an explicit chmod after the open and gives up gracefully if
+# even that fails (`copy.c:1539`); this is the only case in the suite that
+# reaches that repair.
+UMASK=0222 TREE=''
+FAR='printf hello > f; diff_setxattr f user.tag v1; chmod 444 f'
+run_case -v @FAR@/f g
+# `0400`: no group or other bits at all, so there is nothing for the withholding
+# to withhold and the extra bit is the whole difference between the creation
+# mode and the final one.
+UMASK=0222 TREE=''
+FAR='printf hello > f; diff_setxattr f user.tag v1; chmod 400 f'
 run_case -v @FAR@/f g
 
 # An attribute on a directory rather than a file, moved within one filesystem.

@@ -1594,22 +1594,29 @@ doclinks="${repo_root:-.}/scripts/check-doc-links.py"
 # in `coreutils/src/bin` names one directory, and the checker maps a directory
 # to its crate by the same walk it uses for a file. An empty list is the skip —
 # a push with no Rust in it has nothing here to judge.
-doclink_dirs=""
+#
+# WRITTEN TO A FILE, NOT PASSED AS ARGUMENTS. It used to be arguments, and that
+# has a ceiling this repository has already hit: a push carrying 2,568 changed
+# `.rs` files names 2,568 directories, which is 64,862 bytes of command line
+# against Windows' 32,767-character limit. The gate died with "Argument list
+# too long" (exit 126) before reading anything, and — correctly — refused the
+# push rather than calling an unreached verdict a pass. So the list goes in a
+# file, which has no such limit, and the checker reads it with --paths-from.
+doclink_list="${TMPDIR:-/tmp}/pre-push-doclink-dirs.$$"
 if [ "$skip_doclinks" != "1" ]; then
     doclink_old_ifs=$IFS
     IFS='
 '
+    : > "$doclink_list"
     for dl_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
                          --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
                          -- '*.rs' 2>/dev/null \
                      | sed 's|/[^/]*$||' | sort -u); do
         [ -d "$repo_root/$dl_file" ] || continue
-        doclink_dirs="$doclink_dirs
-$dl_file"
+        printf '%s\n' "$dl_file" >> "$doclink_list"
     done
     IFS=$doclink_old_ifs
-    [ -n "${doclink_dirs#
-}" ] || skip_doclinks=1
+    [ -s "$doclink_list" ] || skip_doclinks=1
 fi
 note_gate doc-links "$skip_doclinks"
 
@@ -1625,17 +1632,12 @@ if [ "$skip_doclinks" != "1" ]; then
         echo "pre-push: check-doc-links.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         doclinks_failed=1
     else
-        doclink_old_ifs=$IFS
-        IFS='
-'
-        # Word-splitting is wanted here and the paths cannot contain a newline
-        # (git reports them one per line, and the loop above already dropped
-        # anything that is not an existing directory).
-        # shellcheck disable=SC2086
-        run_checker doc-links "$py" "$doclinks" --check $doclink_dirs || doclinks_failed=1
-        IFS=$doclink_old_ifs
+        run_checker doc-links "$py" "$doclinks" --check \
+            --paths-from "$doclink_list" || doclinks_failed=1
     fi
 fi
+
+rm -f "$doclink_list"
 
 if [ "$doclinks_failed" = "1" ]; then
     cat >&2 <<EOF

@@ -213,6 +213,36 @@ def test_the_request_deletion_gate_judges_the_commit(text):
           "pushed_shas" in code, True)
 
 
+def test_no_gate_hands_a_push_sized_list_to_argv(text):
+    """A scope derived from the pushed files must not travel as arguments.
+
+    Gate 11 used to expand its crate list into `$doclink_dirs` on the command
+    line. That is fine until a push is wide: 2,568 changed `.rs` files name
+    2,568 directories, which is 64,862 bytes against Windows' 32,767-character
+    limit, and on 2026-09-02 the gate died with "Argument list too long" before
+    reading a single file. The hook was right to refuse -- exit 126 is not a
+    verdict -- so the effect was a lane that could not push at all.
+
+    The fixed shape is a file: the list is written to `$doclink_list` and read
+    with `--paths-from`, which has no such ceiling. Asserted here as well as
+    behaviourally in `test-pre-push-doclinks-gate.py`, because the behavioural
+    suite needs a fixture of several hundred crates to see it and this one
+    catches the reintroduction instantly.
+
+    Gate 5's `$bins` is deliberately not covered: its scope is bounded by
+    `userspace/coreutils/src/bin/`, about 124 short names, which cannot reach
+    the limit no matter how wide the push. Gate 7's file list is already a
+    file, and its rustfmt calls are already batched at 64.
+    """
+    code = code_only(text)
+    check("gate 11 reads its scope from a file",
+          re.search(r'--paths-from\s+"\$doclink_list"', code) is not None, True)
+    check("gate 11 no longer expands its scope into argv",
+          re.search(r'--check\s+\$doclink_dirs', code) is not None, False)
+    check("the scope file is cleaned up",
+          re.search(r'rm -f "\$doclink_list"', code) is not None, True)
+
+
 def main():
     text = hook_text()
     tests = [(name, fn) for name, fn in list(globals().items())

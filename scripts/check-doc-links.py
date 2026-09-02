@@ -667,6 +667,40 @@ def selftest() -> int:
     return 0
 
 
+def read_path_list(source: str) -> list[str]:
+    """The path list in `source`, one per line; `-` means stdin.
+
+    WHY THIS EXISTS. The push hook scopes this checker to the crates the push
+    touches and passed them as arguments, which is the obvious way and has a
+    ceiling. On 2026-09-02 a push carrying 2,568 changed `.rs` files produced
+    64,862 bytes of directory names -- almost exactly twice Windows'
+    32,767-character command-line limit -- and the gate died with "Argument
+    list too long" before reading a single file. That is exit 126, which the
+    hook correctly refuses to treat as a pass, so a lane's pushes were blocked
+    by a limit that has nothing to do with the code being pushed.
+
+    Batching the arguments was the tempting fix and is the wrong one: the
+    verdict would still be right, because crates are scanned independently and
+    the findings are a union, but every batch repeats the `rglob("Cargo.toml")`
+    crate discovery over four whole roots. Forty batches of that is minutes of
+    work to avoid a limit a file does not have.
+
+    `split("\\n")` and not `splitlines()`: the latter also breaks on `\\v`,
+    `\\f`, `\\x1c` and `U+2028`, all of which are legal in a path here (this
+    filesystem forbids only `/` and NUL), so it would tear one real name into
+    two that match nothing. A trailing `\\r` is dropped because a Windows
+    producer would have written one -- the same tolerance, for the same
+    reason, as `scripts/gittree.py`.
+    """
+    if source == "-":
+        text = sys.stdin.read()
+    else:
+        with open(source, "r", encoding="utf-8", errors="surrogateescape") as fh:
+            text = fh.read()
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
+    return [ln for ln in lines if ln.strip()]
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--check", action="store_true", help="fail if any link is dead")
@@ -679,13 +713,37 @@ def main() -> int:
         "reads 61 MB of Rust and takes about half a minute; a push usually "
         "touches one crate)",
     )
+    ap.add_argument(
+        "--paths-from",
+        metavar="FILE",
+        help="read the path list from FILE, one per line ('-' for stdin), "
+        "instead of (or as well as) passing them as arguments",
+    )
     args = ap.parse_args()
 
     if args.selftest:
         return selftest()
 
+    paths = list(args.paths)
+    if args.paths_from is not None:
+        try:
+            paths.extend(read_path_list(args.paths_from))
+        except OSError as exc:
+            print(f"check-doc-links: cannot read {args.paths_from}: {exc}",
+                  file=sys.stderr)
+            return 2
+        if not paths:
+            # An explicitly named source of paths that named none is a caller
+            # bug, and the one thing it must not do is look like a pass. It
+            # cannot be read as "scan everything" either -- that is what an
+            # absent list means, and silently widening the scope is how a gate
+            # comes to fail on someone else's file. So: refuse, loudly.
+            print(f"check-doc-links: {args.paths_from} listed no paths",
+                  file=sys.stderr)
+            return 2
+
     repo = Path(__file__).resolve().parent.parent
-    only = crates_touching(repo, args.paths) if args.paths else None
+    only = crates_touching(repo, paths) if paths else None
     if only is not None and not only:
         print("ok -- no scanned crate was touched.")
         return 0

@@ -63,6 +63,7 @@ _REMOVED = gitenv.scrub_environ()
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
+LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
 
 failures: list[str] = []
 
@@ -125,6 +126,28 @@ def build_fixture(tmp: str) -> str:
     with open(dst, "w", encoding="utf-8", newline="") as out:
         out.write(body)
     os.chmod(dst, 0o755)
+
+    # The hook sources `scripts/run-checker.sh`, so a checkout without one is a
+    # checkout it refuses to push from -- by design, since without the library
+    # no gate can tell a checker that found something from one that crashed.
+    #
+    # Copied in rather than stubbed, for the same reason the run-checker suite
+    # cuts the real function out of the real file: a stub here would pass while
+    # the shipped library rotted. It is written *untracked*, because the fixture
+    # commits exactly the files each case is about and an extra one in the tree
+    # would show up in the very `git rev-list` the gates read.
+    #
+    # This is also the arrangement that caught the lookup bug rather than hiding
+    # it. The hook is installed above as a plain copy at `.git/hooks/pre-push`,
+    # which is the shape whose `dirname`s do *not* reach `scripts/`; putting the
+    # library where a real checkout has it means the fallback is what has to
+    # find it, and the fixture fails if that fallback is removed again.
+    os.makedirs(os.path.join(work, "scripts"), exist_ok=True)
+    with open(LIB, "r", encoding="utf-8", newline="") as src:
+        lib_body = src.read()
+    with open(os.path.join(work, "scripts", "run-checker.sh"), "w",
+              encoding="utf-8", newline="") as out:
+        out.write(lib_body)
 
     git(work, "remote", "add", "origin", remote)
     with open(os.path.join(work, "a.txt"), "w", encoding="utf-8") as fh:

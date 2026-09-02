@@ -253,17 +253,38 @@ export CHECKER_LOGDIR CHECKER_PROG CHECKER_REFUSING CHECKER_NOTE
 # scripts/boot-test.sh. It lived here first, and was moved out the day the same
 # defect surfaced at the other boundary — see the file's header.
 #
-# Located from `$0` rather than from `repo_root`: `repo_root` is empty whenever
+# WHY IT IS NOT FOUND FROM `repo_root` ALONE. `repo_root` is empty whenever
 # `git rev-parse` failed, and that is precisely the case in which a missing
 # `run_checker` would be worst. An undefined function is not a `set -u` error —
 # it is "command not found", which exits non-zero, which every gate reads as
 # "the checker found something". So the hook would answer a *missing library*
-# with eleven false accusations. `.git/hooks/pre-push` execs this file by path,
-# so `$0` is `<tree>/scripts/hooks/pre-push` and two `dirname`s reach `scripts/`.
+# with eleven false accusations.
+#
+# WHY IT IS NOT FOUND FROM `$0` ALONE EITHER, WHICH IS WHAT IT DID FIRST AND WAS
+# WRONG. The trampoline `exec sh "$root/scripts/hooks/pre-push"`, so under a
+# normal install `$0` is that path and two `dirname`s reach `scripts/`. But this
+# hook deliberately keeps working when it has been installed as a *copy* — the
+# warning a few lines below says so in as many words, and downgrades that state
+# to an advisory rather than refusing. A copy sits at `.git/hooks/pre-push`, so
+# the same two `dirname`s reach `.git`, and the lookup went to
+# `.git/run-checker.sh`. The result was not a degraded hook but a dead one: it
+# refused every push, with a sentence naming a path nobody had ever put a file
+# at. Caught by `test-pre-push-identity-gate.py`, whose fixture installs the
+# hook the copied way for exactly this reason — all ten of its cases came back
+# as the same refusal.
+#
+# So: `$0` first, because it is the only one that needs no `git` to have
+# succeeded, and `repo_root` second, because a copy has no path back to the tree
+# except through it. A refusal now means both failed, which is a checkout with
+# no `scripts/run-checker.sh` in it.
 hook_lib=$(dirname "$(dirname "$0")")/run-checker.sh
+if [ ! -f "$hook_lib" ] && [ -n "${repo_root:-}" ]; then
+    hook_lib="$repo_root/scripts/run-checker.sh"
+fi
 if [ ! -f "$hook_lib" ]; then
     echo "pre-push: cannot find $hook_lib — refusing to push." >&2
     echo "pre-push: without it no gate below can tell a finding from a crash." >&2
+    echo "pre-push: run ./scripts/install-hooks.sh from a checkout that has it." >&2
     exit 1
 fi
 # shellcheck source=../run-checker.sh

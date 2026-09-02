@@ -6686,6 +6686,20 @@ extern "C" fn kernel_main() -> ! {
         serial_println!("[WARN] Veth self-test failed: {:?}", e);
     }
 
+    // Step 22e⅞++++p8b′: Simulated 802.11 radios (hwsim) init + self-test.
+    // A shared virtual medium that several stations attach to: a frame
+    // transmitted on one radio is offered to every other radio on the same
+    // channel, address-filtered as a real one would filter it.  This is the
+    // device lane C's `net80211::supplicant` associates through — until it
+    // exists, none of the 802.11 join path can be run at all, only unit
+    // tested.  Modelled on Linux's mac80211_hwsim, which exists for exactly
+    // this reason and which Linux keeps permanently for regression testing.
+    // Heap only, no hardware, so it runs anywhere the kernel boots.
+    net::hwsim::init();
+    if let Err(e) = net::hwsim::self_test() {
+        serial_println!("[WARN] hwsim self-test failed: {:?}", e);
+    }
+
     // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.
     // Isolated MAC resolution per namespace — requires netns::init().
     if let Err(e) = net::arp::ns_self_test() {

@@ -17,6 +17,17 @@ netipc = { path = "../netipc" }
 # Acquire/Release SQ/CQ index accesses the forbid-unsafe netipc can't host; the
 # daemon links the same crate, so the ring memory-ordering logic lives once.
 netring = { path = "../netring" }
+# The shared IEEE 802.11 MAC frame parsers/builders, lane C's crate. Linked
+# here by `net::hwsim`, the simulated wireless device: the whole point of that
+# module is that lane C's supplicant and the device it associates through agree
+# on the wire format, and they can only be made to agree by construction if
+# both parse the same bytes with the same code. `hwsim` builds its self-test
+# frames through `net80211::frame` for that reason rather than by hand -- a
+# hand-rolled byte string would let the device and the frame layer drift apart
+# while every test still passed. no_std, no allocator, so it links for the
+# kernel's custom target. See requests/
+# c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md.
+net80211 = { path = "../net80211" }
 # The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
 # (`oils`), the desktop shell, the world clock and `hwclock`. The kernel's
 # locale/timezone tables used to store a fixed `utc_offset_min`, which cannot

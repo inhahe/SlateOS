@@ -5862,6 +5862,7 @@ const COMMANDS: &[&str] = &[
     "ftp",
     "smtp",
     "vlan",
+    "hwsim",
     "qos",
     "socks",
     "socks5",
@@ -7399,6 +7400,7 @@ fn dispatch(line: &str) {
         "ftp" => cmd_ftp(args),
         "smtp" => cmd_smtp(args),
         "vlan" => cmd_vlan(args),
+        "hwsim" => cmd_hwsim(args),
         "qos" => cmd_qos(args),
         "socks" | "socks5" => cmd_socks(args),
         "brctl" | "bridge" | "bond" => cmd_bridge(args),
@@ -72290,6 +72292,296 @@ fn cmd_vlan(args: &str) {
             shell_println!("  vlan status                 — show statistics");
             shell_println!("  vlan test                   — run self-tests");
             end_help_arm("vlan", other);
+        }
+    }
+}
+
+/// `hwsim` — simulated 802.11 radios and the medium between them.
+///
+/// The read-only subcommands are the useful ones: `list` and `stats` are how
+/// you find out what a WiFi test actually did. The mutating ones exist so the
+/// medium can be driven by hand from the shell, which is the only way to
+/// reproduce a reported sequence without writing a self-test for it.
+fn cmd_hwsim(args: &str) {
+    use alloc::vec::Vec;
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let sub = parts.first().copied().unwrap_or("list");
+
+    // Shared by every subcommand that names a radio.
+    fn parse_id(s: &str) -> Option<crate::net::hwsim::RadioId> {
+        s.parse::<usize>().ok()
+    }
+
+    match sub {
+        "list" | "ls" | "show" => {
+            let radios = crate::net::hwsim::list_all();
+            if radios.is_empty() {
+                shell_println!("No simulated radios (hwsim create)");
+                return;
+            }
+            shell_println!("Simulated 802.11 radios:");
+            shell_println!(
+                "  {:>2}  {:17}  {:>2}  {:5}  {:4}  {:>8}  {:>8}  {:>5}",
+                "ID",
+                "MAC",
+                "Ch",
+                "State",
+                "Keys",
+                "TX",
+                "RX",
+                "Queue"
+            );
+            for r in &radios {
+                // Keys column: P = pairwise installed, G = group installed.
+                // Two characters rather than a boolean pair because the
+                // interesting question at a glance is which of the two the
+                // handshake has got to, not whether either exists.
+                let mut keys = [b'-', b'-'];
+                if r.pairwise_installed {
+                    keys[0] = b'P';
+                }
+                if r.group_installed {
+                    keys[1] = b'G';
+                }
+                let keys = core::str::from_utf8(&keys).unwrap_or("??");
+                shell_println!(
+                    "  {:>2}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {:>2}  {:5}  {:4}  {:>8}  {:>8}  {:>5}",
+                    r.id,
+                    r.mac[0],
+                    r.mac[1],
+                    r.mac[2],
+                    r.mac[3],
+                    r.mac[4],
+                    r.mac[5],
+                    r.channel,
+                    if r.up { "up" } else { "down" },
+                    keys,
+                    r.tx_frames,
+                    r.rx_frames,
+                    r.rx_pending
+                );
+                if r.promiscuous {
+                    shell_println!("      (promiscuous — address filter disabled)");
+                }
+            }
+        }
+
+        "stats" | "status" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: hwsim stats <id>");
+                set_exit(1);
+                return;
+            }
+            let Some(id) = parse_id(parts[1]) else {
+                shell_println!("hwsim: invalid radio id '{}'", parts[1]);
+                set_exit(1);
+                return;
+            };
+            let Some(r) = crate::net::hwsim::stats(id) else {
+                shell_println!("hwsim: no such radio: {}", id);
+                set_exit(1);
+                return;
+            };
+            shell_println!("Radio {}:", r.id);
+            shell_println!(
+                "  MAC:              {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                r.mac[0],
+                r.mac[1],
+                r.mac[2],
+                r.mac[3],
+                r.mac[4],
+                r.mac[5]
+            );
+            shell_println!("  Channel:          {}", r.channel);
+            shell_println!("  State:            {}", if r.up { "up" } else { "down" });
+            shell_println!("  Promiscuous:      {}", r.promiscuous);
+            shell_println!(
+                "  TX:               {} frames, {} bytes",
+                r.tx_frames,
+                r.tx_bytes
+            );
+            shell_println!(
+                "  RX:               {} frames, {} bytes",
+                r.rx_frames,
+                r.rx_bytes
+            );
+            shell_println!("  RX pending:       {}", r.rx_pending);
+            shell_println!("  RX dropped (full):{:>4}", r.rx_dropped_full);
+            shell_println!("  RX filtered:      {}", r.rx_filtered);
+            shell_println!(
+                "  Pairwise key:     {}",
+                if r.pairwise_installed {
+                    "installed"
+                } else {
+                    "none"
+                }
+            );
+            shell_println!(
+                "  Group key:        {}",
+                if r.group_installed {
+                    "installed"
+                } else {
+                    "none"
+                }
+            );
+            shell_println!("  Pairwise installs:{:>4}", r.pairwise_installs);
+            shell_println!("  Pairwise PN:      {}", r.pairwise_pn);
+            // Called out on its own line, and named, because a non-zero value
+            // here is not a curiosity: it means something tried to reinstall a
+            // key that was already installed, which on real hardware would
+            // rewind the CCMP nonce and leak keystream (KRACK).
+            if r.key_reinstalls_refused > 0 {
+                shell_println!(
+                    "  KEY REINSTALLS REFUSED: {}  <-- a caller tried to reinstall a live key",
+                    r.key_reinstalls_refused
+                );
+            } else {
+                shell_println!("  Reinstalls refused:  0");
+            }
+        }
+
+        "create" | "add" => match crate::net::hwsim::create_radio() {
+            Ok(id) => {
+                let mac = crate::net::hwsim::mac(id).unwrap_or([0; 6]);
+                shell_println!(
+                    "Radio {} created ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, channel {}, down)",
+                    id,
+                    mac[0],
+                    mac[1],
+                    mac[2],
+                    mac[3],
+                    mac[4],
+                    mac[5],
+                    crate::net::hwsim::channel(id).unwrap_or(0)
+                );
+            }
+            Err(e) => {
+                shell_println!("hwsim: create failed: {:?}", e);
+                set_exit(1);
+            }
+        },
+
+        "destroy" | "del" | "delete" | "remove" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: hwsim destroy <id>");
+                set_exit(1);
+                return;
+            }
+            let Some(id) = parse_id(parts[1]) else {
+                shell_println!("hwsim: invalid radio id '{}'", parts[1]);
+                set_exit(1);
+                return;
+            };
+            match crate::net::hwsim::destroy_radio(id) {
+                Ok(()) => shell_println!("Radio {} destroyed", id),
+                Err(e) => {
+                    shell_println!("hwsim: destroy failed: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+
+        "up" | "down" => {
+            if parts.len() < 2 {
+                shell_println!("Usage: hwsim {} <id>", sub);
+                set_exit(1);
+                return;
+            }
+            let Some(id) = parse_id(parts[1]) else {
+                shell_println!("hwsim: invalid radio id '{}'", parts[1]);
+                set_exit(1);
+                return;
+            };
+            match crate::net::hwsim::set_up(id, sub == "up") {
+                Ok(()) => shell_println!("Radio {} is now {}", id, sub),
+                Err(e) => {
+                    shell_println!("hwsim: {} failed: {:?}", sub, e);
+                    set_exit(1);
+                }
+            }
+        }
+
+        "channel" | "chan" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: hwsim channel <id> <channel>");
+                set_exit(1);
+                return;
+            }
+            let Some(id) = parse_id(parts[1]) else {
+                shell_println!("hwsim: invalid radio id '{}'", parts[1]);
+                set_exit(1);
+                return;
+            };
+            let Ok(ch) = parts[2].parse::<u8>() else {
+                shell_println!("hwsim: invalid channel '{}'", parts[2]);
+                set_exit(1);
+                return;
+            };
+            match crate::net::hwsim::set_channel(id, ch) {
+                // Printing what came back rather than what was asked for: the
+                // return value is the confirmation, and echoing the request
+                // would defeat the point of having one.
+                Ok(now) => shell_println!("Radio {} is now on channel {}", id, now),
+                Err(e) => {
+                    shell_println!("hwsim: set channel failed: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+
+        "monitor" | "promisc" => {
+            if parts.len() < 3 {
+                shell_println!("Usage: hwsim monitor <id> <on|off>");
+                set_exit(1);
+                return;
+            }
+            let Some(id) = parse_id(parts[1]) else {
+                shell_println!("hwsim: invalid radio id '{}'", parts[1]);
+                set_exit(1);
+                return;
+            };
+            let on = matches!(parts[2], "on" | "1" | "true" | "yes");
+            match crate::net::hwsim::set_promiscuous(id, on) {
+                Ok(()) => shell_println!(
+                    "Radio {} address filter {}",
+                    id,
+                    if on { "disabled (monitor)" } else { "enabled" }
+                ),
+                Err(e) => {
+                    shell_println!("hwsim: monitor failed: {:?}", e);
+                    set_exit(1);
+                }
+            }
+        }
+
+        "test" => match crate::net::hwsim::self_test() {
+            Ok(()) => shell_println!("hwsim: all self-tests passed"),
+            Err(e) => {
+                shell_println!("hwsim: self-test failed: {:?}", e);
+                set_exit(1);
+            }
+        },
+
+        other => {
+            shell_println!("hwsim — simulated 802.11 radios (no hardware)");
+            shell_println!();
+            shell_println!("A frame transmitted on one radio is offered to every other radio");
+            shell_println!("that is up and on the same channel, then address-filtered as real");
+            shell_println!("hardware would filter it.  It does NOT encrypt: a frame with the");
+            shell_println!("Protected bit set crosses in the clear, so a green run proves the");
+            shell_println!("frame exchange and the key schedule, not confidentiality.");
+            shell_println!();
+            shell_println!("Usage:");
+            shell_println!("  hwsim list                  — list radios (default)");
+            shell_println!("  hwsim stats <id>            — full counters for one radio");
+            shell_println!("  hwsim create                — create a radio");
+            shell_println!("  hwsim destroy <id>          — destroy a radio");
+            shell_println!("  hwsim up <id>               — bring a radio up");
+            shell_println!("  hwsim down <id>             — take a radio down");
+            shell_println!("  hwsim channel <id> <ch>     — tune, prints the channel it got");
+            shell_println!("  hwsim monitor <id> <on|off> — disable/enable the address filter");
+            shell_println!("  hwsim test                  — run self-tests");
+            end_help_arm("hwsim", other);
         }
     }
 }

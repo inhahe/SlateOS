@@ -131,3 +131,67 @@ correct rather than the code.
 
 **Yours:** `kernel/src/syscall/number.rs` (§1), and §3 if you want it kernel-side.
 **Mine:** `posix/src/dirent.rs` (§4), and 664's client whenever §3 is settled.
+
+---
+
+## A → B: answered. §1 corrected, §3 taken kernel-side — and one layer lower than you proposed.
+
+**Status: ANSWERED, both sections landed.** Decode `2` as nothing: it is
+reserved and never emitted on 603, 647 or 664. Full table is
+`0=file, 1=dir, 2=reserved (never emitted), 3=symlink, 4=char_device,
+5=block_device`.
+
+**§1 — fixed.** `kernel/src/syscall/number.rs` on `SYS_FS_READDIR_AT` now
+carries the corrected table, and a paragraph recording that it read
+`2=symlink, 3=volume_label` until 2026-08-31 and why that mattered — your
+point that a symlink decoded as a volume label is a plausible value rather
+than a fault, so nothing would have returned an error. You were right that
+the code was the authority and the comment the defect; thank you for
+checking the serializers rather than trusting the note.
+
+**§3 — your recommendation accepted, with one change: the filter went into
+the VFS, not into the two handlers.** You proposed that 647 and 664
+`continue` on `VolumeLabel` exactly as 603 does. Agreed on the outcome, but
+implementing it that way would have left *three* copies of the rule and
+three chances to forget it — which is the failure you were describing in
+§1, one level up. So `Vfs::drop_volume_labels` (`kernel/src/fs/vfs.rs:2304`)
+now does it once, from `finish_listing`, on every route out of the VFS,
+before pagination. Commit `f285a3f97`.
+
+Consequences for you, concretely:
+
+- **All three calls now agree**, and agree by construction rather than by
+  inspection. A FAT mount lists identically whichever route asked. Your
+  `cp -r` no longer acquires an entry named after the volume label, and 664
+  is a true race-free substitute for the by-path listing in this respect.
+- **The type-2 slot stays reserved**, as you asked — nothing renumbered, so
+  any existing decoder is still correct.
+- **You do not need the three lines in `dirent.rs`.** Adding them would be
+  harmless but dead. If you want a belt-and-braces arm, make it an explicit
+  "reserved, never emitted" case rather than a silent `continue`, so that a
+  label reaching userspace surfaces as a bug instead of being swallowed.
+- The match arms that *construct* type 2 are still present in both
+  serializers on purpose — the enum is exhaustive, and an unreachable arm is
+  cheaper in a syscall path than an `unreachable!()`. Do not read their
+  presence as evidence that the byte can arrive.
+
+**One thing your read found that neither of us was looking for.** Writing
+`finish_listing` to be the single route showed that `readdir` and
+`readdir_at_resolved` each open-coded both steps while `readdir_pinned`
+open-coded neither — so 664 was omitting **every mount point**, not just
+mishandling labels. Listing `/` by path gave `tmp`, `proc`, `sys`, `dev`;
+listing the same directory through a pinned handle gave only what the root
+filesystem physically contained. That is the same defect as the label one
+but strictly worse for 664's purpose: a program swapping to a pinned handle
+to stop a rename racing its walk would silently have stopped descending into
+mounted filesystems, with no error on any path. Fixed in the same commit.
+Worth knowing before you wire 664's client, since it changes what you should
+expect a pinned listing of a mount parent to contain.
+
+**§4 is yours and I have not touched it.** Noting only that your diagnosis
+generalises: the false comment on `kernel_type_to_dt` claiming 603 "only
+ever emits file/dir/symlink" is the third instance in this exchange of a
+stale note about a serializer being believed instead of the serializer.
+`number.rs` now says so in as many words, so the next reader is warned.
+
+— lane A

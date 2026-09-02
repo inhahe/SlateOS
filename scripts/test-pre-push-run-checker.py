@@ -41,6 +41,7 @@ one likely to be written in the old shape.
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -86,6 +87,36 @@ def extract_run_checker(text: str) -> str:
         if lines[j] == "}":
             return "\n".join(lines[start : j + 1])
     raise SystemExit("run_checker's body has no closing brace at column 0")
+
+
+def child_env() -> dict[str, str]:
+    """This process's environment with every `CHECKER_*` setting removed.
+
+    Every driver below is run under this rather than under a plain inherited
+    environment, because the settings the library reads are *exported* by at
+    least one real caller and would otherwise leak in.
+
+    That is not a precaution; it is a bug this suite already had. `boot-test.sh`
+    does `export CHECKER_PROG CHECKER_REFUSING CHECKER_LOGDIR` before sourcing
+    the library, so every suite its tooling loop runs inherits
+    `CHECKER_PROG=boot-test` and `CHECKER_REFUSING=build`. Group 6 drives the
+    helper from a script that deliberately sets *neither*, to prove each has a
+    default -- but under boot-test that script was not an unconfigured caller at
+    all. It got `boot-test: REFUSING to build`, the two default strings were
+    absent, and the group failed.
+
+    The failure mode is the worst shape available: the suite passed run by hand
+    and failed only inside the boot test, where a Python suite's output is one
+    line in a forty-minute log. A test whose verdict depends on who invoked it
+    is not testing the library.
+
+    Removing the names is right where clearing them to `""` would not be: the
+    library's fallbacks are `${CHECKER_PROG:-checker}`, and `:-` treats empty
+    and unset alike, so an empty value would happen to work today and would
+    stop working the moment a fallback is written `${CHECKER_PROG-checker}`.
+    Unset is the state group 6 is about.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("CHECKER_")}
 
 
 def fake_checker(tmp: Path, name: str, body: str) -> Path:
@@ -141,6 +172,7 @@ def run(
         text=True,
         encoding="utf-8",
         errors="replace",
+        env=child_env(),
     )
 
 
@@ -320,7 +352,8 @@ def main() -> int:
             encoding="utf-8",
         )
         r = subprocess.run(["sh", str(driver)], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace")
+                           encoding="utf-8", errors="replace",
+                           env=child_env())
         out = r.stdout + r.stderr
         check("the command is on one line",
               "--check one two" in out,
@@ -336,6 +369,44 @@ def main() -> int:
         check("still aborts", r.returncode == 1, f"rc={r.returncode}")
         check("falls back to a generic verb", "REFUSING to continue" in flat)
         check("falls back to a generic prefix", "checker: REFUSING" in flat)
+        (tmp_root / "checker-testgate.log").unlink(missing_ok=True)
+
+        # The same three assertions again, with this process's own environment
+        # carrying the settings -- which is not a hypothetical environment but
+        # the one the boot test runs this suite in.
+        #
+        # THE LIBRARY IS NOT AT FAULT HERE, AND NO ASSERTION BELOW IS ABOUT IT.
+        # `boot-test.sh` *exports* `CHECKER_PROG=boot-test` and
+        # `CHECKER_REFUSING=build` before sourcing the library, so a shell it
+        # spawns is genuinely a configured caller; a sourced shell function has
+        # no way to tell a setting its caller exported from one its caller's
+        # caller did, and should not try. What was wrong was this suite, which
+        # asserted the *defaults* from a driver that could not reach them. It
+        # therefore passed run by hand and failed only inside a forty-minute
+        # log -- the worst place available for a Python suite's one line of
+        # output to go red.
+        #
+        # So this pins the property that failed, which is the suite's own:
+        # its verdict does not depend on who invoked it. It is also the only
+        # thing that can notice if `env=child_env()` is ever dropped from
+        # `run` -- without it the scrubbing is indistinguishable from its
+        # own absence.
+        saved = {k: os.environ.get(k) for k in ("CHECKER_PROG", "CHECKER_REFUSING")}
+        os.environ["CHECKER_PROG"] = "leaked"
+        os.environ["CHECKER_REFUSING"] = "leak"
+        try:
+            r = run(tmp_root, func, crashed, configured=False)
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        flat = flatten(r.stdout + r.stderr)
+        check("an ambient CHECKER_PROG does not reach the driver",
+              "checker: REFUSING" in flat and "leaked" not in flat, flat[:200])
+        check("an ambient CHECKER_REFUSING does not either",
+              "REFUSING to continue" in flat, flat[:200])
         (tmp_root / "checker-testgate.log").unlink(missing_ok=True)
 
         # ------------------------------------------------------------------

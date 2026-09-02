@@ -869,9 +869,15 @@ fi
 # first: `git archive HEAD` is 86s/204MB, and narrowing it to one directory
 # does not help, because archive walks the whole tree regardless of pathspec
 # (userspace/zip/src -- 80KB of output -- still took 23s). `cp -al` of a crate
-# is 13-53s and fails outright on this filesystem. Per-file `git cat-file blob`
-# is ~0.7s, so the mirror costs about a second per pushed .rs file and nothing
-# for files nobody touched. That is why it is built a file at a time.
+# is 13-53s and fails outright on this filesystem. So the mirror holds only the
+# files in the push, and nothing for files nobody touched.
+#
+# It is filled by `scripts/gittree.py`, which asks one `git cat-file --batch`
+# for all of them: 2568 files in 2m11s, stubs included. The per-file
+# `fmt_materialise` below is kept as the fallback for a machine with no python,
+# and is the reason that helper exists at all -- at ~0.34s of process startup
+# per file it made the 2568-file push a fifteen-minute one, and a gate too slow
+# to run is a gate that gets bypassed.
 #
 # The one thing a lone file loses is `mod` resolution: rustfmt loads submodules
 # relative to the file it is handed, and refuses outright if one is missing
@@ -993,6 +999,13 @@ fmt_seed_stubs() {
 
 # Copy one file's *pushed* bytes into the mirror; echo where they landed.
 #
+# The fallback path, used only when `scripts/gittree.py` is unavailable or
+# failed. It is the slow one -- one git process and one `sed` per file -- but
+# it reads the same bytes from the same revision, so a machine without python
+# gets a gate that is correct and unhurried rather than one that is switched
+# off. Keeping it also keeps this gate's "no interpreter required" property,
+# which is why `skip_fmt` is computed separately from `$skip`.
+#
 # Returns 1 when the path is not in the tip at all. `--diff-filter=ACMR`
 # excludes deletions, but a file added by one commit in this push and deleted
 # by a later one still appears in the enumeration; the old code dropped it with
@@ -1056,24 +1069,80 @@ if [ "$skip_fmt" != "1" ]; then
     fi
 fi
 
+fmt_list="${TMPDIR:-/tmp}/pre-push-fmt-list.$$"
+fmt_made="${TMPDIR:-/tmp}/pre-push-fmt-made.$$"
+
 if [ "$skip_fmt" != "1" ]; then
-    # `set --` builds the argument list one path at a time so a filename
-    # containing a space survives; plain word-splitting on `$(...)` would tear
-    # it in half. Safe here because the positional parameters are no longer
-    # needed: `$1` was captured into `$remote_name` at the top of the file.
-    #
     # `core.quotePath=false` stops git octal-escaping a non-ASCII path into
     # something that does not name a file — this repository has utilities whose
     # whole purpose is handling those names, so its own hook had better not
     # choke on one.
-    fmt_old_ifs=$IFS
-    IFS='
-'
+    git -c core.quotePath=false log --name-only --pretty=format: \
+        --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
+        -- '*.rs' 2>/dev/null | sort -u > "$fmt_list" || : > "$fmt_list"
+
+    # ONE git process for the whole mirror, not one per file.
+    #
+    # `fmt_materialise` above is correct and costs ~0.34s per file, nearly all
+    # of it process startup. That was invisible while a push carried a handful
+    # of files, and became the dominant cost of pushing the moment one did not:
+    # the push this was written for carries 2568 .rs files, which is ~15
+    # minutes of `git cat-file` plus a `sed` per file for the mod stubs. A gate
+    # nobody can afford to run is a gate that gets bypassed by habit — the same
+    # failure this gate's scope rule is already careful to avoid.
+    #
+    # `scripts/gittree.py` answers all of them over one `git cat-file --batch`
+    # and seeds the stubs in-process: the same 2568 files in 2m11s. It is the
+    # shared helper `known-issues.md` →
+    # TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH asks for
+    # as step 1, written here first because gate 7 is so far the only gate that
+    # reads the pushed tree at all, and so the only one that can use it yet.
+    #
+    # Found the same two ways as `run-checker.sh` — `$0` first, then
+    # `repo_root` — because this hook keeps working when installed as a *copy*,
+    # for which `$0` leads to `.git/` and only `repo_root` leads to `scripts/`.
+    fmt_gittree=$(dirname "$(dirname "$0")")/gittree.py
+    if [ ! -f "$fmt_gittree" ] && [ -n "${repo_root:-}" ]; then
+        fmt_gittree="$repo_root/scripts/gittree.py"
+    fi
+
+    # Falling back is safe — the slow path reads the same bytes from the same
+    # revision — but it is never silent. A gate that quietly got fifteen
+    # minutes slower is a gate whose next reader assumes it has hung.
+    fmt_fast=0
+    if [ -n "${py:-}" ] && [ -f "$fmt_gittree" ]; then
+        if "$py" "$fmt_gittree" materialise --rev HEAD --dest "$fmt_mirror" \
+            --stub-rust-mods < "$fmt_list" > "$fmt_made" 2>/dev/null
+        then
+            fmt_fast=1
+        else
+            printf 'pre-push: %s failed — falling back to one git per file.\n' \
+                "$fmt_gittree" >&2
+        fi
+    fi
+
+    if [ "$fmt_fast" != "1" ]; then
+        # Start from an empty mirror: a half-finished fast path may have left
+        # stubs behind, and a stub outliving the run that made it could shadow
+        # a real file this pass is about to ask for.
+        rm -rf "$fmt_mirror"
+        mkdir -p "$fmt_mirror" 2>/dev/null || :
+        : > "$fmt_made"
+        while IFS= read -r fmt_file; do
+            [ -n "$fmt_file" ] || continue
+            fmt_materialise "$fmt_file" >> "$fmt_made" || :
+        done < "$fmt_list"
+    fi
+
+    # `set --` builds the argument list one path at a time so a filename
+    # containing a space survives; plain word-splitting on `$(...)` would tear
+    # it in half. Safe here because the positional parameters are no longer
+    # needed: `$1` was captured into `$remote_name` at the top of the file.
+    # `IFS= read -r` is what keeps leading whitespace and backslashes in a
+    # path intact, and needs no global `IFS` surgery to do it.
     set --
-    for fmt_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
-                          --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
-                          -- '*.rs' 2>/dev/null | sort -u); do
-        fmt_mirrored=$(fmt_materialise "$fmt_file") || continue
+    while IFS= read -r fmt_mirrored; do
+        [ -n "$fmt_mirrored" ] || continue
         set -- "$@" "$fmt_mirrored"
         # Drain in batches: the command line is finite, and a push that lands a
         # whole subsystem can carry hundreds of files. (Measured: handing
@@ -1086,12 +1155,12 @@ if [ "$skip_fmt" != "1" ]; then
             fmt_check "$@" || fmt_failed=1
             set --
         fi
-    done
-    IFS=$fmt_old_ifs
+    done < "$fmt_made"
 
     fmt_check "$@" || fmt_failed=1
 fi
 
+rm -f "$fmt_list" "$fmt_made"
 [ -n "$fmt_mirror" ] && rm -rf "$fmt_mirror"
 
 if [ "$fmt_failed" = "1" ]; then

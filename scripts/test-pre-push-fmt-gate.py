@@ -32,6 +32,23 @@ new one -- a green run against only the obvious cases (committed-clean passes,
 committed-dirty is refused) is worth nothing here, because the old code passed
 those too. That is the whole lesson of the bug.
 
+Why every case runs twice
+-------------------------
+
+The gate fills its mirror of the pushed bytes two ways: normally by handing
+the whole file list to `scripts/gittree.py`, which answers them over one
+`git cat-file --batch`, and otherwise -- no python, or that script failed --
+one `git cat-file blob` per file in the shell. Both must reach the same
+verdict, so both are run.
+
+That is not symmetry for its own sake. The batched path shipped with a defect
+the per-file path cannot have: on Windows, `print` writes `\r\n`, so every
+path it emitted arrived at the hook's `IFS= read -r` with a trailing carriage
+return, rustfmt reported "file does not exist", and the gate reads any rustfmt
+failure as drift -- *every clean file in a push was refused*. Nothing in the
+per-file run could see it, and a suite that ran each case once would have
+picked whichever mode the machine happened to have.
+
 Why it scrubs its environment at import
 ---------------------------------------
 
@@ -58,6 +75,22 @@ _REMOVED = gitenv.scrub_environ()
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
+GITTREE = os.path.join(REPO_ROOT, "scripts", "gittree.py")
+
+# The gate fills its mirror two ways and both have to reach the same verdict.
+#
+# `batched` is the normal path: one `git cat-file --batch` via
+# scripts/gittree.py for every file in the push. `per-file` is the fallback for
+# a machine with no python, one `git cat-file blob` and one `sed` each. The
+# fallback exists so the gate keeps its "no interpreter required" property, and
+# a fallback nobody tests is a fallback that has quietly rotted by the time the
+# machine without python turns up -- so every case below runs under both.
+#
+# `broken` is neither: a gittree.py that exits non-zero, which must degrade to
+# `per-file` *and say so*. It is also the only way this suite can prove the
+# hook invokes gittree.py at all, since a silent fast path and a silent
+# fallback are indistinguishable from their verdicts.
+MIRROR_MODES = ("batched", "per-file")
 
 # Deliberately mangled: rustfmt reindents the body and collapses the blank run.
 # Written as source rather than as a "here is the formatted version" pair so the
@@ -67,8 +100,14 @@ UGLY = "fn main() {\nlet x=1;\n\n\n    println!(\"{x}\");\n}\n"
 
 failures: list[str] = []
 
+# Appended to every label while a mirror mode is running. Every case is run
+# once per mode, so without it the two runs report identical names and a
+# failure list cannot say which path broke.
+label_suffix = ""
+
 
 def check(label: str, got: object, want: object) -> None:
+    label = label + label_suffix
     if got == want:
         print(f"PASS  {label}")
     else:
@@ -121,26 +160,56 @@ def commit(work: str, rel: str, message: str) -> None:
     git(work, "commit", "--quiet", "-m", message)
 
 
-def push_verdict(work: str) -> str:
-    """`allowed`, `refused`, or `error:<...>` for a push of main.
+def push_output(work: str) -> tuple[str, str]:
+    """(verdict, everything the push printed) for a push of main.
 
-    Only gate 7's refusal counts as `refused`; anything else the hook rejects
-    for is an `error`, because a test that accepted any refusal would pass on a
-    fixture that trips gate 1 and never reach the formatting logic at all.
+    Verdict is `allowed`, `refused`, or `error:<...>`. Only gate 7's refusal
+    counts as `refused`; anything else the hook rejects for is an `error`,
+    because a test that accepted any refusal would pass on a fixture that trips
+    gate 1 and never reaches the formatting logic at all.
     """
     proc = git(work, "push", "origin", "main")
     blob = proc.stdout + proc.stderr
     if proc.returncode == 0:
-        return "allowed"
+        return "allowed", blob
     # Matched on one line's worth: the refusal text wraps between "rustfmt" and
     # "formats it", so the obvious whole-sentence probe never matches and every
     # correct refusal reads as an unrelated error.
     if "a file above is not formatted the way rustfmt" in blob:
-        return "refused"
-    return "error:" + blob.strip().replace("\n", " | ")[:400]
+        return "refused", blob
+    return "error:" + blob.strip().replace("\n", " | ")[:400], blob
 
 
-def build_fixture(tmp: str) -> str:
+def push_verdict(work: str) -> str:
+    return push_output(work)[0]
+
+
+def install_gittree(work: str, mode: str) -> None:
+    """Put `scripts/gittree.py` in the fixture, or deliberately do not.
+
+    The hook looks for it beside the hook first and under `repo_root/scripts`
+    second; a fixture installs the hook as a *copy* at `.git/hooks/pre-push`,
+    so only the second lookup can find anything, and that is the one being
+    exercised here.
+    """
+    dst = os.path.join(work, "scripts", "gittree.py")
+    if mode == "batched":
+        with open(GITTREE, "r", encoding="utf-8", newline="") as src:
+            body = src.read()
+        with open(dst, "w", encoding="utf-8", newline="") as out:
+            out.write(body)
+    elif mode == "broken":
+        with open(dst, "w", encoding="utf-8", newline="") as out:
+            out.write("import sys\nsys.exit(3)\n")
+    elif mode == "per-file":
+        # Absent, which is what a machine without the helper looks like.
+        if os.path.exists(dst):
+            os.remove(dst)
+    else:
+        raise AssertionError(f"unknown mirror mode {mode!r}")
+
+
+def build_fixture(tmp: str, mirror: str = "batched") -> str:
     """A repo with the real hook installed and one clean commit on origin."""
     os.makedirs(tmp, exist_ok=True)
     remote = os.path.join(tmp, "remote.git")
@@ -171,6 +240,7 @@ def build_fixture(tmp: str) -> str:
     with open(os.path.join(work, "scripts", "run-checker.sh"), "w",
               encoding="utf-8", newline="") as out:
         out.write(lib_body)
+    install_gittree(work, mirror)
 
     git(work, "remote", "add", "origin", remote)
     write(work, "a.txt", "one\n")
@@ -188,23 +258,23 @@ def build_fixture(tmp: str) -> str:
 # in a way that is invisible until one is reordered.
 # --------------------------------------------------------------------------
 
-def case_committed_clean(tmp: str) -> None:
+def case_committed_clean(tmp: str, mirror: str) -> None:
     """Baseline. Formatted and committed: nothing to complain about."""
-    work = build_fixture(os.path.join(tmp, "clean"))
+    work = build_fixture(os.path.join(tmp, "clean"), mirror)
     write(work, "c/src/main.rs", pretty(UGLY))
     commit(work, "c/src/main.rs", "add a formatted file")
     check("a formatted commit pushes", push_verdict(work), "allowed")
 
 
-def case_committed_dirty(tmp: str) -> None:
+def case_committed_dirty(tmp: str, mirror: str) -> None:
     """Baseline. Unformatted and committed: refused, as the gate always did."""
-    work = build_fixture(os.path.join(tmp, "dirty"))
+    work = build_fixture(os.path.join(tmp, "dirty"), mirror)
     write(work, "c/src/main.rs", UGLY)
     commit(work, "c/src/main.rs", "add an unformatted file")
     check("an unformatted commit is refused", push_verdict(work), "refused")
 
 
-def case_false_pass(tmp: str) -> None:
+def case_false_pass(tmp: str, mirror: str) -> None:
     """The bug, in the shape that actually shipped.
 
     Commit unformatted bytes, then tidy the working tree without committing --
@@ -212,7 +282,7 @@ def case_false_pass(tmp: str) -> None:
     still unformatted, so the push must still be refused. The old gate read the
     tidy working copy and allowed it.
     """
-    work = build_fixture(os.path.join(tmp, "falsepass"))
+    work = build_fixture(os.path.join(tmp, "falsepass"), mirror)
     write(work, "c/src/main.rs", UGLY)
     commit(work, "c/src/main.rs", "add an unformatted file")
     write(work, "c/src/main.rs", pretty(UGLY))          # fixed, NOT committed
@@ -220,14 +290,14 @@ def case_false_pass(tmp: str) -> None:
           push_verdict(work), "refused")
 
 
-def case_false_fail(tmp: str) -> None:
+def case_false_fail(tmp: str, mirror: str) -> None:
     """The same confusion, mirrored.
 
     The commit is clean; only the working tree is messy, and that mess is not
     being published. Refusing here breaks the ordinary commit-then-keep-editing
     workflow and contradicts the gate's own refusal text.
     """
-    work = build_fixture(os.path.join(tmp, "falsefail"))
+    work = build_fixture(os.path.join(tmp, "falsefail"), mirror)
     write(work, "c/src/main.rs", pretty(UGLY))
     commit(work, "c/src/main.rs", "add a formatted file")
     write(work, "c/src/main.rs", UGLY)                  # drift, NOT committed
@@ -235,7 +305,7 @@ def case_false_fail(tmp: str) -> None:
           push_verdict(work), "allowed")
 
 
-def case_untouched_submodule(tmp: str) -> None:
+def case_untouched_submodule(tmp: str, mirror: str) -> None:
     """A module root must not drag its untouched children into the verdict.
 
     `child.rs` is unformatted and already on origin, so it is not in this push.
@@ -243,7 +313,7 @@ def case_untouched_submodule(tmp: str) -> None:
     how an untouched file ends up failing someone else's push; the stubs the
     mirror seeds are what stop it.
     """
-    work = build_fixture(os.path.join(tmp, "submodule"))
+    work = build_fixture(os.path.join(tmp, "submodule"), mirror)
     write(work, "c/src/child.rs", UGLY)
     write(work, "c/src/lib.rs", "pub mod child;\n")
     git(work, "add", "--", "c/src/child.rs", "c/src/lib.rs")
@@ -262,7 +332,7 @@ def case_untouched_submodule(tmp: str) -> None:
           push_verdict(work), "allowed")
 
 
-def case_added_then_deleted(tmp: str) -> None:
+def case_added_then_deleted(tmp: str, mirror: str) -> None:
     """A file added and removed inside one push range has no bytes to check.
 
     `--diff-filter=ACMR` still lists it, so something has to drop it. The old
@@ -270,7 +340,7 @@ def case_added_then_deleted(tmp: str) -> None:
     coincidence -- the file is absent there too. Reading the tip has to reach
     the same answer deliberately.
     """
-    work = build_fixture(os.path.join(tmp, "transient"))
+    work = build_fixture(os.path.join(tmp, "transient"), mirror)
     write(work, "c/src/gone.rs", UGLY)
     commit(work, "c/src/gone.rs", "add a file")
     git(work, "rm", "--quiet", "--", "c/src/gone.rs")
@@ -279,9 +349,9 @@ def case_added_then_deleted(tmp: str) -> None:
           push_verdict(work), "allowed")
 
 
-def case_bypass(tmp: str) -> None:
+def case_bypass(tmp: str, mirror: str) -> None:
     """The documented escape hatch still works on the new code path."""
-    work = build_fixture(os.path.join(tmp, "bypass"))
+    work = build_fixture(os.path.join(tmp, "bypass"), mirror)
     write(work, "c/src/main.rs", UGLY)
     commit(work, "c/src/main.rs", "add an unformatted file")
     env = gitenv.clean_env()
@@ -289,6 +359,31 @@ def case_bypass(tmp: str) -> None:
     proc = subprocess.run(["git", "push", "origin", "main"], cwd=work,
                           env=env, capture_output=True, text=True, check=False)
     check("ALLOW_FMT_DRIFT=1 publishes it anyway", proc.returncode, 0)
+
+
+def case_gittree_failure_falls_back(tmp: str) -> None:
+    """A broken helper must cost speed, never correctness, and never silence.
+
+    Run once per mirror mode this would fall back *to*, which is one: the
+    per-file path. Two assertions, and the second is the one that cannot be
+    made any other way -- a hook that never invoked gittree.py at all would
+    pass the verdict assertion for the wrong reason, and only the notice on
+    stderr distinguishes "the fast path failed and we recovered" from "the fast
+    path was never wired up".
+    """
+    work = build_fixture(os.path.join(tmp, "gtbroken"), "broken")
+    write(work, "c/src/main.rs", UGLY)
+    commit(work, "c/src/main.rs", "add an unformatted file")
+    verdict, blob = push_output(work)
+    check("a broken gittree.py still refuses drift", verdict, "refused")
+    check("a broken gittree.py says it fell back",
+          "falling back to one git per file" in blob, True)
+
+    work = build_fixture(os.path.join(tmp, "gtbroken2"), "broken")
+    write(work, "c/src/main.rs", pretty(UGLY))
+    commit(work, "c/src/main.rs", "add a formatted file")
+    check("a broken gittree.py still allows a clean commit",
+          push_verdict(work), "allowed")
 
 
 def main() -> int:
@@ -299,12 +394,20 @@ def main() -> int:
         print("SKIP  rustfmt is not on PATH — gate 7 skips too, nothing to test")
         return 0
 
+    global label_suffix
     with tempfile.TemporaryDirectory() as tmp:
-        for case in (case_committed_clean, case_committed_dirty,
-                     case_false_pass, case_false_fail,
-                     case_untouched_submodule, case_added_then_deleted,
-                     case_bypass):
-            case(tmp)
+        for mirror in MIRROR_MODES:
+            print(f"\n--- mirror filled {mirror} ---")
+            label_suffix = f" [{mirror}]"
+            for case in (case_committed_clean, case_committed_dirty,
+                         case_false_pass, case_false_fail,
+                         case_untouched_submodule, case_added_then_deleted,
+                         case_bypass):
+                case(os.path.join(tmp, mirror), mirror)
+        print("\n--- gittree.py fails ---")
+        label_suffix = " [broken]"
+        case_gittree_failure_falls_back(os.path.join(tmp, "broken"))
+        label_suffix = ""
 
     if failures:
         print(f"\n{len(failures)} pre-push fmt-gate test(s) failed:",

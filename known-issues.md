@@ -108278,10 +108278,18 @@ takes `--head <sha>` and reads blobs out of git rather than off the disk, and
 --head so it judges the pushed commit`) — so the pattern, the precedent and even
 the regression test all exist. The work is:
 
-1. A shared helper — `scripts/gittree.py` — exposing `list(rev, pathspec)` and
+1. ~~A shared helper — `scripts/gittree.py` — exposing `list(rev, pathspec)` and
    `read(rev, path)` over one long-lived `git cat-file --batch`, so N files cost
    one process rather than N × 0.7 s. This is the piece that makes the whole
-   thing affordable and does not exist yet.
+   thing affordable and does not exist yet.~~ **Done 2026-09-02.** It exists,
+   with `GitTree.read` / `read_many` / `list_paths` for the Python checkers and
+   a `materialise` subcommand for the shell hook, which cannot import Python.
+   Gate 7 uses it: 2568 files in 2m11s rather than ~15 minutes of `git cat-file`
+   plus a `sed` each. `scripts/test-gittree.py` covers it (26 assertions), and
+   `test-pre-push-fmt-gate.py` now runs every case twice — once batched, once
+   over the per-file fallback — because the batched path shipped a `\r\n`
+   defect that refused *every clean file in a push* and that only the batched
+   run could see. Steps 2–4 are untouched.
 2. Convert each checker's file access to go through it, with `--head <sha>`
    selecting git and its absence keeping today's filesystem walk (the checkers
    are also run by hand and by the boot test, where the working tree is right).

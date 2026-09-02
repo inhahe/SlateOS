@@ -21,6 +21,12 @@
 #       booted.  Like 4 it says nothing about the code under test, and like 4
 #       the right response is to retry later: the cause is another lane's
 #       build, and it clears on its own.
+#   6 — A build tool crashed instead of reporting a finding: clippy-driver or
+#       rustc died on a signal or an NTSTATUS rather than exiting with a verdict.
+#       Like 4 and 5 this says nothing about the code under test.  It is listed
+#       separately because the *evidence* differs: 4 and 5 are this script
+#       declining to start, whereas 6 is a gate that ran, produced no judgement,
+#       and must not be read as having produced a clean one.
 #
 # 2 and 3 are listed here because they were not: exit 2 has existed since the
 # stall detector landed and this header still claimed the script only ever
@@ -4431,6 +4437,44 @@ check_kernel_clippy() {
         echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
 0 errors, $warns pedantic-level warnings -> $log)."
         return 0
+    fi
+
+    # A non-zero clippy is not automatically a lint finding.  `clippy-driver`
+    # can *crash* -- on 2026-09-02 it died with STATUS_STACK_BUFFER_OVERRUN
+    # (0xc0000409) while the host was at 3.1 GiB of free commit under another
+    # lane's build -- and a crash exits non-zero too.  Reading that as "at least
+    # one clippy::all violation" is the same error `boot-history.py` used to
+    # make about exit 127: a verdict that rests on the *absence* of findings
+    # cannot be asserted when the tool that would have found them never
+    # finished.  The message below would have printed "Sites:" and then nothing,
+    # which is the shape of a gate accusing the tree of something it did not
+    # observe.
+    #
+    # The discriminator is cargo's own: a genuine lint failure ends with
+    # "could not compile ... due to N previous errors" and no "Caused by".  A
+    # crashed subprocess produces "process didn't exit successfully" carrying a
+    # signal or an NTSTATUS, which cargo only prints when the child died rather
+    # than reported.  Matching on that, rather than on the specific status code,
+    # keeps this correct for a SIGSEGV on a POSIX host as well.
+    if grep -qE "process didn't exit successfully|internal compiler error" "$log"; then
+        echo "" >&2
+        echo "ERROR: clippy-driver crashed instead of reporting a verdict." >&2
+        echo "" >&2
+        grep -E "process didn't exit successfully|internal compiler error" "$log" \
+            | sed -E 's/^(.{0,200}).*/  \1/' >&2
+        echo "" >&2
+        echo "THIS SAYS NOTHING ABOUT THE TREE.  The gate ran and produced no" >&2
+        echo "judgement; it did not produce a clean one.  Do not read a crashed" >&2
+        echo "linter as a clean linter, and do not #[allow] anything on the" >&2
+        echo "strength of it." >&2
+        echo "" >&2
+        echo "The usual cause on this host is memory: at the Windows commit" >&2
+        echo "limit a compiler dies wherever it happens to be, and another" >&2
+        echo "lane's cargo build is normally what got us there.  Wait for it" >&2
+        echo "and re-run -- see check_commit_headroom and exit 5." >&2
+        echo "" >&2
+        echo "Full output: $log" >&2
+        exit 6
     fi
 
     echo "" >&2

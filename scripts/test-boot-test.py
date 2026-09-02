@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -386,6 +387,94 @@ def test_the_excluded_paths_are_the_files_the_recorders_actually_write():
                                    REPO_ROOT).replace(os.sep, "/")
         check(f"{label} writes {relative}, and the dirty check excludes it",
               f"':(exclude){relative}'" in fragment, True)
+
+
+def extract_clippy_crash_pattern(source=None):
+    """The regex `check_kernel_clippy` uses to tell a crash from a finding.
+
+    Lifted out of the script for the same reason `extract_dirty_check` is: a
+    pattern restated here would be a pattern this file tests and the script does
+    not use.
+    """
+    if source is None:
+        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    marker = 'if grep -qE "'
+    start = source.find(marker)
+    if start == -1:
+        raise RuntimeError(
+            "boot-test.sh no longer contains the `grep -qE` that separates a "
+            "crashed clippy-driver from a real lint finding. If the check moved, "
+            "update this extractor; do not delete the test -- without the check, "
+            "a linter that died of memory starvation is reported to the operator "
+            "as a tree full of clippy::all violations.")
+    rest = source[start + len(marker):]
+    return rest[:rest.index('"')]
+
+
+def test_a_crashed_linter_is_not_a_tree_full_of_lint_findings():
+    """A tool that died produced no verdict, and must not be read as a clean one.
+
+    This is exit 127 all over again, one gate along. `boot-history.py` used to
+    file a host `fork()` failure as a kernel TIMEOUT because both arrive as a
+    non-zero status; `check_kernel_clippy` had the same hole, and the log below
+    is the real one from 2026-09-02, when clippy-driver died with
+    STATUS_STACK_BUFFER_OVERRUN at 3.1 GiB of free commit while another lane
+    built. The gate would have told the operator the kernel had deny-level lint
+    violations and then listed none, because there were none to list.
+
+    The discriminating fact is not the status code -- both are 101 -- but whether
+    cargo reported a *judgement* or reported that its child never delivered one.
+    """
+    pattern = re.compile(extract_clippy_crash_pattern())
+
+    crashed = (
+        "error: could not compile `kernel` (bin \"kernel\"); 9911 warnings emitted\n"
+        "\n"
+        "Caused by:\n"
+        "  process didn't exit successfully: `clippy-driver.exe ...` "
+        "(exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)\n"
+    )
+    check("a clippy-driver that died on an NTSTATUS is recognised as a crash",
+          bool(pattern.search(crashed)), True)
+
+    # The POSIX shape of the same event. Matching cargo's wording rather than
+    # the Windows status code is what makes this hold on a Linux host too.
+    signalled = (
+        "error: could not compile `kernel` (bin \"kernel\")\n"
+        "\n"
+        "Caused by:\n"
+        "  process didn't exit successfully: `clippy-driver` (signal: 11, "
+        "SIGSEGV: invalid memory reference)\n"
+    )
+    check("a clippy-driver killed by a signal is recognised as a crash",
+          bool(pattern.search(signalled)), True)
+
+    check("a compiler ICE is recognised as a crash",
+          bool(pattern.search("error: internal compiler error: unexpected panic\n")),
+          True)
+
+    # The control, and the half that actually matters: a real finding must still
+    # reach the lint branch. A pattern that matched this too would convert every
+    # genuine clippy::all violation into "the host is busy, try later" -- which
+    # is a worse bug than the one being fixed, because it hides a defect in the
+    # tree rather than merely misnaming one.
+    real_finding = (
+        "error: this loop never actually loops\n"
+        "  --> kernel/src/fs/vfs.rs:412:5\n"
+        "error: could not compile `kernel` (bin \"kernel\") due to 3 previous errors\n"
+    )
+    check("a genuine deny-level lint failure is NOT mistaken for a crash",
+          bool(pattern.search(real_finding)), False)
+
+    # `warning:` lines are the pedantic backlog and are present on every clean
+    # run; nothing in them may trip the crash branch.
+    backlog = (
+        "warning: `panic` should not be present in production code\n"
+        "warning: `kernel` (build script) generated 5 warnings\n"
+    )
+    check("the pedantic warning backlog does not look like a crash",
+          bool(pattern.search(backlog)), False)
 
 
 def main():

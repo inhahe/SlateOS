@@ -58,22 +58,52 @@ file, so one file answering to `sudo`, `visudo` and `sudoedit` must hold the
 union of what all three need, which is the least-privilege problem this OS
 exists to avoid.
 
+## Which tree it reads, and why that is a flag
+
+By default this reads the working tree, which is what a person running it by
+hand means and what the boot test means. `--head <rev>` reads a git revision
+instead, through the `Tree` seam in `scripts/gittree.py`.
+
+The push hook passes it, and the difference is the gate's whole point there:
+without it the gate enumerates the *pushed* commits and then judges whatever
+happens to be lying on the disk, so a personality that a commit introduces is
+missed whenever the working tree has since been tidied, and a push of unrelated
+clean commits is blocked whenever the disk has an uncommitted one. See
+`known-issues.md` ->
+`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH`.
+
+The baseline is read through the same tree, deliberately: it is a file in the
+commit like any other, and reading the code from the revision while reading the
+waiver list from the disk would let an uncommitted baseline edit excuse a
+committed defect. `--update-baseline` still *writes* to the disk, because there
+is nowhere else to write.
+
 Usage:
     python scripts/multicall-aliases.py             # the report
     python scripts/multicall-aliases.py --check     # exit 1 on a NEW unreachable alias
+    python scripts/multicall-aliases.py --check --head <rev>   # ...as of a commit
     python scripts/multicall-aliases.py --update-baseline
 """
 
 from __future__ import annotations
 
+import argparse
+import os
 import re
 import sys
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gittree  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
-USERSPACE = ROOT / "userspace"
-COREUTILS_BIN = USERSPACE / "coreutils" / "src" / "bin"
-ROOTFS = ROOT / "scripts" / "create-ext4-rootfs.sh"
+# Repo-relative, `/`-separated, because that is the only spelling the `Tree`
+# seam speaks -- see `gittree.Tree`. The one `Path` left is `BASELINE`, which
+# `--update-baseline` writes to the disk.
+USERSPACE = "userspace"
+COREUTILS_BIN = "userspace/coreutils/src/bin"
+ROOTFS = "scripts/create-ext4-rootfs.sh"
+BASELINE_REL = "scripts/multicall-aliases-baseline.txt"
 BASELINE = Path(__file__).resolve().parent / "multicall-aliases-baseline.txt"
 
 # A file is only considered if it extracts its own invocation name at all.
@@ -140,7 +170,7 @@ def invocation_aliases(text: str, crate: str) -> set[str]:
     return {n for n in names if n != crate and n not in IGNORE}
 
 
-def staged_aliases() -> set[str]:
+def staged_aliases(tree: gittree.Tree) -> set[str]:
     """Names `create-ext4-rootfs.sh` installs as a second name for a binary.
 
     It copies rather than links (`dash` -> `/bin/sh`) so the image builder need
@@ -149,18 +179,20 @@ def staged_aliases() -> set[str]:
     costs a missed defect here, whereas under-reporting it produces a false
     alarm in `--check`, and a checker that cries wolf gets switched off.
     """
-    if not ROOTFS.is_file():
+    text = tree.read_text(ROOTFS)
+    if text is None:
         return set()
-    text = ROOTFS.read_text(encoding="utf-8", errors="replace")
     found: set[str] = set()
     for m in re.finditer(r"(?:cp|install|ln)\s[^\n]*?/s?bin/([a-z][a-z0-9_.+-]*)", text):
         found.add(m.group(1))
     return found
 
 
-def producers(alias: str, cu_bins: set[str], staged: set[str]) -> list[str]:
+def producers(
+    tree: gittree.Tree, alias: str, cu_bins: set[str], staged: set[str]
+) -> list[str]:
     out = []
-    if (USERSPACE / alias / "Cargo.toml").is_file():
+    if tree.is_file(f"{USERSPACE}/{alias}/Cargo.toml"):
         out.append(f"crate userspace/{alias}")
     if alias in cu_bins:
         out.append("coreutils bin")
@@ -169,24 +201,46 @@ def producers(alias: str, cu_bins: set[str], staged: set[str]) -> list[str]:
     return out
 
 
-def survey() -> list[tuple[str, str, list[str]]]:
-    cu_bins = {p.stem for p in COREUTILS_BIN.glob("*.rs")}
-    cu_bins |= {p.name for p in COREUTILS_BIN.iterdir() if p.is_dir()}
-    staged = staged_aliases()
+def _leaf(rel: str) -> str:
+    return rel.rsplit("/", 1)[-1]
+
+
+def survey(tree: gittree.Tree) -> list[tuple[str, str, list[str]]]:
+    # `entries` in place of `glob("*.rs")` + `iterdir()`: one listing, then this
+    # file's own predicate. The seam offers no filtering on purpose -- see
+    # `gittree.Tree` -- because "a coreutils bin" means two different shapes
+    # here (a `<name>.rs` file and a `<name>/` directory) and no shared glob
+    # could have meant both without an option nobody else would use.
+    cu_bins: set[str] = set()
+    for rel, is_dir in tree.entries(COREUTILS_BIN):
+        name = _leaf(rel)
+        if is_dir:
+            cu_bins.add(name)
+        elif name.endswith(".rs"):
+            cu_bins.add(name[:-3])
+    staged = staged_aliases(tree)
     rows: list[tuple[str, str, list[str]]] = []
-    for main in sorted(USERSPACE.glob("*/src/main.rs")):
-        crate = main.parent.parent.name
-        text = main.read_text(encoding="utf-8", errors="replace")
+    for rel, is_dir in tree.entries(USERSPACE):
+        if not is_dir:
+            continue
+        crate = _leaf(rel)
+        # `read_text` answers `None` for a crate with no `main.rs` -- a library
+        # crate, or `coreutils` itself -- so the absence needs no separate
+        # `is_file` call, and cannot race one on the disk.
+        text = tree.read_text(f"{rel}/src/main.rs")
+        if text is None:
+            continue
         for alias in sorted(invocation_aliases(text, crate)):
-            rows.append((crate, alias, producers(alias, cu_bins, staged)))
+            rows.append((crate, alias, producers(tree, alias, cu_bins, staged)))
     return rows
 
 
-def read_baseline() -> set[str]:
-    if not BASELINE.is_file():
+def read_baseline(tree: gittree.Tree) -> set[str]:
+    text = tree.read_text(BASELINE_REL)
+    if text is None:
         return set()
     out = set()
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.split("#", 1)[0].strip()
         if line:
             out.add(line)
@@ -194,9 +248,33 @@ def read_baseline() -> set[str]:
 
 
 def main() -> int:
-    check = "--check" in sys.argv[1:]
-    update = "--update-baseline" in sys.argv[1:]
-    rows = survey()
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--check", action="store_true",
+                    help="exit 1 on an unreachable alias not in the baseline")
+    ap.add_argument("--update-baseline", action="store_true",
+                    help="rewrite the baseline from what is found now")
+    ap.add_argument(
+        "--head", default=None,
+        help="judge this commit instead of the working tree. The push hook "
+             "passes the commit being published, so a personality introduced "
+             "by a commit cannot be hidden by a tidied worktree -- nor an "
+             "uncommitted one block a push of unrelated clean commits.",
+    )
+    args = ap.parse_args()
+    check = args.check
+    update = args.update_baseline
+
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1. `scripts/run-checker.sh` reads 1 as "the checker found
+        # something" and prints the gate's refusal over it; a revision that
+        # cannot be opened is not a finding against anyone's code.
+        print(f"multicall-aliases: cannot read {args.head!r}: {exc}", file=sys.stderr)
+        return 2
+    with tree:
+        rows = survey(tree)
+        baseline = read_baseline(tree)
     unreachable = {f"{c}:{a}" for c, a, p in rows if not p}
     shadowed = [(c, a, p) for c, a, p in rows if p]
 
@@ -240,7 +318,6 @@ def main() -> int:
                 print(f"  {crate} answers to {alias}, but {prod[0]} provides it")
         return 0
 
-    baseline = read_baseline()
     new = sorted(unreachable - baseline)
     fixed = sorted(baseline - unreachable)
     for name in fixed:

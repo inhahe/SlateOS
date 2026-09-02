@@ -213,6 +213,79 @@ def test_the_request_deletion_gate_judges_the_commit(text):
           "pushed_shas" in code, True)
 
 
+# Checkers that must be told *which tree to judge*, keyed by the name the hook
+# invokes them under. A gate that enumerates the pushed commits and then reads
+# the working tree answers a question about a tree that exists nowhere: it
+# misses a defect a commit introduces once the worktree is tidied, and refuses
+# a push of clean commits over an uncommitted one. See known-issues.md ->
+# TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH.
+#
+# This list grows as each checker is converted. Its value is that it is a list:
+# the conversion is seven separate edits to one file, and "did gate 6 get the
+# flag too?" is exactly the question a reader of the hook cannot answer by
+# looking, because a gate that dropped it looks like every other gate.
+HEAD_GATES = {
+    "multicall-aliases.py": "gate 2, unreachable command names",
+    "check-requests-not-deleted.py": "gate 9, request deletion",
+}
+
+
+def _joined(code):
+    """`code` with backslash-continuations folded into single lines.
+
+    The invocations under test span two lines — the checker and its flags are
+    deliberately not crammed onto one — so a line-at-a-time search would find
+    the `run_checker` and the `--head` in different strings and conclude the
+    flag was absent.
+    """
+    return re.sub(r"\\\n\s*", " ", code)
+
+
+def test_every_tree_reading_gate_tells_its_checker_which_tree(text):
+    """Not "is `--head` in the file" — is it on *that gate's* invocation.
+
+    A bare presence check is satisfied by any one gate having the flag, which
+    is the state this is meant to detect the end of. It is also satisfied by
+    the paragraph above a gate arguing for the flag, which is why `code_only`
+    is used: that has happened here before, to the assertion two tests down.
+    """
+    code = _joined(code_only(text))
+    for script, label in sorted(HEAD_GATES.items()):
+        # The hook parks each checker's path in a variable and invokes `"$var"`,
+        # so the script name and the flag are never in the same word. Find the
+        # variable, then the invocation that uses it.
+        m = re.search(rf'^(\w+)="[^"\n]*{re.escape(script)}"', code, re.MULTILINE)
+        if not check(f"{label}: the hook names its checker in a variable",
+                     m is not None, True):
+            continue
+        var = m.group(1)
+        calls = [ln for ln in code.splitlines()
+                 if "run_checker" in ln and f'"${var}"' in ln
+                 and "--selftest" not in ln]
+        if not check(f"{label}: the checker is invoked through run_checker",
+                     len(calls) > 0, True):
+            continue
+        # *Every* non-selftest invocation, not merely one: a gate that grew a
+        # second call site would otherwise be half-converted and green.
+        check(f"{label}: every invocation says which tree to judge",
+              [c for c in calls if '--head "$sha"' not in c], [])
+
+
+def test_a_head_reading_gate_skips_when_nothing_is_being_pushed(text):
+    """A `for sha in $pushed_shas` over an empty list runs the checker zero times.
+
+    That is not a pass, it is an unasked question — and `note_gate` would have
+    already recorded the gate as having *run*, so the hook's own summary would
+    say it was checked. Each such gate therefore guards on `pushed_shas` being
+    non-empty and reports itself skipped, the way gate 9 does.
+    """
+    code = _joined(code_only(text))
+    guards = re.findall(r'\[ -n "\$\{pushed_shas# \}" \] \|\| skip_\w+=1', code)
+    loops = re.findall(r"for sha in \$pushed_shas", code)
+    check("every gate that loops over the pushed shas guards on there being some",
+          len(guards), len(loops))
+
+
 def test_no_gate_hands_a_push_sized_list_to_argv(text):
     """A scope derived from the pushed files must not travel as arguments.
 

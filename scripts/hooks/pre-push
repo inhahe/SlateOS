@@ -239,6 +239,19 @@ fi
 # fails only on a name that is *not* in it -- a ratchet, so the backlog can be
 # worked down without the check being red (and therefore deleted) from day one.
 #
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` is what makes the
+# question this gate answers match the thing it is gating. Without it the gate
+# decides *whether to run* from the pushed commits and then decides *what the
+# answer is* from the disk, which is wrong in both directions and silent in
+# one: a personality a commit introduces is missed whenever the working tree
+# has since been tidied, and a push of unrelated clean commits is refused
+# whenever the disk has an uncommitted one — with the bypass as the only
+# remedy on offer, which turns the gate off for the commits it should be
+# judging. See known-issues.md ->
+# TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH, and
+# scripts/test-checkers-honour-head.py, which builds a repository whose commit
+# and worktree disagree and asserts the verdict follows the flag.
+#
 # Two deliberate limits keep this from taxing anyone it is not about:
 #   * It runs only when the push actually adds commits touching `userspace/`,
 #     which is lane B's tree. A lane A or C push never pays the ~3 seconds and
@@ -332,11 +345,26 @@ checker="${repo_root:-.}/scripts/multicall-aliases.py"
 [ -f "$checker" ] || skip_alias=1
 # Only lane B's tree can introduce one of these, so only pay for it there.
 touches userspace/ || skip_alias=1
+# Nothing being published is nothing to judge. This is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate`
+# reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_alias=1
 note_gate unreachable-command "$skip_alias"
 
 alias_failed=0
-if [ "$skip_alias" != "1" ] && ! run_checker unreachable-command "$py" "$checker" --check; then
-    alias_failed=1
+if [ "$skip_alias" != "1" ]; then
+    # One run per ref being pushed. Unlike gate 9 this asks a question about a
+    # *state* rather than a diff, so only each ref's tip matters — and in the
+    # ordinary single-branch push that is exactly one run, at the same cost as
+    # the working-tree call it replaces.
+    for sha in $pushed_shas; do
+        # Per-sha gate name, for gate 9's reason: a shared name lets a later
+        # clean sha delete the kept log of an earlier failing one.
+        if ! run_checker "unreachable-command-$sha" "$py" "$checker" \
+                         --check --head "$sha"; then
+            alias_failed=1
+        fi
+    done
 fi
 
 if [ "$alias_failed" = "1" ]; then

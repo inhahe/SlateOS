@@ -108242,8 +108242,8 @@ that range:
 | 1 private-file | pushed tip | `git cat-file -e "$local_sha:$path"` |
 | 9 request-deletion | pushed tip | checker takes `--head "$sha"` |
 | 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
-| 2 unreachable-command | working tree | `--check`, checker walks the filesystem |
-| 3 raced-global | working tree | same |
+| 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+| 3 raced-global | working tree | `--check`, checker walks the filesystem |
 | 4 argv-utf8 | working tree | same |
 | 5 getopt-table | working tree | same |
 | 6 host-errmsg | working tree | same |
@@ -108319,15 +108319,41 @@ the regression test all exist. The work is:
    over the per-file fallback — because the batched path shipped a `\r\n`
    defect that refused *every clean file in a push* and that only the batched
    run could see. Steps 2–4 are untouched.
+   **Extended 2026-09-02** with the `Tree` seam the checkers are actually
+   written against: `WorkTree` (the disk) and `RevTree` (a revision) behind one
+   interface, chosen by `open_tree(root, head)`. The measurement that made
+   step 2 possible at all is in `RevTree`'s docstring: 2,305 blobs of
+   `posix/src` in **46 s** over the shared `git cat-file --batch`, against the
+   ~27 minutes recorded in the table above — so gate 11 joins the conversion
+   rather than being carved out of it. 97 assertions, and 12 mutants all
+   caught, including both halves of the original bug.
 2. Convert each checker's file access to go through it, with `--head <sha>`
    selecting git and its absence keeping today's filesystem walk (the checkers
    are also run by hand and by the boot test, where the working tree is right).
+   **In progress.** Gate 2's `multicall-aliases.py` converted 2026-09-02;
+   output on the working tree is byte-identical to before in both its modes.
+   Six to go: gates 3, 4, 5, 6, 8, 11.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
-   assertion to all eight gates instead of just gate 9.
+   assertion to all eight gates instead of just gate 9. **In progress.** The
+   assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
+   and it checks *every* non-selftest invocation of each listed checker rather
+   than the file merely containing the flag somewhere. Gates 2 and 9 are in it.
+   A second assertion pairs with it: a gate looping over `$pushed_shas` must
+   also guard on that list being non-empty, because a loop over nothing runs
+   the checker zero times while `note_gate` has already reported the gate as
+   having run.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
    against the broken code, which is exactly why this survived in gate 7.
+   **In progress**, in `scripts/test-checkers-honour-head.py`: every case
+   builds a repository whose commit and worktree *disagree*, runs the checker
+   twice against it — with and without `--head` — and requires the two verdicts
+   to differ. Gate 2 has 7 cases; a first draft had 5 and four mutants survived
+   it, because asserting that the *dispatch* comes from the revision leaves the
+   checker free to answer "does anything produce this name?" from the disk, and
+   that half decides the verdict just as completely. Whatever the next checker
+   reads, every input it reads must be made to differ.
 
 ### Why it is not done yet
 

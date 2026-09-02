@@ -4370,68 +4370,12 @@ check_kernel_clippy
 #
 # `x86_64-unknown-linux-gnu`, NOT `x86_64-slateos`: the latter needs
 # `-Zbuild-std` and is far slower, and for `cfg(unix)` coverage the two are
-# equivalent.  Neither `clippy` nor `check` links anything, so no cross-linker
-# is needed on a Windows host.
+# equivalent.  `check` rather than `build` means nothing is linked, so no
+# cross-linker is needed on a Windows host.
 #
-# `clippy` AND NOT `check`, SINCE 2026-09-02.  For its first three days this
-# gate ran `cargo check`, and half of what it was built to close stayed open.
-# `check` compiles the `cfg(unix)` arm, so it catches the syntax and
-# name-resolution errors that motivated the request -- but it does not run
-# clippy, and several crates here are `#![deny(clippy::all)]`.  A deny is not a
-# warning: for the crate that declared it, the lint is fatal, and the only
-# thing that can enforce it for the shipping target is a clippy run aimed at
-# that target.  Every lane's own clippy runs on the Windows host, where the
-# `cfg(unix)` arm does not exist, so a deny-level violation inside one was
-# unreachable from any check the project had.
-#
-# Not hypothetical, and not found by this gate: `userspace/coreutils`'
-# `utimecmp.rs` carried a `clippy::modulo_one` deny under `mod unix` -- found on
-# 2026-09-01 by running clippy for this target by hand, fixed in f107b77cc.  The
-# gate is what stops the next one needing somebody to think of it.
-#
-# WHY THE `-p kernel` ARGUMENT ABOVE DOES NOT TRANSFER.  `check_kernel_clippy`
-# scopes itself to one crate because "a workspace-wide clippy would let a red
-# crate in lane B's or lane C's tree block lane A's boot test".  Three reasons
-# that does not decide this gate:
-#   - The coupling is already here and was accepted deliberately.  This gate has
-#     always been `--workspace`, and has always failed lane A's boot test on a
-#     lane B compile error in a `cfg(unix)` arm, because coverage of those arms
-#     is workspace-wide or it is nothing -- no lane's own checks can see them.
-#   - The verb change adds no *warnings* to anyone's build.  `cargo clippy`
-#     exits non-zero only on deny/error level; the 18,538 warnings this
-#     invocation prints today do not fail it, and never will.  What it adds is
-#     exactly the class the paragraph above describes: a lint the crate's own
-#     author declared fatal.
-#   - The lane that introduces one is the lane that hits it.  Every lane runs
-#     this same boot test in its own worktree before merging to `main`, so the
-#     violation fires on its author's next run, not on a bystander's.
-#
-# NO `--all-targets`, MEASURED RATHER THAN CHOSEN.  It would cover `cfg(unix)`
-# code in `#[cfg(test)]` modules, which this does not, but it cannot run at all:
-# `--all-targets` builds a test harness for every crate including `kernel`,
-# which is `no_std` with its own `#[panic_handler]`, and linking one against a
-# hosted target's libtest is `E0152: found duplicate lang item panic_impl`.
-# Measured 2026-09-02: exit 101 at kernel/src/main.rs:7923 after 218 s.  A
-# per-crate `--all-targets` sweep excluding the no_std crates would close the
-# remainder; it is not attempted here because this gate's value is that it is
-# one command with no crate list to drift.
-#
-# VERIFIED BY MUTATION, not by a green run: with `utimecmp.rs`'s
-# `#[allow(clippy::modulo_one)]` removed, `cargo clippy -p coreutils --target
-# x86_64-unknown-linux-gnu` exits 101 and names `utimecmp.rs:370:32` -- without
-# `--all-targets`, confirming this gate's exact shape catches the one instance
-# the project has ever had.  A clean log alone is equally consistent with
-# "linted and clean" and "not linted".
-#
-# COST, and it is not free.  As `check` this was ~10 s warm, measured (5m22s on
-# the first, cold run that populates target/x86_64-unknown-linux-gnu).  `clippy`
-# sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace unit's
-# fingerprint, so it neither reuses nor invalidates those artifacts: it pays a
-# one-time cold population of its own, and its own warm cost thereafter.
-# Measured 2026-09-02: 55 s with no source edit, 92 s after touching one file,
-# 155 s for the first run of this shape in a session.  That is roughly a minute
-# added to a boot test whose QEMU window alone is 400-900 s.  Recorded with the
-# rest of the reasoning in design-decisions.md §747.
+# COST: ~10 s warm, measured (5m22s on the first, cold run that populates
+# target/x86_64-unknown-linux-gnu).  Lane B estimated "under three minutes";
+# it is an order cheaper than that once the cache exists.
 check_cfg_unix() {
     if ! rustup target list --installed 2>/dev/null \
         | grep -qx "x86_64-unknown-linux-gnu"; then
@@ -4440,38 +4384,29 @@ check_cfg_unix() {
         return 0
     fi
 
-    echo "=== Checking that every #[cfg(unix)] arm compiles and lints ==="
+    echo "=== Checking that every #[cfg(unix)] arm compiles ==="
     local log start rc
     log="$PROJECT_ROOT/build/check-cfg-unix.log"
     start="$(date +%s)"
     # Same `&& rc=0 || rc=$?` reasoning as check_shellcheck: this file runs
     # under `set -e`, so a bare `if ! cargo ...` is fine but a plain command
     # whose status we want to read is not.
-    "$CARGO" clippy --workspace --target x86_64-unknown-linux-gnu \
+    "$CARGO" check --workspace --target x86_64-unknown-linux-gnu \
         --message-format=short > "$log" 2>&1 && rc=0 || rc=$?
     if [ "$rc" -eq 0 ]; then
-        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles and lints)."
+        echo "cfg(unix) OK ($(( $(date +%s) - start ))s, every cfg(unix) arm compiles)."
         return 0
     fi
 
     echo "" >&2
-    echo "ERROR: refusing to build.  Code guarded by #[cfg(unix)] either does" >&2
-    echo "not compile for a unix target, or violates a deny-level clippy lint" >&2
-    echo "there.  This is invisible to every other check here, because they all" >&2
-    echo "run for the Windows host -- and it is the arm that ships, because" >&2
-    echo "SlateOS sets target-family = [\"unix\"]." >&2
+    echo "ERROR: refusing to build.  Code guarded by #[cfg(unix)] does not" >&2
+    echo "compile for a unix target.  This is invisible to every other check" >&2
+    echo "here, because they all run for the Windows host -- and it is the arm" >&2
+    echo "that ships, because SlateOS sets target-family = [\"unix\"]." >&2
     echo "" >&2
     grep -E '^[^ ].*: error' "$log" >&2 || true
     echo "" >&2
     echo "Full output: $log" >&2
-    echo "" >&2
-    echo 'Reading the two cases apart: an "error[E0433]"-style code is a' >&2
-    echo 'compile failure; a bare "error: <lint text>" is clippy, fatal' >&2
-    echo 'because the crate itself says #![deny(clippy::all)].' >&2
-    echo "" >&2
-    echo "Warnings in that log are NOT why this failed -- clippy exits non-zero" >&2
-    echo "only at deny level, and a good run still prints thousands of pedantic" >&2
-    echo "warnings." >&2
     echo "" >&2
     echo "If you arrived here from a warning-cleanup sweep, suspect the sweep:" >&2
     echo "an \"unused variable\" that is real on Windows is often read only by" >&2

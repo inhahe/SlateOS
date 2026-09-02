@@ -1545,7 +1545,7 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 ### 3.2 Graphics Stack
 
 - [ ] DRM/KMS equivalent (kernel mode setting, GPU memory management)
-- [ ] Vulkan loader and basic GPU command submission
+- [-] Vulkan loader and basic GPU command submission — loader started 2026-09-02 in `gui/vulkan/` (crate `vkloader`): the interface-version handshake and the dispatchable-handle ABI, both against the Khronos Loader–Driver Interface, then the instance-level entry points on top of them. `vkGetInstanceProcAddr`, `vkCreateInstance`, `vkDestroyInstance` and `vkEnumeratePhysicalDevices` are exported and fan out across every registered driver; the three `vkEnumerateInstance*` commands are deliberately absent symbols rather than empty-list stubs. Device-level Vulkan and command submission untouched. See `roadmap.md` and design-decisions.md §577, §578.
 - [ ] OpenGL via Mesa port
 - [ ] 2D drawing library for application UI
 - [ ] OS-level image codec support (all common formats apps can decode/encode via system API):

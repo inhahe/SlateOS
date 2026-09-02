@@ -195,10 +195,18 @@ def test_the_request_deletion_gate_judges_the_commit(text):
     # is what tells a checker that *found* something from one that fell over.
     # Matching that helper rather than a bare `"$py"` is deliberate: reverting a
     # gate to the direct call is the regression this line should catch, and
-    # `test-pre-push-run-checker.py` group 6 asserts the same rule for all
+    # `test-pre-push-run-checker.py` group 7 asserts the same rule for all
     # eleven gates at once.
+    #
+    # `"$py"` is matched between the label and the script because the helper
+    # moved to `scripts/run-checker.sh`, shared with `boot-test.sh`, and takes
+    # the interpreter as an ordinary argument rather than reading an ambient
+    # `$py` from the caller's scope. boot-test declares `local py` inside each
+    # of its gates, so the ambient form would have worked there only for as long
+    # as no call site was a subshell.
     check("gate 9 self-tests the checker before believing it",
-          re.search(r'if\s*!\s*run_checker\s+\S+\s+"\$reqdel"\s+--selftest', code)
+          re.search(r'if\s*!\s*run_checker\s+\S+\s+"\$py"\s+"\$reqdel"\s+--selftest',
+                    code)
           is not None,
           True)
     check("gate 9 collects the refs being pushed",

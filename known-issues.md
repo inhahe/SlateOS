@@ -107797,3 +107797,70 @@ rather than letting a run produce numbers from a harness that had just failed
 its own test.
 
 ---
+
+### A-PIPING-A-BACKGROUNDED-RUN-THROUGH-`tail`-REPORTS-SOMEBODY-ELSE'S-EXIT-STATUS — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A; a working-practice fix, no code change)
+
+**In short:** a boot test that *failed* was reported to me as "completed, exit
+code 0", and I was one step from closing a bug and merging to `main` on the
+strength of it. The cause was not the harness. It was that I had started the
+run as `./scripts/boot-test.sh … | tail -80`, and a shell pipeline exits with
+the status of its **last** command — `tail`, which succeeds at tailing the
+output of a program that just died. The failure was sitting in the text I did
+have; the status that would have made me read it said everything was fine.
+
+**What it looked like.**
+
+```
+ERROR: refusing to build.  1 tooling test suite(s) failed:
+    test-check-design-decisions-bands.py
+[run-timeout] child exited: FAIL (exit 1), 3242s elapsed
+```
+
+…delivered under a completion notice reading `completed (exit code 0)`.
+
+**Why this is worth an entry rather than a shrug.** The truncation half of this
+trap is already recorded immediately above — "capture the run's output to a
+file in full rather than reading a truncated background-task tail". That advice
+is right and it is not sufficient, because it is about *losing* information. The
+sharper defect is that the pipe does not merely hide the verdict, it **replaces
+the verdict with a different program's success**. Lost output announces itself
+the moment you go looking; a fabricated `0` does not, and it is trusted
+precisely at the moment a decision hangs on it — "is the tree green enough to
+merge?".
+
+This is the shape this file already names twice from other directions:
+`A-GATES-SILENTLY-STOPPED-CHECKING` (a gate parsing a fraction of the tree and
+reporting "clean") and the `[ -f ]` guard in `A-KILL-QEMU-PRINTS-A-BARE-NO-SUCH-
+FILE` — *a guard that reports a fact it has not checked costs more than the
+finding does*. Here the "guard" is an exit status, and the fact it had not
+checked was whether the thing I actually ran succeeded. Arriving from a third
+direction is the argument for writing it down.
+
+**The rule.** Never pipe a command whose exit status you intend to believe.
+For a backgrounded run, redirect instead, and read the status explicitly:
+
+```bash
+# WRONG — notification reports tail's status, not the build's
+python scripts/run-timeout.py 7200 ./scripts/boot-test.sh 2>&1 | tail -80
+
+# RIGHT — full output kept, status preserved and printed
+python scripts/run-timeout.py 7200 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
+echo "EXIT=$?"
+```
+
+`tee` is the exception worth knowing, since it is the reason the advice above
+reaches for it: `cmd | tee f` has the same defect, but `set -o pipefail` or
+`${PIPESTATUS[0]}` recovers the real status, and `run-timeout.py` also prints
+`child exited: …` in its own output regardless of how the pipeline is wired.
+The cheapest habit is still redirect-then-read.
+
+**Cost this time:** 54 minutes of wall clock on a run that refused to build in
+its first phase, plus a near-miss on closing
+`A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST` against a boot that never
+happened — an entry whose own text warns, in as many words, that "every
+assertion here is boot-time, so an unrun harness has demonstrated nothing."
+The gate that caught the underlying problem (`check-design-decisions-bands`,
+on a §675 entry missing its `**Lane:** A` field) worked exactly as designed.
+The only thing that failed was my reading of whether it had run.
+
+---

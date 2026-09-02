@@ -127,11 +127,23 @@ static REFCOUNT_LEN: AtomicU64 = AtomicU64::new(0);
 /// Sizing to `total_frames` fixes that for arbitrary RAM.
 ///
 /// When a frame is allocated and the allocating task belongs to a non-root
-/// cgroup with a memory limit, the cgroup ID is stored here.  On free, the
-/// stored ID is used to uncharge the *correct* cgroup — even if a different
-/// task (e.g. a kernel worker cleaning up after process exit) performs the
-/// free.  Value `0` means the frame was charged to the root cgroup (or was
-/// not charged at all), so no uncharge is needed.
+/// cgroup with a memory limit, a *charge tag* for that cgroup is stored here.
+/// On free, the stored tag is used to uncharge the *correct* cgroup — even if
+/// a different task (e.g. a kernel worker cleaning up after process exit)
+/// performs the free.  Value `cgroup::TAG_NONE` (0) means the frame was
+/// charged to the root cgroup (or was not charged at all), so no uncharge is
+/// needed.
+///
+/// The tag is `u32` rather than a bare `u8` id because an id alone cannot
+/// survive the group being deleted: cgroup slots are reissued routinely, so a
+/// frame outliving the group that paid for it would uncharge whichever
+/// unrelated group inherited the slot, pushing that group's `mem_usage` below
+/// its real usage until its `MemLimit` stopped being enforced.  The tag pairs
+/// the id with the slot's generation, which lets `cgroup::mem_uncharge_tag`
+/// recognise the stale reference and drop it.  Cost is 3 extra bytes per
+/// 16 KiB frame — 0.02% of RAM — for closing a silent-accounting-drift class
+/// outright; see known-issues
+/// `TD-A-FRAMES-OUTLIVE-THEIR-CGROUP-AND-UNCHARGE-A-RECYCLED-SLOT`.
 ///
 /// `FRAME_CGROUP_PTR` is the HHDM virtual base of the array and
 /// `FRAME_CGROUP_LEN` its length in frames; both are set once during `init`
@@ -146,10 +158,10 @@ static FRAME_CGROUP_LEN: AtomicU64 = AtomicU64::new(0);
 /// Record which cgroup was charged for a frame allocation.
 ///
 /// Called after a successful `mem_charge` on the cgroup.  `frame_idx`
-/// is `phys_addr / FRAME_SIZE`.  `cgroup_id` is truncated to u8
-/// (MAX_CGROUPS = 256 fits in u8).
+/// is `phys_addr / FRAME_SIZE`.  `tag` is a charge tag from
+/// `cgroup::tag_for`, which pairs the group's id with its slot generation.
 #[inline]
-fn set_frame_cgroup(frame_idx: usize, cgroup_id: u8) {
+fn set_frame_cgroup(frame_idx: usize, tag: u32) {
     #[allow(clippy::cast_possible_truncation)]
     let len = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize;
     if frame_idx >= len {
@@ -160,36 +172,38 @@ fn set_frame_cgroup(frame_idx: usize, cgroup_id: u8) {
         return;
     }
     // SAFETY: frame_idx < len, so `base + frame_idx` lies within the
-    // `len`-byte array allocated in `init` (HHDM virtual, never moved), and
-    // we're the sole owner of this frame (just allocated it).
+    // `len`-element u32 array allocated in `init` (HHDM virtual, never moved,
+    // and 4-byte aligned by `plan_metadata`), and we're the sole owner of
+    // this frame (just allocated it).
     unsafe {
-        (base as *mut u8).add(frame_idx).write(cgroup_id);
+        (base as *mut u32).add(frame_idx).write(tag);
     }
 }
 
-/// Look up which cgroup was charged for a frame.
+/// Look up the charge tag recorded for a frame.
 ///
-/// Returns 0 (ROOT_CGROUP) if the frame was not charged or is out of range.
+/// Returns `cgroup::TAG_NONE` if the frame was not charged or is out of range.
 #[inline]
-fn get_frame_cgroup(frame_idx: usize) -> u8 {
+fn get_frame_cgroup(frame_idx: usize) -> u32 {
     #[allow(clippy::cast_possible_truncation)]
     let len = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize;
     if frame_idx >= len {
-        return 0;
+        return crate::cgroup::TAG_NONE;
     }
     let base = FRAME_CGROUP_PTR.load(Ordering::Relaxed);
     if base == 0 {
-        return 0;
+        return crate::cgroup::TAG_NONE;
     }
-    // SAFETY: frame_idx < len, so `base + frame_idx` is within the array,
-    // and we hold exclusive access to this frame (about to free it).
-    unsafe { (base as *const u8).add(frame_idx).read() }
+    // SAFETY: frame_idx < len, so `base + frame_idx` is within the u32 array
+    // (4-byte aligned by `plan_metadata`), and we hold exclusive access to
+    // this frame (about to free it).
+    unsafe { (base as *const u32).add(frame_idx).read() }
 }
 
 /// Clear the cgroup charge record for a frame (on free).
 #[inline]
 fn clear_frame_cgroup(frame_idx: usize) {
-    set_frame_cgroup(frame_idx, 0);
+    set_frame_cgroup(frame_idx, crate::cgroup::TAG_NONE);
 }
 
 /// Charge the current task's cgroup for a frame allocation.
@@ -236,17 +250,27 @@ fn charge_cgroup_alloc_to(
         return Ok(());
     }
 
-    // Charge the cgroup.  Fails if the group would exceed its limit.
-    crate::cgroup::mem_charge(cgroup_id, count)?;
+    // Charge the cgroup, and get back the tag that redeems *this* charge.
+    // Fails if the group would exceed its limit.
+    //
+    // `mem_charge_tagged` rather than `mem_charge` + `tag_for` because the
+    // charge and the tag must come from one acquisition of the cgroup table
+    // lock.  `mem_charge` can decline to charge without saying so — it uses
+    // try_lock and returns Ok on contention, since frame allocation can run
+    // in interrupt context — so asking separately would let the two answers
+    // disagree: a charge with no recorded tag never gets uncharged, and a
+    // recorded tag with no charge gets uncharged anyway.  A returned
+    // `TAG_NONE` means "nothing was charged", and recording it is correct.
+    let tag = crate::cgroup::mem_charge_tagged(cgroup_id, count)?;
 
-    // Record the cgroup ID per frame so we uncharge the right group
-    // even if a different task frees the frame.
+    // Record the charge tag per frame so we uncharge the right group even if
+    // a different task frees the frame — and, because the tag carries the
+    // slot's generation, so that we *decline* to uncharge if the group has
+    // since been deleted and its slot reissued to someone else.
     #[allow(clippy::arithmetic_side_effects)]
     let base_idx = (frame_addr / FRAME_SIZE as u64) as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    let cg_u8 = cgroup_id as u8;
     for i in 0..count as usize {
-        set_frame_cgroup(base_idx.wrapping_add(i), cg_u8);
+        set_frame_cgroup(base_idx.wrapping_add(i), tag);
     }
 
     Ok(())
@@ -269,9 +293,9 @@ fn uncharge_cgroup_free(frame_addr: u64, count: u64) {
 
     for i in 0..count as usize {
         let idx = base_idx.wrapping_add(i);
-        let cg = get_frame_cgroup(idx);
-        if cg != 0 {
-            crate::cgroup::mem_uncharge(cg as u32, 1);
+        let tag = get_frame_cgroup(idx);
+        if tag != crate::cgroup::TAG_NONE {
+            crate::cgroup::mem_uncharge_tag(tag, 1);
             clear_frame_cgroup(idx);
         }
     }
@@ -1776,13 +1800,13 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
     );
 
     // We need 1 byte per frame for page_info + 2 bytes per frame for
-    // refcount + 1 byte per frame for the per-frame cgroup id + 1 byte per
-    // frame for the frame-owner tag, plus up to 1 byte of alignment padding
-    // before the (u16) refcount array.  The cgroup and owner arrays are u8
-    // so they need no further alignment.
+    // refcount + 4 bytes per frame for the per-frame cgroup charge tag + 1
+    // byte per frame for the frame-owner tag, plus alignment padding before
+    // the (u16) refcount array and before the (u32) cgroup array.  The owner
+    // array is u8 so it needs no further alignment.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
-    let cgroup_offset = refcount_offset + total_frames * 2;
-    let owner_offset = cgroup_offset + total_frames;
+    let cgroup_offset = (refcount_offset + total_frames * 2 + 3) & !3; // align up to 4
+    let owner_offset = cgroup_offset + total_frames * 4;
     let metadata_bytes = owner_offset + total_frames;
     let metadata_frames = (align_up(metadata_bytes as u64, frame_size) / frame_size) as usize;
     let metadata_size = (metadata_frames as u64) * frame_size;
@@ -1794,7 +1818,7 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
         metadata_size / 1024,
         total_frames,
         total_frames * 2,
-        total_frames,
+        total_frames * 4,
         total_frames
     );
 
@@ -1906,12 +1930,12 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     //
     // The refcount array must be 2-byte aligned (u16).  Round up the
     // page_info region to the next even byte boundary.  The per-frame cgroup
-    // id array (u8) follows the refcount array, and the per-frame owner tag
-    // array (u8) follows that; it must match the layout computed in
-    // `plan_metadata`.
+    // charge-tag array (u32) follows the refcount array and must be 4-byte
+    // aligned, and the per-frame owner tag array (u8) follows that; this must
+    // match the layout computed in `plan_metadata`.
     let refcount_offset = (total_frames + 1) & !1; // align up to 2
-    let cgroup_offset = refcount_offset + total_frames * 2;
-    let owner_offset = cgroup_offset + total_frames;
+    let cgroup_offset = (refcount_offset + total_frames * 2 + 3) & !3; // align up to 4
+    let owner_offset = cgroup_offset + total_frames * 4;
     let metadata_virt = (metadata_phys + hhdm_offset) as *mut u8;
     // SAFETY: metadata_phys is in a USABLE memory region, the HHDM maps
     // it to metadata_virt, and we have exclusive access during early boot
@@ -1924,9 +1948,10 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
         // the aligned pointer for later use.
         let refcount_ptr = metadata_virt.add(refcount_offset);
         core::ptr::write_bytes(refcount_ptr, 0, total_frames * 2);
-        // per-frame cgroup ids: fill with 0 = "root / not charged".
+        // per-frame cgroup charge tags: fill with 0 = TAG_NONE ("root / not
+        // charged").  4 bytes per frame, so zero `total_frames * 4` bytes.
         let cgroup_ptr = metadata_virt.add(cgroup_offset);
-        core::ptr::write_bytes(cgroup_ptr, 0, total_frames);
+        core::ptr::write_bytes(cgroup_ptr, 0, total_frames * 4);
         // per-frame owner tags: fill with 0 = Owner::Free ("not allocated").
         let owner_ptr = metadata_virt.add(owner_offset);
         core::ptr::write_bytes(owner_ptr, 0, total_frames);
@@ -1935,7 +1960,9 @@ pub unsafe fn init(hhdm_offset: u64, memory_map: &[&MemmapEntry]) -> KernelResul
     // is 2-byte aligned (metadata_virt is frame-aligned = 16 KiB aligned).
     let refcount_virt = unsafe { metadata_virt.add(refcount_offset) as *mut u16 };
     // SAFETY: cgroup_offset is within the metadata region reserved by
-    // plan_metadata (which sized it to include `total_frames` cgroup bytes).
+    // plan_metadata (which sized it to include `total_frames * 4` cgroup
+    // bytes) and is rounded up to a multiple of 4, so — metadata_virt being
+    // frame-aligned — the array is correctly aligned for u32 access.
     let cgroup_virt = unsafe { metadata_virt.add(cgroup_offset) };
     // Publish the per-frame cgroup array so set/get_frame_cgroup can reach it.
     // These never change after init.  Store the base before the length so a
@@ -3348,8 +3375,8 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
     let cg_idx = (cg_frame.addr() / FRAME_SIZE as u64) as usize;
     let stored_cg = get_frame_cgroup(cg_idx);
     assert!(
-        stored_cg == 0,
-        "frame cgroup should be 0 when limits inactive"
+        stored_cg == crate::cgroup::TAG_NONE,
+        "frame cgroup tag should be TAG_NONE when limits inactive"
     );
     // SAFETY: frame was just allocated.
     unsafe {
@@ -3361,17 +3388,29 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
     // Test 9: Cgroup per-frame tracking round-trip
     // -----------------------------------------------------------------------
 
-    // Manually test set/get/clear for the per-frame cgroup array.
-    set_frame_cgroup(42, 7);
-    assert_eq!(get_frame_cgroup(42), 7, "set/get round-trip");
+    // Manually test set/get/clear for the per-frame cgroup array.  Use a
+    // tag-shaped value with a large generation rather than a small integer:
+    // the array is u32 precisely so the generation half survives, and a
+    // value that fits in the old u8 would not have noticed if it did not.
+    const PROBE_TAG: u32 = (0x00ff_ffff << 8) | 7; // max generation, id 7
+    set_frame_cgroup(42, PROBE_TAG);
+    assert_eq!(get_frame_cgroup(42), PROBE_TAG, "set/get round-trip");
     clear_frame_cgroup(42);
-    assert_eq!(get_frame_cgroup(42), 0, "clear resets to 0");
+    assert_eq!(
+        get_frame_cgroup(42),
+        crate::cgroup::TAG_NONE,
+        "clear resets to TAG_NONE"
+    );
 
     // Out-of-bounds (>= the dynamic array length) should return 0 / no-op.
     #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     let oob_idx = FRAME_CGROUP_LEN.load(Ordering::Relaxed) as usize + 1;
-    assert_eq!(get_frame_cgroup(oob_idx), 0, "out-of-bounds get");
-    set_frame_cgroup(oob_idx, 5); // should be no-op
+    assert_eq!(
+        get_frame_cgroup(oob_idx),
+        crate::cgroup::TAG_NONE,
+        "out-of-bounds get"
+    );
+    set_frame_cgroup(oob_idx, PROBE_TAG); // should be no-op
     serial_println!("[mm]   Cgroup per-frame tracking: OK");
 
     // -----------------------------------------------------------------------
@@ -3484,14 +3523,15 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
                 let u_charged = crate::cgroup::stats(cg_id)
                     .map(|s| s.mem_usage)
                     .unwrap_or(0);
-                let tag_after_charge = u32::from(get_frame_cgroup(idx));
+                let tag_after_charge = get_frame_cgroup(idx);
+                let expected_tag = crate::cgroup::tag_for(cg_id);
 
                 // Uncharge once → usage back to base and tag cleared.
                 uncharge_cgroup_free(fr.addr(), 1);
                 let u_uncharged = crate::cgroup::stats(cg_id)
                     .map(|s| s.mem_usage)
                     .unwrap_or(0);
-                let tag_after_uncharge = u32::from(get_frame_cgroup(idx));
+                let tag_after_uncharge = get_frame_cgroup(idx);
 
                 // SAFETY: frame was just allocated, is not mapped, and its
                 // per-frame cgroup record is already cleared (so free_frame's
@@ -3507,10 +3547,19 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
                     base.saturating_add(1),
                     "charge must add exactly +1"
                 );
-                assert_eq!(tag_after_charge, cg_id, "charge must record the cgroup id");
+                assert_eq!(
+                    tag_after_charge, expected_tag,
+                    "charge must record the cgroup's current charge tag"
+                );
+                assert_eq!(
+                    tag_after_charge & 0xff,
+                    cg_id,
+                    "the tag's low byte must be the cgroup id"
+                );
                 assert_eq!(u_uncharged, base, "uncharge must subtract exactly -1");
                 assert_eq!(
-                    tag_after_uncharge, 0,
+                    tag_after_uncharge,
+                    crate::cgroup::TAG_NONE,
                     "uncharge must clear the per-frame record"
                 );
                 serial_println!("[mm]   Cgroup charge/uncharge round-trip (no double-charge): OK");
@@ -3593,6 +3642,133 @@ fn test_zero_on_free_inner(skips: &mut crate::fs::selftest::Skips) -> KernelResu
             }
         }
         let _ = crate::cgroup::delete(cg_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 14: A frame outliving its cgroup must not debit the slot's next
+    //          occupant
+    // -----------------------------------------------------------------------
+    // `delete` requires no tasks and no children, but deliberately *not* zero
+    // memory usage — a group can be deleted while frames it paid for are
+    // still live.  Slot ids are small and `next_id` wraps, so that id is
+    // handed to an unrelated group as a matter of routine.  Before charge
+    // tags carried a generation, the eventual free of those older frames read
+    // the bare stale id and debited whoever now held the slot: the new
+    // group's `mem_usage` read below its real usage and its `MemLimit`
+    // admitted allocations it should have rejected.
+    //
+    // This drives the real reuse path rather than simulating it — it walks
+    // `next_id` all the way around the ring with create/delete until `create`
+    // hands back the very slot the deleted group had.  See known-issues
+    // TD-A-FRAMES-OUTLIVE-THEIR-CGROUP-AND-UNCHARGE-A-RECYCLED-SLOT.
+    let cg_a = selftest_cgroup("Cgroup slot reuse")?;
+    {
+        let _ = crate::cgroup::set_mem_limit(cg_a, crate::cgroup::MemLimit { max_frames: 1000 });
+
+        match alloc_frame() {
+            Ok(fr) => {
+                #[allow(clippy::arithmetic_side_effects)]
+                let idx = (fr.addr() / FRAME_SIZE as u64) as usize;
+
+                // Charge the frame to group A and confirm it took.
+                let charged = charge_cgroup_alloc_to(fr.addr(), 1, cg_a).is_ok();
+                let tag_a = get_frame_cgroup(idx);
+
+                // Delete A *while its frame is still live*.  This is the step
+                // that creates the dangling reference, and it is allowed.
+                let deleted = crate::cgroup::delete(cg_a).is_ok();
+
+                // Walk the allocation ring until the same slot comes back.
+                // Bounded at twice the table size: one lap is enough, and a
+                // second is slack for the root slot being skipped.
+                let mut reused = None;
+                for _ in 0..(crate::cgroup::MAX_CGROUPS * 2) {
+                    match crate::cgroup::create(crate::cgroup::ROOT_CGROUP) {
+                        Ok(id) if id == cg_a => {
+                            reused = Some(id);
+                            break;
+                        }
+                        Ok(id) => {
+                            let _ = crate::cgroup::delete(id);
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                if let Some(cg_b) = reused {
+                    // B now holds A's old slot, with a bumped generation.
+                    let _ = crate::cgroup::set_mem_limit(
+                        cg_b,
+                        crate::cgroup::MemLimit { max_frames: 1000 },
+                    );
+                    let tag_b = crate::cgroup::tag_for(cg_b);
+                    let usage_before = crate::cgroup::stats(cg_b).map(|s| s.mem_usage).unwrap_or(0);
+                    let dropped_before = crate::cgroup::stale_uncharges_dropped();
+
+                    // Free A's frame.  The stale tag must be recognised.
+                    uncharge_cgroup_free(fr.addr(), 1);
+
+                    let usage_after = crate::cgroup::stats(cg_b).map(|s| s.mem_usage).unwrap_or(0);
+                    let dropped_after = crate::cgroup::stale_uncharges_dropped();
+                    let tag_after = get_frame_cgroup(idx);
+
+                    let _ = crate::cgroup::delete(cg_b);
+                    // SAFETY: frame was just allocated, is not mapped, and its
+                    // per-frame record is already cleared.
+                    let _ = unsafe { free_frame(fr) };
+
+                    assert!(charged, "charging group A should succeed within limit");
+                    assert!(
+                        deleted,
+                        "delete must be allowed while charged frames are live \
+                         (that precondition is what the tag defends against)"
+                    );
+                    assert_ne!(
+                        tag_a, tag_b,
+                        "the reissued slot must mint a different tag than its \
+                         previous occupant — equal tags mean the generation \
+                         never advanced and the guard is inert"
+                    );
+                    assert_eq!(
+                        usage_after, usage_before,
+                        "freeing a frame charged to a DELETED group must not \
+                         debit the group that inherited its slot"
+                    );
+                    assert_eq!(
+                        dropped_after,
+                        dropped_before.saturating_add(1),
+                        "the dropped uncharge must be counted, not silently lost"
+                    );
+                    assert_eq!(
+                        tag_after,
+                        crate::cgroup::TAG_NONE,
+                        "a dropped uncharge must still clear the per-frame record"
+                    );
+                    serial_println!(
+                        "[mm]   Cgroup slot reuse (stale charge dropped, heir not debited): OK"
+                    );
+                } else {
+                    // Could not steer the ring back to the same slot — the
+                    // table was too full to lap.  Clean up and skip.
+                    uncharge_cgroup_free(fr.addr(), 1);
+                    // SAFETY: frame was just allocated and is not mapped.
+                    let _ = unsafe { free_frame(fr) };
+                    skips.record(
+                        "Cgroup slot reuse",
+                        "could not walk the cgroup ring back to the freed slot",
+                    );
+                }
+            }
+            Err(KernelError::OutOfMemory) => {
+                let _ = crate::cgroup::delete(cg_a);
+                skips.record("Cgroup slot reuse", "no free frame left on this machine");
+            }
+            Err(e) => {
+                serial_println!("[mm]   FAIL: Cgroup slot reuse: alloc_frame failed: {e:?}");
+                let _ = crate::cgroup::delete(cg_a);
+                return Err(e);
+            }
+        }
     }
 
     // Restore original state.

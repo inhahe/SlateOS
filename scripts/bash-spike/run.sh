@@ -1,3 +1,7 @@
+#!/bin/bash
+# The shebang was missing until 2026-09-02 — the only one of the five
+# `*-spike/run.sh` runners without one — so `./run.sh` ran it under whatever
+# /bin/sh is, while the first line below needs `${BASH_SOURCE[0]}`.
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
 
 set -x

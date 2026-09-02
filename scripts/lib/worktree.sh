@@ -1,3 +1,14 @@
+# shellcheck shell=bash
+#
+# The directive above is load-bearing rather than decorative. This file has no
+# shebang, because it is sourced and never run, and shellcheck will not give a
+# target-shell-dependent opinion about a script whose shell it cannot work out
+# — SC2148, which is *error*-level, so without this line the file could not be
+# linted at all rather than merely linted loosely. `bash` and not `sh` because
+# `${BASH_SOURCE[0]}` below is the entire mechanism here and has no POSIX
+# equivalent. Same convention as `diff-wsl.sh` and `run-checker.sh`, which are
+# sourced the same way and declare `shell=sh`.
+#
 # Locate the worktree the sourcing script physically lives in.
 #
 # Source this instead of typing a repo path into a script:
@@ -44,8 +55,21 @@
 # root is two levels up from `scripts/lib/` regardless of the caller's depth.
 SLATE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || return 1
 SLATE_LANE="$(basename "$SLATE_ROOT")"
+# SC2034 (appears unused) on the two below, and on the four `SLATE_*_TARBALL`
+# assignments later in this file, is a false positive *by construction* rather
+# than a judgement call: they are this library's product, read by the script
+# that sourced it, and a sourced file linted on its own has no sourcer in which
+# the tool could see those reads. The names it does *not* flag -- `SLATE_ROOT`,
+# `SLATE_LANE`, `SLATE_SPIKE` -- differ only in also happening to be read
+# further down this same file.
+#
+# Per-line rather than one file-wide disable at the top: a file-wide one would
+# also cover a variable added later that genuinely *is* dead, which is the one
+# thing SC2034 is good at. Same shape as `test-boot-lock.sh`.
+# shellcheck disable=SC2034
 SLATE_SYSROOT="$SLATE_ROOT/toolchain/sysroot/lib"
 SLATE_SPIKE="$SLATE_ROOT/build/spike"
+# shellcheck disable=SC2034
 SLATE_ROOTFS="$SLATE_ROOT/rootfs.ext4"
 
 # The zig cross-toolchain. Pinned by version *and* hash: `zig cc
@@ -343,6 +367,7 @@ slate_ensure_bash_src() {
         return 1
     fi
 
+    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
     SLATE_BASH_TARBALL="$tarball"
 }
 
@@ -394,6 +419,7 @@ slate_ensure_pkgconf_src() {
         return 1
     fi
 
+    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
     SLATE_PKGCONF_TARBALL="$tarball"
 }
 
@@ -438,6 +464,7 @@ slate_ensure_make_src() {
         return 1
     fi
 
+    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
     SLATE_MAKE_TARBALL="$tarball"
 }
 
@@ -482,6 +509,7 @@ slate_ensure_coreutils_src() {
         return 1
     fi
 
+    # shellcheck disable=SC2034  # the caller's, not ours; see SLATE_SYSROOT above
     SLATE_COREUTILS_TARBALL="$tarball"
 }
 

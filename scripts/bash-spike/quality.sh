@@ -3,7 +3,6 @@
 # implementations, and how many are stub-only / ENOSYS?
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
 
-SYSROOT="$SLATE_SYSROOT"
 POSIX="$SLATE_ROOT/posix/src"
 
 # Symbols bash needs that are provided ONLY by libstubs.a (not by libc.a).

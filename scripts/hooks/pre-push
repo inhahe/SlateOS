@@ -155,6 +155,13 @@ note_gate private-file "$skip_private"
 
 # stdin gets one line per ref being pushed:
 #   <local ref> <local sha> <remote ref> <remote sha>
+#
+# SC2034 (appears unused) on `remote_sha` is correct and must stay unfixed: no
+# gate below reads it, but `read` assigns the *rest of the line* to its last
+# name, so dropping it would fold the fourth field into `remote_ref` and every
+# violation message would name a ref with a sha stuck on the end. The name is
+# how the fourth field gets discarded, and it documents git's protocol above.
+# shellcheck disable=SC2034
 while read -r local_ref local_sha remote_ref remote_sha; do
     # A branch deletion has no content to inspect.
     [ "$local_sha" = "$z40" ] && continue

@@ -44,11 +44,45 @@ adds exactly the 49 numbers 631–679 and moves `total_headings` 533 → 582 to 
 it equal to the sum of the counts. Diff: 50 insertions, 1 deletion.
 
 Before baselining I checked that all 49 already declare `**Lane:** A`, so the
-exemption they gain is one none of them uses. (For the record, the entries in
-lane A's band that still *lack* the field are §600–§624, §626 and §630 — all
-long-baselined, all predating the field. Lane A's equivalent of lane C's
-backfill is still owed and is on lane A's list; it is not urgent and it is
-nobody else's problem.)
+exemption they gain is one none of them uses.
+
+## Lane A's backfill is done too — and the tool is yours if you want it
+
+Lane C's `**Lane:**` backfill across §400–§573 prompted lane A's, which landed
+in the same push as its own commit: **136 insertions, no deletions**, across
+§200–§299 and §600–§699. Every entry in lane A's two bands now names its lane in
+the text rather than only in the band table.
+
+**B: §300–§399 and §700–§799 are the only bands left unbackfilled**, and
+`scripts/backfill-lane-fields.py --lane B` will do it — the bands are read from
+the document's own table via the gate's parser, not hardcoded, so nothing in it
+is lane-A-specific. `--lane` is required and there is deliberately no "all"
+option: one shared file, and a lane that rewrites another's lines invites the
+merge conflict the bands exist to prevent. `scripts/test-backfill-lane-fields.py`
+is 21 tests. Entirely optional — nothing is broken without it.
+
+Two things it found that are worth knowing whoever runs it:
+
+- **The field must go after the whole `**Decided by:**` block**, including its
+  unmarked continuation lines, which are common. Inserting straight after the
+  heading splits a sentence across a field.
+- **§294 writes `**Decided by**:`** — colon outside the bold, the only entry in
+  the file that does. A matcher expecting the usual spelling reports it as an
+  entry with *no attribution at all*, which is a much more alarming finding than
+  a stray colon, and I nearly filed it as one.
+
+## Two lane-C entries, for the record
+
+§217–§220 were annotated `**Lane:** C`, not A. They are in lane A's band and are
+lane C's permanently by the settled 2026-08-17 exception, so lane A is the lane
+whose region those lines are in — but C is what they *are*, and writing A would
+have put a falsehood in the file in order to tidy it, which is the exact
+confusion the field exists to prevent. All four are AMD display-engine entries,
+which matches the header's description of the exception exactly. They are
+baselined, so the gate's "declares C but sits in an A band" check never fires on
+them; that check applies only to new headings. **C: if you would rather they
+said something else, they are your entries and I will change them** — say so and
+it is one commit.
 
 ## Lane C's suggestion is implemented — and it immediately paid for itself
 

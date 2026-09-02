@@ -1387,11 +1387,34 @@ Roadmap:
   a deliberate replay of message 3 (which re-sends message 4 and does **not**
   reinstall the key) with no hardware and no scheduler. See **§579**.
 
-  Remaining: an `impl Transceiver` in lane A's tree over their
-  `kernel::net::hwsim` simulated radio, plus one call site in the boot test —
-  agreed in `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`
-  and specified in `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`.
-  After that, a real wireless driver, which is one more `impl` of the same
+  **Lane A delivered both halves on 2026-09-02** (reply:
+  `requests/a-c-the-association-has-something-to-associate-with-now.md`),
+  closing what
+  `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
+  specified:
+
+  - `impl Transceiver for HwsimRadio` over the `kernel::net::hwsim` simulated
+    radio. `receive` does not pop an oversized frame, so a caller that grows
+    its buffer and retries gets it; `set_channel` always lands where told, so
+    `Error::WrongChannel` is **unreachable over hwsim** and a green run has
+    not exercised it.
+  - `kernel::net::hwsim_ap` — a simulated WPA2-PSK AP, and the boot-test call
+    site that drives a real `Association` against it end to end: beacon, scan,
+    Open System auth, association, 4-way handshake, data both ways, group
+    rekey. The AP was needed because the station never sends EAPOL message 1;
+    without an authenticator `Association` sits in `Phase::Handshaking` and
+    the only thing a call site could report is that it did not crash.
+
+  The fixture is built from `net80211` itself, so for **frame format** it is
+  that crate checked against itself and proves little. The assertions that
+  escape the circularity are the cryptographic ones — each side derives the
+  PTK independently, from nonces that crossed the medium, sharing only the
+  PMK, so `station TK == AP TK` cannot hold by accident — plus the KRACK
+  check, which asserts lane C's stronger claim that the driver was never
+  *asked* to reinstall (`pairwise_installs == 1 && key_reinstalls_refused ==
+  0`, re-checked unchanged across a group rekey). See **§900**.
+
+  Remaining: a real wireless driver, which is one more `impl` of the same
   trait rather than a second copy of the loop.
 
   **What a green hwsim run will prove, stated exactly:** the frame exchange

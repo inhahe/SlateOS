@@ -9,8 +9,30 @@
 //!
 //! Keeping it small is the point. Every declaration here is a promise about
 //! the memory layout of something another compiler produced, and a wrong
-//! promise is a crash rather than a type error. Six declarations can be
-//! checked against `vulkan_core.h` by reading; six hundred cannot.
+//! promise is a crash rather than a type error. A list this short can be
+//! checked against `vulkan_core.h` by reading; a whole binding cannot.
+//!
+//! # No structure is declared here, and that is the rule rather than the
+//! current state
+//!
+//! Every Vulkan structure the loader touches appears in these signatures as
+//! `*const c_void` or `*mut c_void` — `VkInstanceCreateInfo`,
+//! `VkDeviceCreateInfo`, `VkPhysicalDeviceProperties`, `VkQueueFamilyProperties`
+//! and the rest. That is not laziness; it is the only part of this module that
+//! is genuinely load-bearing.
+//!
+//! A wrong *function* signature is nearly always caught: the loader passes a
+//! handle and some scalars and forwards, so getting one wrong means a wrong
+//! argument count, which is a compile error at the call site or an immediate
+//! crash. A wrong *structure* layout is caught by nothing. The caller writes
+//! field `A`, the driver reads field `B`, and the result is a plausible wrong
+//! answer — the failure mode this tree keeps filing bugs about. Since the
+//! loader never reads a field of any of these structures, declaring one would
+//! buy nothing and stake everything.
+//!
+//! The consequence to keep in mind when adding a command: if a new one needs
+//! the loader to *look inside* a structure, that is the point to stop and think,
+//! not to reach for a `#[repr(C)]` copy of a header.
 //!
 //! # Naming
 //!
@@ -58,6 +80,31 @@ pub const VK_ERROR_INITIALIZATION_FAILED: VkResult = -3;
 /// means "this machine has no driver that can serve you at all", which is a
 /// real, reportable failure.
 pub const VK_ERROR_INCOMPATIBLE_DRIVER: VkResult = -9;
+
+/// Any Vulkan enumeration — `VkFormat`, `VkImageType`, `VkImageTiling` and the
+/// rest — as the loader passes it: a 32-bit value it does not interpret.
+///
+/// Signed because that is what a C `enum` is. Every Vulkan enumeration carries a
+/// `..._MAX_ENUM = 0x7FFFFFFF` member for the express purpose of pinning its
+/// underlying type to a 32-bit signed integer, so this is the header's own
+/// choice rather than a guess. On every calling convention the loader targets it
+/// occupies the same argument slot as the `u32` a flags word does; the
+/// distinction is kept anyway, because "this parameter is an enumeration" is a
+/// fact about the API that costs one word to record and cannot be recovered from
+/// `u32`.
+///
+/// Deliberately not an enum on the Rust side, for the reason given on
+/// [`VkResult`]: a driver may be asked about a format from an extension this
+/// loader has never heard of, and receiving a value outside a fixed variant set
+/// is undefined behaviour.
+pub type VkEnum = i32;
+
+/// Any Vulkan flags word — `VkImageUsageFlags`, `VkImageCreateFlags` — as the
+/// loader passes it.
+///
+/// `VkFlags` is `typedef uint32_t VkFlags` in the header, so unlike [`VkEnum`]
+/// there is nothing to infer.
+pub type VkFlags = u32;
 
 /// `VkInstance`, and every other dispatchable handle, as an untyped address.
 ///
@@ -172,6 +219,133 @@ pub type CreateDeviceFn = unsafe extern "C" fn(
 /// `device` must be null or a handle the callee created and has not already
 /// destroyed; `allocator` must match the one creation was given.
 pub type DestroyDeviceFn = unsafe extern "C" fn(device: Handle, allocator: *const c_void);
+
+// ---------------------------------------------------------------------------
+// The physical-device commands
+// ---------------------------------------------------------------------------
+//
+// These nine, plus `vkCreateDevice` above, are every Vulkan 1.0 command whose
+// first parameter is a `VkPhysicalDevice`. The loader has to name each one
+// because it *wraps* physical devices: an application's `VkPhysicalDevice` is
+// a loader object, and the driver has never seen it, so each of these commands
+// needs a trampoline that substitutes the driver's handle before forwarding.
+// That cost is the mirror image of what adopting the driver's `VkDevice` avoids
+// for the several hundred device commands, and is argued for in
+// `crate::physical`.
+//
+// Every structure parameter below is `c_void`. See the module documentation:
+// none of these are read by the loader, and declaring their layouts is the one
+// mistake this module exists to not make.
+
+/// `PFN_vkGetPhysicalDeviceProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported, and `out` a writable
+/// `VkPhysicalDeviceProperties`.
+pub type GetPhysicalDevicePropertiesFn =
+    unsafe extern "C" fn(physical_device: Handle, out: *mut c_void);
+
+/// `PFN_vkGetPhysicalDeviceFeatures`.
+///
+/// # Safety
+///
+/// As [`GetPhysicalDevicePropertiesFn`], with `out` a `VkPhysicalDeviceFeatures`.
+pub type GetPhysicalDeviceFeaturesFn =
+    unsafe extern "C" fn(physical_device: Handle, out: *mut c_void);
+
+/// `PFN_vkGetPhysicalDeviceMemoryProperties`.
+///
+/// # Safety
+///
+/// As [`GetPhysicalDevicePropertiesFn`], with `out` a
+/// `VkPhysicalDeviceMemoryProperties`.
+pub type GetPhysicalDeviceMemoryPropertiesFn =
+    unsafe extern "C" fn(physical_device: Handle, out: *mut c_void);
+
+/// `PFN_vkGetPhysicalDeviceQueueFamilyProperties`.
+///
+/// The count-then-array shape Vulkan uses everywhere, and the one an application
+/// cannot avoid: a queue family index is required to create a device, and this
+/// is the only command that reports what families exist.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported, `count` a writable
+/// `u32`, and `out` either null or an array of at least `*count`
+/// `VkQueueFamilyProperties`.
+pub type GetPhysicalDeviceQueueFamilyPropertiesFn =
+    unsafe extern "C" fn(physical_device: Handle, count: *mut u32, out: *mut c_void);
+
+/// `PFN_vkGetPhysicalDeviceFormatProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported and `out` a writable
+/// `VkFormatProperties`. `format` is not validated by the loader.
+pub type GetPhysicalDeviceFormatPropertiesFn =
+    unsafe extern "C" fn(physical_device: Handle, format: VkEnum, out: *mut c_void);
+
+/// `PFN_vkGetPhysicalDeviceImageFormatProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported and `out` a writable
+/// `VkImageFormatProperties`. The five scalars are passed through unvalidated.
+pub type GetPhysicalDeviceImageFormatPropertiesFn = unsafe extern "C" fn(
+    physical_device: Handle,
+    format: VkEnum,
+    image_type: VkEnum,
+    tiling: VkEnum,
+    usage: VkFlags,
+    flags: VkFlags,
+    out: *mut c_void,
+) -> VkResult;
+
+/// `PFN_vkGetPhysicalDeviceSparseImageFormatProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported, `count` a writable
+/// `u32`, and `out` either null or an array of at least `*count`
+/// `VkSparseImageFormatProperties`.
+pub type GetPhysicalDeviceSparseImageFormatPropertiesFn = unsafe extern "C" fn(
+    physical_device: Handle,
+    format: VkEnum,
+    image_type: VkEnum,
+    samples: VkFlags,
+    usage: VkFlags,
+    tiling: VkEnum,
+    count: *mut u32,
+    out: *mut c_void,
+);
+
+/// `PFN_vkEnumerateDeviceExtensionProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported, `layer_name` null or
+/// a NUL-terminated string valid for the call, `count` a writable `u32`, and
+/// `out` either null or an array of at least `*count` `VkExtensionProperties`.
+pub type EnumerateDeviceExtensionPropertiesFn = unsafe extern "C" fn(
+    physical_device: Handle,
+    layer_name: *const c_char,
+    count: *mut u32,
+    out: *mut c_void,
+) -> VkResult;
+
+/// `PFN_vkEnumerateDeviceLayerProperties`.
+///
+/// Deprecated by Vulkan — device layers no longer exist — but still a command a
+/// conforming loader answers, and still one only the driver can answer for.
+///
+/// # Safety
+///
+/// `physical_device` must be a handle the callee reported, `count` a writable
+/// `u32`, and `out` either null or an array of at least `*count`
+/// `VkLayerProperties`.
+pub type EnumerateDeviceLayerPropertiesFn =
+    unsafe extern "C" fn(physical_device: Handle, count: *mut u32, out: *mut c_void) -> VkResult;
 
 /// `PFN_vk_icdNegotiateLoaderICDInterfaceVersion`.
 ///

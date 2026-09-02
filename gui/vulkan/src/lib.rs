@@ -24,6 +24,7 @@
 //! | [`registry`] | The drivers this loader knows about: the handshake with each, the version it settled on, and — kept rather than discarded — the ones that were rejected and why. |
 //! | [`instance`] | What one `vkCreateInstance` means across several drivers: which failure the application is told about, and the loader's own dispatchable instance and physical-device objects. |
 //! | [`device`] | What one `vkCreateDevice` means when exactly one driver is behind it: the record a device's dispatch word points at, and which of the two device-level commands the loader must answer itself. |
+//! | [`physical`] | The other side of that coin: the commands a wrapped `VkPhysicalDevice` forces the loader to name one by one, and the order a driver is asked for them in. |
 //! | [`entry`] | The exported symbols, the process-wide driver registry, and the dispatch table their addresses come from. |
 //! | [`vk`] | The few Vulkan C types the loader's own signatures cannot avoid naming. Not a binding, and not becoming one. |
 //!
@@ -61,13 +62,10 @@
 //!
 //! # What is deliberately not here yet
 //!
-//! The exported symbols are `vkGetInstanceProcAddr`, `vkCreateInstance`,
-//! `vkDestroyInstance` and `vkEnumeratePhysicalDevices`, plus SlateOS's own
-//! `vk_slateosRegisterDriver`. That is the whole list, and the omissions are
-//! omissions rather than stubs: `vkEnumerateInstanceExtensionProperties`,
-//! `vkEnumerateInstanceLayerProperties` and `vkEnumerateInstanceVersion` are
-//! *not exported at all*, so an application that needs one fails to link with
-//! that symbol named.
+//! The three remaining omissions are `vkEnumerateInstanceExtensionProperties`,
+//! `vkEnumerateInstanceLayerProperties` and `vkEnumerateInstanceVersion`, and
+//! they are omissions rather than stubs: they are *not exported at all*, so an
+//! application that needs one fails to link with that symbol named.
 //!
 //! Exporting them to return an empty list would be the alternative, and it is
 //! the defect this tree has been filing bugs about — a tool that reports
@@ -90,6 +88,23 @@
 //! siblings are reached through the driver's own `vkGetDeviceProcAddr` with the
 //! loader nowhere in the call path, which is the arrangement Vulkan separates
 //! device-level dispatch in order to allow.
+//!
+//! # The asymmetry that makes both halves work
+//!
+//! Handing back the driver's own `VkDevice` is what lets the device half export
+//! three symbols and cover an open-ended API. The instance half cannot do the
+//! same trick, and [`physical`] is the bill: because a `VkPhysicalDevice` is a
+//! loader object the driver has never seen, **every** command taking one must be
+//! named and trampolined, and there are ten of them — `vkCreateDevice` plus the
+//! nine of [`physical::Command`].
+//!
+//! Building them was not a rounding-out exercise. Until they existed the loader
+//! answered null for `vkGetPhysicalDeviceQueueFamilyProperties`, which is the
+//! only command that reports which queue families a GPU has, and
+//! `vkCreateDevice` cannot be called without a queue family index. The device
+//! layer above was therefore *unreachable by a conforming application* despite
+//! being complete and tested — a subsystem correct in isolation and inert in
+//! place. That is worth remembering as a shape: the tests all passed.
 
 #![no_std]
 
@@ -100,5 +115,6 @@ pub mod dispatch;
 pub mod entry;
 pub mod icd;
 pub mod instance;
+pub mod physical;
 pub mod registry;
 pub mod vk;

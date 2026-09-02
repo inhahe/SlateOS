@@ -67,12 +67,18 @@ use crate::device::{self, Device, LoaderCommand, Lookup};
 use crate::dispatch;
 use crate::icd::CURRENT;
 use crate::instance::{DriverInstance, Instance, PhysicalDevice, adopt_all, array_query, outcome};
+use crate::physical::{self, Ask, Command};
 use crate::registry::{Admission, Driver, Entry, Registry};
 use crate::vk::{
     CreateDeviceFn, CreateInstanceFn, DestroyDeviceFn, DestroyInstanceFn,
+    EnumerateDeviceExtensionPropertiesFn, EnumerateDeviceLayerPropertiesFn,
     EnumeratePhysicalDevicesFn, GetDeviceProcAddrFn, GetInstanceProcAddrFn,
-    GetPhysicalDeviceProcAddrFn, Handle, NegotiateFn, VK_ERROR_INCOMPATIBLE_DRIVER,
-    VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS, VkResult, VoidFn,
+    GetPhysicalDeviceFeaturesFn, GetPhysicalDeviceFormatPropertiesFn,
+    GetPhysicalDeviceImageFormatPropertiesFn, GetPhysicalDeviceMemoryPropertiesFn,
+    GetPhysicalDeviceProcAddrFn, GetPhysicalDevicePropertiesFn,
+    GetPhysicalDeviceQueueFamilyPropertiesFn, GetPhysicalDeviceSparseImageFormatPropertiesFn,
+    Handle, NegotiateFn, VK_ERROR_INCOMPATIBLE_DRIVER, VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS,
+    VkEnum, VkFlags, VkResult, VoidFn,
 };
 
 // ---------------------------------------------------------------------------
@@ -171,12 +177,32 @@ static DRIVERS: SpinLock<Registry> = SpinLock::new(Registry::new(CURRENT));
 /// on a `VkDevice`, which points at a [`crate::device::Device`] record instead —
 /// they are handed out directly by [`get_instance_proc_addr`], for the same
 /// reason `vkCreateInstance` is.
+///
+/// By that rule the table is **exhaustive over the commands a
+/// `VkPhysicalDevice` can be called with**, which is why the nine forwarding
+/// trampolines of [`crate::physical`] are members rather than being reached
+/// directly. The alternative — leaving them out because nothing dispatches
+/// through the table by offset yet — would make the table a structure that
+/// merely looks like the thing it is named after, which is the defect
+/// `crate::device` declines to introduce on the device side. Thirteen entries,
+/// every one of them read by [`get_instance_proc_addr`], is a different
+/// proposition from the several hundred a device table would need.
 #[repr(C)]
 struct Table {
     get_instance_proc_addr: GetInstanceProcAddrFn,
     destroy_instance: DestroyInstanceFn,
     enumerate_physical_devices: EnumeratePhysicalDevicesFn,
     create_device: CreateDeviceFn,
+    get_physical_device_properties: GetPhysicalDevicePropertiesFn,
+    get_physical_device_features: GetPhysicalDeviceFeaturesFn,
+    get_physical_device_memory_properties: GetPhysicalDeviceMemoryPropertiesFn,
+    get_physical_device_queue_family_properties: GetPhysicalDeviceQueueFamilyPropertiesFn,
+    get_physical_device_format_properties: GetPhysicalDeviceFormatPropertiesFn,
+    get_physical_device_image_format_properties: GetPhysicalDeviceImageFormatPropertiesFn,
+    get_physical_device_sparse_image_format_properties:
+        GetPhysicalDeviceSparseImageFormatPropertiesFn,
+    enumerate_device_extension_properties: EnumerateDeviceExtensionPropertiesFn,
+    enumerate_device_layer_properties: EnumerateDeviceLayerPropertiesFn,
 }
 
 /// The one table, for the lifetime of the process.
@@ -189,6 +215,15 @@ static TABLE: Table = Table {
     destroy_instance,
     enumerate_physical_devices,
     create_device,
+    get_physical_device_properties,
+    get_physical_device_features,
+    get_physical_device_memory_properties,
+    get_physical_device_queue_family_properties,
+    get_physical_device_format_properties,
+    get_physical_device_image_format_properties,
+    get_physical_device_sparse_image_format_properties,
+    enumerate_device_extension_properties,
+    enumerate_device_layer_properties,
 };
 
 /// [`TABLE`]'s address, in the form the dispatch machinery takes.
@@ -340,7 +375,10 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
             // as well, which is how a `VkDevice`'s first command is ever found.
             b"vkGetDeviceProcAddr" => Some(erase(get_device_proc_addr as *const ())),
             b"vkDestroyDevice" => Some(erase(destroy_device as *const ())),
-            _ => None,
+            // The nine commands taking a `VkPhysicalDevice`, answered from one
+            // place rather than nine arms so that the set stays exactly
+            // [`crate::physical::Command`] and the compiler checks it is covered.
+            _ => physical::lookup(name).map(physical_trampoline),
         }
     }
 }
@@ -721,6 +759,380 @@ fn clamp_count(n: usize) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Physical devices
+// ---------------------------------------------------------------------------
+
+/// The trampoline that answers for a physical-device command.
+///
+/// Kept as one exhaustive match rather than nine arms in
+/// [`get_instance_proc_addr`] so that adding a [`Command`] is a compile error
+/// until a function is named for it. Every arm reads [`TABLE`], because the
+/// table is what a `VkPhysicalDevice` dispatches through and a second list of
+/// the same nine pointers is a second list to get out of step.
+fn physical_trampoline(command: Command) -> unsafe extern "C" fn() {
+    let f = match command {
+        Command::Properties => TABLE.get_physical_device_properties as *const (),
+        Command::Features => TABLE.get_physical_device_features as *const (),
+        Command::MemoryProperties => TABLE.get_physical_device_memory_properties as *const (),
+        Command::QueueFamilyProperties => {
+            TABLE.get_physical_device_queue_family_properties as *const ()
+        }
+        Command::FormatProperties => TABLE.get_physical_device_format_properties as *const (),
+        Command::ImageFormatProperties => {
+            TABLE.get_physical_device_image_format_properties as *const ()
+        }
+        Command::SparseImageFormatProperties => {
+            TABLE.get_physical_device_sparse_image_format_properties as *const ()
+        }
+        Command::DeviceExtensionProperties => {
+            TABLE.enumerate_device_extension_properties as *const ()
+        }
+        Command::DeviceLayerProperties => TABLE.enumerate_device_layer_properties as *const (),
+    };
+    // SAFETY: every arm is a function pointer cast in place, which is the whole
+    // of `erase`'s contract.
+    unsafe { erase(f) }
+}
+
+/// Unwrap an application's `VkPhysicalDevice` and find one of its driver's
+/// commands, in the order [`crate::physical::ask`] prescribes.
+///
+/// Returns the driver's own physical-device handle alongside the pointer,
+/// because the two are always needed together and separating them invites
+/// calling a driver's function with the loader's handle — the mistake wrapping
+/// exists to make possible.
+///
+/// # Safety
+///
+/// `physical_device` must be null or a `VkPhysicalDevice` this loader handed out
+/// from `vkEnumeratePhysicalDevices` whose instance is still alive.
+unsafe fn forward(
+    physical_device: Handle,
+    command: Command,
+) -> Option<(Handle, unsafe extern "C" fn())> {
+    if physical_device.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees this handle is one this loader handed out,
+    // so it points at a live `PhysicalDevice` owned by an instance that has not
+    // been destroyed.
+    let physical: &PhysicalDevice = unsafe { &*physical_device.cast::<PhysicalDevice>() };
+
+    let registry = DRIVERS.lock();
+    // The device names a driver the registry no longer has — unreachable while
+    // drivers are only ever added, and reported rather than assumed away for the
+    // same reason as in `create_device`.
+    let driver = registry.drivers().get(physical.driver())?;
+
+    let name = command.name();
+    let instance = physical.instance();
+    let driver_lookup = driver.physical_device_proc_addr();
+
+    let found = match physical::ask(driver_lookup.is_some()) {
+        Ask::PhysicalDeviceThenInstance => driver_lookup.and_then(|lookup| {
+            // SAFETY: `driver_lookup` is `Some` only for a driver that settled at
+            // interface version 4 or above, which is what entitles the loader to
+            // call this pointer at all; `instance` is that driver's own, and
+            // `name` is a literal that outlives the call.
+            unsafe { lookup(instance, name.as_ptr()) }
+        }),
+        // Nothing to try first: below version 4 the driver exports no such
+        // pointer, and calling one it never exported is not a null check away.
+        Ask::InstanceOnly => None,
+    };
+
+    let found = match found {
+        Some(found) => found,
+        // SAFETY: the driver's entry points are live for the process, and
+        // `instance` is the instance this physical device was enumerated from.
+        None => unsafe { instance_level(driver, instance, name) }?,
+    };
+    Some((physical.handle(), found))
+}
+
+// The nine trampolines. Each is the same three steps — unwrap, resolve, call
+// with the driver's handle — and they are written out rather than generated
+// because a macro would hide the one thing worth reading in each: that its
+// signature matches the header.
+//
+// A driver that cannot supply one of these is not a Vulkan 1.0 driver, since all
+// nine are core. There is still a decision to make about what happens, and it is
+// the same one `driver_destroy_device` makes: the command does what it can and
+// no more. Where there is a count to report, it is set to zero — a truthful "no
+// queue families", which makes the application's `vkCreateDevice` fail for a
+// reason it can act on. Where there is a `VkResult`,
+// `VK_ERROR_INITIALIZATION_FAILED` is returned. Where there is neither, the
+// caller's structure is left untouched, which is the only remaining option and
+// is recorded here as noticed rather than overlooked.
+
+/// `vkGetPhysicalDeviceProperties`.
+///
+/// # Safety
+///
+/// `physical_device` must be null or a `VkPhysicalDevice` this loader handed out
+/// whose instance is still alive, and `out` must be a writable
+/// `VkPhysicalDeviceProperties`.
+#[unsafe(export_name = "vkGetPhysicalDeviceProperties")]
+pub unsafe extern "C" fn get_physical_device_properties(physical_device: Handle, out: *mut c_void) {
+    // SAFETY: forwarded from this function's contract.
+    let Some((handle, found)) = (unsafe { forward(physical_device, Command::Properties) }) else {
+        return;
+    };
+    // SAFETY: the driver returned this pointer for this command's name, which is
+    // the contract that fixes its signature.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDevicePropertiesFn>(found)
+    };
+    // SAFETY: `handle` is the driver's own physical device and `out` is the
+    // caller's, passed through unread.
+    unsafe { call(handle, out) };
+}
+
+/// `vkGetPhysicalDeviceFeatures`.
+///
+/// # Safety
+///
+/// As [`get_physical_device_properties`], with `out` a
+/// `VkPhysicalDeviceFeatures`.
+#[unsafe(export_name = "vkGetPhysicalDeviceFeatures")]
+pub unsafe extern "C" fn get_physical_device_features(physical_device: Handle, out: *mut c_void) {
+    // SAFETY: forwarded from this function's contract.
+    let Some((handle, found)) = (unsafe { forward(physical_device, Command::Features) }) else {
+        return;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceFeaturesFn>(found)
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, out) };
+}
+
+/// `vkGetPhysicalDeviceMemoryProperties`.
+///
+/// # Safety
+///
+/// As [`get_physical_device_properties`], with `out` a
+/// `VkPhysicalDeviceMemoryProperties`.
+#[unsafe(export_name = "vkGetPhysicalDeviceMemoryProperties")]
+pub unsafe extern "C" fn get_physical_device_memory_properties(
+    physical_device: Handle,
+    out: *mut c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    let Some((handle, found)) = (unsafe { forward(physical_device, Command::MemoryProperties) })
+    else {
+        return;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceMemoryPropertiesFn>(found)
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, out) };
+}
+
+/// `vkGetPhysicalDeviceQueueFamilyProperties`.
+///
+/// The one command an application cannot do without: `vkCreateDevice` needs a
+/// queue family index, and this is the only way to learn which indices exist.
+///
+/// # Safety
+///
+/// `physical_device` must be null or a `VkPhysicalDevice` this loader handed out
+/// whose instance is still alive, `count` a writable `u32`, and `out` null or an
+/// array of at least `*count` `VkQueueFamilyProperties`.
+#[unsafe(export_name = "vkGetPhysicalDeviceQueueFamilyProperties")]
+pub unsafe extern "C" fn get_physical_device_queue_family_properties(
+    physical_device: Handle,
+    count: *mut u32,
+    out: *mut c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { forward(physical_device, Command::QueueFamilyProperties) };
+    let Some((handle, found)) = found else {
+        // Zero rather than untouched: an application that reads a count it never
+        // wrote gets whatever was on its stack and then reads that many
+        // structures. Zero is a wrong answer it survives.
+        if !count.is_null() {
+            // SAFETY: checked non-null, and the caller guarantees it is writable.
+            unsafe { *count = 0 };
+        }
+        return;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceQueueFamilyPropertiesFn>(
+            found,
+        )
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, count, out) };
+}
+
+/// `vkGetPhysicalDeviceFormatProperties`.
+///
+/// # Safety
+///
+/// As [`get_physical_device_properties`], with `out` a `VkFormatProperties`.
+/// `format` is passed through unvalidated.
+#[unsafe(export_name = "vkGetPhysicalDeviceFormatProperties")]
+pub unsafe extern "C" fn get_physical_device_format_properties(
+    physical_device: Handle,
+    format: VkEnum,
+    out: *mut c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    let Some((handle, found)) = (unsafe { forward(physical_device, Command::FormatProperties) })
+    else {
+        return;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceFormatPropertiesFn>(found)
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, format, out) };
+}
+
+/// `vkGetPhysicalDeviceImageFormatProperties`.
+///
+/// # Safety
+///
+/// As [`get_physical_device_properties`], with `out` a
+/// `VkImageFormatProperties`. The five scalars are passed through unvalidated.
+#[unsafe(export_name = "vkGetPhysicalDeviceImageFormatProperties")]
+pub unsafe extern "C" fn get_physical_device_image_format_properties(
+    physical_device: Handle,
+    format: VkEnum,
+    image_type: VkEnum,
+    tiling: VkEnum,
+    usage: VkFlags,
+    flags: VkFlags,
+    out: *mut c_void,
+) -> VkResult {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { forward(physical_device, Command::ImageFormatProperties) };
+    let Some((handle, found)) = found else {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceImageFormatPropertiesFn>(
+            found,
+        )
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, format, image_type, tiling, usage, flags, out) }
+}
+
+/// `vkGetPhysicalDeviceSparseImageFormatProperties`.
+///
+/// # Safety
+///
+/// As [`get_physical_device_queue_family_properties`], with `out` an array of
+/// `VkSparseImageFormatProperties`. The four scalars are passed through
+/// unvalidated.
+#[unsafe(export_name = "vkGetPhysicalDeviceSparseImageFormatProperties")]
+pub unsafe extern "C" fn get_physical_device_sparse_image_format_properties(
+    physical_device: Handle,
+    format: VkEnum,
+    image_type: VkEnum,
+    samples: VkFlags,
+    usage: VkFlags,
+    tiling: VkEnum,
+    count: *mut u32,
+    out: *mut c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { forward(physical_device, Command::SparseImageFormatProperties) };
+    let Some((handle, found)) = found else {
+        // Zero, for the reason given in
+        // `get_physical_device_queue_family_properties`.
+        if !count.is_null() {
+            // SAFETY: checked non-null, and the caller guarantees it is writable.
+            unsafe { *count = 0 };
+        }
+        return;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), GetPhysicalDeviceSparseImageFormatPropertiesFn>(
+            found,
+        )
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe {
+        call(
+            handle, format, image_type, samples, usage, tiling, count, out,
+        );
+    };
+}
+
+/// `vkEnumerateDeviceExtensionProperties`.
+///
+/// Unlike the *instance* extension list, this one is a single driver's answer
+/// about a single physical device, so there is nothing to merge and nothing to
+/// decide — the driver's answer is the answer.
+///
+/// # Safety
+///
+/// `physical_device` must be null or a `VkPhysicalDevice` this loader handed out
+/// whose instance is still alive, `layer_name` null or a NUL-terminated string
+/// valid for the call, `count` a writable `u32`, and `out` null or an array of at
+/// least `*count` `VkExtensionProperties`.
+#[unsafe(export_name = "vkEnumerateDeviceExtensionProperties")]
+pub unsafe extern "C" fn enumerate_device_extension_properties(
+    physical_device: Handle,
+    layer_name: *const c_char,
+    count: *mut u32,
+    out: *mut c_void,
+) -> VkResult {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { forward(physical_device, Command::DeviceExtensionProperties) };
+    let Some((handle, found)) = found else {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), EnumerateDeviceExtensionPropertiesFn>(found)
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, layer_name, count, out) }
+}
+
+/// `vkEnumerateDeviceLayerProperties`.
+///
+/// Deprecated by Vulkan — a device has no layers of its own any more — and
+/// forwarded rather than answered with an empty list anyway. The loader does not
+/// know what a driver will say, and inventing a zero here would be exactly the
+/// "reports success for work it never did" failure this crate declines to commit
+/// elsewhere.
+///
+/// # Safety
+///
+/// As [`get_physical_device_queue_family_properties`], with `out` an array of
+/// `VkLayerProperties`.
+#[unsafe(export_name = "vkEnumerateDeviceLayerProperties")]
+pub unsafe extern "C" fn enumerate_device_layer_properties(
+    physical_device: Handle,
+    count: *mut u32,
+    out: *mut c_void,
+) -> VkResult {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { forward(physical_device, Command::DeviceLayerProperties) };
+    let Some((handle, found)) = found else {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    let call = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), EnumerateDeviceLayerPropertiesFn>(found)
+    };
+    // SAFETY: as in `get_physical_device_properties`.
+    unsafe { call(handle, count, out) }
+}
+
+// ---------------------------------------------------------------------------
 // Devices
 // ---------------------------------------------------------------------------
 
@@ -976,14 +1388,16 @@ mod tests {
     use super::{
         SpinLock, create_across, create_device, create_instance, destroy_across, destroy_device,
         destroy_instance, enumerate_across, enumerate_physical_devices, get_device_proc_addr,
-        get_instance_proc_addr, register_driver, table,
+        get_instance_proc_addr, get_physical_device_format_properties,
+        get_physical_device_queue_family_properties, register_driver, table,
     };
     use crate::dispatch::{ICD_LOADER_MAGIC, is_loader_magic, loader_data};
     use crate::icd::{CURRENT, DriverReply};
+    use crate::instance::PhysicalDevice;
     use crate::registry::{Entry, Registry};
     use crate::vk::{
         Handle, VK_ERROR_INCOMPATIBLE_DRIVER, VK_ERROR_INITIALIZATION_FAILED, VK_INCOMPLETE,
-        VK_SUCCESS, VkResult, VoidFn,
+        VK_SUCCESS, VkEnum, VkResult, VoidFn,
     };
     use alloc::boxed::Box;
     use alloc::vec;
@@ -1210,17 +1624,112 @@ mod tests {
         Some(unsafe { core::mem::transmute::<*const (), unsafe extern "C" fn()>(f) })
     }
 
+    // -----------------------------------------------------------------------
+    // Stub drivers that answer physical-device commands
+    // -----------------------------------------------------------------------
+
+    /// Which entry point the loader last found a physical-device command
+    /// through.
+    ///
+    /// A driver may be asked two ways, and the answer looks identical either
+    /// way — a function pointer — so the order [`crate::physical::ask`]
+    /// prescribes is unobservable from outside unless the stub says which route
+    /// the question arrived by. This is that.
+    static VIA: AtomicUsize = AtomicUsize::new(0);
+    const VIA_NOTHING: usize = 0;
+    const VIA_PHYSICAL_DEVICE_PROC_ADDR: usize = 1;
+    const VIA_INSTANCE_PROC_ADDR: usize = 2;
+
+    /// The `VkPhysicalDevice` a stub driver's command was last called with,
+    /// as an address.
+    ///
+    /// The point of the whole module under test: this must be the *driver's*
+    /// handle, never the loader's wrapper.
+    static SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// How many queue families every stub driver claims.
+    const STUB_QUEUE_FAMILIES: u32 = 3;
+
+    /// A stub's `vkGetPhysicalDeviceQueueFamilyProperties`.
+    ///
+    /// Only the count form is modelled. Writing the array would mean agreeing on
+    /// the layout of `VkQueueFamilyProperties`, and `crate::vk` declares no
+    /// Vulkan structure on purpose — a stub that declared one would be testing
+    /// the loader against a promise the loader does not make.
+    unsafe extern "C" fn gpu_queue_families(physical: Handle, count: *mut u32, _out: *mut c_void) {
+        SEEN.store(physical as usize, Ordering::SeqCst);
+        unsafe { *count = STUB_QUEUE_FAMILIES };
+    }
+
+    /// A stub's `vkGetPhysicalDeviceFormatProperties`.
+    ///
+    /// Echoes `format` into the caller's first four bytes. A handle arriving
+    /// intact only proves the loader substituted one pointer; echoing a scalar
+    /// proves the *rest* of the signature survived the trampoline too, which is
+    /// the part a wrong `PFN_` declaration would break.
+    unsafe extern "C" fn gpu_format_properties(physical: Handle, format: VkEnum, out: *mut c_void) {
+        SEEN.store(physical as usize, Ordering::SeqCst);
+        unsafe { *out.cast::<VkEnum>() = format };
+    }
+
+    /// A version-4 driver's `vk_icdGetPhysicalDeviceProcAddr`.
+    ///
+    /// Answers for one command and is deliberately null for
+    /// `vkGetPhysicalDeviceFormatProperties`, which its `vkGetInstanceProcAddr`
+    /// *does* answer — modelling the driver the Loader–Driver Interface's
+    /// fallback rule exists for, which routes only some of its physical-device
+    /// commands through this entry point.
+    unsafe extern "C" fn gpdpa_with_devices(_instance: Handle, name: *const c_char) -> VoidFn {
+        let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+        if bytes != b"vkGetPhysicalDeviceQueueFamilyProperties" {
+            return None;
+        }
+        VIA.store(VIA_PHYSICAL_DEVICE_PROC_ADDR, Ordering::SeqCst);
+        Some(unsafe {
+            core::mem::transmute::<*const (), unsafe extern "C" fn()>(
+                gpu_queue_families as *const (),
+            )
+        })
+    }
+
+    /// Settles at whatever the loader proposed, by succeeding without writing —
+    /// which [`crate::icd::settle`] treats as agreement. That is
+    /// [`CURRENT`], so this driver is entitled to its
+    /// `vk_icdGetPhysicalDeviceProcAddr`.
+    unsafe extern "C" fn negotiate_at_the_loaders_version(_version: *mut u32) -> VkResult {
+        VK_SUCCESS
+    }
+
     /// A driver that makes devices as well as instances.
     unsafe extern "C" fn gipa_with_devices(_instance: Handle, name: *const c_char) -> VoidFn {
         let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
         let f: *const () = match bytes {
             b"vkCreateDevice" => create_gpu as *const (),
             b"vkGetDeviceProcAddr" => gdpa as *const (),
+            b"vkGetPhysicalDeviceFormatProperties" => {
+                VIA.store(VIA_INSTANCE_PROC_ADDR, Ordering::SeqCst);
+                gpu_format_properties as *const ()
+            }
             // Everything else is the shared stub's answer, which is what gives
             // this driver an instance and a physical device to start from.
             _ => return unsafe { answer(name, create_with_one_device as *const ()) },
         };
         Some(unsafe { core::mem::transmute::<*const (), unsafe extern "C" fn()>(f) })
+    }
+
+    /// A driver below interface version 4 that answers a physical-device
+    /// command. Its `vkGetInstanceProcAddr` is the only route there is.
+    unsafe extern "C" fn gipa_physical_only(_instance: Handle, name: *const c_char) -> VoidFn {
+        if unsafe { CStr::from_ptr(name) }.to_bytes() == b"vkGetPhysicalDeviceQueueFamilyProperties"
+        {
+            VIA.store(VIA_INSTANCE_PROC_ADDR, Ordering::SeqCst);
+            return Some(unsafe {
+                core::mem::transmute::<*const (), unsafe extern "C" fn()>(
+                    gpu_queue_families as *const (),
+                )
+            });
+        }
+        unsafe { answer(name, create_with_one_device as *const ()) }
     }
 
     /// A registry holding the named stub drivers, all settled at [`CURRENT`].
@@ -1424,23 +1933,38 @@ mod tests {
         // SAFETY: both names are string literals, so `'static`, and every
         // function pointer is an item in this module and lives for the process.
         unsafe {
+            // Settles at `CURRENT`, so its `vk_icdGetPhysicalDeviceProcAddr` is
+            // one the loader is entitled to call.
             assert_eq!(
                 register_driver(
                     c"stub-with-devices".as_ptr(),
                     Some(gipa_with_devices),
+                    None,
+                    Some(gpdpa_with_devices),
+                    Some(negotiate_at_the_loaders_version)
+                ),
+                VK_SUCCESS
+            );
+            // Registered second, and used below for two opposite cases: it has an
+            // instance and a physical device but no `vkGetDeviceProcAddr`, so no
+            // device can be made from it, and it answers no physical-device
+            // command either.
+            assert_eq!(
+                register_driver(
+                    c"stub-without-devices".as_ptr(),
+                    Some(gipa_one_device),
                     None,
                     None,
                     None
                 ),
                 VK_SUCCESS
             );
-            // Registered second, and used below for the opposite case: it has an
-            // instance and a physical device but no `vkGetDeviceProcAddr`, so no
-            // device can be made from it.
+            // Third: no handshake, so it settles below version 4 and has no
+            // `vk_icdGetPhysicalDeviceProcAddr` to be asked through.
             assert_eq!(
                 register_driver(
-                    c"stub-without-devices".as_ptr(),
-                    Some(gipa_one_device),
+                    c"stub-physical-only".as_ptr(),
+                    Some(gipa_physical_only),
                     None,
                     None,
                     None
@@ -1456,7 +1980,7 @@ mod tests {
             unsafe { create_instance(ptr::null(), ptr::null(), &raw mut instance) },
             VK_SUCCESS
         );
-        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before + 2);
+        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before + 3);
 
         let mut count: u32 = 0;
         // SAFETY: the instance is this loader's own and `count` is writable; a
@@ -1465,7 +1989,7 @@ mod tests {
             unsafe { enumerate_physical_devices(instance, &raw mut count, ptr::null_mut()) },
             VK_SUCCESS
         );
-        assert_eq!(count, 2, "one physical device per registered stub driver");
+        assert_eq!(count, 3, "one physical device per registered stub driver");
 
         let mut handles: Vec<Handle> = vec![ptr::null_mut(); count as usize];
         // SAFETY: `handles` has room for `count` entries, which is what `count`
@@ -1473,6 +1997,113 @@ mod tests {
         assert_eq!(
             unsafe { enumerate_physical_devices(instance, &raw mut count, handles.as_mut_ptr()) },
             VK_SUCCESS
+        );
+
+        // ---- What a real application does next, and could not do before ----
+        //
+        // Having a list of GPUs, it asks each what it can do, and above all how
+        // many queue families it has, because `vkCreateDevice` below cannot be
+        // called without naming one. Every assertion in this block answered null
+        // until `physical` existed, which is what made the device half of this
+        // test unreachable in practice while passing in the suite.
+
+        // The driver's own handle, which is what its commands must be called
+        // with — never the wrapper the application holds.
+        // SAFETY: `handles[0]` is a `PhysicalDevice` this loader just handed out
+        // and the instance owning it is alive.
+        let drivers_own = unsafe { &*handles[0].cast::<PhysicalDevice>() }.handle();
+        assert_ne!(
+            drivers_own as usize, handles[0] as usize,
+            "the fixture is not testing anything: wrapper and inner handle coincide"
+        );
+
+        VIA.store(VIA_NOTHING, Ordering::SeqCst);
+        SEEN.store(0, Ordering::SeqCst);
+        let mut families: u32 = 0;
+        // SAFETY: `handles[0]` is this loader's, `families` is writable, and a
+        // null array is how the C API asks for the count alone.
+        unsafe {
+            get_physical_device_queue_family_properties(
+                handles[0],
+                &raw mut families,
+                ptr::null_mut(),
+            );
+        }
+        assert_eq!(
+            families, STUB_QUEUE_FAMILIES,
+            "the count never reached the driver"
+        );
+        assert_eq!(
+            SEEN.load(Ordering::SeqCst),
+            drivers_own as usize,
+            "the driver was called with the loader's wrapper instead of its own handle"
+        );
+        assert_eq!(
+            VIA.load(Ordering::SeqCst),
+            VIA_PHYSICAL_DEVICE_PROC_ADDR,
+            "a version-4 driver was not asked through its version-4 entry point first"
+        );
+
+        // The same driver, a command its version-4 entry point answers null for.
+        // The Loader–Driver Interface requires falling back to the instance
+        // lookup, and treating that null as final would lose the command on a
+        // driver that is behaving correctly.
+        VIA.store(VIA_NOTHING, Ordering::SeqCst);
+        SEEN.store(0, Ordering::SeqCst);
+        let mut echoed: VkEnum = 0;
+        let format: VkEnum = 37;
+        // SAFETY: `handles[0]` is this loader's and `echoed` is a writable
+        // `VkEnum`, which is what this stub writes through `out`.
+        unsafe {
+            get_physical_device_format_properties(
+                handles[0],
+                format,
+                (&raw mut echoed).cast::<c_void>(),
+            );
+        }
+        assert_eq!(
+            echoed, format,
+            "a scalar argument did not survive the trampoline"
+        );
+        assert_eq!(SEEN.load(Ordering::SeqCst), drivers_own as usize);
+        assert_eq!(
+            VIA.load(Ordering::SeqCst),
+            VIA_INSTANCE_PROC_ADDR,
+            "the loader gave up when the version-4 entry point answered null"
+        );
+
+        // The third driver settled below version 4, so there is only one route
+        // to it and the loader must take it.
+        VIA.store(VIA_NOTHING, Ordering::SeqCst);
+        let mut families: u32 = 0;
+        // SAFETY: as for `handles[0]`.
+        unsafe {
+            get_physical_device_queue_family_properties(
+                handles[2],
+                &raw mut families,
+                ptr::null_mut(),
+            );
+        }
+        assert_eq!(families, STUB_QUEUE_FAMILIES);
+        assert_eq!(VIA.load(Ordering::SeqCst), VIA_INSTANCE_PROC_ADDR);
+
+        // The second driver answers no physical-device command at all — not a
+        // conforming Vulkan 1.0 driver. The count is set to zero rather than
+        // left holding whatever the caller's stack did, because an application
+        // that then reads that many structures reads an arbitrary amount of
+        // memory.
+        let mut families: u32 = 0xDEAD_BEEF;
+        // SAFETY: as for `handles[0]`.
+        unsafe {
+            get_physical_device_queue_family_properties(
+                handles[1],
+                &raw mut families,
+                ptr::null_mut(),
+            );
+        }
+        assert_eq!(
+            families, 0,
+            "a driver with no such command left the caller's count untouched"
         );
 
         let mut device: Handle = ptr::null_mut();
@@ -1584,6 +2215,29 @@ mod tests {
             lookup(ptr::null_mut(), c"vkCreateDevice").is_none(),
             "a command needing a physical device was answered with no instance"
         );
+    }
+
+    #[test]
+    fn every_physical_device_command_is_findable_through_an_instance() {
+        // The check that was missing, and whose absence is the whole of the bug
+        // the physical-device half of this module fixes. Each of these is core
+        // Vulkan 1.0 and each was answered null — including the one that reports
+        // queue families, without which `vkCreateDevice` cannot be called at
+        // all, so the device layer below was complete, tested and unreachable.
+        //
+        // Iterating `physical::ALL` rather than listing nine names is what makes
+        // this a check on the *set*: a command added to the enum and forgotten
+        // in `get_instance_proc_addr` fails here rather than shipping.
+        for command in crate::physical::ALL {
+            assert!(
+                lookup(an_instance(), command.name()).is_some(),
+                "{command:?} is not reachable through vkGetInstanceProcAddr",
+            );
+            assert!(
+                lookup(ptr::null_mut(), command.name()).is_none(),
+                "{command:?} was answered with no instance",
+            );
+        }
     }
 
     #[test]

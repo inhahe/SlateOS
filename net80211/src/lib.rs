@@ -9,11 +9,17 @@
 //! plus, in [`kdf`], the clause-12 key derivation that turns a PMK and two
 //! nonces into the keys those frames are protected with.
 //!
-//! One module is not wire format: [`supplicant`] is the station-side state
+//! Two modules are not wire format. [`supplicant`] is the station-side state
 //! machine that drives the 4-way handshake over those frames. It lives here
 //! rather than in the supplicant binary because it is the only consumer that
 //! ties the other modules together, and because a state machine with no I/O
 //! in it is testable in a way that one wrapped around a socket is not.
+//!
+//! [`assoc`] is the outer half of the same state machine: the order the
+//! frames go in, from tuning the radio to installing the keys. It reaches a
+//! radio through the [`assoc::Transceiver`] trait, so that the loop is
+//! written once here — against a mock, with no hardware and no clock — rather
+//! than once per driver in each driver's own tree.
 //!
 //! Three consumers need exactly this code and must not each grow their own
 //! copy of it:
@@ -59,6 +65,7 @@
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 
+pub mod assoc;
 pub mod eapol;
 pub mod fcs;
 pub mod frame;

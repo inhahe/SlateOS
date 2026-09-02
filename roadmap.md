@@ -1373,14 +1373,35 @@ Roadmap:
   `hmac/` (HMAC, PBKDF2), and `net80211::supplicant` — the station-side state
   machine that drives scan → auth → assoc → 4-way handshake → group rekey →
   data encapsulation, with the KRACK key-reinstallation defence expressed as
-  an `Outcome` variant rather than a comment. 194 tests against the published
-  vectors, including IEEE 802.11-2020 Annex J. One piece remains and it is
-  hardware-gated: a **wireless driver** (lane A — there is no radio in QEMU
-  and no `mac80211_hwsim` equivalent, so nothing can carry these frames
-  anywhere). Requested in
-  `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
-  which asks for a *simulated* device first so the join can be run end to end;
-  it also offers to let lane C build it if lane A would rather not.
+  an `Outcome` variant rather than a comment. 194 tests across the three
+  crates against the published vectors, including IEEE 802.11-2020 Annex J.
+
+  `net80211::assoc` now closes the loop above it: a `Transceiver` trait (the
+  five things the association needs from a radio — transmit, receive, install
+  a pairwise key, install a group key, set the channel) and an `Association`
+  **step function** that owns the frame ordering from tuning the radio to
+  installing both keys. It has no clock in it — `poll` does at most one thing
+  and says what it did, and `retransmit` is separate, because deciding that a
+  request has gone unanswered *long enough* belongs to whoever holds a timer.
+  25 tests drive a complete association, a group rekey, a deauthentication and
+  a deliberate replay of message 3 (which re-sends message 4 and does **not**
+  reinstall the key) with no hardware and no scheduler. See **§579**.
+
+  Remaining: an `impl Transceiver` in lane A's tree over their
+  `kernel::net::hwsim` simulated radio, plus one call site in the boot test —
+  agreed in `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`
+  and specified in `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`.
+  After that, a real wireless driver, which is one more `impl` of the same
+  trait rather than a second copy of the loop.
+
+  **What a green hwsim run will prove, stated exactly:** the frame exchange
+  and the key schedule — both ends derived the same PTK, the handshake reached
+  `Complete`, and both keys were handed to the radio. It will **not** prove
+  confidentiality: `hwsim` does not encrypt, deliberately (lane A's §677 — a
+  simulated medium implementing CCMP would be checking `net80211`'s cipher
+  against itself). `Association::is_established` is documented to make the
+  narrower claim, and it must not be reported as the wider one here or
+  anywhere else.
 - `[C]` Port FreeRDP (line ~5058)
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
@@ -2641,13 +2662,38 @@ _Port ext4 first. Don't write a custom filesystem._
     only `Complete` authorises installing a key, and a retransmitted M3
     returns `Retransmission`, so a caller that matches on the enum cannot
     reinstall a key — and so replay a CCMP nonce — by accident. 32 tests
-  - [ ] Wireless driver — **blocked on lane A.** There is no radio and no
-    `mac80211_hwsim` equivalent, so nothing yet carries these frames.
-    Requested in
-    `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`
-  - [ ] End-to-end association in the boot test — lane C's, and gated purely
-    on the line above: with a simulated device, scan → join → handshake →
-    an ARP exchange over the encapsulated data path becomes testable
+  - [x] `net80211::assoc`: the outer half of that state machine — the
+    `Transceiver` trait (transmit, receive, install a pairwise key, install a
+    group key, set the channel) and an `Association` **step function** that
+    owns the frame ordering: tune → auth → assoc → the AP-driven handshake →
+    both keys installed → data. No clock in it — `poll` does at most one
+    thing and reports what it did, and `retransmit` is a separate call
+    because "long enough to have been lost" is a timing decision that belongs
+    to whoever holds a timer. `receive` returns `Result<Option<usize>, _>` so
+    "nothing waiting" and "the read failed" cannot arrive as one value, and
+    an oversized frame is a named `Oversized` error rather than a truncation,
+    because a truncated 802.11 frame parses as a different, shorter,
+    still-well-formed frame. A frame that is merely not ours is discarded,
+    not failed; any real failure is terminal and latched. 25 tests drive a
+    complete association, a group rekey, a deauthentication and a deliberate
+    replay of message 3 — which re-sends message 4 and does *not* reinstall
+    the key — with no hardware and no scheduler. See **§579**
+  - [ ] `impl Transceiver for HwsimRadio` — **lane A's**, over their
+    `kernel::net::hwsim` simulated radio, plus one call site in the boot
+    test. Agreed in
+    `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`;
+    the landed signatures are in
+    `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
+  - [ ] End-to-end association in the boot test — gated purely on the line
+    above: scan → join → handshake → an ARP exchange over the encapsulated
+    data path. **What a green run will prove, stated exactly:** the frame
+    exchange and the key schedule — both ends derived the same PTK, the
+    handshake reached `Complete`, both keys were handed to the radio. It will
+    **not** prove confidentiality; `hwsim` does not encrypt, deliberately
+    (lane A's §677), and `Association::is_established` is documented to make
+    only the narrower claim
+  - [ ] Real wireless driver — one more `impl Transceiver`, not a second copy
+    of the association loop. Still hardware-gated: there is no radio in QEMU
 
 ### 2.5 POSIX compatibility layer
 - [-] `[B]` Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)

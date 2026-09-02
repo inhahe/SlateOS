@@ -91574,6 +91574,39 @@ detection lane B actually relies on is its own — which argues for lane B runni
 the linux-target check in its own routine rather than treating the tree-wide gate
 as the safety net. (As of `045f603e1` lane B does run it per task, by hand.)
 
+**Update 2026-09-01 (lane B) — the adopted remedy is `cargo check`, and half the
+blind spot is a clippy one.** Everything above prescribes `cargo check
+--workspace --target x86_64-unknown-linux-gnu`, and all three lanes adopted that
+verb. `cargo check` does not run clippy. So the half of this blind spot that is a
+*compile error* is now covered, and the half that is a **`#![deny(clippy::all)]`
+violation** is not — and in these crates a denied lint is a build failure on the
+target, not a warning.
+
+Measured, today: `userspace/coreutils/src/utimecmp.rs:360` truncates with
+`nsec % SYSCALL_RESOLUTION`, and that constant is `1`, so it is `% 1` —
+`clippy::modulo_one`, `deny`-level under the crate's `#![deny(clippy::all)]`. The
+whole module is `cfg(unix)`, so on the Windows host it is not compiled at all and
+`cargo clippy` here has never seen the line. It has been there since the module
+was written. Found by
+
+```
+cargo clippy -p coreutils --target x86_64-unknown-linux-gnu --all-targets
+```
+
+which is the same trick this entry already describes, with `clippy` in place of
+`check`. Fixed in `f107b77cc` with an `#[allow]` and the reasoning for keeping
+the no-op line (it is the line that stops being a no-op the day
+`SYSCALL_RESOLUTION` changes, and gnulib has it).
+
+**So: say `clippy`, not `check`.** `cargo clippy` runs everything `cargo check`
+runs and then the lints, on the same artifacts, so substituting it costs
+essentially nothing and covers both halves. `--all-targets` matters too: without
+it the `#[cfg(test)]` modules — which is where most `cfg(unix)` test code lives
+in `userspace/**` — go unlinted for the target as well. Neither `cargo check` nor
+plain `cargo build` for `x86_64-slateos` would have caught this either, because
+`deny(clippy::…)` is inert outside clippy; the only thing that sees it is a
+clippy run with a unix-family target.
+
 ## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **CLOSED 2026-08-26, and the diagnosis below was wrong**
 
 **Resolution.** Fixed, but not as this entry proposed — the diagnosis under

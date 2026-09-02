@@ -15797,6 +15797,62 @@ fed back through the parser on the next keystroke. A round-trip assertion over
 a 0xFF name (complete → re-expand → compare bytes) is the test that pins it,
 and it is the one case a self-test in this area must have.
 
+**[A] Correction 6 (2026-09-02) — auditing the `$'…'` path stage by stage
+found a live bug that has nothing to do with bytes, and settled where the
+decode can and cannot go. The table above is right about *what* is left and
+optimistic about the size of one row.**
+
+*The live bug, which is independent of all of this and fixable on its own.*
+`expand_vars_bytes` (`kshell.rs:881`) has no `$'` arm, so `$'…'` falls into
+the `$`-followed-by-anything-else arm at ~1051, which emits the `$` and the
+`'` and advances **one** byte — without setting `in_single_quote`. The
+construct's own **closing** `'` is therefore read as an *opening* quote, and
+every word after it on the line is treated as single-quoted until the next
+`'` appears. So today:
+
+```
+echo $'\x41' $HOME      # prints:  $'\x41' $HOME
+```
+
+— the `$HOME` is not expanded, and neither is anything else for the rest of
+the line. This is a quote-state desynchronisation, not a missing feature: it
+would be a bug even if `$'…'` were never going to mean anything. The minimal
+fix is a copy-through arm that consumes the whole construct verbatim
+(honouring `\'`), which leaves the text unchanged but keeps the quote state
+honest, and is the natural place for the decode to be added later.
+
+*Where the decode can go.* The tempting shortcut is to decode at
+`resolve_path` (`kshell.rs:675`) — one site, already generic over
+`AsRef<Path>`, already returning `PathBuf`, and every one of its ~257 callers
+would get it for free with no signature churn. **It is wrong, and the reason
+is the escape hatch.** `expand_vars_bytes` skips its whole `$` branch inside
+single quotes, so single-quoting is how a user says "I mean those characters
+literally" — exactly as in bash. But `remove_quotes` (`kshell.rs:1424`) then
+strips the quotes, so by the time the word reaches `resolve_path` the quoted
+and unquoted spellings are *the same bytes*. Decoding there would make a file
+whose name literally contains `$'…'` unreachable, with no way to spell it.
+Late decoding conflates data with syntax; `$'…'` is a quoting construct and
+has to be removed by the parser that recognises quoting, which is
+`expand_vars_bytes` and only that.
+
+*Which makes the "8 production callers" row optimistic about one of them.*
+Seven are cheap. Site **6051** is not: it narrows to a `String` because it
+feeds `execute_single`, a full bash-like `&str` parser (alias expansion,
+arrays, `(( ))`, `eval`, pipes, redirects, heredocs), and a `String` cannot
+hold the 0xFF that `$'\xff'` exists to produce. So the decode is *gated on*
+converting `execute_single` to bytes — that conversion is the task, not a
+prerequisite to be noted and skipped. (Three of the other seven — 1569, 3233,
+3300 — feed numeric/arithmetic parsers that genuinely want a `String`;
+converting those would add `from_utf8` noise for nothing and they should be
+left alone.)
+
+*Two more stages need work once bytes flow, both found by reading rather than
+by reasoning from names:* `remove_quotes` (1424) and `split_words` (3338)
+both strip quotes with no backslash or `$'` awareness, so each needs to pass
+the construct through verbatim. `expand_braces` (1273) and
+`split_chain_operators` (6134) are already correct — both toggle their quote
+state symmetrically on `'` — and need no edit.
+
 **[A] 2026-08-24 — the follow-up landed too: the line-oriented commands are
 byte-clean end to end** (`b3c828edb`, `eb8f4109d`). The sink could carry bytes
 that no *command* could produce; that gap is closed for the commands where

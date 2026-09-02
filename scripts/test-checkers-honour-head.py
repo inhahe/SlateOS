@@ -316,6 +316,326 @@ def case_gate2_a_crate_absent_from_the_disk_is_still_judged(tmp: str) -> None:
 
 
 # --------------------------------------------------------------------------
+# Gate 3 -- raced-globals.py
+#
+# The defect it looks for: a mutable process-global that two or more `#[test]`
+# functions reach with no lock between them. libtest runs tests concurrently, so
+# whichever one asserts on the value is asserting on what the other thread left.
+#
+# Four separate inputs decide its verdict, and each one has to be pinned
+# separately -- the lesson gate 2 taught, where a first draft asserted only that
+# the *source* came from the revision and left the checker free to answer the
+# other half of the question from the disk. Here the four are: the `.rs` source,
+# the baseline that forgives, the `Cargo.toml` that decides whether the crate's
+# tests can run at all, and the set of files that exist. One case each.
+# --------------------------------------------------------------------------
+
+# A resettable atomic reached by two unserialised tests: `static NAME: Atomic*`
+# is one of the two declaration shapes the checker matches, `.store(` is what
+# makes it a *reset* rather than a monotonic counter (which is safe to share and
+# deliberately not reported), and neither test body carries a lock hint.
+_RACED = '''\
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[test]
+fn first() {
+    COUNTER.store(1, Ordering::SeqCst);
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn second() {
+    COUNTER.store(2, Ordering::SeqCst);
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+}
+'''
+
+_UNRACED = "pub fn nothing_to_see() {}\n"
+
+_RG_BASELINE = "# nothing baselined yet\n"
+
+# The key the baseline is written in: "<relpath>:<NAME>".
+_RACE_KEY = "posix/src/race.rs:COUNTER"
+
+# A manifest that positively demonstrates the crate has no target left for a
+# test harness to attach to, which is the checker's one route to silencing a
+# whole crate. Every clause is load-bearing: a `[lib]` that is merely absent is
+# autodiscovered from `src/lib.rs` and testable, and a `[[bin]]` list that is
+# absent means any binary present was autodiscovered and is testable too.
+_NO_TEST_TARGET = '''\
+[package]
+name = "p"
+
+[lib]
+test = false
+
+[[bin]]
+name = "p"
+path = "src/bin_p.rs"
+test = false
+'''
+
+_PLAIN_MANIFEST = '[package]\nname = "p"\n'
+
+# The same, minus the `[lib]` table: with nothing said about a library target,
+# `src/lib.rs` is autodiscovered, which is a *fifth* thing the crate's
+# testability can turn on and so a fifth file whose existence must be read from
+# the tree under judgement.
+_NO_LIB_TABLE = '''\
+[package]
+name = "p"
+
+[[bin]]
+name = "p"
+path = "src/bin_p.rs"
+test = false
+'''
+
+
+def _raced_repo(tmp: str, name: str, manifest: str = _PLAIN_MANIFEST,
+                with_lib: bool = True) -> str:
+    """A one-crate repository with the checker installed and nothing raced yet.
+
+    `src/bin_p.rs` rather than `src/bin/p.rs` on purpose: the checker treats a
+    `src/bin/` *directory* as an autodiscovered target that keeps the crate
+    testable, which would make the manifest cases below unable to silence
+    anything.
+
+    Every fixture carries a raced file under `src/vendor/`, committed, in both
+    trees. It is not part of any case's argument: it is there so that the
+    checker's own `SKIP_DIRS` has to be doing its job on *both* sides of the
+    seam for any case to pass. Handing that list to `files_under(prune=...)`
+    rather than filtering the results is what keeps the disk side from
+    descending a vendored tree in order to discard it, and this is what notices
+    if the list stops being handed over at all -- on the disk, where it costs
+    time, or in a revision, where it would start reporting races in code we did
+    not write.
+    """
+    root = new_repo(tmp, name, ("raced-globals.py",))
+    write(root, "scripts/raced-globals-baseline.txt", _RG_BASELINE)
+    write(root, "posix/Cargo.toml", manifest)
+    if with_lib:
+        write(root, "posix/src/lib.rs", "pub fn ok() {}\n")
+    write(root, "posix/src/bin_p.rs", "fn main() {}\n")
+    write(root, "posix/src/vendor/dep.rs", _RACED)
+    return root
+
+
+def case_gate3_a_tidied_worktree_cannot_hide_a_committed_race(tmp: str) -> None:
+    """The silent half: the race is in the commit, and no longer on the disk."""
+    root = _raced_repo(tmp, "g3a")
+    write(root, "posix/src/race.rs", _RACED)
+    sha = commit(root)
+    write(root, "posix/src/race.rs", _UNRACED)
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: the disk sees nothing raced", disk.returncode, 0)
+    check("gate 3: ...and the commit is refused anyway", rev.returncode, 1)
+    check("gate 3: ...naming the global the commit races",
+          "COUNTER" in rev.stdout + rev.stderr, True)
+
+
+def case_gate3_an_uncommitted_race_does_not_block_a_clean_push(tmp: str) -> None:
+    """The loud half: an experiment on the disk, nothing raced in the commit."""
+    root = _raced_repo(tmp, "g3b")
+    sha = commit(root)
+    write(root, "posix/src/race.rs", _RACED)
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: the disk refuses the uncommitted race", disk.returncode, 1)
+    check("gate 3: ...but the commit being pushed is clean", rev.returncode, 0)
+
+
+def case_gate3_the_baseline_is_read_from_the_same_tree(tmp: str) -> None:
+    """The ratchet must not be loosened by a line nobody is publishing.
+
+    The baseline is itself a tracked, pushed file. Reading the source from the
+    revision while reading the waiver list from the disk would mean an
+    *uncommitted* line excuses a *committed* race -- and the reviewer would see
+    the race added, the baseline untouched, and the gate green.
+    """
+    root = _raced_repo(tmp, "g3c")
+    write(root, "posix/src/race.rs", _RACED)
+    sha = commit(root)
+    check("gate 3: the fixture starts refused",
+          run_checker(root, "raced-globals.py", "--check",
+                      "--head", sha).returncode, 1)
+
+    # Forgive it in a *commit*, and un-forgive it on the *disk*.
+    write(root, "scripts/raced-globals-baseline.txt",
+          _RG_BASELINE + _RACE_KEY + "\n")
+    sha = commit(root, "baseline it")
+    write(root, "scripts/raced-globals-baseline.txt", _RG_BASELINE)
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: the disk's baseline forgives nothing", disk.returncode, 1)
+    check("gate 3: the commit's baseline forgives it, and passes",
+          rev.returncode, 0)
+
+
+def case_gate3_the_manifest_is_read_from_the_same_tree(tmp: str) -> None:
+    """The third input, and the one that can silence an entire crate.
+
+    Before reporting anything the checker asks whether `cargo test` builds a
+    target for the crate at all: `#[test]`s in a crate with no test target never
+    execute, and tests that cannot execute cannot interleave. That answer comes
+    from `Cargo.toml`. So a checker reading the source from the revision and the
+    manifest from the disk can be handed an uncommitted `test = false` and drop
+    a committed race on the floor -- with no mention of the race in its output,
+    because the whole crate is accounted for elsewhere.
+
+    The race is identical in both trees here; only the manifest differs.
+    """
+    root = _raced_repo(tmp, "g3d")
+    write(root, "posix/src/race.rs", _RACED)
+    sha = commit(root)
+    write(root, "posix/Cargo.toml", _NO_TEST_TARGET)
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: the disk's manifest silences the crate", disk.returncode, 0)
+    # ...for the stated reason, and not because the race stopped being detected
+    # for some unrelated reason -- which would pass this case while proving
+    # nothing about where the manifest was read from.
+    check("gate 3: ...saying so, rather than merely finding nothing",
+          "no test target" in disk.stdout, True)
+    check("gate 3: the commit's manifest leaves it testable, and is refused",
+          rev.returncode, 1)
+    check("gate 3: ...naming the global", "COUNTER" in rev.stdout + rev.stderr,
+          True)
+
+
+def case_gate3_a_file_absent_from_the_disk_is_still_judged(tmp: str) -> None:
+    """The fourth input: the enumeration, not only the contents.
+
+    The cases above all edit a file that exists on both sides, so a checker
+    listing `.rs` files from the disk and reading their text from the revision
+    passes every one of them. Here the raced file is gone from the working tree
+    entirely -- a commit on a branch since cleaned up, or a file that only ever
+    existed in what is being pushed.
+    """
+    root = _raced_repo(tmp, "g3e")
+    write(root, "posix/src/race.rs", _RACED)
+    sha = commit(root)
+    remove(root, "posix/src/race.rs")
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: the disk has no such file to judge", disk.returncode, 0)
+    check("gate 3: the commit still has it, and is refused", rev.returncode, 1)
+    check("gate 3: ...naming the global in a file the disk lacks",
+          "COUNTER" in rev.stdout + rev.stderr, True)
+
+
+def case_gate3_the_crate_boundary_is_found_in_the_same_tree(tmp: str) -> None:
+    """Where the crate *starts* is itself read from a tree.
+
+    Before it can ask whether a crate's tests run, the checker has to decide
+    which crate a file belongs to, by walking up looking for a `Cargo.toml`.
+    Reading that from the disk gives an answer about a crate layout that is not
+    being pushed -- and the two answers are not close: no manifest at all means
+    no crate, which means the "can these tests even run?" question is never
+    asked and every race is reported.
+    """
+    root = _raced_repo(tmp, "g3g", manifest=_NO_TEST_TARGET)
+    write(root, "posix/src/race.rs", _RACED)
+    sha = commit(root)
+    remove(root, "posix/Cargo.toml")
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: with no manifest on the disk the race is reported",
+          disk.returncode, 1)
+    check("gate 3: the commit's manifest silences the crate", rev.returncode, 0)
+    check("gate 3: ...for the stated reason", "no test target" in rev.stdout,
+          True)
+
+
+def case_gate3_the_silenced_crate_report_describes_the_commit(tmp: str) -> None:
+    """A crate falling silent is a finding, and it too must be about the push.
+
+    `#[test]`s in a crate `cargo test` builds no target for never run and are
+    never even type-checked. The checker counts them and says so -- separately
+    from the races, because tests that cannot execute cannot interleave. That
+    count is the one output here that no exit code depends on, which is exactly
+    why it needs its own case: a checker counting them off the disk reports a
+    number about a tree nobody is publishing, and both runs still exit 0.
+    """
+    root = _raced_repo(tmp, "g3h", manifest=_NO_TEST_TARGET)
+    write(root, "posix/src/onlycommit.rs",
+          "#[test]\nfn t() {\n    assert!(true);\n}\n")
+    sha = commit(root)
+    remove(root, "posix/src/onlycommit.rs")
+
+    disk = run_checker(root, "raced-globals.py", "--check")
+    rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+    check("gate 3: neither tree is refused", (disk.returncode, rev.returncode),
+          (0, 0))
+    check("gate 3: the disk has no unrunnable test to report",
+          "no test target" in disk.stdout, False)
+    check("gate 3: the commit does, and it is reported",
+          "no test target" in rev.stdout, True)
+
+
+def case_gate3_every_test_target_probe_reads_the_same_tree(tmp: str) -> None:
+    """Four files, any one of which keeps a crate's tests runnable.
+
+    `crate_has_test_target` is a chain of short-circuiting probes, so no single
+    fixture can exercise more than one of them: the first that finds a target
+    answers, and the rest are never reached. Each therefore gets its own tiny
+    repository, differing from its sibling only in which file the disk has that
+    the commit does not.
+
+    They are worth pinning individually because each is a whole-crate silencer
+    working in the *false pass* direction: a probe answered from the disk says
+    "these tests do run" about a commit in which they do not, or the reverse,
+    and either way the crate's races are decided by a file that is not being
+    pushed.
+    """
+    probes = (
+        # (label, manifest, has a committed src/lib.rs, the disk-only file)
+        ("an autodiscovered library", _NO_LIB_TABLE, False, "posix/src/lib.rs"),
+        ("an integration test", _NO_TEST_TARGET, True, "posix/tests/it.rs"),
+        ("an autodiscovered binary", _NO_TEST_TARGET, True, "posix/src/main.rs"),
+        ("a src/bin binary", _NO_TEST_TARGET, True, "posix/src/bin/extra.rs"),
+    )
+    for i, (label, manifest, with_lib, only_on_disk) in enumerate(probes):
+        root = _raced_repo(tmp, f"g3probe{i}", manifest=manifest,
+                           with_lib=with_lib)
+        write(root, "posix/src/race.rs", _RACED)
+        sha = commit(root)
+        # The file exists only on the disk, so only the disk's crate has a
+        # target for a harness to attach to -- and only the disk's copy of the
+        # race is therefore reachable by a test that runs.
+        write(root, only_on_disk, "pub fn extra() {}\n")
+
+        disk = run_checker(root, "raced-globals.py", "--check")
+        rev = run_checker(root, "raced-globals.py", "--check", "--head", sha)
+        check(f"gate 3: {label} on the disk makes the disk's crate testable",
+              disk.returncode, 1)
+        check(f"gate 3: ...and the commit, lacking {label}, is silenced",
+              rev.returncode, 0)
+
+
+def case_gate3_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
+    """Exit 2, not 1 -- the same contract gate 2 has with run-checker.sh.
+
+    Exit 1 means "the checker found something" and gets the gate's refusal text
+    printed over it, telling the author their tests race and offering the
+    bypass. A revision that cannot be read says nothing about anybody's tests.
+    """
+    root = _raced_repo(tmp, "g3f")
+    commit(root)
+    proc = run_checker(root, "raced-globals.py", "--check", "--head", "nosuchrev")
+    check("gate 3: an unreadable --head exits 2, not 1", proc.returncode, 2)
+
+
+# --------------------------------------------------------------------------
 # The hook, not the checker.
 #
 # Everything above runs the checker directly, which leaves the seam between the
@@ -333,8 +653,17 @@ HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 LIB = os.path.join(REPO_ROOT, "scripts", "run-checker.sh")
 
 
-def _push_fixture(tmp: str, name: str) -> str:
-    """A repository with a remote and the real hook and checker installed."""
+def _push_fixture(tmp: str, name: str,
+                  checkers: tuple[str, ...] = ("multicall-aliases.py",),
+                  seed: dict[str, str] | None = None) -> str:
+    """A repository with a remote and the real hook and `checkers` installed.
+
+    Only the named checkers are installed, which is what makes the other gates
+    skip themselves: each one tests for its own script and stands down when it
+    is absent. So a gate-3 fixture is not silently also being judged by gate 2.
+    """
+    if seed is None:
+        seed = {"scripts/multicall-aliases-baseline.txt": _EMPTY_BASELINE}
     root = os.path.join(tmp, name)
     remote = os.path.join(root, "remote.git")
     work = os.path.join(root, "w")
@@ -349,12 +678,12 @@ def _push_fixture(tmp: str, name: str) -> str:
 
     hooks = os.path.join(work, ".git", "hooks")
     os.makedirs(hooks, exist_ok=True)
-    for src, dst in ((HOOK, os.path.join(hooks, "pre-push")),
-                     (LIB, os.path.join(work, "scripts", "run-checker.sh")),
-                     (os.path.join(HERE, "multicall-aliases.py"),
-                      os.path.join(work, "scripts", "multicall-aliases.py")),
-                     (os.path.join(HERE, "gittree.py"),
-                      os.path.join(work, "scripts", "gittree.py"))):
+    copies = [(HOOK, os.path.join(hooks, "pre-push")),
+              (LIB, os.path.join(work, "scripts", "run-checker.sh"))]
+    for script in ("gittree.py", *checkers):
+        copies.append((os.path.join(HERE, script),
+                       os.path.join(work, "scripts", script)))
+    for src, dst in copies:
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         with open(src, encoding="utf-8", newline="") as fh:
             body = fh.read()
@@ -363,19 +692,29 @@ def _push_fixture(tmp: str, name: str) -> str:
     os.chmod(os.path.join(hooks, "pre-push"), 0o755)
 
     git(work, "remote", "add", "origin", remote)
-    write(work, "scripts/multicall-aliases-baseline.txt", _EMPTY_BASELINE)
+    for rel, text in seed.items():
+        write(work, rel, text)
     git(work, "add", "--all")
     git(work, "commit", "--quiet", "-m", "install the gate")
     git(work, "push", "--quiet", "origin", "main")
     return work
 
 
-def _push(work: str, ref: str = "main") -> tuple[str, str]:
+# One line's worth of each gate's refusal paragraph, and nothing wider: the
+# refusals are hand-wrapped, so a whole-sentence probe never matches and a
+# correct refusal reads as an unrelated error. Kept free of the em dashes the
+# hook uses, which do not survive a cp1252 console.
+_G2_REFUSAL = "command name exists that nothing can run"
+_G3_REFUSAL = "is raced by its own tests"
+
+
+def _push(work: str, ref: str = "main",
+          marker: str = _G2_REFUSAL) -> tuple[str, str]:
     """(verdict, output). `allowed`, `refused`, or `error:<...>`.
 
-    Only *gate 2's* refusal counts as `refused`. A suite that accepted any
-    refusal would pass on a fixture that trips some other gate and never reach
-    the thing it is about.
+    Only the *named gate's* refusal counts as `refused`. A suite that accepted
+    any refusal would pass on a fixture that trips some other gate and never
+    reach the thing it is about.
 
     `ALLOW_FMT_DRIFT=1` because the fixture's `.rs` files are hand-written and
     gate 7 would rustfmt them; `test-pre-push-fmt-gate.py` covers that gate
@@ -398,12 +737,30 @@ def _push(work: str, ref: str = "main") -> tuple[str, str]:
         blob = blob.replace(spelling, "<fixture>")
     if proc.returncode == 0:
         return "allowed", blob
-    # One line's worth: the refusal is a hand-wrapped paragraph, so a
-    # whole-sentence probe never matches and a correct refusal would read as an
-    # unrelated error.
-    if "command name exists that nothing can run" in blob:
+    if marker in blob:
         return "refused", blob
     return "error:" + blob.strip().replace("\n", " | ")[:600], blob
+
+
+def _tally(blob: str) -> tuple[set[str], set[str]]:
+    """(gates that ran, gates that skipped), from the hook's own summary.
+
+    "The push was allowed" and "the gate was asked" are different claims, and
+    this line is the only thing that tells them apart: a gate that skipped
+    itself allows everything, including every fixture in this file. Parsed from
+    the summary rather than matched as a substring because the two names appear
+    in each other's neighbourhood -- `raced-global` is a prefix of
+    `raced-global-selftest`, and a gate name occurring anywhere in the blob is
+    not evidence that it is on the `ran:` side of it.
+    """
+    ran: set[str] = set()
+    skipped: set[str] = set()
+    for line in blob.splitlines():
+        stripped = line.strip()
+        for prefix, into in (("ran:", ran), ("skipped:", skipped)):
+            if stripped.startswith(prefix):
+                into.update(stripped[len(prefix):].split())
+    return ran, skipped
 
 
 def case_gate2_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
@@ -446,8 +803,7 @@ def case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -
     # itself would also allow it, and would allow the case above too. The
     # hook's own tally is what distinguishes the two.
     check("gate 2 end to end: ...and the gate actually ran",
-          "ran:" in blob and "unreachable-command" in blob.split("skipped:")[0],
-          True)
+          "unreachable-command" in _tally(blob)[0], True)
 
 
 def case_gate2_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
@@ -482,6 +838,131 @@ def case_gate2_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
           "offbranch" in blob, True)
 
 
+def case_gate3_the_hook_refuses_a_commit_the_worktree_no_longer_shows(tmp: str) -> None:
+    """End to end: gate 3's own wiring, not gate 2's.
+
+    Gate 2's end-to-end cases prove `touches` and the `$pushed_shas` loop are
+    right, and prove nothing whatever about gate 3, which is a separate block
+    with its own guard, its own loop and its own `--head "$sha"`. Dropping the
+    flag from *this* invocation leaves every gate-2 case green.
+
+    Gate 3 also runs `--selftest` before `--check` and disbelieves the result if
+    that fails, so this case additionally covers the arm where the self-test is
+    what decides -- a broken detector reports a clean tree, not a broken one.
+    """
+    work = _push_fixture(
+        tmp, "g3push-hide", checkers=("raced-globals.py",),
+        seed={"scripts/raced-globals-baseline.txt": _RG_BASELINE},
+    )
+    write(work, "posix/Cargo.toml", _PLAIN_MANIFEST)
+    write(work, "posix/src/lib.rs", "pub fn ok() {}\n")
+    write(work, "posix/src/race.rs", _RACED)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "two tests sharing one atomic")
+    # The tidy-up that makes the disk lie.
+    write(work, "posix/src/race.rs", _UNRACED)
+
+    verdict, blob = _push(work, marker=_G3_REFUSAL)
+    check("gate 3 end to end: the push is refused", verdict, "refused")
+    check("gate 3 end to end: ...naming the global only the commit races",
+          "COUNTER" in blob, True)
+
+
+def case_gate3_the_hook_allows_a_clean_commit_under_a_dirty_worktree(tmp: str) -> None:
+    """End to end, the other direction -- and the one that checks it ran.
+
+    A gate that had skipped itself would also allow this, and would have allowed
+    the case above too if its refusal came from somewhere else. The hook's own
+    tally is the only thing that tells "passed" apart from "never asked".
+    """
+    work = _push_fixture(
+        tmp, "g3push-wip", checkers=("raced-globals.py",),
+        seed={"scripts/raced-globals-baseline.txt": _RG_BASELINE},
+    )
+    write(work, "posix/Cargo.toml", _PLAIN_MANIFEST)
+    write(work, "posix/src/lib.rs", "pub fn ok() {}\n")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a crate with nothing shared in it")
+    write(work, "posix/src/race.rs", _RACED)
+
+    verdict, blob = _push(work, marker=_G3_REFUSAL)
+    check("gate 3 end to end: an uncommitted race does not block", verdict,
+          "allowed")
+    check("gate 3 end to end: ...and the gate actually ran",
+          "raced-global" in _tally(blob)[0], True)
+
+
+def case_gate3_the_hook_judges_a_branch_it_is_not_standing_on(tmp: str) -> None:
+    """End to end: `git push origin feature` from `main`, for gate 3's loop.
+
+    Gate 2's equivalent case pins `touches`, which is shared. This pins the part
+    that is not: gate 3's own `for sha in $pushed_shas`. Pinning that loop to
+    `git rev-parse HEAD` instead survives every other case in this file, because
+    every other one pushes the branch it is standing on and so cannot tell the
+    two apart -- which is precisely how the `touches` defect went unnoticed.
+    """
+    work = _push_fixture(
+        tmp, "g3push-elsewhere", checkers=("raced-globals.py",),
+        seed={"scripts/raced-globals-baseline.txt": _RG_BASELINE},
+    )
+    git(work, "checkout", "--quiet", "-b", "feature")
+    write(work, "posix/Cargo.toml", _PLAIN_MANIFEST)
+    write(work, "posix/src/lib.rs", "pub fn ok() {}\n")
+    write(work, "posix/src/race.rs", _RACED)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a race on a branch we will leave")
+    git(work, "checkout", "--quiet", "main")
+
+    verdict, blob = _push(work, "feature", marker=_G3_REFUSAL)
+    check("gate 3 end to end: a branch other than HEAD is still judged",
+          verdict, "refused")
+    check("gate 3 end to end: ...naming the global on that other branch",
+          "COUNTER" in blob, True)
+
+
+def case_gate3_the_hook_treats_a_deletion_as_nothing_to_judge(tmp: str) -> None:
+    """A push that sends no commits must not be refused, or claim to have run.
+
+    Deleting a remote branch is a push with an all-zero local sha, so
+    `pushed_shas` is empty and there is no tree to judge. Two things must follow
+    and neither is automatic: the push is allowed however broken the working
+    tree is, and the tally says `skipped` rather than `ran` -- because a gate
+    reporting that it ran, having looped over an empty list, is a gate whose
+    summary line cannot be believed by anyone reading it.
+
+    Note for whoever changes `touches` next: with the helper scoped to
+    `$pushed_shas`, gate 3's own `[ -n "${pushed_shas# }" ]` guard is currently
+    *unobservable* -- an empty list already makes `touches` false, so removing
+    the guard changes no outcome, and mutation testing confirms no behavioural
+    case can kill that mutant. It is kept, and pinned statically by
+    `test-pre-push-gates.py`, because the redundancy is one edit deep: `touches`
+    was HEAD-scoped until 2026-09-02, and under that spelling this exact push
+    reached the loop with nothing in it.
+    """
+    work = _push_fixture(
+        tmp, "g3push-delete", checkers=("raced-globals.py",),
+        seed={"scripts/raced-globals-baseline.txt": _RG_BASELINE},
+    )
+    write(work, "posix/Cargo.toml", _PLAIN_MANIFEST)
+    write(work, "posix/src/lib.rs", "pub fn ok() {}\n")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "a clean crate")
+    check("gate 3 end to end: the clean crate publishes",
+          _push(work, marker=_G3_REFUSAL)[0], "allowed")
+    git(work, "branch", "doomed")
+    check("gate 3 end to end: the doomed branch publishes",
+          _push(work, "doomed", marker=_G3_REFUSAL)[0], "allowed")
+
+    # A race on the disk and nowhere else, so a gate reading the disk has
+    # something to refuse a push that is sending nothing at all.
+    write(work, "posix/src/race.rs", _RACED)
+    verdict, blob = _push(work, ":doomed", marker=_G3_REFUSAL)
+    check("gate 3 end to end: deleting a branch is not refused", verdict,
+          "allowed")
+    check("gate 3 end to end: ...and no gate claims to have judged it",
+          "raced-global" in _tally(blob)[1], True)
+
+
 def case_gate2_an_unopenable_revision_is_not_a_finding(tmp: str) -> None:
     """Exit 2, not 1.
 
@@ -507,24 +988,43 @@ CASES = (
     case_gate2_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
     case_gate2_the_hook_judges_a_branch_it_is_not_standing_on,
     case_gate2_an_unopenable_revision_is_not_a_finding,
+    case_gate3_a_tidied_worktree_cannot_hide_a_committed_race,
+    case_gate3_an_uncommitted_race_does_not_block_a_clean_push,
+    case_gate3_the_baseline_is_read_from_the_same_tree,
+    case_gate3_the_manifest_is_read_from_the_same_tree,
+    case_gate3_a_file_absent_from_the_disk_is_still_judged,
+    case_gate3_the_crate_boundary_is_found_in_the_same_tree,
+    case_gate3_the_silenced_crate_report_describes_the_commit,
+    case_gate3_every_test_target_probe_reads_the_same_tree,
+    case_gate3_an_unopenable_revision_is_not_a_finding,
+    case_gate3_the_hook_refuses_a_commit_the_worktree_no_longer_shows,
+    case_gate3_the_hook_allows_a_clean_commit_under_a_dirty_worktree,
+    case_gate3_the_hook_judges_a_branch_it_is_not_standing_on,
+    case_gate3_the_hook_treats_a_deletion_as_nothing_to_judge,
 )
 
 
 def main() -> int:
     # A discovery mechanism that discovers nothing looks exactly like a suite
     # that passes. Assert a floor, as the sibling suites do.
-    if len(CASES) < 10:
+    if len(CASES) < 23:
         print(f"FATAL: only {len(CASES)} cases registered; the suite has at "
-              f"least 10. The list is broken, not the code.")
+              f"least 23. The list is broken, not the code.")
         return 1
-    # ...and at least one of them must go through the real hook. A floor on the
-    # count alone would be met by nine direct-invocation cases, which is the
-    # arrangement that left the hook->checker seam untested in the first place.
-    end_to_end = [c for c in CASES if "the_hook" in c.__name__]
-    if len(end_to_end) < 2:
-        print(f"FATAL: {len(end_to_end)} end-to-end case(s) registered; the "
-              f"suite has at least 2. The list is broken, not the code.")
-        return 1
+    # ...and each converted gate must be represented, through the real hook as
+    # well as directly. A floor on the count alone would be met by any number of
+    # gate-2 cases, and a floor on end-to-end cases alone was already met before
+    # gate 3 was converted at all -- so both are counted per gate. Raise these
+    # as each remaining checker is converted; they are the thing that notices a
+    # gate's cases being deleted along with the gate's own wiring.
+    for gate, floor, e2e_floor in (("gate2", 10, 3), ("gate3", 13, 4)):
+        named = [c for c in CASES if c.__name__.startswith(f"case_{gate}_")]
+        hooked = [c for c in named if "the_hook" in c.__name__]
+        if len(named) < floor or len(hooked) < e2e_floor:
+            print(f"FATAL: {gate} has {len(named)} case(s) of which "
+                  f"{len(hooked)} end-to-end; it has at least {floor} and "
+                  f"{e2e_floor}. The list is broken, not the code.")
+            return 1
     with tempfile.TemporaryDirectory() as tmp:
         for case in CASES:
             case(tmp)

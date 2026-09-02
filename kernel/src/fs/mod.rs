@@ -86,6 +86,7 @@ pub mod colortemp;
 pub mod columnview;
 pub mod compress;
 pub mod compstat;
+pub mod conformance;
 pub mod contextmenu;
 pub mod coredump;
 pub mod cpio;

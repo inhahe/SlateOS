@@ -1946,6 +1946,156 @@ def test_a_host_signature_never_rewrites_a_clean_verdict(bh):
           bh.classify(None, 1, E_HOST_OOM), "NO_BOOT")
 
 
+#: A boot that got underway, said ordinary things, and never reached its
+#: marker: no panic, no stall, nothing wrong with it but the missing marker.
+#: Deliberately the blandest possible failing log, so that what the tests below
+#: change is the exit status and nothing else.
+S_NO_MARKER = _PROLOGUE + "[shell] prompt ready\n"
+
+
+def test_an_exit_status_the_harness_cannot_produce_is_not_a_boot_outcome(bh):
+    """The run of 2026-09-02: exit 127, filed as TIMEOUT, streak reset.
+
+    That boot ran for 395 seconds and then the *harness* died -- bash could not
+    fork a child, because the host had reached 96% of its Windows commit limit.
+    Nothing about it was a statement about the kernel, yet it was recorded as a
+    TIMEOUT, it reset the consecutive-clean streak that four `known-issues.md`
+    entries use as their closure bar, and it was matched against a lane-B hang.
+
+    The stderr-based override could not catch it: that reads QEMU's stderr, and
+    the fork that failed was not QEMU's. The exit status is the evidence that
+    was there all along.
+    """
+    s = _serial(bh, S_NO_MARKER)
+    check("exit 127 with no host stderr is still a host failure",
+          bh.classify(s, 127), "HOST_FAIL")
+    check("...and so is 126", bh.classify(s, 126), "HOST_FAIL")
+    check("the same log under a status the harness DOES produce is a TIMEOUT",
+          bh.classify(s, 1), "TIMEOUT")
+
+
+def test_a_harness_abort_does_not_erase_a_panic_the_log_recorded(bh):
+    """The counter-example that was already in the history: 2026-09-01T11:06.
+
+    That boot exited 127 *and* its log ends
+    `FATAL: virtio-gpu render-resource self-test failed`. Both happened -- the
+    kernel died, then the harness could not fork on its way out -- and the
+    first draft of the exit-status override would have rewritten it to
+    HOST_FAIL, deleting a real FATAL from the counts. That is the direction
+    this whole file exists to prevent, so it is asserted rather than trusted.
+
+    The line the override must not cross: PANIC is read out of the log, and a
+    harness that stumbled afterwards cannot un-say what the kernel already
+    said. TIMEOUT and SELFTEST_FAIL rest on absence -- a marker that never
+    arrived, a gate that never reported -- which is precisely what a harness
+    that stopped running is in no position to testify to.
+    """
+    panicked = _serial(bh, _PROLOGUE + (
+        "[virtio-gpu] RESOURCE SELF-TEST FAILED: a resource exactly at the "
+        "bound was rejected: I/O error (-600)\n"
+        "FATAL: virtio-gpu render-resource self-test failed: internal kernel "
+        "error (-1)\n"
+    ))
+    check("a panic in the log survives the harness dying after it",
+          bh.classify(panicked, 127), "PANIC")
+    check("...and 126 likewise", bh.classify(panicked, 126), "PANIC")
+    # The stderr half is guarded differently on purpose, and the pair is what
+    # shows the difference is deliberate rather than an oversight in one of
+    # them: QEMU saying it could not get memory explains the panic; a fork
+    # that failed minutes later explains nothing but itself.
+    check("QEMU's own stderr still does override a panic",
+          bh.classify(panicked, 127, E_HOST_OOM), "HOST_FAIL")
+    # A gate verdict rests on the gate having reported. Exit 127 means it did
+    # not, so the accusation is retracted even though the marker was reached.
+    check("a verdict resting on a gate that never ran is retracted",
+          bh.classify(_serial(bh, S_PASS), 127), "HOST_FAIL")
+    check("...where the same log with a status the harness produces accuses",
+          bh.classify(_serial(bh, S_PASS), 1), "SELFTEST_FAIL")
+
+
+def test_run_timeout_expiry_is_a_statement_about_the_tree(bh):
+    """124 is outside the harness's vocabulary and must NOT be excused.
+
+    The tempting rule -- "any status boot-test.sh does not emit means the host
+    failed" -- would swallow this one, and 124 is exactly the case where that
+    is wrong: `run-timeout.py` returns it when the whole tree overran its
+    budget, which is a fact about something not finishing. Excusing it would
+    delete the loudest hang signal the harness has.
+    """
+    s = _serial(bh, S_NO_MARKER)
+    check("run-timeout's expiry is not a harness abort",
+          bh.harness_abort(124), None)
+    check("...and does not become a HOST_FAIL", bh.classify(s, 124), "TIMEOUT")
+
+
+def test_a_kernel_cannot_forge_a_harness_abort(bh):
+    """The exit status is chosen for the same reason QEMU's stderr is.
+
+    It is set by the shell, above the emulator, after the kernel has had its
+    say -- so no string the guest prints can reach it. Asserted explicitly
+    because the value of both overrides is entirely in this property: an
+    excuse the accused can issue itself is not an excuse.
+    """
+    forged = _serial(bh, _PROLOGUE + (
+        "[test] harness exit 127: could not run a command at all\n"
+        "PANIC: kernel wrote a shared CoW page\n"
+    ))
+    check("the words in the guest's log do not excuse the guest",
+          bh.classify(forged, 1), "PANIC")
+
+
+def test_a_harness_abort_cannot_collide_with_a_clean_verdict(bh):
+    """The harness half reaches the downward guard differently, and must.
+
+    The stderr override needs the guard: QEMU can print a warning on a boot
+    that then passes, so PASS and a host signature genuinely co-occur. The
+    harness override cannot -- the exit status is *both* the trigger and the
+    thing every clean verdict is derived from, and no clean verdict is derived
+    from 126 or 127. So `classify(passing log, 127)` is HOST_FAIL, and that is
+    the right answer rather than a hole in the guard: a harness that could not
+    run a command did not run its gates either, so nothing about that run had
+    yet been checked. The marker in the log says the kernel got somewhere; it
+    does not say the run finished.
+
+    Asserted as a property of the two sets, not of one sample, so that adding
+    a clean verdict on some future exit status cannot quietly make a
+    harness-aborted run readable as clean.
+    """
+    for code in bh.HARNESS_ABORT_EXITS:
+        check_true(f"exit {code} derives no clean verdict from a passing log",
+                   bh._verdict_from_evidence(_serial(bh, S_PASS), code)
+                   not in bh.CLEAN_VERDICTS)
+        check(f"...so exit {code} on a passing log reads as HOST_FAIL",
+              bh.classify(_serial(bh, S_PASS), code), "HOST_FAIL")
+    # The upward guard is real for both halves and is checked for both: a run
+    # with no serial output at all has no boot in it to file.
+    check("a run with no serial output at all stays NO_BOOT",
+          bh.classify(None, 127), "NO_BOOT")
+
+
+def test_the_recorded_reason_and_the_verdict_come_from_one_derivation(bh):
+    """A HOST_FAIL row must never carry an empty `host_fail`.
+
+    `classify` and `main` decide separately whether to override and what to
+    write beside it. `not_about_the_tree` is the single derivation they share;
+    if it were ever forked into two, the failure would be silent -- a row that
+    says HOST_FAIL and cannot say why, which is precisely the assertion the
+    reader has no way to check.
+    """
+    s = _serial(bh, S_NO_MARKER)
+    for stderr, code in ((E_HOST_OOM, 1), ("", 127), (E_CYGHEAP, 127)):
+        why = bh.not_about_the_tree(stderr, code)
+        check_true(f"stderr={bool(stderr)} exit={code}: a reason exists",
+                   bool(why))
+        check(f"stderr={bool(stderr)} exit={code}: and the verdict agrees",
+              bh.classify(s, code, stderr), "HOST_FAIL")
+    check("an ordinary failing boot is left alone",
+          bh.not_about_the_tree("", 1), None)
+    check("QEMU's words win over the exit status when both are present",
+          bh.not_about_the_tree(E_HOST_OOM, 127),
+          "QEMU could not map guest memory")
+
+
 def test_every_signature_is_matched_and_named(bh):
     """Each signature fires, and each names a reason a human can act on.
 

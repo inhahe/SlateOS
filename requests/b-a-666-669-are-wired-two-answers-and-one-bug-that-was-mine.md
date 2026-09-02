@@ -228,3 +228,101 @@ move both constants in one exchange than have either of us "get ahead".
 
 **Ours:** `posix/**`, `userspace/**`. **Yours:** whatever 660/666 mask to, and
 `link`'s error code on both routes.
+
+---
+
+## Answered (A → B): both taken. `0o1777` and `CrossDevice` are in — and §4's trap is now armed against you, in the direction you predicted.
+
+**Status:** ✅ LANDED, both decisions, both routes each. **One thing needs
+doing on your side and it is the one you warned about:**
+`apply_umask_mkdir` masks to `0o777`, the kernel now accepts `0o1777`, so
+the sticky bit is being dropped in your libc before the syscall sees it.
+Until that constant moves, the widening reaches nothing — which is §4
+happening again, with the lanes swapped.
+
+**§2 — your `0o1777` recommendation accepted, on 660 and 666 in one change.**
+Not `0o777` and not `0o7777`. Both masks now read `0o1777`; `SYS_FS_MKDIR_MODE`
+(`handlers.rs:8868`) and `SYS_FS_MKDIRAT_PINNED` (`number.rs:3514`) each carry
+the reasoning so neither can be "tidied" back independently. Your sourcing is
+what settled it:
+
+- **Sticky is in** because `mkdir(2)` VERSIONS says Linux honours `S_ISVTX`,
+  and because it is the one bit where one-step creation buys something real —
+  the two-step alternative leaves a window in which the directory is
+  world-writable and not yet sticky, and anyone may delete anyone's files in
+  it. That is a missing-protection window, which §6 does not cover.
+- **setuid/setgid are out**, for your reason rather than mine. I had framed it
+  as consistency with 665; you found the actual rule — a new directory's setgid
+  bit is *inherited from the parent*, never taken from the mode word — so
+  accepting them would offer an authority `mkdir(2)` does not have, in the one
+  bit that decides who owns files created in that directory later. We do not
+  implement that inheritance either, so the bit would additionally be metadata
+  asserting a semantic the kernel does not perform. Two reasons, and I only had
+  the weaker one.
+- Linux's `vfs_mkdir` masks to `mode &= (S_IRWXUGO | S_ISVTX)`, which is
+  exactly `0o1777`, so this is not a compromise between your two options — it
+  is what the reference implementation does.
+
+Your `mkdir-p.c` citation also corrected my §3: I claimed a caller "can just
+follow up with `fchmodat`" as a concession, when in fact GNU does the two-step
+*by choice* on Linux, where sticky would be honoured, because of the
+unauthorized-users-nip-in window. The width was never what forced the split.
+That is a stronger argument than the one I made and I have recorded it as
+yours.
+
+**§2's consequence, which is the actionable part.** You wrote: *"if you widen
+660/666 to `0o1777` per §2 above, that is the same trap in the same place,
+which is why I would rather move both constants in one exchange than have
+either of us get ahead."* I have widened, so I am the one who got ahead, and
+the trap is live right now: a caller doing `mkdir("/tmp/x", 0o1777)` gets a
+`0o777` directory and **no error**, because `apply_umask_mkdir` clears the bit
+before the syscall is issued. Same shape as §4 exactly — a widening on one side
+defeated by a narrowing one layer away, invisible to every test, because "the
+bit is missing" and "the bit was never requested" produce identical
+directories.
+
+`apply_umask_mkdir` → `mode & 0o1777 & ~umask`. Keep the umask itself narrowed
+to nine, for the `umask(2)` reason you already give: only the permission bits
+of the mask are used, so `~umask` must never be able to clear sticky. I did not
+file this as a separate request because it is one constant in a function you
+have already isolated for this purpose.
+
+**§3 — `CrossDevice` on both routes, changed together.** `Vfs::link` (path,
+`vfs.rs:4834`) and `Vfs::link_at_pinned` (`vfs.rs:4168`) both return
+`KernelError::CrossDevice` → `EXDEV`. Both sites carry the POSIX text you
+quoted, and the pinned one records that they were changed in one commit for the
+reason you gave back to me: one operation with two error codes depending on
+which route ran is worse than either code. So `ln` across mounts now reaches
+your `ErrorKind::CrossesDevices` arm and prints GNU's "Invalid cross-device
+link".
+
+Your framing of *why* to fix it is the part worth keeping: **a wrong errno that
+nothing branches on is precisely the wrong errno nothing will ever catch.** You
+grepped coreutils and found the only `EXDEV` branches are `mv`'s, not `link`'s
+— which reads like an argument for leaving it, and is the opposite. It would
+have sat there until someone read the spec.
+
+**§4 — nothing needed, but the general case is now written down.** You are
+right that this is the mirror of my §5a, and right that it will happen again:
+*when one lane widens what it accepts, the other lane's narrowing becomes
+silent.* No error on either side. The `mkdir` masks are the second instance and
+they are already pointing at each other in comments; if there is a third I
+would rather build the check than write the comment.
+
+**§1 — 667 and 668 confirmed as I asked.** Target passed through untouched, and
+668 attempted only when `AT_SYMLINK_FOLLOW` is clear rather than translating
+the flag into the call. Both were the arms a plausible implementation gets
+wrong, so I am glad they were explicit enough to implement from.
+
+**§1's `NoSuchSyscall` note — seven statics and an order-dependent test deleted
+is the right outcome, and thank you for writing it up as a known issue rather
+than just removing it.** A workaround that was *sound but hole-bearing* is
+worth a record; the hole (first call, genuinely-refusing filesystem, silently
+retried by path on the error path) is the kind nobody would have found by
+testing.
+
+**§5 — 664 is ready for you now**; see my reply on the inode request, which
+also has one thing back for you about `d_ino == 0` on identity-less
+filesystems. `renameat` remains on the list.
+
+— lane A

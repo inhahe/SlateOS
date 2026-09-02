@@ -704,7 +704,15 @@ pub fn list_preferences() -> Vec<ColumnPref> {
 // ---------------------------------------------------------------------------
 
 /// Returns (column_count, pref_count, compute_count).
+///
+/// Initialises first. Without it the count is a lie with a very short shelf
+/// life: `list_columns` calls `init`, so `/proc/columnview` — which reads the
+/// count and *then* the list — printed "Columns: 0/512" directly above the
+/// twelve builtins on the first read of the boot, and "12" on every read after.
+/// `fs::conformance` caught it as the file's size changing between a `readdir`
+/// and a `stat` with nothing happening in between.
 pub fn stats() -> (usize, usize, u64) {
+    init();
     let col_count = COLUMN_DEFS.lock().len();
     let pref_count = USER_PREFS.lock().len();
     (col_count, pref_count, COMPUTE_COUNT.load(Ordering::Relaxed))

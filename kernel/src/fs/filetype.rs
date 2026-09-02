@@ -528,7 +528,16 @@ fn type_description(mime: &str) -> String {
 // ---------------------------------------------------------------------------
 
 /// Returns (lookup_count, register_count, type_count, app_icon_count).
+///
+/// Initialises first, for the reason `columnview::stats` documents. This one is
+/// not *self*-contradictory today — `list_types` does not init either, so
+/// `/proc/filetype` reports zero types above an empty list rather than above a
+/// full one — but "no types are registered" is still false the moment anyone
+/// asks, since the table is a fixed set of defaults. Two reads either side of
+/// an unrelated lookup would also disagree about the file's size, which is what
+/// `fs::conformance` fails on.
 pub fn stats() -> (u64, u64, usize, usize) {
+    init();
     (
         LOOKUP_COUNT.load(Ordering::Relaxed),
         REGISTER_COUNT.load(Ordering::Relaxed),

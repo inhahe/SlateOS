@@ -438,6 +438,54 @@ build directory, or keep three and keep pruning.** C stays either way, and D is
 orthogonal too — it asks *where* the output lives, not *how many copies* there
 are, so it composes with A and B just as C does.
 
+### 2026-09-02 — option A's only stated cost has now been measured, and it is much smaller than the table implies
+
+Nothing about the disk-space side has changed (**93 GiB free of 1.9 TB, 95%
+used**, measured today — the margin the August updates left is holding). This
+update is about the *other* column. Option A's cost is stated as "Lanes
+serialise on the build lock. Wall-clock per lane goes up whenever two build at
+once." That sentence assumes the thing worth checking: that two lanes building
+at once today are actually getting two lanes' worth of work done.
+
+**They are not.** Measured today with lane A and lane B each running a boot
+test:
+
+| | uncontended | with a second lane building | ratio |
+|---|---|---|---|
+| read 6441 `.rs` files (`check-variant-lists.py`'s scan) | ~3 s | **368.5 s** | ~120× |
+| mean per file | <1 ms | 57 ms | — |
+| slowest single file | — | 0.86 s | — |
+
+There is no outlier and no pathological input: *every* read is uniformly two
+orders of magnitude slower. The disk is saturated, so the second lane is not
+running alongside the first so much as taking turns with it at a much worse
+exchange rate than a lock would give.
+
+**And it now destroys runs, not just measurements.** The August argument for A
+was that concurrency contaminates benchmark numbers. Today it killed a lane-A
+boot test outright: the run hit its 1800s budget having **never reached QEMU**,
+because the pre-build static gates alone consumed all of it. No fork failed, the
+commit-limit floor never tripped, and every gate that ran passed. Both lanes now
+have to budget 7200s for a job that takes ~8 minutes alone.
+
+*What changes if you pick A:* lanes queue explicitly and each build runs at full
+speed, instead of overlapping and each running at a fraction of it. The wall
+clock the table lists as A's cost is largely already being paid under B — just
+without the queue, the predictability, or the ~100 GiB.
+
+**This does not settle the question,** because it measures the *disk*, not the
+build lock: cargo's lock serialises at a coarser grain than the disk contention
+does, so A could still idle a lane that would otherwise be doing non-disk work.
+It does mean the table's cost column overstates what A gives up, and the
+recommendation above ("A's serialisation is arguably a bonus rather than a
+cost") now has a number behind it rather than only an argument.
+
+**If it is never answered:** B+C keeps running and stays safe on disk — C's
+floor is what makes that true and it is not going away. What continues to
+degrade is throughput and trust in timings: every boot test either takes 4-8×
+longer than it should or has to be re-run with a bigger budget, and no benchmark
+taken while another lane builds is worth recording.
+
 ## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
 
 **In short:** When a program asks this system a question about a file — "how big

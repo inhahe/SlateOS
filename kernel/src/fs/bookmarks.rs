@@ -439,7 +439,13 @@ pub fn count() -> usize {
 // ---------------------------------------------------------------------------
 
 /// Get statistics.
+///
+/// Initialises first, for the reason `columnview::stats` documents: `list`
+/// calls `init`, so `/proc/bookmarks` — which reads the count and *then* the
+/// list — would print a count of 0 directly above the default bookmarks on the
+/// first read of the boot, and the true count on every read after.
 pub fn stats() -> (u64, u64, usize) {
+    init();
     let count = BOOKMARKS.lock().len();
     (
         RESOLVE_COUNT.load(Ordering::Relaxed),

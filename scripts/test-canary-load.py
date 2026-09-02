@@ -676,30 +676,58 @@ check("a window no sample fell into yields no inflation",
 print()
 print("spinner occupancy")
 
+# A snapshot is now a (cpu_seconds, monotonic) *pair* per spinner, published
+# together under the cell's lock.  That is what makes the ceiling a bound
+# rather than a hope: the denominator is the spinner's own elapsed time over
+# the same interval as the numerator, not an interval the controller stamped
+# around it.  See `canary-load.py:occupancy_ceiling`.
+def snap(cpu, clock):
+    """Build a snapshot list, pairing each CPU figure with a clock reading."""
+    return [(c, clock) for c in cpu]
+
+
 check("no snapshots means no measurement",
       cl.summarise_occupancy(None, None, 3.0), None)
 check("mismatched snapshots are refused",
-      cl.summarise_occupancy([0.0], [1.0, 2.0], 3.0), None)
+      cl.summarise_occupancy(snap([0.0], 0.0), snap([1.0, 2.0], 3.0), 3.0),
+      None)
 check("a zero-length window yields no ratio",
-      cl.summarise_occupancy([0.0], [1.0], 0)["occupancy"], None)
+      cl.summarise_occupancy(snap([0.0], 0.0), snap([1.0], 3.0),
+                             0)["occupancy"], None)
 
-full = cl.summarise_occupancy([0.0, 0.0, 0.0, 0.0],
-                              [3.0, 3.0, 3.0, 3.0], 3.0)
+full = cl.summarise_occupancy(snap([0.0] * 4, 0.0), snap([3.0] * 4, 3.0), 3.0)
 check("four spinners with a core each score 1.0", full["occupancy"], 1.0)
 check("their burned CPU is the snapshot delta",
       full["cpu_seconds_total"], 12.0)
 check("expected CPU is spinners x window", full["expected_cpu_seconds"], 12.0)
 check("none of them counts as idle", full["idle_spinners"], 0)
+check("the span comes from the spinners' own clocks", full["span_s"], 3.0)
+check("and is reported per spinner too", full["span_each_s"], [3.0] * 4)
+check_true("a full core is exactly at the physical ceiling",
+           full["occupancy_measured"] <= full["occupancy_ceiling"],
+           f"{full['occupancy_measured']} > {full['occupancy_ceiling']}")
+
+# The bound has to come from each spinner's own span, so a spinner whose
+# window was shorter is divided by *its* window and not by the group's.  Two
+# spinners, one measured over 3 s and one over 1 s, each fully busy: the ratio
+# is 1.0, and a controller-stamped span would have called it 2.0.
+uneven = cl.summarise_occupancy([(0.0, 0.0), (0.0, 0.0)],
+                                [(3.0, 3.0), (1.0, 1.0)], 3.0)
+check("each spinner is divided by its own span",
+      uneven["occupancy_measured"], 1.0)
+check("and the spread is visible rather than averaged away",
+      uneven["span_each_s"], [3.0, 1.0])
 
 # The failure this exists to catch: processes that were nominally started but
 # never actually ran.  A standalone probe once did exactly this and reported a
 # confident ratio with zero live spinners.
-dead = cl.summarise_occupancy([0.0] * 4, [0.0] * 4, 3.0)
+dead = cl.summarise_occupancy(snap([0.0] * 4, 0.0), snap([0.0] * 4, 3.0), 3.0)
 check("spinners that never ran score 0", dead["occupancy"], 0.0)
 check("and every one is named as idle", dead["idle_spinners"], 4)
 check_true("which is below the floor", dead["occupancy"] < cl.OCCUPANCY_FLOOR)
 
-half = cl.summarise_occupancy([0.0] * 4, [3.0, 3.0, 0.0, 0.0], 3.0)
+half = cl.summarise_occupancy(snap([0.0] * 4, 0.0),
+                              snap([3.0, 3.0, 0.0, 0.0], 3.0), 3.0)
 check("partial scheduling is reported proportionally",
       half["occupancy"], 0.5)
 check("and the starved ones are counted", half["idle_spinners"], 2)
@@ -707,7 +735,8 @@ check("and the starved ones are counted", half["idle_spinners"], 2)
 # A CPU clock cannot run backwards; if a snapshot pair says it did, the
 # reading is garbage and must not become negative "credit" that masks another
 # spinner's idleness.
-backwards = cl.summarise_occupancy([5.0, 0.0], [0.0, 3.0], 3.0)
+backwards = cl.summarise_occupancy(snap([5.0, 0.0], 0.0),
+                                   snap([0.0, 3.0], 3.0), 3.0)
 check("a backwards clock contributes nothing rather than a negative",
       backwards["cpu_seconds_total"], 3.0)
 
@@ -785,8 +814,27 @@ with tempfile.TemporaryDirectory() as tmpdir:
     def start_replay7():
         replay(serial, SUITE, per_line=0.02).join()
 
+    # A 30-benchmark window (0.6 s), where every other test here uses 10.
+    # Both bounds below need it, in opposite directions, and 10 was too few
+    # for either:
+    #
+    #   * The floor asks whether the spinners were *scheduled*.  Over 0.2 s a
+    #     single unrelated process on the host can take most of the CPU, and
+    #     the instrument cannot tell that from a load that was never applied.
+    #     A 14-run probe caught it once, at `occupancy 0.304` on an otherwise
+    #     idle machine -- which would have refused a boot test for a fact
+    #     about the host rather than about this code.
+    #   * The ceiling is `1 + 15.6 ms / span`, so a short span buys a loose
+    #     bound: 7.8% at 0.2 s against 2.6% here.  Tripling the span triples
+    #     the check's power, and the quantisation it must still tolerate is
+    #     one tick either way regardless of length.
+    #
+    # The other tests keep the short window deliberately -- they are about the
+    # controller's ordering logic, which a fast replay tests harder.  This one
+    # is about a physical measurement, and a physical measurement needs enough
+    # ticks under it to mean something.
     record, rc, out = run_controller(
-        serial, ["--at", "bench_10", "--until", "bench_20"],
+        serial, ["--at", "bench_05", "--until", "bench_35"],
         wait_for=start_replay7, delay=0.3, spinners=2)
 
     occ = record["host_occupancy"]

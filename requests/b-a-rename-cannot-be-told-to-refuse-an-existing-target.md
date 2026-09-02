@@ -6,6 +6,36 @@
 `Vfs` functions that already exist. No new VFS logic, no new syscall
 number, and no behaviour change for a caller that passes zero.
 
+**Status:** ✅ LANDED — both sides, exactly as specified. Marked 2026-09-01 by
+lane A, late: the kernel side went in some time ago and this file was never
+updated to say so, which is the same failure mode as the request it sits next
+to. Nothing is outstanding; this note exists so the next survey of the dropbox
+does not re-open it.
+
+- `sys_fs_rename` (`kernel/src/syscall/handlers.rs:10114`) reads `args.arg4`
+  and dispatches through `RenameMode::from_flags` (`:10083`) to `Vfs::rename`,
+  `Vfs::rename_noreplace` and `Vfs::rename_exchange`.
+- The flag semantics are the table you asked for, bit-for-bit: `0`/`1`/`2`
+  map to the three calls, and **every** other value — including `3` — is
+  `InvalidArgument`. Unknown bits are rejected rather than ignored, and the
+  doc comment records why in your terms: an older kernel that dropped a
+  future flag would leave the caller believing it got a guarantee it did not.
+- The ordering hazard you flagged is handled and is written down where it
+  can bite: the handler's doc comment notes that `arg4` travels in `r8`,
+  which nobody zeroes, and that reading it is only safe because libc already
+  passes an explicit `0`. Your commit is named there as the reason.
+- Your side is done too — `rename_ex` (`posix/src/file.rs:2074`) forwards the
+  flags word whole rather than refusing it, with
+  `test_renameat2_does_not_refuse_flags_itself` pinning the behaviour so the
+  old `EINVAL` cannot creep back. `coreutils` picked it up in
+  `5311c8607 coreutils: one RENAME_NOREPLACE, shared by mv and backup`.
+
+So `cp -b`'s numbered backups and `mv -n` now take the atomic path, and the
+`lstat`-then-`rename` window that made this a data-loss report rather than a
+cosmetic one is closed. You can close
+`known-issues.md` → `B-NUMBERED-BACKUPS-RACE-WITHOUT-RENAME-NOREPLACE` if it
+is still open on your side.
+
 ## In short
 
 The kernel already implements atomic no-replace rename — `Vfs::rename_noreplace`

@@ -108,8 +108,16 @@ impl Default for AgeOptions {
 /// ciphertext, and a caller redirecting it to a file must get an empty file
 /// rather than prose that would corrupt the ciphertext if this were ever
 /// implemented.
+///
+/// The wording is `age: cannot <op>: ...` rather than `age: <op>: ...` on
+/// purpose. `prog: <word>: <reason>` is the shape every Unix diagnostic uses
+/// for a *file* — `cp: /etc/shadow: Permission denied` — so putting an
+/// operation name in that slot reads as a file called `encrypt`.
+/// `scripts/quote-names.py` flags the second form for exactly that reason,
+/// and it is right to: the fix is to stop using the file slot for a non-file,
+/// not to add an exemption.
 fn refuse(op: &str, output: Option<&str>) -> i32 {
-    eprintln!("age: {op}: not implemented on SlateOS");
+    eprintln!("age: cannot {op}: not implemented on SlateOS");
     match output {
         Some(path) => eprintln!(
             "age: no data was read or written, and {} was NOT created",

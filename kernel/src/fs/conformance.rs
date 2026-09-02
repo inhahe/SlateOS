@@ -49,6 +49,7 @@
 //! image that has already been constructed, and it exercises the driver rather
 //! than a re-implementation of it.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::error::KernelResult;
@@ -536,6 +537,180 @@ pub fn check_tree(
     check_sizes_bracketed(backend, fs, dir, &entries, &stat_sizes, r);
 }
 
+// ---------------------------------------------------------------------------
+// Layer two: declared values
+// ---------------------------------------------------------------------------
+
+/// One object whose mode a fixture *declares*, and what its mount is permitted
+/// to do to that mode on the way back out.
+///
+/// The clauses in [`check_meta`] cannot catch a **narrowing**. Masking a mode
+/// with `& 0o777` produces only values that are inside [`MODE_DOMAIN`], so every
+/// domain rule still holds while setuid, setgid and sticky are being deleted.
+/// That is not hypothetical — it is the btrfs/zfs/f2fs bug in this module's
+/// header, and it survived all three backends' own test suites because every
+/// assertion in them used a mode inside `0o777`, which is exactly the range a
+/// `& 0o777` bug cannot disturb.
+///
+/// Catching it needs two things the domain layer does not have: a fixture that
+/// writes a bit *outside* `0o777`, and a checker that knows which bit was
+/// written. This type is the second one, and it is deliberately declared next to
+/// the fixture that writes the bits, so that changing one without the other is a
+/// visible inconsistency in a single file rather than a silent disagreement
+/// across two.
+pub struct Declared {
+    /// Path within the mounted fixture.
+    pub path: &'static str,
+    /// The permission bits the fixture wrote, within [`MODE_DOMAIN`].
+    ///
+    /// The file-type bits of an on-disk `i_mode` (`S_IFREG`, `S_IFDIR`) are not
+    /// part of `FileMeta::permissions` and are not carried here: `entry_type` is
+    /// where the contract puts that information, and duplicating it would create
+    /// a second place for the two to disagree.
+    pub mode: u16,
+    /// Bits the mount may legitimately remove — and *only* those.
+    ///
+    /// Every fixture below mounts read-only, so a driver that clears the write
+    /// bits is telling userspace the truth and must not be failed for it. This
+    /// is stated per object rather than assumed globally so that a backend which
+    /// gains a read-write mount has to edit this line to keep passing, instead
+    /// of quietly satisfying a weaker check.
+    pub may_drop: u16,
+}
+
+/// Build one backend's synthetic volume and hand back the modes it declares.
+///
+/// Uniform across backends on purpose. The four drivers spell their fixtures
+/// differently — btrfs returns `KernelResult<Vec<u8>>` from `build_image`, f2fs
+/// returns a bare `Vec<u8>`, ntfs builds its image inside `mount_image`, and zfs
+/// calls the mount function `mount` — and threading those four shapes through
+/// this module would put knowledge of each backend's test scaffolding here,
+/// where it would rot the first time any of them changed. One seam per backend
+/// keeps that knowledge in the backend.
+pub type FixtureFn = fn() -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])>;
+
+/// Check every declared object against what the driver actually reports.
+///
+/// The comparison is **equality**, not "the declared bits are present among the
+/// reported ones". A superset test would pass a driver that invented bits it was
+/// never given, and an invented mode bit is not a milder bug than a dropped one:
+/// a spurious setuid bit is a privilege granted to a file that was never given
+/// it, whereas a dropped one is a privilege lost. Both are the contract broken.
+fn check_declared(
+    backend: &'static str,
+    fs: &mut dyn FileSystem,
+    declared: &[Declared],
+    r: &mut Report,
+) {
+    for d in declared {
+        let path = Path::new(d.path);
+        match fs.metadata(path) {
+            Ok(meta) => {
+                let want = d.mode & !d.may_drop;
+                r.check(
+                    meta.permissions == want,
+                    backend,
+                    path,
+                    "the mode the fixture wrote is not the mode the driver reports",
+                );
+                if meta.permissions != want {
+                    // A second line, because the first names the clause and this
+                    // names the evidence. The narrowing case is called out by
+                    // name: `& 0o777` is a specific, recurring bug with a
+                    // specific signature — everything inside 0o777 survives and
+                    // everything above it is gone — and a reader who is told
+                    // that has the diagnosis, not just the symptom.
+                    let narrowed = meta.permissions == want & 0o777 && (want & !0o777) != 0;
+                    serial_println!(
+                        "[fsconform]   declared {:#o}, mount may drop {:#o}, so expected \
+                         {:#o}; got {:#o}{}",
+                        d.mode,
+                        d.may_drop,
+                        want,
+                        meta.permissions,
+                        if narrowed {
+                            " — precisely the bits above 0o777 are missing, which is the \
+                             `& 0o777` narrowing this layer exists to catch"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+            }
+            Err(e) => {
+                // A failure, not a skip. These fixtures are byte arrays built
+                // from constants with no dependency on the host, the disks or
+                // the boot — the same reason the memfs fixture is unconditional.
+                // A declared path that will not stat is the driver failing to
+                // read something the fixture demonstrably wrote.
+                r.failed = r.failed.saturating_add(1);
+                serial_println!(
+                    "[fsconform] FAIL {}:{} — the fixture declares this object but \
+                     metadata() returned {:?}",
+                    backend,
+                    path.display(),
+                    e
+                );
+            }
+        }
+    }
+}
+
+/// Every backend that can build a synthetic volume without a disk.
+///
+/// These four are the interesting ones for this harness: they are real on-disk
+/// formats with real mode-decoding paths, three of the four *were* the original
+/// bug, and each already builds an in-RAM image for its own self-tests, so
+/// reaching them costs one more image rather than a disk.
+const FIXTURES: [(&str, FixtureFn); 4] = [
+    ("btrfs", crate::fs::btrfs::tests::conformance_fixture),
+    ("f2fs", crate::fs::f2fs::tests::conformance_fixture),
+    ("ntfs", crate::fs::ntfs::tests::conformance_fixture),
+    ("zfs", crate::fs::zfs::tests::conformance_fixture),
+];
+
+/// Run both layers over every synthetic-volume backend.
+///
+/// Layer one ([`check_tree`]) runs here too, not only layer two. Until this
+/// existed the domain and cross-route clauses were checked against memfs and
+/// whatever the live VFS had mounted — which on a diskless boot is no real
+/// on-disk driver at all. The four drivers whose `FileMeta` implementations
+/// diverged in the first place were never among them.
+fn check_fixture_backends(r: &mut Report, heap: &mut HeapWatch) {
+    for (backend, open) in FIXTURES {
+        match open() {
+            Ok((mut fs, declared)) => {
+                check_tree(backend, fs.as_mut(), Path::new("/"), r, &mut Skips::new());
+                check_declared(backend, fs.as_mut(), declared, r);
+                if declared.is_empty() {
+                    // A backend that declares nothing has opted itself out of
+                    // the only layer that can catch a narrowing, while still
+                    // appearing in the pass line. That is the shape of
+                    // `A-GATES-SILENTLY-STOPPED-CHECKING`, so it is a failure.
+                    r.failed = r.failed.saturating_add(1);
+                    serial_println!(
+                        "[fsconform] FAIL {backend}:/ — the fixture declares no modes, so \
+                         nothing here can catch a narrowing; an empty table is not a \
+                         backend with nothing to declare"
+                    );
+                }
+            }
+            Err(e) => {
+                // Same reasoning as the memfs fixture: these images depend on
+                // nothing about this boot, so "it would not build" is the
+                // backend failing rather than an austere environment.
+                r.failed = r.failed.saturating_add(1);
+                serial_println!(
+                    "[fsconform] FAIL {backend}:/ — the synthetic volume could not be built \
+                     or mounted ({e:?}); it is a byte array built from constants and depends \
+                     on nothing about this boot"
+                );
+            }
+        }
+        heap.mark(&backend, r);
+    }
+}
+
 /// Run the contract over every backend the boot can reach.
 ///
 /// Returns `Err` when a *clause* failed. A backend that could not be reached is
@@ -575,6 +750,12 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     heap.mark(&"memfs fixture", &mut r);
+
+    // The four on-disk drivers, over their own synthetic volumes. This is the
+    // pass that carries the declared-value layer — the one the module header
+    // calls "what closes the family that was actually open" — and it is also the
+    // only pass that reaches a real on-disk format on a diskless boot.
+    check_fixture_backends(&mut r, &mut heap);
 
     // The live VFS mounts. Every boot has at least the root; a boot with
     // pseudo-filesystems mounted gets those too, and those are exactly the

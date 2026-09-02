@@ -49,6 +49,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
+use crate::fs::conformance::Declared;
 use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
@@ -1452,6 +1453,49 @@ fn test_primitives(c: &mut Checks) -> KernelResult<()> {
 
 fn mount_image() -> KernelResult<NtfsFs> {
     NtfsFs::open_source(Box::new(MemorySource::new(build_image())))
+}
+
+/// The modes this fixture declares, for the cross-backend conformance harness.
+///
+/// **NTFS is the one backend here that cannot carry a bit above `0o777`**, and
+/// this table says so rather than papering over it. NTFS has no Unix mode at
+/// all: `super::mod`'s `metadata` *synthesises* `0o555` for a directory and
+/// `0o444` for a file, to match the driver's read-only capability. There is
+/// therefore no setuid bit on this volume to lose, and nothing here can detect a
+/// `& 0o777` narrowing — not because the check is weak but because the format
+/// has no such bit to narrow.
+///
+/// What this table does do is pin the synthesis. Those two constants are a
+/// promise to userspace, and nothing outside this file checked that the same two
+/// values reach a caller through the conformance contract. A driver that started
+/// reporting `0o644` for files — the "obvious" mode, and the one the comment at
+/// that synthesis explicitly warns against inventing — would be telling
+/// userspace it may write to a mount that refuses every write.
+///
+/// `may_drop` is `0` throughout: these are already the read-only modes, so there
+/// is nothing further the mount is entitled to remove.
+const DECLARED: &[Declared] = &[
+    Declared {
+        path: "/hello.txt",
+        mode: 0o444,
+        may_drop: 0,
+    },
+    Declared {
+        path: "/sub",
+        mode: 0o555,
+        may_drop: 0,
+    },
+    Declared {
+        path: "/sub/inner.txt",
+        mode: 0o444,
+        may_drop: 0,
+    },
+];
+
+/// Build and mount the synthetic volume for `fs::conformance`.
+pub(crate) fn conformance_fixture() -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])> {
+    let fs = mount_image()?;
+    Ok((Box::new(fs), DECLARED))
 }
 
 fn names_of(fs: &mut NtfsFs, path: &str) -> KernelResult<Vec<String>> {

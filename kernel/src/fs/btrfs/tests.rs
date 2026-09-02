@@ -68,6 +68,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::blocksrc::MemorySource;
+use crate::fs::conformance::Declared;
 use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
@@ -653,7 +654,12 @@ fn fs_leaf_a_items() -> Vec<(Key, Vec<u8>)> {
 
     items.push((
         Key::new(INO_HELLO, INODE_ITEM_KEY, 0),
-        inode_item(u64_len(HELLO_TEXT), 1, 0o100_644, 0),
+        // setuid, deliberately: a mode bit *outside* `0o777`. Every assertion in
+        // this file used to sit inside `0o777`, which is exactly the range a
+        // `& 0o777` narrowing cannot disturb — so the bug that masked those
+        // three bits away passed this suite unchallenged. See
+        // `fs::conformance::Declared` and `DECLARED` below.
+        inode_item(u64_len(HELLO_TEXT), 1, 0o104_644, 0),
     ));
     items.push((
         Key::new(INO_HELLO, INODE_REF_KEY, INO_ROOT),
@@ -666,7 +672,11 @@ fn fs_leaf_a_items() -> Vec<(Key, Vec<u8>)> {
 
     items.push((
         Key::new(INO_SUB, INODE_ITEM_KEY, 0),
-        inode_item(0, 1, 0o040_755, 0),
+        // setgid + sticky, the other two bits above `0o777`. A directory
+        // carries them in the wild (`/tmp` is sticky, a group-shared tree is
+        // setgid), so this is the realistic case as well as the discriminating
+        // one.
+        inode_item(0, 1, 0o043_755, 0),
     ));
     items.push((
         Key::new(INO_SUB, INODE_REF_KEY, INO_ROOT),
@@ -840,6 +850,43 @@ fn build_image() -> KernelResult<Vec<u8>> {
 /// Mount an image through [`MemorySource`].
 fn mount_image(image: Vec<u8>) -> KernelResult<BtrfsFs> {
     BtrfsFs::open_source(Box::new(MemorySource::new(image)))
+}
+
+/// The modes [`build_image`] writes, for the cross-backend conformance harness.
+///
+/// Kept beside the builder rather than in `fs::conformance` so that a change to
+/// one is visible next to the other. A table living in the harness would let a
+/// fixture edit here drift away from the declaration there, and the resulting
+/// failure would look like a driver bug.
+///
+/// `may_drop` is `0o222` throughout because this mount is read-only
+/// (`read_only: true`), which entitles the driver to withhold write permission
+/// and nothing else — see the masking note in `super::mod`'s `metadata`.
+const DECLARED: &[Declared] = &[
+    Declared {
+        path: "/hello.txt",
+        mode: 0o4644,
+        may_drop: 0o222,
+    },
+    Declared {
+        path: "/sub",
+        mode: 0o3755,
+        may_drop: 0o222,
+    },
+    Declared {
+        path: "/sub/data.bin",
+        mode: 0o644,
+        may_drop: 0o222,
+    },
+];
+
+/// Build and mount the synthetic volume for `fs::conformance`.
+///
+/// See [`crate::fs::conformance::FixtureFn`] for why every backend spells this
+/// the same way despite spelling its fixture differently.
+pub(crate) fn conformance_fixture() -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])> {
+    let fs = mount_image(build_image()?)?;
+    Ok((Box::new(fs), DECLARED))
 }
 
 /// Overwrite bytes in the superblock and re-seal its checksum.
@@ -1863,12 +1910,12 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     // A read-only mount that advertised write bits would be lying to
     // userspace, which would then act on it.
     c.check(
-        meta.permissions == 0o444,
-        "0644 is reported without write bits",
+        meta.permissions == 0o4444,
+        "04644 loses its write bits to the read-only mount and keeps setuid",
     );
     c.check(
-        fs.metadata(Path::new("/sub"))?.permissions == 0o555,
-        "0755 keeps execute but loses write",
+        fs.metadata(Path::new("/sub"))?.permissions == 0o3555,
+        "03755 keeps execute, setgid and sticky but loses write",
     );
     c.check(
         fs.metadata(Path::new("/sub/data.bin"))?.blocks == 16,

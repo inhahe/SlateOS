@@ -1602,6 +1602,27 @@ fn move_one<O: Write, E: Write>(
         forget(job, src_id.as_ref());
         return give_up_cross_device(job, &failure, target, moved_aside.as_deref());
     }
+    // Recorded *before* the source is unlinked, which is upstream's order rather
+    // than this file's: the insertion into the destination set is inside
+    // `copy_internal` (`copy.c:3223`), and `do_move` only reaches `rm()` once
+    // that has returned. It matters on the failing path — a source that cannot
+    // be removed still leaves a complete destination, and a later source landing
+    // on that same name must still be told apart from an ordinary overwrite.
+    // Always `true`; see [`record_move`].
+    let recorded = record_move(target, relname, last_file, seen);
+    // The removal is `mv`'s own step, not the copying machinery's, and its
+    // failure is **not** an `un_backup` jump: the destination is complete, so
+    // putting a `-b` backup back over it would destroy the only copy of the
+    // file. Reported and counted as a failed move, exactly as the same removal
+    // is on the hard-link path — see [`link_to_earlier`], whose header carries
+    // the argument in full, and [`copy_across_devices`], which no longer does
+    // this itself so that the two failures can be told apart here.
+    if let Err(failure) = remove_source(src) {
+        let why = strerror(&failure.err);
+        let what = &failure.what;
+        let _ = writeln!(job.err, "mv: {what}: {why}");
+        return false;
+    }
     // The second line of the pair, and it comes from somewhere else entirely in
     // GNU: `mv.c:238` hands the source to `rm()` with `rm_options.verbose` set,
     // and it is `remove.c:400` that prints it. That is why the wording is
@@ -1609,7 +1630,7 @@ fn move_one<O: Write, E: Write>(
     // sentence, not `mv`'s. Reached only on success, because `do_move` only
     // calls `rm()` when `copy` returned true.
     announce_removed(job, src);
-    record_move(target, relname, last_file, seen)
+    recorded
 }
 
 /// GNU's `emit_verbose` (`copy.c:2082`) with the verb its callers prefix —
@@ -2497,7 +2518,31 @@ fn clear_destination(target: &Path) -> io::Result<()> {
     }
 }
 
-/// The `EXDEV` fallback: reproduce the source at `target`, then remove it.
+/// The `EXDEV` fallback: reproduce the source at `target`.
+///
+/// **It does not remove the source.** That is [`move_one`]'s next step, and the
+/// separation is the whole of GNU's `do_move`: `copy()` reproduces the file and
+/// returns, and only then does `mv.c:238` hand the source to `rm()`. Reproducing
+/// that split here is not tidiness — the two failures want opposite repairs, and
+/// this function's caller can only tell them apart if they arrive separately:
+///
+/// * a **copy** that failed leaves a half-made or absent destination, so a `-b`
+///   backup must be put back over it ([`give_up_cross_device`], upstream's
+///   `un_backup` label, reached from eleven places in the copying machinery);
+/// * a **removal** that failed leaves a *complete* destination. Putting the
+///   backup back over it would delete the one good copy of the file — the move
+///   half-succeeded, and the repair for the half that failed is to say so and
+///   set the exit status, which is what [`link_to_earlier`] already does for the
+///   same removal on the hard-link path.
+///
+/// Until 2026-09-01 the removal was the last statement of both arms below, so a
+/// source that could not be unlinked — a sticky directory owned by someone else
+/// is the ordinary way to get there, and Linux answers `EXDEV` from the mount
+/// comparison in `do_renameat2` before it checks any permission, so this path is
+/// reachable rather than theoretical — was reported as a *copy* failure. `mv -b`
+/// then restored the backup over the freshly written destination, and the tree
+/// was left with the source still in place, the backup where the destination
+/// should be, and no copy at all.
 ///
 /// `target` is a free name: [`clear_destination`] has just unlinked anything
 /// that was there, so every kind here creates rather than overwrites. That is
@@ -2594,7 +2639,9 @@ fn copy_across_devices<E: Write>(
         let mut debt = ModeDebt::default();
         // Always `true` for a move; see the discard above and [`Job::run`].
         let _ = preserve_attributes(source, on, target, Made::Symlink, true, &mut debt, run);
-        return remove_source(src);
+        // The link is reproduced; unlinking the original is the caller's step.
+        // See this function's header for why the two cannot share an error path.
+        return Ok(());
     }
 
     if kind.is_dir() {
@@ -2657,7 +2704,9 @@ fn copy_across_devices<E: Write>(
         &mut debt,
         run,
     );
-    remove_source(src)
+    // Bytes and attributes are down; unlinking the source is the caller's step.
+    // See this function's header for why the two cannot share an error path.
+    Ok(())
 }
 
 /// Create `target` for writing, with the source's mode *narrowed* to the owner.
@@ -4392,20 +4441,140 @@ mod tests {
             "a symlink must arrive as a symlink, not as a copy of its target"
         );
         assert_eq!(fs::read_link(&moved).unwrap(), real);
-        assert!(fs::symlink_metadata(&link).is_err(), "source must be gone");
+        // Still there: the fallback reproduces, and `move_one` unlinks. This
+        // used to assert the opposite, and it was the removal being *inside*
+        // here that let a failed unlink be reported as a failed copy — after
+        // which `mv -b` put the backup back over a destination that was fine.
+        assert!(
+            fs::symlink_metadata(&link).is_ok(),
+            "the fallback must leave the source for its caller to remove"
+        );
         assert_eq!(fs::read(&real).unwrap(), b"contents", "target untouched");
     }
 
+    /// Named *reproduces*, not *moves*: the fallback is only the first half of a
+    /// move, and the half it is not — the unlink — is asserted to have not
+    /// happened, because a test that called this "moves" is what let the removal
+    /// live in here unquestioned.
     #[test]
-    fn the_cross_device_fallback_moves_a_plain_file() {
+    fn the_cross_device_fallback_reproduces_a_plain_file() {
         let dir = scratch("xdev_file");
         let a = dir.path("a");
         let b = dir.path("b");
         fs::write(&a, b"bytes").unwrap();
         let meta = fs::symlink_metadata(&a).unwrap();
         copy_across_devices(&a, &b, &meta, &mut cross_device_run(&mut Vec::new())).unwrap();
-        assert!(!a.exists());
+        // See the symlink case above: removing the source is `move_one`'s step,
+        // so that a removal that fails is not mistaken for a copy that did.
+        assert!(
+            a.exists(),
+            "the fallback must leave the source for its caller to remove"
+        );
         assert_eq!(fs::read(&b).unwrap(), b"bytes");
+    }
+
+    /// A removal that failed must not be reported as a copy that failed.
+    ///
+    /// [`move_one`] is driven directly with a rename that "returned" `EXDEV`,
+    /// because there is no portable way to make two filesystems appear in a unit
+    /// test — the same reason the fallback's other units call it directly. The
+    /// unlink is made to fail by taking the write bit off the directory the
+    /// source's *name* lives in, which is how a real one fails, and this pairing
+    /// is reachable rather than contrived: Linux answers `EXDEV` from the mount
+    /// comparison in `do_renameat2` before it checks any permission at all.
+    ///
+    /// Three things are asserted, and all three were wrong while the removal
+    /// lived inside [`copy_across_devices`]:
+    ///
+    /// * **the destination survives, holding the source's bytes.** The copy did
+    ///   succeed; reporting the unlink as a copy failure sent the caller into
+    ///   [`give_up_cross_device`], whose `un_backup` puts a `-b` backup back
+    ///   over the one good copy of the file. (The backup itself needs a second
+    ///   filesystem to reach, since a destination that exists makes the retry at
+    ///   the `is_exists` branch succeed here; what this test can pin is that the
+    ///   removal no longer arrives on that path at all.)
+    /// * **`seen` records the destination**, because [`record_move`] now runs
+    ///   before the unlink, as upstream's does — the insertion is inside
+    ///   `copy_internal` (`copy.c:3223`) and `rm()` is after it (`mv.c:238`).
+    ///   Without it a later source landing on this name is taken for an ordinary
+    ///   overwrite instead of a collision.
+    /// * **the copied-inode table keeps its entry.** The destination is
+    ///   complete, so there is nothing to forget; [`link_to_earlier`]'s header
+    ///   makes the same argument for the same removal on the hard-link path. The
+    ///   source is given a second name first, because the table is only written
+    ///   on the `st_nlink > 1` arm — with one link there is no entry, and the
+    ///   assertion would hold whether or not the bug was fixed.
+    #[test]
+    #[cfg(unix)]
+    fn a_source_that_cannot_be_removed_leaves_the_destination_standing() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("xdev_unremovable");
+        let pen = dir.path("pen");
+        fs::create_dir(&pen).unwrap();
+        let src = pen.join("a");
+        fs::write(&src, b"bytes").unwrap();
+        fs::hard_link(&src, pen.join("also-a")).unwrap();
+        let target = dir.path("a");
+        let id = file_id(&src, &fs::symlink_metadata(&src).unwrap()).unwrap();
+
+        fs::set_permissions(&pen, fs::Permissions::from_mode(0o555)).unwrap();
+        // Root ignores a directory's write bit, and so do some filesystems.
+        // Neither can produce the failure this is about, and a test that quietly
+        // passed there would be reporting the euid rather than this `mv`.
+        if fs::write(pen.join("probe"), b"").is_ok() {
+            fs::set_permissions(&pen, fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+        let mut answers = Canned::new(&[]);
+        let flags = MvFlags::default();
+        let mut copied = Copied::default();
+        let mut seen: Option<DestInfo> = Some(DestInfo::default());
+        let ok = {
+            let mut job = Job {
+                flags: &flags,
+                out: &mut out,
+                err: &mut err,
+                answers: &mut answers,
+                copied: &mut copied,
+                umask: coreutils::umask::current(),
+            };
+            move_one(
+                &mut job,
+                &src,
+                &target,
+                &OsString::from("a"),
+                Renamed::Failed(io::Error::from_raw_os_error(CROSS_DEVICE_ERRNO)),
+                false,
+                &mut seen,
+            )
+        };
+        // Put the write bit back before the assertions: a panic between here and
+        // the end of the test would otherwise leave the scratch directory
+        // undeletable, turning one failure into a failure plus a leak.
+        fs::set_permissions(&pen, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(!ok, "a move whose source is still there is not a move");
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            format!("mv: cannot remove {}: Permission denied\n", shown(&src)),
+        );
+        assert_eq!(
+            fs::read(&target).unwrap(),
+            b"bytes",
+            "the copy succeeded and must be left standing"
+        );
+        assert_eq!(
+            seen.as_ref().map(std::collections::HashSet::len),
+            Some(1),
+            "the destination must be recorded before the unlink is attempted"
+        );
+        assert!(
+            copied.lookup(&id).is_some(),
+            "a complete destination has nothing to forget"
+        );
     }
 
     /// A move is meant to be indistinguishable from a rename, and a rename does

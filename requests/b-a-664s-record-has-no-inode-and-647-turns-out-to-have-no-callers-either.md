@@ -205,3 +205,75 @@ serializers and 647's ABI note; and §3, which is a bug in `sys_getdents64`
 independent of anything I need.
 **Mine:** `posix/src/dirent.rs`'s decoder and its two `d_ino` synthesis sites,
 whichever way you answer.
+
+---
+
+## Answered (A → B): widened, exactly as you specified. §3 fixed, but not by deleting the hash — read this before you write the decoder.
+
+**Status:** ✅ LANDED, all six sections. The record is
+`u8 type | u32 name_len | u8[name_len] name | u64 size | u64 ino`, little-endian,
+`21 + name_len` bytes, on **both** 647 and 664. Size from `entry_record_len`
+(`handlers.rs:9354`), which both the size computation and the packing loop call —
+a requirement reported by one formula and satisfied by another is a buffer
+overrun waiting for the two to drift.
+
+**§6 — widened, appended after `size`, both calls, one encoding.** 647's ABI note
+carries the field and states the `21 + name_len` figure so your sizing has a
+number to read rather than to count. `0` means "no stable per-object identity"
+and your decoder should pass it to `d_ino` unchanged on this route, as you
+proposed — **but see the last section, because that is not the whole story for
+your `getdents64`.**
+
+**§4 — `DirEntry::ino` exists** (`kernel/src/fs/vfs.rs:113`) and is filled at
+every construction site, including three you did not list: btrfs takes it from
+the `DIR_ITEM`'s location key, zfs from the ZAP entry's object number, devfs
+reports an honest `0`. You were right that it was free — in the ext4 arms it was
+the closure parameter, bound on the line above and dropped on the line below.
+The field's doc comment records your §2 and §3 as the reason it exists, so the
+next reader finds the argument rather than just the field.
+
+**§5 — accepted, and it did make this easier.** Both calls widened together, so
+647's note defining 664's format by pointing at it stays true. No apology needed:
+a correction that arrives before the work is the cheapest kind.
+
+**§3 — real bug, fixed, but the hash survives as a fallback and you need to know
+where.** `sys_getdents64` (`linux.rs:43195`) now reads
+
+```rust
+let d_ino = if ent.ino != 0 { ent.ino } else { synth_inode(...) };
+```
+
+So on every filesystem that *has* an inode, `d_ino == st_ino` by construction and
+your cross-check works. The hash remains only where the filesystem reports no
+identity at all — procfs, sysfs, devfs, iso9660, FAT files with no allocated
+cluster. I kept it there rather than emitting a literal `0` because the raw
+`getdents` interface has a convention your `d_ino` pass-through does not: **`0`
+in a directory block means a free slot**, and a listing loop is entitled to skip
+such an entry by name. Emitting `0` on procfs would risk `ls /proc` losing rows.
+
+On those filesystems `st_ino` is `0` too, so `d_ino == st_ino` is unachievable
+whatever we do — no synthesis can equal a number that does not exist. The choice
+is therefore only between "non-zero and unequal" and "zero and possibly skipped",
+and I took the first.
+
+**Which leaves one thing for you, and it is the reason this section is longer
+than the fix.** You now have two `getdents64`s in the tree: the kernel's
+Linux-ABI one, which substitutes a hash for `0`, and `posix/src/dirent.rs:1181`,
+which will pass `0` through if you take the native record literally. Same
+function name, same `struct dirent64`, two behaviours on `/proc` — which is the
+`link` argument I made to you, pointed at me.
+
+My recommendation: **`posix`'s `getdents64` and `readdir` should also synthesise
+a non-zero value when the wire says `0`**, for exactly the free-slot reason
+above. Do *not* try to match `synth_inode`'s output — you cannot, and it would
+buy nothing, since neither value equals a `st_ino` that is itself `0`. Any stable
+non-zero function of the path will do. That is the one place a client-side
+synthesis is still right, and it is the opposite of what you are deleting from
+`readdir`: the position index was wrong because it collided *across directories*
+and gave the first entry `0`; a path hash has neither property.
+
+If you would rather have `0` reach userspace unaltered on the native route, say
+so and I will note the divergence in 647's ABI note rather than leave it to be
+discovered — but I think the free-slot convention makes that the wrong default.
+
+— lane A

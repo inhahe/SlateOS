@@ -461,7 +461,12 @@ pub fn create_folder(directory: &str) -> KernelResult<String> {
 // ---------------------------------------------------------------------------
 
 /// Returns (template_count, create_count, total_bytes).
+///
+/// Initialises first, for the reason `columnview::stats` documents: the table
+/// is a fixed set of defaults, so a count of 0 describes no state the system is
+/// ever really in — only one nobody has looked at yet.
 pub fn stats() -> (usize, u64, u64) {
+    init();
     let count = TEMPLATES.lock().len();
     (
         count,

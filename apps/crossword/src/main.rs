@@ -1189,7 +1189,20 @@ impl Crossword {
         }
     }
 
+    /// Handle keyboard input.
+    ///
+    /// Releases are ignored. They were not: no arm below read `pressed`, so
+    /// every keystroke arrived twice and did its work twice. In a crossword
+    /// that is worse than a doubled arrow key, because the grid is edited by
+    /// typing: a letter was written into the current cell and then, on the
+    /// release, into the *next* one as well, so a five-letter answer needed
+    /// its own letters typed into alternate squares to come out right.
+    /// Backspace cleared two cells, Ctrl-R revealed two letters, and Tab
+    /// skipped a clue.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
         match self.view {
             View::PuzzleSelect => self.key_in_menu(key),
             View::Playing => self.key_in_puzzle(key),
@@ -1348,19 +1361,32 @@ impl Crossword {
     /// at `x: 300.0` whatever the window was.
     fn draw_menu(&self, f: &mut Frame<Target>, l: &Layout) {
         let heading = "Crossword Puzzles";
-        centred(
-            f,
+        // The heading owns the strip above the first row, and is centred in a
+        // band cut to the window rather than written at a fixed `l.pad` from
+        // its top. The fixed offset was a fault, not a stylistic choice: an
+        // 18pt-tall window still gets a 12.6pt title, whose line is 17.3, and
+        // `4 + 17.3` is outside the window it was drawn for.
+        let head = Rect::new(
             l.window.x,
+            l.window.y,
             l.window.w,
-            l.pad,
-            heading,
-            TEXT_COLOR,
-            l.title,
-            FontWeightHint::Bold,
+            (l.pad + l.title * 2.2).min(l.window.h),
         );
+        if let Some(ty) = centre_line(head, text::line_height(l.title, FontWeightHint::Bold)) {
+            centred(
+                f,
+                head.x,
+                head.w,
+                ty,
+                heading,
+                TEXT_COLOR,
+                l.title,
+                FontWeightHint::Bold,
+            );
+        }
 
         let row_h = (l.title * 2.0).max(1.0);
-        let mut y = l.pad + l.title * 2.2;
+        let mut y = head.bottom();
         for (i, def) in PUZZLES.iter().enumerate() {
             let r = Rect::new(l.pad, y, (l.window.w - l.pad * 2.0).max(0.0), row_h);
             if r.bottom() > l.window.h - l.pad {
@@ -1368,40 +1394,69 @@ impl Crossword {
             }
             let on = i == self.selected_puzzle;
             fill(f, r, if on { SURFACE1 } else { SURFACE0 }, l.pad * 0.4);
-            text_at(
-                f,
-                r.x + l.pad,
-                r.y + (row_h - l.font) / 2.0,
-                def.name,
-                if on { BLUE } else { TEXT_COLOR },
-                l.font,
-                FontWeightHint::Bold,
-            );
+
+            // The dimensions sit at the right-hand end, measured, and the name
+            // gets what is left. Both were previously free to run the whole
+            // width of the row, so a long puzzle name was drawn straight
+            // through the "15x15" beside it and out over the row's edge.
             let size = format!("{}x{}", def.width, def.height);
-            let w = text::measure(&size, l.small, FontWeightHint::Regular);
-            text_at(
-                f,
-                r.right() - l.pad - w,
-                r.y + (row_h - l.small) / 2.0,
-                &size,
-                SUBTEXT0,
-                l.small,
-                FontWeightHint::Regular,
-            );
+            let dims_w = text::measure(&size, l.small, FontWeightHint::Regular)
+                .min((r.w - l.pad * 2.0).max(0.0));
+            let dims_x = r.right() - l.pad - dims_w;
+            if let Some(y) = centre_line(r, text::line_height(l.font, FontWeightHint::Bold)) {
+                text_at(
+                    f,
+                    r.x + l.pad,
+                    y,
+                    def.name,
+                    if on { BLUE } else { TEXT_COLOR },
+                    l.font,
+                    FontWeightHint::Bold,
+                    dims_x - l.pad * 0.5 - (r.x + l.pad),
+                );
+            }
+            if let Some(y) = centre_line(r, text::line_height(l.small, FontWeightHint::Regular)) {
+                text_at(
+                    f,
+                    dims_x,
+                    y,
+                    &size,
+                    SUBTEXT0,
+                    l.small,
+                    FontWeightHint::Regular,
+                    dims_w,
+                );
+            }
             f.hit(Target::PuzzleRow(i), r);
             y += row_h + l.pad * 0.5;
         }
 
-        let hint = "Up/Down to choose, Enter to start -- or click a puzzle";
-        if y + l.small <= l.window.h {
+        // The hint's own strip, at the foot of the window. Measured as a band
+        // and refused when it does not fit, rather than tested with `y +
+        // l.small <= l.window.h` -- which compared the *font size* against the
+        // window's height and so let a run a third of a line taller than it
+        // measured through, and which asked about the wrong thing anyway: what
+        // matters is whether the hint's strip clears the last row drawn above
+        // it, not whether it clears the bottom of the window.
+        let line = text::line_height(l.small, FontWeightHint::Regular);
+        let strip = Rect::new(
+            l.pad,
+            l.window.h - l.pad - line,
+            (l.window.w - l.pad * 2.0).max(0.0),
+            line,
+        );
+        if strip.y >= y
+            && let Some(ty) = centre_line(strip, line)
+        {
             text_at(
                 f,
-                l.pad,
-                l.window.h - l.pad - l.small,
-                hint,
+                strip.x,
+                ty,
+                "Up/Down to choose, Enter to start -- or click a puzzle",
                 OVERLAY0,
                 l.small,
                 FontWeightHint::Regular,
+                strip.w,
             );
         }
     }
@@ -1411,43 +1466,48 @@ impl Crossword {
         if l.header.is_empty() {
             return;
         }
-        let y = l.header.y + (l.header.h - l.title) / 2.0;
-        text_at(
-            f,
-            l.pad,
-            y,
-            self.puzzle_name(),
-            TEXT_COLOR,
-            l.title,
-            FontWeightHint::Bold,
-        );
-
         // The readouts are laid out from the right edge of the window they are
         // in. They used to sit at `width - 100.0` and `width - 220.0`, which
         // are widths used as coordinates: in a 200-pixel window both were off
         // the left edge.
+        //
+        // They are placed before the name, not after it, because the name is
+        // the thing that has to give way. A puzzle name is arbitrary text and
+        // the readouts are not, so the readouts take what they measure and the
+        // name is cut to whatever is left -- which is the only ordering that
+        // cannot end with a name drawn through a clock.
         let (filled, total) = self.filled_count();
-        let right = [
+        let readouts = [
             (self.format_time(), TEXT_COLOR),
             (format!("{filled}/{total}"), SUBTEXT0),
         ];
         let mut x = l.header.right() - l.pad;
-        for (s, colour) in right {
+        for (s, colour) in readouts {
             let w = text::measure(&s, l.font, FontWeightHint::Regular);
             x -= w;
             if x < l.pad {
+                x += w;
                 break;
             }
+            if let Some(y) =
+                centre_line(l.header, text::line_height(l.font, FontWeightHint::Regular))
+            {
+                text_at(f, x, y, &s, colour, l.font, FontWeightHint::Regular, w);
+            }
+            x -= l.pad;
+        }
+
+        if let Some(y) = centre_line(l.header, text::line_height(l.title, FontWeightHint::Bold)) {
             text_at(
                 f,
-                x,
-                l.header.y + (l.header.h - l.font) / 2.0,
-                &s,
-                colour,
-                l.font,
-                FontWeightHint::Regular,
+                l.pad,
+                y,
+                self.puzzle_name(),
+                TEXT_COLOR,
+                l.title,
+                FontWeightHint::Bold,
+                x - l.pad * 0.5 - l.pad,
             );
-            x -= l.pad;
         }
     }
 
@@ -1468,17 +1528,25 @@ impl Crossword {
             clue.text
         );
         // Bounded to the window: a clue is arbitrary text, and unbounded it ran
-        // straight off the right-hand edge.
-        f.push(RenderCommand::Text {
-            x: l.pad,
-            y: l.banner.y + (l.banner.h - l.font) / 2.0,
-            text: s,
-            font_size: l.font,
-            color: YELLOW,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some((l.banner.w - l.pad * 2.0).max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
+        // straight off the right-hand edge. The vertical bound is newer: the
+        // old `(banner.h - l.font) / 2.0` centred the *font size* in the band,
+        // and a run is `line_height` tall, which is a third as much again, so
+        // the strip overflowed top and bottom by a sixth of a line whenever
+        // the band was tight. `centre_line` centres the run and refuses when
+        // the run does not fit.
+        let line = text::line_height(l.font, FontWeightHint::Regular);
+        if let Some(y) = centre_line(l.banner, line) {
+            text_at(
+                f,
+                l.pad,
+                y,
+                &s,
+                YELLOW,
+                l.font,
+                FontWeightHint::Regular,
+                (l.banner.w - l.pad * 2.0).max(0.0),
+            );
+        }
     }
 
     /// The grid, and the box a click on each cell must land in.
@@ -1517,15 +1585,31 @@ impl Crossword {
 
                 if cell.number > 0 {
                     let n = cell.number.to_string();
-                    text_at(
-                        f,
+                    // The number sits in the cell's top-left corner rather
+                    // than in the middle of it, so it gets a corner band of
+                    // its own instead of `centre_line`. The band matters
+                    // because the size has a 6pt *floor*: below a cell of
+                    // about 8pt the floor is taller than the corner it is
+                    // being written into, and a floor is not a bound.
+                    let size = (l.cell * 0.24).max(6.0);
+                    let corner = Rect::new(
                         r.x + l.cell * 0.08,
                         r.y + l.cell * 0.05,
-                        &n,
-                        if on_cursor { CRUST } else { OVERLAY0 },
-                        (l.cell * 0.24).max(6.0),
-                        FontWeightHint::Regular,
+                        (r.w - l.cell * 0.16).max(0.0),
+                        (r.h - l.cell * 0.05).max(0.0),
                     );
+                    if text::line_height(size, FontWeightHint::Regular) <= corner.h {
+                        text_at(
+                            f,
+                            corner.x,
+                            corner.y,
+                            &n,
+                            if on_cursor { CRUST } else { OVERLAY0 },
+                            size,
+                            FontWeightHint::Regular,
+                            corner.w,
+                        );
+                    }
                 }
 
                 if let Some(entry) = cell.entry {
@@ -1541,18 +1625,13 @@ impl Crossword {
                     let size = l.cell * 0.5;
                     let s = entry.to_string();
                     // Measured, not centred by subtracting six pixels from the
-                    // middle of the cell as it was before.
-                    let w = text::measure(&s, size, FontWeightHint::Bold);
-                    let (cx, cy) = r.centre();
-                    text_at(
-                        f,
-                        cx - w / 2.0,
-                        cy - size / 2.0,
-                        &s,
-                        colour,
-                        size,
-                        FontWeightHint::Bold,
-                    );
+                    // middle of the cell as it was before -- and vertically
+                    // centred on the height of the *line*, not on the font
+                    // size, which is the smaller number and left every letter
+                    // sitting low in its cell.
+                    if let Some(y) = centre_line(r, text::line_height(size, FontWeightHint::Bold)) {
+                        centred(f, r.x, r.w, y, &s, colour, size, FontWeightHint::Bold);
+                    }
                 }
 
                 // The box a click on this cell lands in *is* the cell that was
@@ -1600,15 +1679,25 @@ impl Crossword {
             y += row_h;
             let index = match *row {
                 PanelRow::Heading(dir) => {
-                    text_at(
-                        f,
-                        r.x,
-                        r.y,
-                        dir.label(),
-                        LAVENDER,
-                        l.small,
-                        FontWeightHint::Bold,
-                    );
+                    // A heading is a row like any other and is centred in it.
+                    // It used to be written at `r.y`, which is the row's top
+                    // edge, so it sat proud of its row by however much the row
+                    // was taller than the line -- and hung out of the panel
+                    // entirely when the row was shorter.
+                    if let Some(ty) =
+                        centre_line(r, text::line_height(l.small, FontWeightHint::Bold))
+                    {
+                        text_at(
+                            f,
+                            r.x,
+                            ty,
+                            dir.label(),
+                            LAVENDER,
+                            l.small,
+                            FontWeightHint::Bold,
+                            r.w,
+                        );
+                    }
                     continue;
                 }
                 PanelRow::Clue(index) => index,
@@ -1620,29 +1709,36 @@ impl Crossword {
             if on {
                 fill(f, r, SURFACE0, l.small * 0.3);
             }
-            f.push(RenderCommand::Text {
-                x: r.x + l.pad * 0.3,
-                y: r.y + (row_h - l.small) / 2.0,
-                // The direction goes in the label because the heading that
-                // would otherwise say it scrolls away: 7 Across and 7 Down are
-                // both "7", and a panel showing one of them without its
-                // heading would not say which.
-                text: format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text),
-                font_size: l.small,
-                color: if on { YELLOW } else { SUBTEXT0 },
-                font_weight: if on {
-                    FontWeightHint::Bold
-                } else {
-                    FontWeightHint::Regular
-                },
-                // The renderer is the only thing that knows how wide the text
-                // it draws will be, so it is the only thing that may cut it.
-                // This used to be cut at `(w / 7.0) - 3` *bytes* -- a guessed
-                // advance, and a byte offset that aborts the process the first
-                // time a clue holds an accented letter.
-                max_width: Some((r.w - l.pad * 0.6).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
+            let weight = if on {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
+            // Centred on the line, not on the font size: `(row_h - l.small)`
+            // is a third of a line too much room, and the difference put every
+            // clue a sixth of a line below where it belonged -- and out of the
+            // bottom of the panel on the last row of a tight one.
+            if let Some(ty) = centre_line(r, text::line_height(l.small, weight)) {
+                text_at(
+                    f,
+                    r.x + l.pad * 0.3,
+                    ty,
+                    // The direction goes in the label because the heading that
+                    // would otherwise say it scrolls away: 7 Across and 7 Down
+                    // are both "7", and a panel showing one of them without
+                    // its heading would not say which.
+                    &format!("{}{}. {}", clue.number, clue.direction.initial(), clue.text),
+                    if on { YELLOW } else { SUBTEXT0 },
+                    l.small,
+                    weight,
+                    // The renderer is the only thing that knows how wide the
+                    // text it draws will be, so it is the only thing that may
+                    // cut it. This used to be cut at `(w / 7.0) - 3` *bytes*
+                    // -- a guessed advance, and a byte offset that aborts the
+                    // process the first time a clue holds an accented letter.
+                    (r.w - l.pad * 0.6).max(0.0),
+                );
+            }
             f.hit(Target::ClueRow(index), r);
         }
     }
@@ -1658,8 +1754,16 @@ impl Crossword {
         }
         let size = (l.small * 0.95).max(7.0);
         let gap = l.pad * 0.4;
+        // The button strip is the footer less a gap, centred in it. Written
+        // through `centre_line` rather than by hand so that the one place in
+        // this file that turns a band and a height into a top edge is the one
+        // place that has to be right; `h` is `footer.h` minus a non-negative
+        // number, so the refusal cannot fire here, and the `let else` says so
+        // rather than pretending the arithmetic is unconditional.
         let h = (l.footer.h - gap).max(0.0);
-        let y = l.footer.y + (l.footer.h - h) / 2.0;
+        let Some(y) = centre_line(l.footer, h) else {
+            return;
+        };
         let mut x = l.pad;
         for button in BUTTONS {
             let label = button.label();
@@ -1673,16 +1777,23 @@ impl Crossword {
             let on = button == Button::Check && self.check_mode
                 || button == Button::Help && self.show_help;
             fill(f, r, if on { SURFACE1 } else { SURFACE0 }, h * 0.25);
-            let (cx, cy) = r.centre();
-            text_at(
-                f,
-                cx - text::measure(label, size, FontWeightHint::Bold) / 2.0,
-                cy - size / 2.0,
-                label,
-                if on { TEXT_COLOR } else { SUBTEXT0 },
-                size,
-                FontWeightHint::Bold,
-            );
+            // `cy - size / 2.0` centred the font size in the button and left
+            // the label low in it by a sixth of a line; a 7pt floor on `size`
+            // in a footer that can be shorter than 9pt put it out of the
+            // window's bottom edge altogether. The label is dropped rather
+            // than drawn outside the button that is meant to contain it.
+            if let Some(ty) = centre_line(r, text::line_height(size, FontWeightHint::Bold)) {
+                centred(
+                    f,
+                    r.x,
+                    r.w,
+                    ty,
+                    label,
+                    if on { TEXT_COLOR } else { SUBTEXT0 },
+                    size,
+                    FontWeightHint::Bold,
+                );
+            }
             f.hit(Target::Button(button), r);
             x += w + gap;
         }
@@ -1729,41 +1840,68 @@ impl Crossword {
             card_h,
         );
         fill(f, card, MANTLE, l.pad * 0.6);
-        centred(
-            f,
-            card.x,
-            card.w,
-            card.y + l.pad,
-            heading,
-            TEXT_COLOR,
-            l.title,
-            FontWeightHint::Bold,
-        );
+        // The heading owns the band the rows begin after, and is centred in
+        // it rather than written at `card.y + l.pad`. In a window shorter than
+        // the card's natural height the card is cut to the window, and the
+        // fixed `l.pad` offset then put the heading below the card's own
+        // bottom edge; a band that is cut with the card cannot do that.
+        let head = Rect::new(card.x, card.y, card.w, (l.title * 1.8).min(card.h));
+        if let Some(ty) = centre_line(head, text::line_height(l.title, FontWeightHint::Bold)) {
+            centred(
+                f,
+                card.x,
+                card.w,
+                ty,
+                heading,
+                TEXT_COLOR,
+                l.title,
+                FontWeightHint::Bold,
+            );
+        }
 
-        let mut y = card.y + l.title * 1.8;
+        // Two columns, each with a width of its own. The key column is the
+        // widest key; the description gets what is left of the card. Both were
+        // unbounded, and in a card cut down to a narrow window both ran out of
+        // the right-hand edge of the thing that is meant to contain them.
+        let key_x = card.x + l.pad;
+        let desc_x = key_x + key_w + l.pad;
+        let room = |x: f32| (card.right() - l.pad - x).max(0.0);
+        let key_limit = key_w.min(room(key_x));
+        let desc_limit = room(desc_x);
+        let step = l.small * 1.8;
+        // The taller of the two faces, because both are drawn on this line and
+        // a bound that holds for one of them is not a bound.
+        let line = text::line_height(l.small, FontWeightHint::Bold)
+            .max(text::line_height(l.small, FontWeightHint::Regular));
+        let mut y = head.bottom();
         for (key, desc) in &rows {
-            if y + l.small > card.bottom() {
+            // `y + l.small` measured the *font size* against the card's floor,
+            // which is a third of a line short: the last row that this let
+            // through was drawn a sixth of a line below the card.
+            if y + line > card.bottom() {
                 break;
             }
             text_at(
                 f,
-                card.x + l.pad,
+                key_x,
                 y,
                 key,
                 BLUE,
                 l.small,
                 FontWeightHint::Bold,
+                key_limit,
             );
             text_at(
                 f,
-                card.x + l.pad + key_w + l.pad,
+                desc_x,
                 y,
                 desc,
                 SUBTEXT0,
                 l.small,
                 FontWeightHint::Regular,
+                desc_limit,
             );
-            y += l.small * 1.8;
+            y += step;
         }
         // The card itself swallows clicks so the grid behind it is not played
         // by a player reaching for a line of the help.
@@ -1811,7 +1949,10 @@ impl Crossword {
 
         let mut y = card.y + l.pad;
         for (s, size, colour, weight) in lines {
-            if y + size > card.bottom() {
+            // Against the height of the line, not the font size. `y + size`
+            // let through a row whose descender was already past the card's
+            // bottom edge, which is what the card is for.
+            if y + text::line_height(size, weight) > card.bottom() {
                 break;
             }
             centred(f, card.x, card.w, y, s, colour, size, weight);
@@ -1838,7 +1979,50 @@ fn fill(f: &mut Frame<Target>, r: Rect, color: Color, radius: f32) {
     });
 }
 
-/// One run of text.
+/// Where a run of `size` points starts if it is to sit centred in `band`, or
+/// `None` when the band is too short to hold one.
+///
+/// The shape this replaces is `band.y + (band.h - size) / 2.0`, written twelve
+/// times across this file. It reads like a bound and is not one: it is an
+/// *offset*, and when the band is shorter than the run the slack goes negative
+/// and the run is placed above the band's top, spilling out of both ends at
+/// once. Nothing in the resulting picture says which band the fault is in --
+/// the run is simply somewhere it does not belong, overlapping whatever is
+/// above and below.
+///
+/// `size` is a **line height**, not a font size, and the distinction is the
+/// whole point of the function. Every one of the twelve sites passed a font
+/// size, because that is the number in scope; but the renderer places a run by
+/// its top-left corner and the run then occupies a full line height, which for
+/// this face is 1.33 times the font size. A band sized to hold exactly one line
+/// therefore appeared to have a third of a line spare, and every "centred" run
+/// in the program sat about a sixth of a line low -- consistently enough to
+/// look like a design choice rather than a bug.
+///
+/// Returning `Option` rather than clamping is deliberate. A run that will not
+/// fit is not improved by being moved to the top of a band it overflows; the
+/// caller has to decide, and every caller here decides not to draw it. See the
+/// `C-CENTRING-IS-NOT-A-BOUND` campaign in `known-issues.md`.
+fn centre_line(band: Rect, size: f32) -> Option<f32> {
+    if band.is_empty() || size <= 0.0 || size > band.h {
+        return None;
+    }
+    Some(band.y + (band.h - size) / 2.0)
+}
+
+/// One run of text, cut to `limit`.
+///
+/// The limit is not optional, and that is the fix. This function used to push
+/// `max_width: None` with `overflow: Clip`, which together mean "draw the whole
+/// string wherever it reaches" -- so every label, name, heading and hint in the
+/// program was free to run past the right-hand edge of whatever it was in, and
+/// several did. `None` is not a wide limit, it is the *absence* of one, and a
+/// renderer given no limit has nothing to cut against; the `Clip` beside it
+/// looked like a bound and clipped to nothing at all.
+///
+/// Making the limit a required argument rather than defaulting it means a new
+/// call site cannot be written without answering the question, which is the
+/// only version of this that stays fixed.
 fn text_at(
     f: &mut Frame<Target>,
     x: f32,
@@ -1847,7 +2031,11 @@ fn text_at(
     color: Color,
     font_size: f32,
     font_weight: FontWeightHint,
+    limit: f32,
 ) {
+    if s.is_empty() || font_size <= 0.0 || limit <= 0.0 {
+        return;
+    }
     f.push(RenderCommand::Text {
         x,
         y,
@@ -1855,8 +2043,8 @@ fn text_at(
         color,
         font_size,
         font_weight,
-        max_width: None,
-        overflow: TextOverflow::Clip,
+        max_width: Some(limit),
+        overflow: TextOverflow::Ellipsis,
     });
 }
 
@@ -1873,6 +2061,13 @@ fn text_at(
 /// a weight each -- a bold heading over regular body text -- so a `centred`
 /// that always measured `Bold` would centre the regular rows against a width
 /// they do not have.
+/// The limit is measured from where the run *starts*, not from `x`. A centred
+/// run is already inset by half the slack, so handing it the box's full width
+/// would let it end half the slack past the box's right edge -- and the wider
+/// the string, the further past, which is the opposite of what a limit is for.
+/// The start is also floored at `x`, so a string wider than its box begins at
+/// the left edge and is ellipsised rather than being centred into a negative
+/// inset and hanging off both sides.
 fn centred(
     f: &mut Frame<Target>,
     x: f32,
@@ -1884,7 +2079,8 @@ fn centred(
     weight: FontWeightHint,
 ) {
     let measured = text::measure(s, size, weight);
-    text_at(f, x + (w - measured) / 2.0, y, s, color, size, weight);
+    let start = (x + (w - measured) / 2.0).max(x);
+    text_at(f, start, y, s, color, size, weight, x + w - start);
 }
 
 // ── The window ──────────────────────────────────────────────────────
@@ -1981,7 +2177,8 @@ mod tests {
     )]
 
     use super::*;
-    use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, shift};
+    use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, release, shift};
+    use std::collections::BTreeMap;
 
     // ── Fixtures ───────────────────────────────────────────────────
 
@@ -1994,7 +2191,15 @@ mod tests {
     /// than tall, taller than wide, exactly square, one so short the three
     /// bars have already spent the height, and one so narrow the clue panel
     /// cannot exist at all.
-    const SIZES: [(f32, f32); 12] = [
+    /// The last four are the slivers, and they are here for a reason the
+    /// others cannot cover. `pad` follows the window's *shorter* side and the
+    /// type sizes follow its *height*, so a tall narrow window drives them
+    /// apart -- and the bands are all `type + k * pad` tall. 133x600 is the
+    /// case where the header ends up shorter than the title it carries; the
+    /// three around it are its neighbours on both sides of that boundary, so a
+    /// change that moves the boundary shows up as a failure rather than as a
+    /// probe that quietly stops probing.
+    const SIZES: [(f32, f32); 18] = [
         (860.0, 580.0),
         (320.0, 240.0),
         (240.0, 320.0),
@@ -2007,6 +2212,12 @@ mod tests {
         (140.0, 140.0),
         (900.0, 60.0),
         (60.0, 900.0),
+        (133.0, 600.0),
+        (160.0, 900.0),
+        (110.0, 1000.0),
+        (900.0, 26.0),
+        (900.0, 18.0),
+        (900.0, 14.0),
     ];
 
     /// An app with puzzle `index` open, driven to the size a probe uses.
@@ -2302,6 +2513,511 @@ mod tests {
                 l.grid
             );
         }
+    }
+
+    // ── Every pass stays inside the band it owns ───────────────────
+
+    /// Boxes the layout would never hand a pass, so that a bound is checked
+    /// where it is meant to bite rather than only where it was never going to.
+    ///
+    /// Both axes: the vertical squeezes are what `centre_line` is for, and the
+    /// horizontal ones are what the `limit` argument to `text_at` is for. A run
+    /// bounded on one axis and not the other leaves the band by the other one.
+    fn squeezes(r: Rect) -> Vec<Rect> {
+        let mut out = vec![r];
+        let mut push_h = |h: f32| {
+            if h < r.h {
+                out.push(Rect::new(r.x, r.y, r.w, h));
+            }
+        };
+        for h in [0.0, 1.0, 3.0, 7.0, 13.0, 26.0] {
+            push_h(h);
+        }
+        for k in 1..16_u8 {
+            push_h(r.h * f32::from(k) / 16.0);
+        }
+        let mut push_w = |w: f32| {
+            if w < r.w {
+                out.push(Rect::new(r.x, r.y, w, r.h));
+            }
+        };
+        for w in [0.0, 1.0, 5.0, 30.0, 120.0] {
+            push_w(w);
+        }
+        for k in 1..16_u8 {
+            push_w(r.w * f32::from(k) / 16.0);
+        }
+        out
+    }
+
+    type Pass = fn(&Crossword, &mut Frame<Target>, &Layout);
+    type Band = fn(&mut Layout) -> &mut Rect;
+    type Region = fn(&Layout) -> Rect;
+
+    /// Every drawing pass and the region it is entitled to paint in.
+    ///
+    /// `menu`, `help` and `completed` own the **window**: each of the three
+    /// covers the screen -- the menu is a screen in its own right, and the
+    /// other two scrim what is behind them before drawing a card, so the window
+    /// really is the region they paint. That means this test says nothing about
+    /// the help card's or the end card's own box, which is what
+    /// `every_run_a_card_draws_stays_inside_the_card` below is for.
+    const PASSES: [(&str, Pass, Region); 7] = [
+        ("menu", Crossword::draw_menu, |l| l.window),
+        ("header", Crossword::draw_header, |l| l.header),
+        ("banner", Crossword::draw_banner, |l| l.banner),
+        ("grid", Crossword::draw_grid, |l| l.grid),
+        ("panel", Crossword::draw_panel, |l| l.panel),
+        ("footer", Crossword::draw_footer, |l| l.footer),
+        ("help", Crossword::draw_help, |l| l.window),
+        // `draw_completed` is absent on purpose: it is `View::Completed`'s
+        // whole screen and is covered by the `window` sweep in
+        // `nothing_is_painted_outside_the_window`, and by the card test below.
+    ];
+
+    /// The bands a test may replace with one the layout would not have given.
+    ///
+    /// The **grid** is not among them, and that is not an oversight. Every cell
+    /// is placed from `l.cell` rather than from `l.grid.h`, so a grid squeezed
+    /// on its own is a grid the cells were never solved for: the overrun would
+    /// be the test's own doing and would say nothing about the drawing. The
+    /// grid's containment is checked from real layouts, where `grid.h` and
+    /// `cell` agree because `Layout::solve` derived them together.
+    const SQUEEZABLE: [(&str, Band, Pass); 4] = [
+        ("header", |l| &mut l.header, Crossword::draw_header),
+        ("banner", |l| &mut l.banner, Crossword::draw_banner),
+        ("panel", |l| &mut l.panel, Crossword::draw_panel),
+        ("footer", |l| &mut l.footer, Crossword::draw_footer),
+    ];
+
+    /// Every run of type, as the box the renderer may fill with it.
+    ///
+    /// The height is `text::line_height`, not the font size: a run's *top-left*
+    /// corner is what is placed, so it occupies a whole line below `y`. The
+    /// difference is a third of the size, and measuring runs by their font size
+    /// is precisely the mistake this app's twelve centrings all made -- a test
+    /// that repeated it would pass against the code that has it.
+    fn inked(f: &Frame<Target>) -> Vec<(String, Rect)> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    x,
+                    y,
+                    max_width,
+                    font_size,
+                    font_weight,
+                    ..
+                } => {
+                    let w =
+                        max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                    Some((
+                        text.clone(),
+                        Rect::new(*x, *y, w, text::line_height(*font_size, *font_weight)),
+                    ))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Every rectangle a frame filled.
+    fn filled(f: &Frame<Target>) -> Vec<Rect> {
+        f.commands()
+            .iter()
+            .filter_map(|c| match *c {
+                RenderCommand::FillRect {
+                    x,
+                    y,
+                    width,
+                    height,
+                    ..
+                } => Some(Rect::new(x, y, width, height)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A box with no area is inside anything: it is a thing that was not drawn.
+    fn inside(outer: Rect, inner: Rect) -> bool {
+        inner.is_empty()
+            || (inner.x >= outer.x - 0.01
+                && inner.y >= outer.y - 0.01
+                && inner.right() <= outer.right() + 0.01
+                && inner.bottom() <= outer.bottom() + 0.01)
+    }
+
+    fn check_containment(state: &str, pass: &str, region: Rect, f: &Frame<Target>) {
+        for r in filled(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, painted {r:?}"
+            );
+        }
+        for (s, r) in inked(f) {
+            assert!(
+                inside(region, r),
+                "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
+            );
+        }
+        // The containment assertion above cannot see this one, and that is not
+        // a gap to be argued away: `inked` gives a run bounded to zero a box of
+        // no width, and a box of no area is inside everything. So a run placed
+        // where there is no room passes containment precisely *because* it has
+        // nowhere to go. What is wrong with it is the same thing that is wrong
+        // with a fill of no area -- it is a command the renderer is entitled to
+        // treat however it likes, and an `Ellipsis` into zero width may well be
+        // an ellipsis drawn outside the band. `text_at` refuses it; this is
+        // where that refusal is checked, on every screen and every squeeze.
+        for c in f.commands() {
+            if let RenderCommand::Text {
+                text,
+                max_width: Some(limit),
+                ..
+            } = c
+            {
+                assert!(
+                    *limit > 0.0,
+                    "{state}: the {pass} pass gave {text:?} a width of {limit} \
+                     to fit in, which is no room at all"
+                );
+            }
+        }
+        for (target, rect) in f.hits() {
+            assert!(
+                inside(region, *rect),
+                "{state}: the {pass} pass, given {region:?}, hit-boxed {target:?} at {rect:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative() {
+        let band = Rect::new(10.0, 100.0, 80.0, 20.0);
+        assert_eq!(
+            centre_line(band, 20.0),
+            Some(100.0),
+            "a run exactly as tall as its band sits at the band's top"
+        );
+        assert_eq!(
+            centre_line(band, 10.0),
+            Some(105.0),
+            "and one half as tall sits half the slack down"
+        );
+        assert_eq!(
+            centre_line(band, 20.001),
+            None,
+            "a run taller than its band has nowhere to go, and the answer is \
+             not a negative offset above the band's top edge"
+        );
+        assert_eq!(
+            centre_line(band, 0.0),
+            None,
+            "a run of no height is not a run"
+        );
+        assert_eq!(
+            centre_line(Rect::EMPTY, 1.0),
+            None,
+            "a band with no area holds nothing"
+        );
+        assert_eq!(
+            centre_line(Rect::new(0.0, 0.0, 0.0, 50.0), 10.0),
+            None,
+            "and a band with height but no width is still a band with no area"
+        );
+    }
+
+    #[test]
+    fn text_at_refuses_a_run_with_no_room_to_draw_it() {
+        // Both halves, because a refusal that refuses everything is not a
+        // refusal. The three inputs below are the three ways there is nothing
+        // to draw: no text, no size, no width. Each must produce no command;
+        // the fourth case must produce exactly one.
+        for (why, s, size, limit) in [
+            ("no text", "", 12.0, 100.0),
+            ("no size", "Across", 0.0, 100.0),
+            ("no width", "Across", 12.0, 0.0),
+            ("a negative width", "Across", 12.0, -40.0),
+        ] {
+            let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+            text_at(
+                &mut f,
+                10.0,
+                10.0,
+                s,
+                TEXT_COLOR,
+                size,
+                FontWeightHint::Regular,
+                limit,
+            );
+            assert!(
+                f.commands().is_empty(),
+                "a run with {why} must not reach the renderer, yet {:?} did",
+                f.commands()
+            );
+        }
+        let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+        text_at(
+            &mut f,
+            10.0,
+            10.0,
+            "Across",
+            TEXT_COLOR,
+            12.0,
+            FontWeightHint::Regular,
+            100.0,
+        );
+        assert!(
+            matches!(
+                f.commands(),
+                [RenderCommand::Text {
+                    max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
+                    ..
+                }]
+            ),
+            "a run with room in it is one bounded command, not {:?}",
+            f.commands()
+        );
+    }
+
+    #[test]
+    fn a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_inside_it() {
+        // Containment is a *weaker* property than centring, and this app has
+        // bands with slack in them. A clue row is `small * 1.7` tall and a line
+        // is about `small * 1.33`, so a run centred on the font size instead of
+        // on the line still lands inside its row -- a sixth of a line low, and
+        // invisible to every containment sweep above, because nothing has left
+        // anything. The same holds for a footer button. Where the drawing fills
+        // a box and then writes in it, the fill *is* the band, and the run and
+        // the fill must share a centre line; that is the assertion containment
+        // cannot make.
+        let mut checked = 0_u32;
+        let mut per: BTreeMap<&str, u32> = BTreeMap::new();
+        for (w, h) in SIZES {
+            let mut app = playing(0);
+            app.size = (w, h);
+            app.check_mode = true;
+            // A freshly-opened puzzle has no letters in it, and a grid with no
+            // letters draws no runs a cell can be off-centre in -- so without
+            // this the grid pass contributed nothing and the test said so only
+            // through the counter. Revealing fills every cell of the word the
+            // cursor is in, which is the state a player is in most of the time
+            // anyway.
+            app.reveal_word();
+            let l = Layout::solve(w, h, app.width, app.height);
+            for (name, pass) in [
+                ("panel", Crossword::draw_panel as Pass),
+                ("footer", Crossword::draw_footer as Pass),
+                ("grid", Crossword::draw_grid as Pass),
+            ] {
+                let mut f = Frame::new(w, h);
+                pass(&app, &mut f, &l);
+                for band in filled(&f) {
+                    for (s, r) in inked(&f) {
+                        // Paired by the run's *centre point*, not by whole
+                        // containment. A cell's fill is its box inset by a
+                        // pixel, so the letter -- bounded to the cell -- is a
+                        // hair wider than the fill and no containment test
+                        // pairs the two. An inset does not move a centre,
+                        // which is the thing being compared, so pairing by the
+                        // centre asks the question the band was drawn to
+                        // answer.
+                        let (rx, ry) = r.centre();
+                        if rx < band.x || rx > band.right() || ry < band.y || ry > band.bottom() {
+                            continue;
+                        }
+                        // A cell's *number* is the one run in this app that is
+                        // deliberately not centred: it sits in the top-left
+                        // corner of its cell, which is where a crossword puts
+                        // its numbers. It has a corner band of its own and the
+                        // containment sweep checks it there; skipping it here
+                        // is not excusing it. Digits tell it from the letter,
+                        // which is a single capital.
+                        if s.chars().all(|c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        let (_, by) = band.centre();
+                        assert!(
+                            (ry - by).abs() < 0.02,
+                            "{name} at {w}x{h}: {s:?} is centred on {ry} in a band                              centred on {by} ({band:?}); a run centred on its font                              size rather than on its line lands exactly here --                              inside the band, and off its middle"
+                        );
+                        checked += 1;
+                        *per.entry(name).or_insert(0_u32) += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 40,
+            "only {checked} runs were paired with the box that was filled for \
+             them; this test says nothing about a pass whose fill it never found"
+        );
+        // Per pass, not just in total. A fixture change that stops one of the
+        // three producing runs at all -- an unrevealed grid draws no letters,
+        // which is exactly how this test first passed while saying nothing
+        // about a cell -- would otherwise hide behind the other two.
+        for name in ["panel", "footer", "grid"] {
+            let n = per.get(name).copied().unwrap_or(0);
+            assert!(
+                n > 5,
+                "the {name} pass contributed {n} centred runs; a pass this test \
+                 never sees a run from is a pass it does not cover"
+            );
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_the_region_it_owns() {
+        for (w, h) in SIZES {
+            for (state, app) in every_screen((w, h)) {
+                let l = Layout::solve(w, h, app.width, app.height);
+                for (name, pass, region) in PASSES {
+                    let mut f = Frame::new(w, h);
+                    pass(&app, &mut f, &l);
+                    check_containment(&format!("{state} at {w}x{h}"), name, region(&l), &f);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out() {
+        // The window list on its own is not enough. `Layout::solve` mostly
+        // gives each band room for the type it carries, so a bound checked only
+        // against the layout's own answers is checked where it was never going
+        // to bite. The counter below is what says this sweep reached the cases
+        // it exists for: bands with area, too short for the line they carry.
+        let mut tight = 0_u32;
+        for (w, h) in SIZES {
+            for (state, app) in every_screen((w, h)) {
+                let base = Layout::solve(w, h, app.width, app.height);
+                for (name, band, pass) in SQUEEZABLE {
+                    for squeezed in squeezes(*band(&mut base.clone())) {
+                        let mut l = base;
+                        *band(&mut l) = squeezed;
+                        let mut f = Frame::new(w, h);
+                        pass(&app, &mut f, &l);
+                        check_containment(
+                            &format!("{state} at {w}x{h} with {name} squeezed to {squeezed:?}"),
+                            name,
+                            squeezed,
+                            &f,
+                        );
+                        if !squeezed.is_empty()
+                            && squeezed.h < text::line_height(l.small, FontWeightHint::Regular)
+                        {
+                            tight += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            tight > 50,
+            "only {tight} squeezed bands were shorter than the line they carry; \
+             a sweep that never squeezes a band past its own type checks nothing"
+        );
+    }
+
+    #[test]
+    fn a_header_too_short_for_its_title_drops_the_name_rather_than_spilling_it() {
+        // Not a hypothetical, and not squeezed by the test: `Layout::solve`
+        // itself produces this. `header.h` is `title + pad * 1.6` and a run is
+        // `line_height` -- about `1.33 * title` -- tall, so the band is shorter
+        // than the run it carries whenever `title > 4.85 * pad`. `pad` follows
+        // the *shorter* side of the window and `title` the *taller*, so a tall
+        // narrow window separates them: at 133x600 the band is 28.5 and the
+        // run 29.4. Before `centre_line` the title was drawn at a negative
+        // offset from the band's top and spilled out of both of its ends.
+        let (w, h) = (133.0, 600.0);
+        let app = playing(0);
+        let l = Layout::solve(w, h, app.width, app.height);
+        assert!(
+            l.header.h < text::line_height(l.title, FontWeightHint::Bold),
+            "this probe is pointless unless the header really is too short: \
+             {} against {}",
+            l.header.h,
+            text::line_height(l.title, FontWeightHint::Bold)
+        );
+        let mut f = Frame::new(w, h);
+        app.draw_header(&mut f, &l);
+        let names: Vec<String> = inked(&f)
+            .into_iter()
+            .map(|(s, _)| s)
+            .filter(|s| s.contains(app.puzzle_name()))
+            .collect();
+        assert!(
+            names.is_empty(),
+            "the title does not fit this header and must not be drawn in it, \
+             yet {names:?} was"
+        );
+        check_containment("the 133x600 header", "header", l.header, &f);
+    }
+
+    #[test]
+    fn every_run_a_card_draws_stays_inside_the_card() {
+        // The help and end cards own the window in `PASSES`, because both scrim
+        // it. That makes the window sweep silent about the card itself, which
+        // is the box that actually holds the type -- and the box that used to
+        // be a fixed 360x280 whatever the window was. The card is found the
+        // only way that cannot re-derive a fault: it is the largest thing the
+        // pass filled.
+        //
+        // Both counters below matter. `cards` says the card was found at all --
+        // a run of `continue`s would otherwise turn this into a test of
+        // nothing. `runs` says the cards had type in them: a card located
+        // correctly and drawn empty passes every assertion here and is exactly
+        // the failure a size sweep is meant to catch.
+        let mut cards = 0_u32;
+        let mut runs = 0_u32;
+        for (w, h) in SIZES {
+            for (name, mut app, help) in
+                [("help", playing(1), true), ("completed", playing(2), false)]
+            {
+                app.size = (w, h);
+                app.show_help = help;
+                let l = Layout::solve(w, h, app.width, app.height);
+                let mut f = Frame::new(w, h);
+                if help {
+                    app.draw_help(&mut f, &l);
+                } else {
+                    app.draw_completed(&mut f, &l);
+                }
+                // The scrim is the whole window; the card is the next largest.
+                let mut boxes = filled(&f);
+                boxes.sort_by(|a, b| {
+                    (b.w * b.h)
+                        .partial_cmp(&(a.w * a.h))
+                        .unwrap_or(core::cmp::Ordering::Equal)
+                });
+                let Some(card) = boxes.into_iter().find(|r| r.w < w || r.h < h) else {
+                    // Every fill covers the window: there is no card to be
+                    // outside of, which a window with no room for one is
+                    // entitled to produce.
+                    continue;
+                };
+                cards += 1;
+                for (s, r) in inked(&f) {
+                    runs += 1;
+                    assert!(
+                        inside(card, r),
+                        "the {name} card at {w}x{h} is {card:?} and inked {s:?} at {r:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            cards > 20,
+            "only {cards} of the sizes drew a card at all; this sweep has to \
+             find one at nearly every size or it is testing the `continue`"
+        );
+        assert!(
+            runs > 100,
+            "only {runs} runs were checked against a card; a card drawn empty \
+             passes every assertion above and is the fault this exists to find"
+        );
     }
 
     #[test]
@@ -2942,6 +3658,93 @@ mod tests {
         app.key_at(&press(Key::Backspace), Crossword::SIZE);
         assert_eq!(app.cell(0, 0).unwrap().entry, None, "a full cell empties");
         assert_eq!(app.cursor, (0, 0), "without moving");
+    }
+
+    /// A key does its work once per press, not again on the release.
+    ///
+    /// It did it twice: `handle_key` read `key.key` and never `key.pressed`,
+    /// so the release that follows every press ran the same arm again. The
+    /// grid is edited by typing, which makes the damage worse here than a
+    /// doubled arrow key: the press wrote the letter and advanced, and then
+    /// the release wrote the *same* letter into the next cell and advanced
+    /// again, so typing `SPY` produced `SSPPYY` across six squares.
+    #[test]
+    fn a_typed_letter_lands_once_and_not_again_on_the_release() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+
+        assert_eq!(
+            app.key_at(&press(Key::S), Crossword::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(app.cell(0, 0).unwrap().entry, Some('S'));
+        assert_eq!(app.cursor, (0, 1), "one press advanced one cell");
+
+        assert_eq!(
+            app.key_at(&release(Key::S), Crossword::SIZE),
+            EventResult::Ignored,
+            "the release was acted on"
+        );
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            None,
+            "the release typed a second S into the next cell"
+        );
+        assert_eq!(app.cursor, (0, 1), "the release advanced the cursor");
+    }
+
+    /// The same, stated as the thing the player would actually see: a word
+    /// typed one key at a time spells that word, and not each letter twice.
+    #[test]
+    fn a_word_typed_key_by_key_spells_that_word() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+
+        for key in [Key::S, Key::P, Key::Y] {
+            app.key_at(&press(key), Crossword::SIZE);
+            app.key_at(&release(key), Crossword::SIZE);
+        }
+
+        let typed: String = (0..3)
+            .map(|col| app.cell(0, col).and_then(|c| c.entry).unwrap_or(' '))
+            .collect();
+        assert_eq!(typed, "SPY", "each keystroke was entered twice");
+    }
+
+    /// Backspace, too: a release that clears is a release that eats a letter
+    /// the player did not ask to lose.
+    #[test]
+    fn backspace_deletes_one_cell_per_press() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+        for key in [Key::S, Key::P, Key::Y] {
+            app.key_at(&press(key), Crossword::SIZE);
+            app.key_at(&release(key), Crossword::SIZE);
+        }
+        // The cursor stops on the answer's last cell rather than running off
+        // its end, so it is sitting on a *full* cell — the case where
+        // backspace clears in place and does not step back.
+        assert_eq!(app.cursor, (0, 2));
+
+        app.key_at(&press(Key::Backspace), Crossword::SIZE);
+        app.key_at(&release(Key::Backspace), Crossword::SIZE);
+        assert_eq!(
+            app.cell(0, 2).unwrap().entry,
+            None,
+            "the press did not clear the cell it was on"
+        );
+        // The double-fire's exact shape here: having emptied the cell, the
+        // release found an empty one, and an empty one is the case that steps
+        // back and clears its neighbour. So one keystroke ate two letters.
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            Some('P'),
+            "one backspace cleared two cells"
+        );
+        assert_eq!(app.cursor, (0, 2), "one backspace stepped back a cell");
     }
 
     #[test]

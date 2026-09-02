@@ -100,6 +100,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::blocksrc::MemorySource;
+use crate::fs::conformance::Declared;
 use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
@@ -747,6 +748,12 @@ fn build_image() -> Vec<u8> {
             inline: F2FS_INLINE_DATA | F2FS_EXTRA_ATTR,
             extra_isize: EXTRA_ISIZE,
             size: text.len() as u64,
+            // setuid, deliberately: a bit *outside* `0o777`. Overridden here
+            // rather than in `InodeSpec::file` so that exactly one file carries
+            // it — a fixture where every object is setuid would not distinguish
+            // "the driver preserved this file's bits" from "the driver returns
+            // the same mode for everything". See `DECLARED` below.
+            mode: 0o104_644,
             ..InodeSpec::file(NID_HELLO, block, 0)
         };
         put_inode(&mut img, &spec);
@@ -758,6 +765,9 @@ fn build_image() -> Vec<u8> {
     let sub = InodeSpec {
         links: 2,
         pino: NID_ROOT,
+        // setgid + sticky: the other two bits above `0o777`, and the realistic
+        // case for a directory (`/tmp` is sticky, a group-shared tree setgid).
+        mode: 0o43_755,
         ..InodeSpec::dir(NID_SUB, B_SUB, u64::try_from(blk(2)).unwrap_or(8192))
     };
     put_inode(&mut img, &sub);
@@ -864,6 +874,40 @@ fn build_image() -> Vec<u8> {
 /// Mount the synthetic volume.
 fn mount_image(img: Vec<u8>) -> KernelResult<F2fsFs> {
     F2fsFs::open_source(Box::new(MemorySource::new(img)))
+}
+
+/// The modes [`build_image`] writes, for the cross-backend conformance harness.
+///
+/// `may_drop` is `0o222` throughout: this mount is read-only, which entitles the
+/// driver to withhold write permission and nothing else — see the `0o7555`
+/// masking note in `super::mod`'s `metadata`.
+///
+/// `/sub/data.bin` is declared with a plain `0o644` on purpose. A table in which
+/// every entry carried a bit above `0o777` could be satisfied by a driver that
+/// simply never masks, so at least one object has to be ordinary for the others
+/// to mean anything.
+const DECLARED: &[Declared] = &[
+    Declared {
+        path: "/hello.txt",
+        mode: 0o4644,
+        may_drop: 0o222,
+    },
+    Declared {
+        path: "/sub",
+        mode: 0o3755,
+        may_drop: 0o222,
+    },
+    Declared {
+        path: "/sub/data.bin",
+        mode: 0o644,
+        may_drop: 0o222,
+    },
+];
+
+/// Build and mount the synthetic volume for `fs::conformance`.
+pub(crate) fn conformance_fixture() -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])> {
+    let fs = mount_image(build_image())?;
+    Ok((Box::new(fs), DECLARED))
 }
 
 // ---------------------------------------------------------------------------
@@ -2067,8 +2111,8 @@ fn test_volume(c: &mut Checks) -> KernelResult<()> {
     );
     c.check(meta.permissions == 0o444, "the read bits survive the mask");
     c.check(
-        fs.metadata(Path::new("/sub"))?.permissions == 0o555,
-        "a directory keeps its execute bits",
+        fs.metadata(Path::new("/sub"))?.permissions == 0o3555,
+        "a directory keeps its execute bits, and its setgid and sticky bits",
     );
     // The three timestamps are given three *different* values by the builder,
     // and the nanosecond halves three more, precisely so that a driver which

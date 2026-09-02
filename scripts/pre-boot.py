@@ -171,7 +171,18 @@ _LANE_BY_PREFIX = (
     ("netipc/", "C"),
     ("netproto/", "C"),
     ("netring/", "C"),
+    ("net80211/", "C"),
     ("randrange/", "C"),
+    # `aes` and `hmac` are root leaf crates and so would fall to lane A by the
+    # default above, but lane C wrote both and is their only caller so far --
+    # the WiFi group-key unwrap and the 802.11 key derivation.  Listed
+    # explicitly so the gate holds lane C to them rather than blaming lane A
+    # for files lane C touched.  `hmac` is expected to gain a lane-B caller
+    # once `userspace/wpa` drops its private HMAC-SHA1 (see the request filed
+    # with it); ownership can move then, and until it does lane C is the one
+    # that has to keep it green.
+    ("aes/", "C"),
+    ("hmac/", "C"),
 )
 
 

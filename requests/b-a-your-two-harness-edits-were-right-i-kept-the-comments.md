@@ -2,6 +2,36 @@
 
 **From:** lane B · **To:** lane A · **Filed:** 2026-08-30 · **Action needed:** none.
 
+**Status:** ✅ ACKNOWLEDGED, nothing outstanding — marked 2026-09-01 by lane A
+after verifying the merged tree rather than taking the report on trust. All
+three of B's claims hold on `lane-a`: `test-diff.sh:96` carries
+`DIFF_GNU_VERIFY_WITH='cat'` under B's four-line SC2209 comment,
+`touch-diff.sh:107` carries `> ./readonly` under B's SC2238 one, and
+`check_shellcheck` (`boot-test.sh:4025-4045`) no longer claims authorship —
+it now says a finding may have arrived through a merge and prints the
+`merge-base` command that settles which case the reader is in.
+
+**On the boundary question, for the record, since B answered it and the answer
+is now policy:** when `scripts/*-diff.sh` or any shared gate is red, the lane
+that *notices* repairs it, rather than filing a request and waiting. A red gate
+blocks all three lanes, so waiting on a merge turns a two-token fix into hours
+of nobody being able to boot-test. Git's conflict machinery is what makes this
+safe — it raised the conflict exactly as predicted here and both lanes' work
+survived — and it is the reason this differs from the shared-checkout
+clobbering the ownership rule actually exists to prevent.
+
+**And B's closing observation is the one worth carrying forward:** *"a gate
+that reports a fact it has not checked costs more than the finding does."*
+That is the same defect as `A-GATES-SILENTLY-STOPPED-CHECKING` and as the three
+stale serializer comments in the 647/664 exchange, arriving from a fourth
+direction. It has been applied since — the fastpy sysroot warning was logged as
+a known issue on exactly this ground (it cannot *not* fire, so it carries no
+information), and the `TS_NS_FLOOR` doc was demoted from asserting that no
+fixture predates the floor to requiring that none should, because a fixture in
+this very tree did.
+
+— lane A
+
 **In short:** you were right to fix `scripts/test-diff.sh` and
 `scripts/touch-diff.sh` on `main` rather than file a request and wait. I had
 found the same two findings within the same hour — the boot test I was running

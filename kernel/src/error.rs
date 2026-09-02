@@ -53,13 +53,20 @@ pub enum KernelError {
     ///
     /// Maps to `ERANGE`.
     BufferTooSmall = -9,
-    /// The syscall number has no handler registered in the dispatch table.
+    /// A dispatch table has no handler registered for the entry point named.
     ///
-    /// Returned **only** by `syscall::dispatch::dispatch`, for a number that is
-    /// in range but whose slot is `None`.  It is the kernel saying "I have
-    /// never heard of this call", which is a different fact from a registered
-    /// handler saying "I heard you, and the thing you asked for cannot be done
-    /// here".
+    /// Returned by `syscall::dispatch::dispatch`, for a syscall number that is
+    /// in range but whose slot is `None`, and by `ipc::io_ring::execute_sqe`,
+    /// for an SQE naming an opcode this kernel does not implement.  It is the
+    /// kernel saying "I have never heard of this call", which is a different
+    /// fact from a registered handler saying "I heard you, and the thing you
+    /// asked for cannot be done here".
+    ///
+    /// The name reads as syscall-specific for historical reasons — it was
+    /// introduced for the syscall table and gained its second caller later.
+    /// What it actually means is "unregistered entry point", and an io_uring
+    /// opcode is one; renaming it would touch every use for no gain in
+    /// meaning, so the name stays and this paragraph carries the correction.
     ///
     /// Both used to be [`Self::NotSupported`], and the ambiguity was not
     /// academic: a caller probing for a newer syscall and falling back to an

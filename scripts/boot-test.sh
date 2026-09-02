@@ -16,6 +16,23 @@
 #       kernel was built but never booted, so this says nothing at all about the
 #       code under test — it is the one status where retrying unchanged is the
 #       right response.
+#   5 — Gave up waiting for the host's *commit charge* to fall far enough to
+#       run (see check_commit_headroom).  Nothing was built and nothing was
+#       booted.  Like 4 it says nothing about the code under test, and like 4
+#       the right response is to retry later: the cause is another lane's
+#       build, and it clears on its own.
+#   6 — A build tool crashed instead of reporting a finding: clippy-driver or
+#       rustc died on a signal or an NTSTATUS rather than exiting with a verdict.
+#       Like 4 and 5 this says nothing about the code under test.  It is listed
+#       separately because the *evidence* differs: 4 and 5 are this script
+#       declining to start, whereas 6 is a gate that ran, produced no judgement,
+#       and must not be read as having produced a clean one.
+#       Unlike 4 and 5, retrying is NOT the indicated response.  A crash that
+#       host memory could explain — commit headroom below the floor at the
+#       moment of death — is waited out and retried *inside* the gate, and
+#       becomes a 5 if the host never recovers.  So a 6 that reaches the caller
+#       has already survived that filter: it crashed with memory to spare, or
+#       twice.  Investigate the toolchain; do not re-run expecting better.
 #
 # 2 and 3 are listed here because they were not: exit 2 has existed since the
 # stall detector landed and this header still claimed the script only ever
@@ -641,11 +658,34 @@ check_sysroot_identity() {
     fi
 
     if [ -z "$resolved" ]; then
-        echo "=== WARNING: fastpy would not resolve any SlateOS sysroot ==="
-        echo "    Neither \$FASTPY_SLATEOS_SYSROOT nor the sibling 'os' checkout"
-        echo "    holds a libc.a.  The fixtures in the image were linked against"
-        echo "    something this host can no longer name, so their Path-Z rungs"
-        echo "    cannot be attributed to any posix/ revision."
+        # Say which of the two possible causes this is.  The message used to
+        # read "something this host can no longer name", which describes a
+        # missing or unidentifiable libc -- and that is not what happened.  Ours
+        # is present and named on the next line (the early return above proves
+        # it exists).  What failed is fastpy's *search*: its last candidate is a
+        # sibling checkout literally named `os`, so from `os-lane-{a,b,c}` it
+        # looks only at the integration worktree and never at the tree being
+        # tested.  Misnaming a search defect as a missing file sends the reader
+        # to rebuild a sysroot that is already there.
+        echo "=== WARNING: fastpy cannot see this worktree's sysroot ==="
+        echo "    ours (present, never searched): $ours"
+        echo "    fastpy's last candidate is a *sibling checkout named 'os'*,"
+        echo "    which in the three-worktree layout is the integration tree and"
+        echo "    holds no sysroot.  \$FASTPY_SLATEOS_SYSROOT is unset, so no"
+        echo "    candidate resolves and the fixtures in the image were linked"
+        echo "    without one -- their Path-Z rungs cannot be attributed to any"
+        echo "    posix/ revision.  The kernel result below is unaffected."
+        echo "    To repair, set the variable when the fixtures are BUILT:"
+        # Quoted: every checkout of this project lives under a path with a
+        # space in it ("visual studio projects"), so an unquoted assignment
+        # here is a repair line that fails when pasted.
+        echo "        FASTPY_SLATEOS_SYSROOT=\"$PROJECT_ROOT/toolchain/sysroot\" \\"
+        echo "            python scripts/ctest-fixtures.py build"
+        echo "        wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
+        echo "    Setting it only for this check would make the comparison below"
+        echo "    read our own libc.a against itself and pass in silence, which"
+        echo "    is why this script does not do that (known-issues.md"
+        echo "    A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE)."
         return 0
     fi
 
@@ -1326,8 +1366,13 @@ PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 # $1 = the MSYS/Cygwin PID from `$!` (used for the `wait` and a first,
 # best-effort Cygwin-side kill).  We then read the OS PID that qemu wrote to
 # its -pidfile and `taskkill //F //PID` it, which is the only thing that
-# reliably kills a native Windows qemu from MSYS.  Falls back to killing by
-# image name only if the pidfile is missing (should not happen).  Idempotent.
+# reliably kills a native Windows qemu from MSYS.  Idempotent.
+#
+# A missing pidfile is the NORMAL case on a clean exit, not an anomaly: qemu
+# unlinks it on the way out.  There is deliberately no kill-by-image-name
+# fallback -- this file may run while another lane's boot test has its own qemu
+# alive, and killing by image name would take theirs down with ours.  Losing
+# the pid means the process we wanted to kill has already gone.
 kill_qemu() {
     local cyg_pid="${1:-}"
     # Stamp the end of the QEMU window at the FIRST teardown, not the last.
@@ -1342,12 +1387,25 @@ kill_qemu() {
     # Best-effort Cygwin-side signal first (harmless if it does nothing).
     [ -n "$cyg_pid" ] && kill "$cyg_pid" 2>/dev/null || true
     # Authoritative kill via the OS PID qemu recorded in its pidfile.
-    if [ -f "$PIDFILE" ]; then
-        local win_pid
-        win_pid="$(tr -cd '0-9' < "$PIDFILE" 2>/dev/null || true)"
-        if [ -n "$win_pid" ]; then
-            taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
-        fi
+    #
+    # Read it unconditionally rather than testing for it first.  QEMU unlinks
+    # its own -pidfile as it exits, so a test-then-read races the very teardown
+    # this function performs -- and loses most often on the *happy* path, where
+    # the guest reached BOOT_OK and qemu is already on its way out under its own
+    # power.  An absent file yields an empty pid, which the `-n` below already
+    # handles, so the test bought nothing and only read as though it made the
+    # line beneath it safe.
+    #
+    # The redirect is on the group, not on `tr`.  A failed input redirection is
+    # diagnosed by the shell, which never execs `tr` at all -- so `tr`'s own
+    # `2>/dev/null` is not in effect when the message is produced, and it went
+    # to the script's stderr while `|| true` swallowed the status.  That is how
+    # this printed a bare "line 1329: build/qemu.pid: No such file or directory"
+    # on runs that passed, with nothing else wrong to explain it.
+    local win_pid
+    win_pid="$( { tr -cd '0-9' < "$PIDFILE"; } 2>/dev/null || true)"
+    if [ -n "$win_pid" ]; then
+        taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
     fi
     # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
     [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true
@@ -1895,6 +1953,149 @@ check_free_space() {
     local phase="$1"
     check_tree_free_space "$phase"
     check_temp_free_space "$phase"
+}
+
+# --- Commit charge: the other resource a boot runs out of ---------------------
+#
+# The disk checks above guard the wrong resource for the failure that actually
+# keeps happening.  Windows' *commit limit* is RAM plus pagefile, and when it is
+# reached the kernel refuses to back new private pages -- so `fork()` fails and
+# nothing new can start, while free *physical* memory still reads healthy.  With
+# three lanes compiling at once this machine sits at 96-97% of a ~262 GB limit,
+# and 20 GB of free RAM alongside it is the normal shape, not a contradiction.
+# Watching free RAM does not predict it; only the commit number does.
+#
+# It has cost two boot runs.  On 2026-09-02 one died at 395s with
+# `dofork: child -1 ... 0xC000012D` (STATUS_COMMIT_LIMIT) -- after the build,
+# deep into the self-tests, with the whole run discarded.  See known-issues.md
+# "Three lanes building at once exhausts the Windows commit limit".
+#
+# WAITING RATHER THAN REFUSING.  Unlike a full disk, this condition clears by
+# itself: the builds causing it finish.  Refusing on sight would stop an
+# autonomous lane for something that resolves in minutes, so this mirrors the
+# boot lock -- wait for a bounded budget, then give up with a status that says
+# nothing was booted.
+#
+# AN ABSOLUTE FLOOR, NOT A PERCENTAGE.  What a run needs is a fixed quantity --
+# a 3 GiB guest, QEMU's own mappings, and room for the dozens of short-lived
+# helpers the harness forks while polling -- not a share of the machine.  A
+# percentage would demand more on a big host and less on a small one, which is
+# backwards.
+#
+# NEVER BLOCKS ON A FAILED PROBE.  No PowerShell, or an unparseable answer,
+# means "unknown", and unknown proceeds.  A gate that fails closed on its own
+# measurement error would stop every boot on a non-Windows host, and a boot not
+# run is a regression not caught.
+# WHERE 12 GiB COMES FROM, AND HOW FIRM IT IS.  Not from adding up what a boot
+# needs -- that sum says ~4 GiB (a 3 GiB guest plus QEMU's own mappings) and it
+# is demonstrably too low.  It comes from the failure: readings taken minutes
+# either side of the 2026-09-02 fork failure showed 8.0 and 9.7 GiB of commit
+# still free, so a run died at a headroom that a naive floor would have called
+# ample.  Cygwin's fork reserves the parent's whole address space, and another
+# lane's rustc can take several GiB in a spike, so the margin has to cover a
+# transient neither process reports.
+#
+# So this is an empirical floor anchored to one observation, deliberately set
+# above the highest reading associated with a failure rather than at it.  That
+# makes it a lower bound on what is safe, not a measurement of it.  If a boot
+# ever dies of STATUS_COMMIT_LIMIT while this gate passed it, the number is
+# still too low and the evidence for raising it is that run -- record the
+# reading in known-issues.md rather than adjusting by feel.
+MIN_COMMIT_FREE_MB="${BOOT_TEST_MIN_COMMIT_FREE_MB:-12288}"
+COMMIT_WAIT="${BOOT_TEST_COMMIT_WAIT:-900}"
+
+# Free commit charge in MiB on stdout, or a non-zero status if it cannot be had.
+#
+# `TotalVirtualMemorySize` and `FreeVirtualMemory` are Win32_OperatingSystem's
+# names for the commit limit and the unused part of it, both in KiB.  They are
+# the same pair Task Manager shows as "Committed"; there is no `df`-like
+# equivalent, which is why this reaches for PowerShell at all.
+measure_commit_free_mb() {
+    command -v powershell &>/dev/null || return 1
+    local out
+    out="$(powershell -NoProfile -NonInteractive -Command \
+        '[int]((Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory/1KB)' \
+        2>/dev/null | tr -cd '0-9')" || return 1
+    [ -n "$out" ] || return 1
+    echo "$out"
+}
+
+# Wait until the host can afford this run, or give up with exit 5.
+#
+# `phase` is echoed so a run that waits twice says which wait it is in; the
+# second one is the interesting one, because it means our own build is what
+# consumed the margin.
+check_commit_headroom() {
+    local phase="$1"
+    [ "$MIN_COMMIT_FREE_MB" -gt 0 ] 2>/dev/null || return 0
+
+    local free_mb
+    if ! free_mb="$(measure_commit_free_mb)"; then
+        # Said once per run and not per poll: on a host without PowerShell this
+        # is the normal case, and a warning repeated every 20 seconds trains the
+        # reader to skip the block it is printed in.
+        if [ "${_COMMIT_PROBE_WARNED:-0}" = 0 ]; then
+            _COMMIT_PROBE_WARNED=1
+            echo "NOTE: cannot read the host's commit charge; the" \
+                 "${MIN_COMMIT_FREE_MB} MiB floor is NOT being enforced."
+        fi
+        return 0
+    fi
+
+    if [ "$free_mb" -ge "$MIN_COMMIT_FREE_MB" ]; then
+        echo "Commit headroom OK: ${free_mb} MiB free (floor ${MIN_COMMIT_FREE_MB} MiB, ${phase})."
+        return 0
+    fi
+
+    echo "=== Waiting for commit headroom (${free_mb} MiB free, need ${MIN_COMMIT_FREE_MB} MiB, ${phase}) ==="
+    echo "    Another lane is probably building.  This clears on its own; nothing is wrong with the tree."
+    local waited=0
+    local nap
+    while [ "$waited" -lt "$COMMIT_WAIT" ]; do
+        # Never sleep past the budget.  A fixed 20s tick would make
+        # BOOT_TEST_COMMIT_WAIT=5 wait twenty seconds, so the knob would not
+        # mean what it says -- and it is the knob a test, or an operator in a
+        # hurry, would reach for first.
+        nap=$((COMMIT_WAIT - waited))
+        [ "$nap" -gt 20 ] && nap=20
+        sleep "$nap"
+        waited=$((waited + nap))
+        if ! free_mb="$(measure_commit_free_mb)"; then
+            # The probe worked a moment ago and does not now.  Proceeding is the
+            # right default for the same reason it is above -- we decline to
+            # block on our own inability to measure -- but it is said out loud,
+            # because a silent transition from "gated" to "not gated" is the
+            # shape of a check that has quietly stopped checking.
+            echo "NOTE: the commit-charge probe stopped answering after ${waited}s; proceeding ungated."
+            return 0
+        fi
+        if [ "$free_mb" -ge "$MIN_COMMIT_FREE_MB" ]; then
+            echo "Commit headroom OK after ${waited}s: ${free_mb} MiB free (floor ${MIN_COMMIT_FREE_MB} MiB)."
+            return 0
+        fi
+        echo "    still ${free_mb} MiB free after ${waited}s of ${COMMIT_WAIT}s..."
+    done
+
+    echo "" >&2
+    echo "ERROR: gave up after ${COMMIT_WAIT}s waiting for commit headroom (${free_mb} MiB free, floor ${MIN_COMMIT_FREE_MB} MiB, ${phase})." >&2
+    echo "" >&2
+    echo "NOTHING WAS BUILT AND NOTHING WAS BOOTED — this says nothing about the code under test." >&2
+    echo "" >&2
+    echo "Windows' commit limit is RAM plus pagefile.  At the limit, no process can start:" >&2
+    echo "fork() returns STATUS_COMMIT_LIMIT (0xC000012D) and the run dies wherever it happens" >&2
+    echo "to be, which on 2026-09-02 was 395 seconds into a boot whose build had already cost" >&2
+    echo "twenty minutes.  Refusing now costs seconds instead." >&2
+    echo "" >&2
+    echo "The usual cause is another lane's cargo build.  Do NOT kill it — it is another" >&2
+    echo "agent's in-flight work.  Wait for it, or do work that does not need to boot." >&2
+    echo "" >&2
+    echo "To override for one run:  BOOT_TEST_MIN_COMMIT_FREE_MB=0  (0 disables the floor)" >&2
+    echo "To wait longer:           BOOT_TEST_COMMIT_WAIT=<seconds>" >&2
+    # Same reasoning as exit 4's cleanup: take the previous run's artefacts with
+    # us, so "nothing was booted" is self-evident to a caller that greps the
+    # serial log without having heard of this status.
+    rm -f "${SERIAL_FILE:-}" "${SERIAL_FILE:+${SERIAL_FILE%.txt}-regs.txt}" 2>/dev/null || true
+    exit 5
 }
 
 # Validated here rather than passed through, so a typo ("--host-load=quiet")
@@ -4305,41 +4506,130 @@ check_kernel_clippy() {
     mkdir -p "$PROJECT_ROOT/build"
 
     echo "=== Checking that the kernel is clippy-clean (clippy::all = deny) ==="
-    local start
-    start="$(date +%s)"
-    # Output to a file, never to this log.  18,000 warning lines would bury the
-    # boot output that the rest of this script greps, and the full text is worth
-    # keeping for whoever is working the pedantic backlog.
-    #
-    # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's status is
-    # "did I match", which for an error filter is *inverted* -- a clean crate
-    # would report failure and a broken one success.
-    if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
-            ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
-            --message-format=short) > "$log" 2>&1; then
-        local warns
-        warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
-        echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
-0 errors, $warns pedantic-level warnings -> $log)."
-        return 0
-    fi
 
-    echo "" >&2
-    echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
-    echo "which under this workspace's lint policy means at least one" >&2
-    echo "clippy::all violation -- those are deny-level.  Sites:" >&2
-    echo "" >&2
-    grep ' error: ' "$log" >&2 || true
-    echo "" >&2
-    echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
-    echo "failed this gate): $log" >&2
-    echo "" >&2
-    echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
-    echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
-    echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
-    echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
-    echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
-    exit 1
+    # `attempt` exists because a crash caused by this host running out of commit
+    # is a *host* condition that this script already knows how to wait out, and
+    # throwing away the run instead would discard however many minutes of
+    # dependency compilation clippy had already banked.  It is bounded to one
+    # retry: a second crash is evidence of something other than a transient, and
+    # a gate that retries indefinitely is a gate that never reports.
+    local attempt=1
+    local start free_mb warns
+    while : ; do
+        start="$(date +%s)"
+        # Output to a file, never to this log.  18,000 warning lines would bury
+        # the boot output that the rest of this script greps, and the full text
+        # is worth keeping for whoever is working the pedantic backlog.
+        #
+        # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's
+        # status is "did I match", which for an error filter is *inverted* -- a
+        # clean crate would report failure and a broken one success.
+        if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
+                ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
+                --message-format=short) > "$log" 2>&1; then
+            warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
+            echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
+0 errors, $warns pedantic-level warnings -> $log)."
+            return 0
+        fi
+
+        # A non-zero clippy is not automatically a lint finding.  `clippy-driver`
+        # can *crash* -- on 2026-09-02 it died with STATUS_STACK_BUFFER_OVERRUN
+        # (0xc0000409) while the host was at 3.1 GiB of free commit under another
+        # lane's build -- and a crash exits non-zero too.  Reading that as "at
+        # least one clippy::all violation" is the same error `boot-history.py`
+        # used to make about exit 127: a verdict that rests on the *absence* of
+        # findings cannot be asserted when the tool that would have found them
+        # never finished.  The message below would have printed "Sites:" and then
+        # nothing, which is the shape of a gate accusing the tree of something it
+        # did not observe.
+        #
+        # The discriminator is cargo's own: a genuine lint failure ends with
+        # "could not compile ... due to N previous errors" and no "Caused by".  A
+        # crashed subprocess produces "process didn't exit successfully" carrying
+        # a signal or an NTSTATUS, which cargo only prints when the child died
+        # rather than reported.  Matching on that, rather than on the specific
+        # status code, keeps this correct for a SIGSEGV on a POSIX host as well.
+        if grep -qE "process didn't exit successfully|internal compiler error" "$log"; then
+            # Is memory the explanation?  Ask now rather than assume.  Unlike the
+            # pre-boot headroom gate -- which reads the host ~38 minutes before
+            # QEMU needs it, and so is explicitly *not* a prediction anyone
+            # should make at t=0 -- this reading is taken at the moment of the
+            # failure it is trying to explain.  It is a measurement of a current
+            # need, not a forecast of a later one.
+            free_mb=""
+            if [ "$attempt" -eq 1 ] && [ "${MIN_COMMIT_FREE_MB:-0}" -gt 0 ] 2>/dev/null \
+               && free_mb="$(measure_commit_free_mb)" \
+               && [ "$free_mb" -lt "$MIN_COMMIT_FREE_MB" ]; then
+                echo "" >&2
+                echo "NOTE: clippy-driver crashed with only ${free_mb} MiB of commit free" >&2
+                echo "      (floor ${MIN_COMMIT_FREE_MB} MiB), so memory explains it.  Waiting for" >&2
+                echo "      headroom and running the gate once more rather than discarding" >&2
+                echo "      the dependency build that already succeeded." >&2
+                echo "" >&2
+                # Exits 5 if the host never recovers.  That is the right status:
+                # the run died of host load having produced no verdict about the
+                # tree, which is exactly what 5 means, and it names the real
+                # cause more precisely than 6 would.
+                check_commit_headroom "after clippy-driver crashed, before retrying"
+                attempt=2
+                continue
+            fi
+
+            echo "" >&2
+            echo "ERROR: clippy-driver crashed instead of reporting a verdict." >&2
+            echo "" >&2
+            grep -E "process didn't exit successfully|internal compiler error" "$log" \
+                | sed -E 's/^(.{0,200}).*/  \1/' >&2
+            echo "" >&2
+            echo "THIS SAYS NOTHING ABOUT THE TREE.  The gate ran and produced no" >&2
+            echo "judgement; it did not produce a clean one.  Do not read a crashed" >&2
+            echo "linter as a clean linter, and do not #[allow] anything on the" >&2
+            echo "strength of it." >&2
+            echo "" >&2
+            # Say which of the two cases this is, because they call for opposite
+            # responses: "the host was busy" means wait, whereas "it crashed with
+            # memory to spare, twice" means investigate the toolchain.  A single
+            # message covering both would send the reader to wait out a condition
+            # that is not there.
+            if [ "$attempt" -gt 1 ]; then
+                echo "It crashed TWICE, the second time after commit headroom had" >&2
+                echo "recovered above the ${MIN_COMMIT_FREE_MB} MiB floor.  Host memory does not" >&2
+                echo "explain this one; suspect the toolchain or a genuine ICE, and" >&2
+                echo "do not simply re-run expecting a different answer." >&2
+            elif [ -n "$free_mb" ]; then
+                echo "Commit headroom was ${free_mb} MiB at the moment it died, at or above" >&2
+                echo "the ${MIN_COMMIT_FREE_MB} MiB floor, so this host's memory does not explain" >&2
+                echo "it.  Suspect the toolchain or a genuine ICE." >&2
+            else
+                echo "Commit headroom could not be read, so whether memory explains" >&2
+                echo "this is unknown.  On this host it usually does: at the Windows" >&2
+                echo "commit limit a compiler dies wherever it happens to be, and" >&2
+                echo "another lane's cargo build is normally what got us there." >&2
+                echo "Wait for it and re-run -- see check_commit_headroom and exit 5." >&2
+            fi
+            echo "" >&2
+            echo "Full output: $log" >&2
+            exit 6
+        fi
+
+        echo "" >&2
+        echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
+        echo "which under this workspace's lint policy means at least one" >&2
+        echo "clippy::all violation -- those are deny-level.  Sites:" >&2
+        echo "" >&2
+        grep ' error: ' "$log" >&2 || true
+        echo "" >&2
+        echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
+        echo "failed this gate): $log" >&2
+        echo "" >&2
+        echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
+        echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
+        echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
+        echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
+        echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
+        exit 1
+    done
 }
 
 check_kernel_clippy
@@ -4419,6 +4709,11 @@ check_cfg_unix
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"
+    # Before the build, not only before QEMU.  A build started against an
+    # exhausted commit limit is the thing most likely to *fail* to fork -- rustc
+    # spawns dozens of processes -- and it is also twenty minutes we would spend
+    # before discovering the boot cannot run either.
+    check_commit_headroom "before building"
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
@@ -4764,6 +5059,22 @@ fi
 # went in unlabelled, three reading ~8085 ns for `crypto_sha256_64B` and two
 # ~1936 for identical source, which between them would have stretched that
 # benchmark's outlier fence past 4x and blinded the detector for it.
+
+# Checked a second time here, and the placement is the decision.
+#
+# It has to be *after* the build, because our own build is a large consumer of
+# commit charge and the margin that existed before it may not exist after --
+# checking only up front would gate on a number the build then invalidates.
+#
+# It has to be *before* the boot lock, because this call can wait fifteen
+# minutes, and waiting inside the lock would idle while holding the one resource
+# the other two lanes queue for -- stalling them for a condition their own
+# builds caused, which is the worst possible place to put a sleep.
+#
+# What that ordering gives up: pressure arriving during the lock wait itself is
+# not caught.  That is the residual, and it is the right one to accept -- the
+# alternative trades a rare miss for a certain stall.
+check_commit_headroom "after building, before queueing to boot"
 
 # --- Cross-worktree boot lock -------------------------------------------------
 #

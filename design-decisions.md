@@ -47803,6 +47803,216 @@ from `gui/toolkit/src/lib.rs`.
 
 ---
 
+## 575. WiFi starts as two shared root crates — `net80211` for the wire format and `aes` for the cipher — before any radio exists to run them
+
+**Date:** 2026-09-01
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** The roadmap says the WiFi supplicant (the program that types the
+password into a wireless network for you) is done. It is not: what exists
+turns a password into a key and stops there. There is no code anywhere in the
+tree that can read or write a single WiFi packet, and — checked, not assumed —
+no AES anywhere either, AES being the cipher every modern WiFi network's
+security is built on. The decision is *where the missing pieces go*: two new
+small libraries at the top of the tree, `net80211/` and `aes/`, rather than
+code inside the supplicant or inside the future wireless driver. Nothing
+observable changes yet; this is the foundation the rest of WiFi is built on.
+
+**Why this is the first thing built, and not the radio.** Operator decision
+§264 puts WiFi ahead of Mesa and Chromium, on the grounds that a machine that
+cannot reach a network has nothing for a browser to display. Within WiFi,
+the wire format is the part that has no prerequisites: a beacon frame has
+the same layout whether it arrives from real hardware, from a simulated
+radio, or from a test vector typed into a unit test. So it can be built,
+and fully tested, while the thing that would carry it does not exist. The
+radio itself is kernel-side and therefore lane A's; a request for a
+`mac80211_hwsim` equivalent follows this entry rather than preceding it, so
+that it can cite working code instead of a plan.
+
+**Why `net80211` is a root crate and not a module of the supplicant.** Three
+separate consumers need exactly these bytes, and they live in three different
+places:
+
+| Consumer | Where | Needs it for |
+|---|---|---|
+| the wireless driver | `kernel/` — lane A | building probe requests and parsing beacons, before any of the rest of the stack exists |
+| the supplicant | `userspace/wpa` — lane B | the EAPOL-Key frames its state machine has nothing to run over today |
+| the netstack | `services/netstack` | seeing a data frame as Ethernet once the LLC/SNAP shim is off |
+
+This is precisely the shape §610 settled for DEFLATE, arrived at from the
+other direction: there, two copies already existed and one was promoted;
+here, no copy exists yet and the promotion is done up front. The lesson §610
+draws — that a parser of untrusted input is the worst thing to duplicate,
+because each copy is independently an attack surface and a fix to one leaves
+the other broken — applies with more force here, not less. Every byte
+`net80211` parses arrives from the air, from anyone, unauthenticated, before
+any key has been agreed. A malformed frame is the *expected* case.
+
+**Why `aes` is a separate crate from `net80211`.** WiFi is its first caller
+but plainly not its last: disk encryption already names `Aes256Xts` in
+`kernel/src/fs/diskencrypt.rs` with nothing behind it, and TLS will want the
+same cipher. Folding it into `net80211` would mean the disk encryptor
+eventually depends on a WiFi library, which is the same inversion §610
+rejected. The `crc32` crate's own history is the argument: that polynomial
+had been written **four separate times** before it was factored out. A block
+cipher is a far worse thing to get four copies of than a checksum — a
+mistyped S-box entry does not produce a detectably wrong answer, it produces
+a cipher that interoperates with nothing, and the symptom looks like a
+network fault rather than a crypto bug.
+
+**Members, not `exclude`d.** `netproto`, `netipc`, `netring` and `tzrules` are
+excluded from the workspace, and mirroring them here would have been the
+obvious move — it was in fact the original plan. It is wrong. Those four are
+excluded for one specific reason: they link into `services/netstack`, which is
+built as a bare-metal target *outside* the workspace. Every consumer of
+`net80211` and `aes` is inside it. And exclusion has a real cost: an excluded
+crate does not inherit `[lints] workspace = true`, so it silently opts out of
+the tree's `indexing_slicing` / `arithmetic_side_effects` / `unwrap_used`
+lints — the exact lints that matter most in a parser of hostile input and in
+a cipher. Membership is the default; exclusion needs the netstack-shaped
+excuse.
+
+**The AES here is not constant-time, deliberately, and says so.** It uses
+table lookups indexed by key-dependent bytes, which leak through the cache to
+anything that can measure it. Constant-time AES on x86 means AES-NI, which
+means `unsafe` intrinsics, and both crates are `#![forbid(unsafe_code)]`
+today. The tradeoff is acceptable for what actually calls it — unwrapping a
+group key once per handshake, and keys at rest — and would not be for bulk
+encryption on a machine running untrusted local code. That boundary is
+written in the module docs at the top of the crate, not buried in a comment,
+because the next caller is the one at risk from it. Revisit when either a
+bulk-data caller appears or the tree grows a place where `unsafe` intrinsics
+are allowed.
+
+**The inverse S-box is derived, not transcribed.** `INV_SBOX` is built at
+compile time by inverting `SBOX` in a `const` block. Two hand-typed 256-entry
+tables are two chances to make a typo that no test catches unless it happens
+to touch the wrong byte; one table plus an inversion makes the entire class of
+error unrepresentable, and a test asserts the round-trip on all 256 values
+anyway.
+
+**Where it lives:** `net80211/` — `frame` (MAC header), `mgmt` (beacon, auth,
+assoc, deauth bodies), `ie` (information elements), `rsn` (the security
+element), `llc` (the SNAP shim to Ethernet), `fcs` (the frame checksum, via
+`crc32`), `eapol` (802.1X key frames and the 4-way handshake classifier).
+`aes/` — `lib` (the cipher) and `keywrap` (RFC 3394, how the group key
+arrives inside message 3). Registered in the root `Cargo.toml` `members`, in
+`scripts/pre-boot.py`'s lane map and `scripts/which-lane.py`, and in the
+`roadmap.md` ownership table, all as lane C.
+
+---
+
+## 576. The supplicant's defence against key reinstallation is a return-type variant, not a flag the caller is trusted to read
+
+**Date:** 2026-09-01
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** When a WiFi station finishes negotiating with an access point,
+it installs the encryption key it just agreed. If it ever installs that same
+key a *second* time, the encryption silently becomes breakable — this is a
+real published attack, KRACK. The trouble is that the access point routinely
+re-sends the last message of the negotiation when it does not hear the reply,
+so "install the key" and "you have already installed the key, just answer
+again" arrive as *identical frames*. Something has to tell those two cases
+apart. The decision is about where that distinction lives: in a boolean the
+caller is expected to check, or in the shape of the value the caller gets
+back — such that the code will not compile unless the caller has considered
+both cases.
+
+**Decision:** `Handshake::on_eapol` returns `Result<Outcome, Error>` where
+`Outcome` is a three-variant enum:
+
+```rust
+pub enum Outcome {
+    Reply { len: usize },           // send this; the handshake continues
+    Complete { len: usize },        // send this, and install the keys
+    Retransmission { len: usize },  // send this, and do NOTHING else
+}
+```
+
+Only `Complete` authorises installing a key. A repeated message 3 — the
+attack's vehicle — returns `Retransmission`, which carries a reply to send
+and no permission to touch the keys.
+
+**Why this is a decision and not an obvious call.** The alternative is
+smaller and reads perfectly well:
+
+```rust
+pub struct Outcome { pub len: usize, pub install: bool }
+```
+
+That is one field instead of three variants, needs no `match`, and is the
+shape most C supplicants use. It has a genuine advantage: a caller who wants
+"just send the bytes" writes `out[..o.len]` with no ceremony at all, whereas
+the enum makes every caller name three cases even when two of them do the
+same thing.
+
+The reason it lost is what happens to each shape under the mistake actually
+being guarded against. With the boolean, forgetting `if o.install` is a
+*missing* line — nothing in the type system, the compiler, or a code review
+diff shows an absence. The resulting bug is invisible in testing, because a
+supplicant that installs the key twice associates perfectly and passes every
+functional test; the only symptom is that the traffic is decryptable by
+someone listening. With the enum, the same mistake is a non-exhaustive
+`match`, which is a compile error. The class of bug is converted from
+"silent, security-critical, undetectable by testing" into "will not build".
+
+That trade — a little ceremony at every call site, in exchange for making
+one specific catastrophic error unrepresentable — is worth taking precisely
+because the error is undetectable any other way. It would not be worth
+taking for a mistake that a test could catch.
+
+**Why the third variant, rather than just two.** `Retransmission` could have
+been folded into `Reply`, since both mean "send this and continue". They are
+kept apart because they mean different things to a caller that logs or
+counts: a burst of `Retransmission`s is the signature of either a lossy link
+or an attacker replaying frames, and a supplicant that cannot distinguish
+them from normal progress cannot report either. The variant costs nothing —
+a caller that does not care writes `Reply | Retransmission` in one arm.
+
+**The escape hatch, and why it is not the primary API.**
+`Outcome::installs_keys()` exists and returns the boolean. It is there for a
+caller genuinely writing a dispatch table, and it is documented as the less
+safe of the two spellings. Making it the *only* spelling would have been the
+rejected design; making it available alongside the enum costs nothing,
+because a caller who reaches for it has had to type its name and read its
+doc comment, which is exactly the moment of attention the boolean-only
+design never provides.
+
+**Two smaller calls recorded here rather than separately, both with the same
+character — the type refuses to let the caller be careless:**
+
+- **The station's nonce is supplied by the caller, not generated.** `new`
+  takes `snonce: [u8; 32]`. `net80211` is `no_std` and has no entropy source,
+  and inventing one — a counter, a clock — would produce a supplicant that
+  works in every test and derives a predictable key in the field. Requiring
+  the caller to pass it makes the dependency on real randomness impossible to
+  overlook. The doc comment says why, at the parameter.
+- **Both RSN elements are borrowed slices, not parsed structures.**
+  `Config` holds `sta_rsn_element: &[u8]` and `ap_rsn_element: &[u8]`.
+  Message 3 must be compared against the beacon's element *byte for byte*;
+  comparing parsed structures would compare this parser's opinion of two
+  elements rather than the elements, and a downgrade hidden in a field the
+  parser ignores would compare equal. The borrow also keeps the handshake
+  allocation-free, but that is a secondary benefit, not the reason.
+
+**Where it lives:** `net80211/src/supplicant.rs` — `Outcome`, `Handshake`,
+`Config`. Tested by `a_retransmitted_message_three_is_answered_but_does_not_reinstall_the_key`,
+`a_replayed_group_message_cannot_reinstall_the_group_key` and
+`a_downgraded_rsn_element_in_message_three_is_caught`. The rationale is
+repeated in the module docs, since that is where a driver author will read
+it, and in `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
+since the driver is the code that performs the install.
+
+---
+
+
 ## 610. Code that two lanes both need is promoted to a root leaf crate by the lane that owns the better copy — not duplicated, and not handed over
 
 *Date: 2026-08-26*
@@ -59611,3 +59821,597 @@ instead of measured is the exact failure this benchmark was built to end.
   a measurement is bound by the evidence rules of the tooling that scores it. No
   other benchmark prints a verdict of this kind today; if one is added, this is
   the standard it has to meet.
+
+## §671 — the cross-backend metadata harness checks domain rules first and declared values second, and the declarations live in each backend's own test module
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** several filesystems were losing the extra permission bits on a
+file — the "setuid" bit and its two neighbours, which decide whether a program
+runs as its owner. Each filesystem had tests, each passed, because each test
+asked that filesystem what the bits were and then checked the answer against
+itself. The fix is a harness that walks every backend and checks *shared* rules,
+built in two layers. The first layer needs no test fixture and catches a large
+class of nonsense; the second needs a fixture per backend and is the only one
+that would have caught the original bug. The decision is to land the first layer
+alone rather than hold both back until the second is plumbed — and to keep each
+backend's expected values inside that backend's own test module rather than in a
+table owned by the harness.
+
+### The two layers, and why the cheap one is not sufficient
+
+A **domain claim** can be judged with nothing but the value in hand:
+
+| Claim | Caught without a fixture because |
+|---|---|
+| a mode outside `0o7777` | no permission bit exists above bit 11 |
+| `readdir` and `stat` disagreeing about an inode number | one object, two routes, one answer |
+| a nanosecond field holding a seconds-sized number | `1e16` ns is 115 days of sub-second remainder |
+| a size that changes between two reads with nothing in between | the object did not change; the answer did |
+
+A **value claim** needs a fixture that *declares* what was written: "this file
+was created `0o104_644`, so it must read back `0o104_644`."
+
+The distinction matters more than it looks. The bug that motivated all of this
+was a mask — `& 0o777` where `& 0o7777` was meant — and **a narrowing violates
+no domain rule.** Every value `& 0o777` can produce is inside the legal domain;
+it is a legal value that is not the *right* value. So the domain layer, which is
+the layer that just shipped and is already finding bugs, would **not** have
+caught the thing it was built for. That is not a reason to withhold it — it
+found two real defects on its first live boot, one of them
+(`/proc/columnview` reporting zero columns directly above twelve listed columns)
+a bug that only manifests depending on which self-test ran first, and which no
+per-backend test could have found. But it must be recorded plainly, because a
+half-built harness whose name promises the whole job is exactly the kind of
+thing that gets marked done.
+
+**Alternative considered: hold the harness until both layers are ready.** Its
+argument is honesty — shipping the half that misses the motivating bug invites
+someone to close the issue. Rejected because the second layer needs four
+backends' fixture builders made `pub(crate)` and two existing assertions
+rewritten, and none of that makes the first layer any better. The dishonesty
+risk is handled where it belongs: the `known-issues.md` entry is marked
+**NARROWED**, not fixed, and says in as many words that the domain layer would
+not have caught the motivating bug.
+
+### Why the declarations do not live in the harness
+
+The obvious shape for layer two is a table in `conformance.rs`: backend name,
+path, expected mode. It reads well and it is all in one place.
+
+It is also the original bug, one level up. That table would assert facts about
+files it did not create, maintained by whoever last edited the harness, while
+the fixtures that actually write those files live in four other crates and are
+edited by whoever is changing that backend. The two drift, silently, and the
+drift is invisible in exactly the way the first bug was: the harness passes
+because it is comparing a filesystem against a stale copy of its own intent.
+
+So each backend exports its own `Declared { path, mode_on_disk, may_drop }` from
+the module that builds the fixture. Changing what the fixture writes and
+changing what is expected are then the same edit, in the same file, by the same
+person. The cost is real — the expectations are spread across four modules
+instead of gathered into one readable table, and adding a backend means
+remembering to export the declaration rather than adding a row. Accepted: a
+table that is easy to read and quietly wrong is worse than a declaration that
+takes four files to survey and cannot go stale.
+
+`may_drop` exists because the losses are not all bugs. Three backends mask
+`& 0o7777 & 0o7555` on a read-only mount — twelve bits minus the three write
+bits — which is correct and must not be flagged; and NTFS has no Unix mode at
+all, synthesising one from the mount's read-only-ness, so it is genuinely out of
+scope rather than merely unimplemented.
+
+### Two structural rules the harness enforces on itself
+
+Both come from the same observation: a test that decides not to run is a test
+that reports success.
+
+- **A skip may never be decided from the outcome of the code under test.** A
+  backend carrying the metadata bug could fail its own `readdir`, be skipped for
+  it, and the boot would still print "Conformance passed" — the skip would
+  disable the check on precisely the boot where it would have fired. Every skip
+  is now either read from the environment (the *mount table* is asked whether
+  `/proc` is mounted; the filesystem does not get a vote) or classified through
+  `fs::selftest::classify`, which separates "this system cannot" from "this
+  system was asked and refused". The memfs fixture, which is `MemFs::new()` plus
+  two writes and a `mkdir` and depends on nothing about the boot, is a
+  **failure** when it will not build, never a skip.
+- **A success line printed after a skip must name the skips.** The closing line
+  is the one a reader believes, so a run that reached four of five mounts must
+  not read as a full pass to someone who scrolled to the bottom.
+
+### Consequences
+
+- `known-issues.md`'s `A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST` stays
+  **OPEN**. Its original blocker ("requires a small fixture per filesystem") is
+  retracted — that is no longer what stands in the way; four `pub(crate)`
+  changes are.
+  - **Correction, 2026-09-01 (`5fa72bc13`), when this section was
+    implemented:** the four `pub(crate)` changes were not needed either, so
+    that second blocker is retracted too. This section reasoned that
+    `conformance` would have to reach *into* each backend to drive its
+    builder. It does not: the last clause of this section's own title —
+    "the declarations live in each backend's own test module" — already
+    implies the inverse, and that is what was built. `conformance_fixture()`
+    lives *inside* each `tests` module, calls the private builders as a
+    neighbour, and hands back a `Box<dyn FileSystem>`. Visibility changed
+    nowhere. The lesson is narrow but repeatable: when a plan says a
+    consumer needs wider access to a producer, check first whether the code
+    can be written on the producer's side instead, where the access already
+    exists.
+- The harness now perturbs global allocator state, which a distant checker reads
+  and fails on. `HeapWatch` samples the corruption counters per inspected path
+  for that reason, and the general rule it encodes — a self-test that moves
+  global state hands a later checker a failure it cannot explain — applies to
+  any self-test, not just this one.
+
+## §672 — a free-slot signature is tied to the slot's own address, because a constant is a value the allocator itself leaks
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** The kernel's heap marks every freed block with a fixed magic
+number, so that freeing the same block twice can be spotted — the second free
+sees the mark already there. That check just accused a piece of perfectly
+correct code (`/proc/loadavg`) of freeing memory twice when it had only freed
+it once, and the boot test failed for a day because of it. The reason is that
+the magic number is a *constant*: the allocator scatters copies of it on the
+kernel stack merely by reading and writing it, and a struct with an
+uninitialised 8-byte hole picked one up and carried it into the heap, where it
+sat at exactly the offset the check looks at. The fix is to stop using one
+number for every block and instead use a number derived from the block's own
+address, so a stray copy can only ever match the one block it came from.
+
+### The defect
+
+`fs::conformance` walks `/proc`, which runs `procfs::gen_loadavg`, which builds
+a `Vec<TaskInfo>` from `sched::task_list()`. On dropping that `Vec` — its first
+and only free — `poison_free` reported a double-free, `syshealth` reported
+`[FAIL] Heap safety: 2 violation(s)`, and the boot test panicked.
+
+The chain that explains it:
+
+| Fact | Established by |
+|---|---|
+| The signature was the fixed constant `0xFEEDFACE`, written at bytes 8..12 | `heap.rs` — a single definition, confirmed by grep |
+| `poison_free` and `check_poison` therefore place that constant on the kernel stack on **every** allocator call | reading them |
+| `TaskInfo` is 176 bytes with `stack_used: Option<usize>` at offset **0**, its payload at bytes **8..16** | DWARF in the kernel ELF, read with `pyelftools` |
+| `stack_used` is `None` for the idle task, so those 8 bytes are **never written** | `sched::task_list` |
+| The `Vec` was `len=1 cap=1` and the one task at that point in boot is the idle task | the slot's own bytes: `id=0`, `name="idle"`, `name_len=4` |
+| The uninitialised payload held `FE ED FA CE FE ED FA CE` when it reached the heap | dumping the slot |
+
+So a live, singly-allocated buffer arrived carrying the allocator's own magic,
+at the one offset where the allocator treats it as proof of a previous free.
+Nothing in `procfs`, `sched`, or the slab allocator was wrong. `Option<usize>`
+leaving its payload uninitialised in the `None` case is entirely legal, and
+`memcpy`-ing a struct with uninitialised bytes into a heap buffer is what every
+move does.
+
+### The decision
+
+The signature becomes `poison_magic_for(addr) = 0xFEED_FACE_FEED_FACE ^ addr`,
+widened from four bytes to eight, occupying bytes 8..16; the poison zone moves
+from 12.. to 16...
+
+*What changes:* the expected word is different for every slot, so a copy that
+escapes onto the stack can only ever match the slot it came from, and only if
+it also lands at exactly the right offset. A collision now requires the value
+*and* the address *and* the offset to agree — 64 bits of agreement rather than
+32, and no longer reachable by the allocator's own leakage.
+
+### Alternatives considered
+
+- **Zero the uninitialised padding in `TaskInfo`.** Rejected: it fixes one
+  struct. Every struct with an uninitialised 8-byte hole at offset 8 that is
+  copied into the heap has this bug, and there is no way to enumerate them.
+  This is a defect in the *checker*, and fixing it anywhere else leaves the
+  checker able to accuse the next struct.
+- **Move the signature to a header outside the user-visible bytes.** Correct in
+  principle and strictly better, but it changes the slab layout — every size
+  class, every offset computation, the red zone, and the KASAN shadow mapping.
+  Worth doing on its own merits some day; it is not what this defect requires,
+  and doing it here would have made a one-line-cause bug into a slab rewrite.
+  Logged as the eventual direction, not as this fix.
+- **Widen the constant to 8 bytes without tying it to the address.** Rejected:
+  it lowers the odds without removing the mechanism. The value that collided
+  was not random garbage — it was the allocator's own constant, placed there by
+  the allocator. A wider constant is a wider constant that the allocator still
+  leaks.
+- **Keep the free-trace instrumentation** (16 recorded frames of the first free,
+  written into each freed slot). Removed. It was built to answer "who performed
+  the *first* free", and the answer turned out to be "nobody — there was only
+  one". Keeping a per-free backtrace capture on the allocator's hot path to
+  answer a question that no longer exists is not a trade worth making. The
+  16-frame backtrace printed on *genuine* detection stays: it fires only on
+  detection, and it is what named the call site in the first place.
+
+### What this cost, and the rule it leaves behind
+
+Roughly a day of boot-test failures, and a chain of six wrong hypotheses —
+growth-`realloc` leaving a stale pointer, free-list aliasing across per-CPU
+magazines, the `cache.active` guard racing an ISR, CPU migration mid-allocator,
+`refill` handing out stale poison, an overridden `realloc` — each plausible,
+each disproved. Two rules earned:
+
+- **A defect that vanishes when you add a `serial_println!` has been perturbed,
+  not fixed.** Adding a print to `gen_loadavg` made the boot green; it moved the
+  stack frame so the temporaries were built over different garbage. The
+  discriminating experiment — remove *only* the print — brought it straight
+  back, and that is what proved the cause was stack contents.
+- **DWARF is the authority on `#[repr(Rust)]` field layout, not the
+  declaration order.** Three of the wrong hypotheses came from guessing offsets
+  off the struct definition. `pyelftools` against the kernel ELF settled it in
+  one command, and should have been the first step rather than the last.
+
+## §673 — a cross-route check must establish that the object held still, and a clause that could not be judged is voided, never passed
+
+**Date:** 2026-09-01
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** The conformance harness compares a file's size as reported by two
+different calls — listing the directory, and asking about the file directly —
+and complains if they disagree. It complained about `/proc/heapinfo`, and it was
+wrong: that file's contents are *generated* each time you ask, and they include
+counters that the harness's own memory allocations were bumping between the two
+calls, so the file genuinely was a different length by the time the second call
+ran. Both answers were true when given. The check was assuming the file would
+hold still and never checking that it did. Now it takes the listing twice, once
+before and once after, and only compares when the two agree — and when they
+don't, it says so out loud and counts the check as *unjudged* rather than
+quietly passing it.
+
+### The defect
+
+`check_meta` asserted `entry.size == meta.size` for regular files. Both are
+"the file's size", so they must agree — for an object that did not change
+between the two readings. The harness cannot freeze a filesystem, and never
+established that it had.
+
+`gen_heapinfo` formats `slab_allocs`, `slab_frees`, `total_allocs` and friends.
+Walking `/proc` allocates. So the string grows a digit somewhere between the
+`readdir` that measured it and the `metadata` that measured it again, and the
+harness reported a driver defect where there was only elapsed time.
+
+This survived a boot in which the heap was completely clean (`2507` clauses
+held, `1` broke), which is what ruled out its being collateral from the
+allocator bug being chased at the same time.
+
+### The decision
+
+Bracket the stat between two listings — `d1`, stat, `d2` — and:
+
+| Observation | Verdict | *What changes* |
+|---|---|---|
+| `d1 == d2`, stat agrees | **pass** | as before |
+| `d1 == d2`, stat differs | **fail**, after one tight confirming re-read | a failure now means the size held still and the routes still disagreed |
+| `d1 != d2` | **void** | the log prints a `VOID` line naming what moved; the closing line carries the count |
+
+The third row is the substance. A voided clause is counted in its own field,
+never in `passed`.
+
+### Why not the alternatives
+
+- **Report `st_size = 0` for generated files, as Linux does.** Rejected. It is a
+  user-visible behaviour change made to satisfy a test, and it destroys real
+  information: SlateOS's `/proc` sizes are currently honest, and a reader or a
+  `cat` that preallocates benefits from that. Changing the subject under test
+  because the test was wrong is the wrong direction of fix.
+- **Declare procfs "volatile" in a per-backend table and skip the clause.**
+  Rejected, though it was the first design. A declaration is a promise about
+  the future written by whoever last thought about it; the bracket is a
+  *measurement* taken on the boot in question. The declaration would also be
+  coarse — it would switch the clause off for every file on procfs, including
+  the ones that are perfectly stable and where the check has value.
+- **Silently skip when the sizes disagree.** Rejected outright, and this is the
+  general rule the entry is really about: a check that declines to run and says
+  nothing reads as coverage in the log, which is strictly worse than no check.
+  `A-GATES-SILENTLY-STOPPED-CHECKING` is the same failure in a different
+  subsystem.
+- **Accept the small residual and skip the tight re-read.** The bracket is exact
+  only for a monotonic size. `slab_active` is allocs-minus-frees and can return
+  to a previous value, which would let a genuine disagreement be reported on a
+  boot where nothing was wrong. The re-read runs only where a failure was about
+  to be printed, so it is free on the common path, and a harness whose failures
+  are sometimes noise trains its reader to ignore all of them.
+
+### If it is never revisited
+
+Nothing degrades. The risk to watch is the opposite of the one just fixed: a
+backend that begins churning every file's size would void its way to a clean
+run. That is why the voided count is printed on the closing line rather than
+only on the individual `VOID` lines — the number is the thing that makes such a
+regression visible.
+
+## §674 — the timestamp floor stays where it is and the fixture moves to meet it, because a floor lowered to admit a fixture stops detecting the thing it exists to detect
+
+**Date:** 2026-09-02
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** The conformance harness refuses to believe any file claims to
+have been modified before 1970-04-26, on the grounds that a timestamp that
+early almost certainly means the driver returned the number in the wrong
+*unit* — seconds where nanoseconds were wanted, say. The btrfs test fixture
+declared its files as being from 1970-01-01, fifteen minutes after the epoch,
+and so every btrfs object failed all four of the harness's timestamp clauses —
+24 broken clauses on a driver that was doing nothing wrong. The choice was to
+lower the floor so the fixture fits, or to fix the fixture. The fixture was
+fixed, and the harness's own comment — which had flatly asserted that no
+fixture predates the floor — was corrected to state the obligation instead.
+
+### The defect, on both sides
+
+`TS_NS_FLOOR = 10_000_000_000_000_000` (1e16 ns = 1970-04-26) is not chosen as
+a date. It is chosen because it sits above every wrong *unit* a backend could
+plausibly return for a present-day time, and below the right one:
+
+| what the driver returns | value for "now" | verdict |
+|---|---|---|
+| seconds | ~1.8e9 | caught |
+| milliseconds | ~1.8e12 | caught |
+| microseconds | ~1.8e15 | caught |
+| **nanoseconds** | ~1.8e18 | **passes** |
+
+The btrfs fixture used `1_000`/`2_000`/`3_000`/`4_000` seconds, picked only so
+the four timestamps would be *distinct from one another*. Distinctness is what
+the fixture's authors needed; being in the present was not something they knew
+they owed anyone. So the harness was right, the driver was right, and the
+fixture was a 1970 file — precisely the thing the floor exists to catch, caught.
+
+The second half is the more interesting one. The comment above the constant
+asserted, flatly, that no file in any fixture or on any real disk predates it.
+A fixture in this very tree falsified it. That is a note about a rule, believed
+instead of the rule — the same shape as `A-GATES-SILENTLY-STOPPED-CHECKING`,
+as the three stale serializer comments in the 647/664 exchange, and as lane B's
+*"a gate that reports a fact it has not checked costs more than the finding
+does."*
+
+### The decision
+
+1. **The fixture moves.** Constants become 2024-01-01 plus one day each
+   (`1_704_067_201` … `1_704_326_404`), preserving distinctness — every
+   consumer derives from these, so no assertion needed editing.
+2. **The comment is demoted from a claim to an obligation.** It now says a
+   fixture *should* not predate the floor and records that one did, with the
+   rule stated as a requirement on fixtures: **declare present-day dates, not
+   merely distinct ones.** Writing a fixture below the line does not exercise
+   the check, it fails it.
+
+### Why not the alternatives
+
+- **Lower `TS_NS_FLOOR` to admit the fixture.** Rejected, and this is the whole
+  entry. The floor's value *is* its function: drop it below ~1.8e9 and the
+  seconds-for-nanoseconds case — much the likeliest unit error, and the one a
+  Unix-shaped API invites — stops being detected at all. Lowering it would have
+  turned 24 loud failures into 24 silent passes and left the harness looking
+  healthier while checking strictly less. The failing clauses were the harness
+  working.
+- **Exempt fixture-backed objects from the timestamp clauses.** Rejected. It is
+  the same skip-that-reads-as-coverage that §673 rejected one entry ago, and it
+  would exempt exactly the backends whose timestamps are easiest to get wrong,
+  since a fixture is where a hand-written number enters the system.
+- **Fix the fixture and leave the comment alone.** Rejected because the comment
+  is load-bearing: it is what the next person writing a fixture will read
+  before choosing numbers, and as written it told them the constraint was
+  already satisfied by construction rather than being theirs to meet. A stale
+  reassurance is worse than no comment, because it is consulted.
+
+### If it is never revisited
+
+Nothing degrades, but the failure mode is quiet. A future fixture written with
+small round numbers reproduces this exactly: two dozen failures against a
+correct driver, on a check whose message names the file rather than the
+fixture. The corrected comment is the only thing standing between that and a
+second afternoon spent on it.
+
+## §675 — a measured ratio publishes both halves together, because a numerator and a denominator timed by different parties are not the same interval
+
+**Date:** 2026-09-02
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** the build harness runs its own self-tests before it compiles
+anything, and one of them starts two CPU-burning helper processes and checks
+they really burned CPU. It also checks the reverse — that they did not burn
+*more* CPU than the stretch of time they were watched over, which would be
+physically impossible and would mean the measurement was broken. That
+impossible reading happened, and a whole boot test was refused over it. The
+decision was where to put the fix: loosen the impossibility check so it stops
+firing, or change how the measurement is taken so the check becomes true
+again. We changed the measurement.
+
+### What was actually wrong
+
+The helper processes published a single number — how much CPU they had used so
+far. The controller watching them divided that by a stretch of time *it*
+measured with its own stopwatch. Those two things sound like they describe the
+same interval. They do not.
+
+A helper that is waiting for the start signal only speaks occasionally, so the
+number the controller reads may be up to a second old. The division therefore
+ran from "whenever that helper last spoke" on top to "when the controller
+started its stopwatch" on the bottom. Any CPU charged in between counted in the
+numerator with no matching time underneath it.
+
+That gap is normally tiny, and it stayed invisible for exactly that reason. But
+Windows measures per-process CPU by sampling 64 times a second and charging a
+whole 15.6 ms tick to whichever process it catches — even one that ran for a
+microsecond. One stray tick is 7.8% of a 0.2 s window, and 7.8% was the entire
+error allowance. So a single unlucky sample was enough to produce an impossible
+number, and it did: `1.089` against a ceiling of `1.078` on a loaded machine,
+and later `1.009` on a completely idle one.
+
+### Options
+
+| | *What changes:* |
+|---|---|
+| **A. Widen the tolerance** | the check stops firing, and also stops detecting anything |
+| **B. Delete the check** | nothing detects a malformed measurement at all |
+| **C. Publish CPU and clock together (chosen)** | the two halves of the ratio describe the same interval, so the bound is arithmetic rather than empirical |
+
+**Chosen: C.** Each helper now publishes a *pair* — its CPU total and the clock
+reading taken with it, written together under one lock — and its span is its
+own clock delta. Numerator and denominator cover the same interval by
+construction. Rounding is then the only error left, and the existing
+`1 + 15.6 ms / span` bound is a real bound again rather than an estimate.
+
+### Why not A
+
+A is the option that had already been taken once here, and its cost is on
+record. The bound used to be a hardcoded `2.0`, and under it a defect that made
+each single-threaded helper appear to use **1.82 cores** passed unnoticed for
+as long as the machine stayed quiet. 1.82 is not a tolerance question; one
+thread cannot use two cores. The tolerance was wide enough to swallow an
+impossibility, so nothing was watching.
+
+The general form: *a bound loosened every time it fires is not a bound, it is a
+record of how often it has been ignored.* When a check reports something
+impossible, the useful assumption is that the check is right and the
+measurement is wrong — which is what it turned out to be.
+
+### What this cost, and the discipline it enforces
+
+Two plausible causes were proposed and both were **measured and cleared** before
+anything was changed:
+
+1. *The controller loses milliseconds to descheduling between reading the
+   helpers' clocks and stamping its own.* Measured: **0–20 µs**. The stamping
+   order was fixed anyway because it is correct, but it explains nothing.
+2. *The clock's rounding is worse than one tick.* It is not — the user and
+   kernel counters share one sampler, so their sum advances at most once per
+   tick event.
+
+Both could have explained the magnitude, and neither did. The rule this
+reinforces: **a mechanism that could account for the number is not evidence
+that it did.** The same trap was walked into and out of once more the same day,
+on `check-variant-lists.py`, where a confident theory about a directory walk
+would have produced a real change to a correct file.
+
+### A second finding, kept rather than filed
+
+Reproducing this surfaced an unrelated flake in the same test: the *floor*
+check, which asks whether the helpers ran at all, read `0.304` on an idle
+machine in a 14-run probe. Over 0.2 s one unrelated process can take most of
+the CPU, and the instrument cannot distinguish that from a load that was never
+applied — so it would have refused a boot test over a fact about the host.
+
+Both bounds wanted the same remedy from opposite directions, so the live test's
+window went from 0.2 s to 0.6 s: the floor gets enough samples to average a
+transient away, and the ceiling's allowance falls from 7.8% to 2.6%, tripling
+the check's power. Measured across 14 runs each, the spread narrowed from
+`0.278 – 1.037` to `0.811 – 1.004`, with nothing over the ceiling.
+
+**If this is ever revisited:** the thing to preserve is not the window length
+but the invariant — whoever produces the numerator must also produce the
+denominator, at the same instant, under the same lock. Any future change that
+reintroduces a controller-timed span reintroduces this bug silently, because a
+numerator outrunning its denominator is indistinguishable from a clock that
+rounded up.
+
+---
+
+## §676 — an unknown io_uring opcode answers `NoSuchSyscall` (-10) too, because §656's ambiguity is a property of dispatch, not of syscalls
+
+**Date:** 2026-09-02
+**Lane:** A
+**Decided by:** Claude (autonomous)
+
+**In short:** §656 fixed a case where the kernel gave one answer to two
+different questions — "I have never heard of this request" and "I heard you and
+the answer is no" — so programs had to guess which they had been told. That fix
+was applied to the list of system calls. The kernel has a *second* such list, of
+io_uring operations, and it had the identical flaw. This extends the same fix
+there. Nothing observable changes today, because nothing in the tree currently
+asks the question; the point is that the first program to ask will get a
+truthful answer rather than an ambiguous one.
+
+### The same defect, one layer over
+
+`execute_sqe` in `kernel/src/ipc/io_ring.rs` ended its opcode match with
+`NotSupported` (-2) — the very code a *registered* `exec_*` returns when it ran
+and could not do the thing on this handle. Same code, two facts, opposite
+correct responses, exactly as §656's table put it:
+
+| The caller sees in CQE `res` | It might mean | Correct response |
+|---|---|---|
+| `-2` | this kernel has no such opcode | fall back to the synchronous route |
+| `-2` | the opcode ran and refused | honour it; do **not** fall back |
+
+The difference from §656 is only *where the value surfaces*: a syscall return
+value there, the CQE `res` field here. That is a difference in plumbing, not in
+the reasoning, which is the whole argument for this entry.
+
+### Why it was not swept into §656 at the time, and why that was right
+
+§656 had two callers asking for it, an outstanding promise to lane B, and a
+boot self-test to pin it. This had none of those. Folding it in would have been
+a behavioural change nobody requested, decided by analogy rather than on its own
+evidence, and buried in a commit about something else. The known-issues entry
+that carried it (`A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS`) said so
+explicitly and deferred it on that basis. Deferring was correct; leaving it
+deferred indefinitely would not have been.
+
+### This one is pre-emptive, and that is worth stating plainly
+
+No caller anywhere in the tree compares a CQE `res` against `-2`. That was
+checked when the issue was filed and **re-verified on 2026-09-02** across
+`posix/`, `userspace/`, `services/` and `init/` — the only `ENOSYS`-shaped
+reasoning in the io_uring consumers is about `io_uring_setup` itself returning
+`-1`, which is not a completion result at all.
+
+So this fixes no live misbehaviour. The case for doing it anyway is that the
+ambiguity is cheapest to remove *before* the first fallback path is written
+around it: §656 exists because lane B had already shipped one latch and was
+about to write a second, and a latch is a guess that is wrong for exactly as
+long as no answer has arrived yet. Closing this now costs one match arm; closing
+it after two callers have compensated for it costs their code as well as ours.
+
+The honest counter-argument, recorded because it is not silly: a change with no
+caller is a change with no test of its usefulness, and the tree already has more
+speculative generality than it needs. What tips it is that this is *subtractive*
+— it removes a wrong answer rather than adding a feature — and that the correct
+value already exists and needed no new variant.
+
+### Alternatives considered
+
+**Leave it until a caller needs the distinction.** Rejected on §656's own
+evidence: the caller who needs it is, by construction, the caller who has
+already been given the wrong answer once and written a workaround around it. The
+issue's own trigger ("the next time someone writes a fallback path around a CQE
+result") would have fired *after* the damage.
+
+**Invent a new `KernelError` variant for "no such opcode".** Rejected. The fact
+being reported — "this dispatch table has no entry point here" — is the same
+fact `NoSuchSyscall` already names, and a second variant would make two codes
+where callers need one distinction, recreating the ambiguity in mirror image.
+
+**Rename `NoSuchSyscall` to something ABI-neutral (`NoSuchEntryPoint`).**
+Tempting, since the name now reads as narrower than the meaning, and rejected on
+cost: it touches every use site and every doc reference to buy nothing a comment
+cannot. The variant's doc comment was widened instead, and now names both
+callers and says outright that the name is historical.
+
+### Consequences
+
+`NoSuchSyscall`'s doc no longer claims it is returned "**only** by
+`syscall::dispatch::dispatch`" — that sentence was true when written and became
+false with this change, which is the kind of doc drift that makes a later reader
+distrust the rest of the comment.
+
+The Linux ABI is unchanged: `NotSupported` and `NoSuchSyscall` both map to
+`ENOSYS`, since Linux spends one errno on both. The distinction is visible only
+on the native ABI, where the raw code is what the caller sees. This is the same
+boundary §656 drew and for the same reason.
+
+Pinned by `test_unknown_opcode_is_distinguishable_from_a_refusal` in
+`io_ring::self_test`, which asserts the result is `-10` **and** that it is not
+`-2`. The second assertion is not redundant: an assertion on the new value alone
+would still pass if someone later collapsed the two codes back together at the
+`KernelError` level, which is precisely the regression worth catching. It also
+asserts the SQE still *completes* — a ring that silently dropped an unknown
+opcode would hang a caller waiting on the completion, a worse failure than the
+ambiguity being fixed.

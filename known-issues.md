@@ -56499,7 +56499,43 @@ that other lanes consult is worse than no statement, because it is acted on.
 
 ---
 
-### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — OPEN (lane A tree; request filed)
+### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — **Status: ✅ FIXED 2026-08-21** in `e62931fb7`; **this heading said `OPEN` for 12 days after the fix landed** (corrected 2026-09-02, lane A)
+
+> **Resolution — the fix took the first of the two proposed branches, and the
+> entry below describes the code as it was, not as it is.**
+>
+> `e62931fb7` ("kcmp: gate cross-process introspection on a DEBUG capability")
+> added `kcmp_may_access` / `kcmp_may_compare` (`kernel/src/syscall/linux.rs`
+> :34751, :34775) and calls the conjunction at :34637, refusing with `EPERM`
+> **between** the `ESRCH` liveness gate and the `type` range gate — exactly the
+> placement this entry argued for, so the errno discriminator still matches
+> Linux: `(pid=-1, type=99)` sees `ESRCH`, and an unauthorised probe with a bad
+> type sees `EPERM` rather than `EINVAL`. The predicate is a single
+> undifferentiated conjunction over both targets, so the gate does not itself
+> become an oracle for which of the two was refused. The `kernel_ctx` escape is
+> preserved, so the boot self-test still drives the comparator paths.
+>
+> Covered by a self-test at :50530 that runs `kcmp_may_compare` against real
+> PCBs and real capability tokens, and — the part that matters — asserts the
+> **negative** cases too: prober→victim without `DEBUG` is refused, victim→
+> bystander is refused in both argument orders, and an unresolvable owner
+> (`None`) is refused rather than defaulted. A gate tested only on its allow
+> path is a gate you have not tested.
+>
+> **What this entry is now worth reading for.** Not the defect — that is gone —
+> but the two findings that outlive it: the `KCMP_FILE` `EBADF` flip is an
+> fd-*presence* oracle and not merely an identity leak, and this comparator is
+> **not** a KASLR concern (it orders `handle_kind_ord` and a handle-table index,
+> never a kernel address), so Linux's `kptr_obfuscate()` cookie has no analogue
+> to add here. Both are now recorded in the handler's own comment so the next
+> reader does not re-derive them.
+>
+> **Why it sat stale.** The same failure `A-CREATE-MODE-SYSCALLS-SILENTLY-DROP-
+> SETUID-SETGID-STICKY` records about itself: the fix landed, the heading did
+> not move, and nothing in the tree compares a `Status:` line against the code
+> it describes. Found by re-reading the entry while picking a task, not by any
+> gate. A stale `OPEN` is not harmless — it spends a later session's time
+> re-deriving a fix that already exists, which is exactly what happened here.
 
 **In short.** A "syscall" is a request a program makes of the kernel. One of
 them, `kcmp`, asks the kernel to compare two *other* programs — "are these two
@@ -98363,6 +98399,64 @@ untouched. The name collision is itself part of why this was easy to miss.
 
 ## A-CREATE-MODE-SYSCALLS-SILENTLY-DROP-SETUID-SETGID-STICKY
 
+**Status: FIXED** — found 2026-08-30, fixed in two steps (`SYS_FS_OPEN_MODE`
+2026-08-30, `SYS_FS_MKDIR_MODE` 2026-09-01), **marked fixed 2026-09-01 by
+lane A, late.** The entry sat at `OPEN` after both halves had landed, which is
+the same failure this file records elsewhere about a heading that said `OPEN`
+for five days after the fix. Found by re-reading the entry while answering lane
+B's `666-669` request, not by any gate — there is still nothing that checks a
+`Status:` line against the code it describes.
+
+**The fix took the branch this entry argued *against*, and that is the
+interesting part.** The proposed fix below was to **refuse** `mode & 0o7000`,
+reasoning that the create path could not represent the bits and that a request
+the kernel cannot honour should be an error rather than a silent rounding-down.
+That was correct given the facts at the time — but the premise stopped being
+true: the create path *was* plumbed through, so the bits could simply be
+**accepted** instead. Accepting is strictly better than refusing, because it
+gives the caller what it asked for rather than a diagnosable failure, and it
+needed no ABI negotiation with lanes B and C — which is what this entry named
+as the reason it could not be fixed unilaterally. Worth noting for the next
+entry of this shape: a fix blocked on "this would break other lanes" is worth
+re-examining after the blocking constraint moves, because the *reason* it was
+blocked can expire without anyone revisiting the entry.
+
+Current state, each settled with lane B rather than unilaterally:
+
+| syscall | mask now | decision |
+|---|---|---|
+| `SYS_FS_OPEN_MODE` (`handlers.rs:9180`) | `0o7777` | `design-decisions.md` §639 |
+| `SYS_FS_MKDIR_MODE` (`handlers.rs:8868`) | `0o1777` | §663 |
+| `SYS_FS_MKDIRAT_PINNED` (666) | `0o1777` | §663, moved in the same change |
+
+`kernel/src/fs/handle.rs:588` stamps `create_mode & 0o7777`, so the twelve bits
+reach the file rather than being masked again one layer down — which is the
+line this entry quoted as evidence that the mask was legitimate.
+
+**One residual, deliberate and Linux-matching:** `mkdir` still drops setuid and
+setgid without an error. That is not the defect above returning. `mkdir(2)` has
+no channel for them — a new directory's setgid bit is *inherited from the
+parent*, never taken from the mode word — and Linux's own `vfs_mkdir` does
+`mode &= (S_IRWXUGO | S_ISVTX)` just as silently. Honouring them would offer an
+authority Linux does not, in the one bit that decides who owns files created in
+that directory later; and since we do not implement the inheritance either, the
+bit would additionally assert a semantic the kernel does not perform. Lane B
+sourced this (`requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`
+§2); it is a decision, not an oversight.
+
+**The widening is not yet reaching userspace, and that line is now lane B's to
+move.** `posix`'s `apply_umask_mkdir` masks to `0o777`, so a caller asking for
+`0o1777` still gets `0o777` and no error — the kernel is simply no longer the
+one discarding it. Flagged to lane B in the reply on that request. This is the
+general trap lane B named in §4 of it: **when one lane widens what it accepts,
+the other lane's narrowing becomes silent**, with no error on either side,
+because "the bit is missing" and "the bit was never requested" produce
+identical files. Second instance of that shape in a week.
+
+---
+
+### Original entry, kept for the reasoning
+
 **Status: OPEN** (found 2026-08-30, lane A)
 
 **In short:** Two syscalls let a program create a file or directory and say
@@ -103819,25 +103913,208 @@ So the residual-match report is not noise to be tuned out of the script — it i
 the only thing that would have surfaced this, and it should be read on every
 run, not just when the number changes.
 
-**crossword is next**, at 7 sites (`apps/crossword/src/main.rs:1374, 1385, 1414,
-1444, 1474, 1625, 1662`). A read-ahead predicts two faults, one familiar and one
-new. The familiar one is sokoban's shape 9: `text_at` pushes `max_width: None`,
-so no run it draws is cut to anything. The new one is that **every centring in
-the file is computed against `font_size` rather than `line_height`** —
-`r.y + (row_h - l.font) / 2.0`, `cy - size / 2.0` — which none of the seven
-finished apps did. The renderer places a run by its top-left and the run then
-occupies a full line height, so a box centred on the font size is short by the
-face's leading (33% here) and every centred run in the app sits high by half of
-that. It is not a containment fault at ordinary sizes, which is presumably why
-it survived, but it is the same confusion between "how big the letters are" and
-"how much room the line takes" that shape 12 named, and it will *become* a
-containment fault in any band squeezed to near one line.
+**crossword** (2026-09-01) — done: 77 tests (from 70), 7 sites → 0.
+
+**The mutation sweep is incomplete, and this is the honest number: 16 of 107
+rows ran, all 16 caught, and the remaining 91 were never executed.** The sweep
+was killed part-way by a client restart, not by a failure. Two things follow.
+First, the three survivors described below were found by the rows that *did*
+run, so the shapes they taught are real; what is unverified is only whether the
+other 91 mutants would also have been caught. Second, a killed harness leaves
+the file it was mutating **mutated in place** — `apps/crossword/src/main.rs` was
+recovered from the `main.rs.bak` the harness writes, and it had a live
+`while let` → `if let` mutation in `offset()` at line 863 at the moment the
+process died. Anyone resuming a sweep after an interruption must diff against
+that backup before doing anything else; committing the tree as found would have
+committed the mutant.
+
+Re-running the remaining 91 rows is parked with the rest of the campaign
+(below). It is ~9 minutes per row of exclusive cargo-lock time — around 14
+hours — which is why it is not being finished ahead of the WiFi work the
+operator asked for.
+
+The read-ahead had predicted two faults and both were
+there: sokoban's shape 9 (`text_at` pushed `max_width: None`, so no run it drew
+was cut to anything) and the new one — **every centring in the file was computed
+against `font_size` rather than `line_height`**. The renderer places a run by
+its top-left — the compositor's `draw_text` computes `baseline = y + ascent`, so
+a run occupies `[y, y + line_height)` — and a box centred on the font size is
+therefore short by the face's leading, 33% here. Every centred run in the app
+sat **low** by half of that, which is the direction worth stating: the slack
+above the run grows and the slack below it shrinks, so the edge the fault
+reaches first is always the band's *bottom*.
+
+That second fault is what makes this app worth reading, because **the campaign's
+central test cannot see it, and not for want of sizes**. It produced three
+separate mutation survivors before the cause was understood, and the four shapes
+below are the generalisation.
+
+29. **Containment is strictly weaker than centring, and the gap is exactly the
+    band's slack.** A clue row here is `small * 1.7` tall and a line of `small`
+    is `small * 1.33`; a run centred on the font size instead of the line height
+    is off by a sixth of a line and *never leaves the row*. No window size
+    reaches it, no `squeezes()` entry reaches it, and no squeeze ever will —
+    the fault is invisible to containment **by construction**, in every band
+    with more than 1.33× slack, which is most bands in most apps. This is a
+    second structural blind spot alongside shape 22's "drawing nothing is
+    contained" and shape 24's "an unreachable feature is contained". The
+    counterweight is cheap and general: **where a pass fills a box and then
+    writes in it, the fill *is* the band**, so assert that the run and the fill
+    share a centre line. `a_run_in_a_band_the_drawing_filled_is_centred_in_it_
+    and_not_merely_inside_it` needs no fixture beyond the ones already there and
+    caught all three survivors. Every app in this campaign should have it.
+
+    **And the seven already-finished apps were checked for it, and three have
+    it.** The test is a one-line grep — an app that calls `centre_line` but
+    never calls `text::line_height` is passing font sizes to it, because there
+    is nothing else it could be passing:
+
+    | App | `centre_line` calls | `line_height` calls | Verdict |
+    |---|---|---|---|
+    | automator | 21 | **0** | every centring is on the font size |
+    | taskscheduler | 8 | **0** | every centring is on the font size |
+    | hangman | 11 | **0** | every centring is on the font size |
+    | sokoban | 13 | 9 | mixed — read each site |
+    | klotski | 13 | 14 | mixed — read each site |
+    | rush | 13 | 20 | mixed — read each site |
+    | magnifier | 15 | 16 | mixed — read each site |
+
+    So the campaign's first three apps carry the fault it has only now learned
+    to see, on every run they draw, and their containment suites cannot report
+    it for the structural reason above. `centre_line(rect, l.font)` reads as
+    correct and is the shape the campaign has been *recommending* — which is the
+    uncomfortable part. **The helper's signature is what allows it**: `size` is
+    an `f32` and a font size is an `f32`, so the wrong one is spellable and
+    looks right. Each of the three needs a pass and the shape-29 test, and
+    `centre_line`'s own doc comment must say that `size` is a *line height*
+    and never a font size. This is logged as its own work item below rather
+    than folded into the per-app progress, because it is a regression in
+    finished work.
+30. **Pair a run to its band by the run's centre point, not by containment.**
+    The first draft of that test paired a run with a fill only when the run's box
+    was *inside* the fill, and the grid pass then contributed exactly zero
+    checked runs: a crossword cell's fill is the cell inset by one point while
+    the letter is bounded to the whole cell, so the run is never inside the fill
+    it belongs to. An inset does not move a centre, so pairing on the centre
+    point pairs correctly and the comparison — of centre lines — is unaffected.
+    A test that pairs by containment silently drops precisely the boxes that are
+    drawn tight to their band, which are the ones worth checking.
+31. **A coverage counter must be per pass.** That zero was invisible behind a
+    single `checked > 40` total, which the panel and footer passes met on their
+    own. It only surfaced when the count was broken out per pass and each
+    required to be non-zero. And the reason the grid contributed nothing was a
+    *fixture* fault, not a code fault — `playing(0)` is a fresh puzzle with no
+    letters in it at all, so the pass had no runs to give. **A fixture that
+    stops one pass producing output hides behind the passes that do**, and an
+    aggregate assertion is what lets it hide. Break the counter out by whatever
+    the test iterates over.
+32. **A bound that refuses rather than clamps moves the failure to a different
+    test — expect the mutation row's expectation to change with it.** Mutating
+    the footer's button strip to be taller than the footer used to spill; with
+    `centre_line` in front of it the strip is not drawn at all, so the
+    containment tests are content and the *existence* tests are what fail. This
+    read as a `WRONG TESTS` verdict and looks at first like a hole in the suite.
+    It is the opposite: it is the fix working. Retarget the row and say so in a
+    comment, because the next reader will make the same misdiagnosis.
+
+**The new sliver sizes found a real bug that twelve sizes had not.** The height
+grid gained `(900, 26)`, `(900, 18)` and `(900, 14)` — added only because two
+mutations of the help card's and end card's row fences survived for want of a
+window short enough to reach them — and at 900×18 the *menu* drew its
+17.29-point heading at a fixed `l.pad`, four points down an eighteen-point
+window. The heading had never been in a named band at all. This is rule 3
+("sample the sliver") paying out a second time, and the mechanism is worth
+noting: **the sizes were added to make a mutation reachable, and they found an
+unmutated fault on the way.** A size grid extended for one reason routinely
+pays for itself in another.
+
+**Two survivors here were genuine equivalent mutants, and both were *proved*
+rather than assumed.** `line_height(small, Bold).max(line_height(small, Regular))`
+→ `.min(…)` survives because this font's Bold and Regular faces have identical
+vertical metrics — measured with a throwaway probe test, not reasoned about: 8pt
+→ 10.640625 and 23pt → 30.591797 for both weights. The `.max()` stays, because
+the reason it is the taller of the two does not depend on today's metrics. (The
+probe also showed the cache **quantises size**, so 12.6pt → 17.29, a ratio of
+1.372 rather than the 1.330 the integer sizes give. **Never compute an expected
+line height by multiplying — probe it.**) The second was `let mut y =
+head.bottom();` → the literal offset it used to be: `head.h` is that expression
+`.min(window.h)`, so the two differ only when the window is shorter than the
+heading band, and in that case both produce a first row already past the fence.
+Both rows now carry a `NOT A MUTATION` note with the proof, and the second was
+replaced by a row that does bind — deleting the fence itself.
+
+One more small thing, which is shape 22 in a new dress: `inked` gives a run with
+a zero width limit a zero-width box, and `inside` treats an empty box as inside
+anything, so **a run the layout has left no room for passes containment because
+it has nowhere to go**. A direct scan of the command stream for
+`max_width: Some(w)` with `w <= 0.0` is a two-line addition to
+`check_containment` and catches it; every app in the campaign should carry it.
+
+### Open follow-up: the finished apps centre on the font size
+
+**Status:** OPEN 2026-09-01, raised by crossword's shape 29.
+
+**In short:** Every line of text in automator, taskscheduler and hangman is
+drawn about a sixth of a line lower in its strip than it should be. It is a
+small, uniform misalignment rather than a break — nothing overlaps at ordinary
+window sizes — but it is wrong everywhere in three apps this campaign has
+already signed off, and none of their tests can see it.
+
+**Why they cannot see it.** `centre_line(band, size)` divides the *band's* slack
+around a thing `size` tall. The thing being placed is a run of text, and a run
+is `text::line_height(size, weight)` tall, not `size` tall — the compositor
+draws it with `baseline = y + ascent`, so it occupies `[y, y + line_height)`.
+Passing the font size understates the run's height by the face's leading (33%
+at this face), which pushes the run down by half of that. It stays inside the
+band wherever the band has that much slack, so containment — the campaign's
+central test — is structurally blind to it (shape 29).
+
+**Where.** `apps/automator/src/main.rs` (21 sites), `apps/taskscheduler/src/main.rs`
+(8), `apps/hangman/src/main.rs` (11). The four other finished apps mix the two
+and need reading site by site rather than wholesale.
+
+**The fix, per app:** pass `text::line_height(size, weight)` at every
+`centre_line` call that places a run (a *fill* is still its own height), add
+crossword's `a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_
+inside_it`, and add a mutation row that puts the font size back.
+
+**And fix the helper, not just the callers.** The reason three apps got this
+wrong is that `centre_line(band, size: f32)` accepts a font size and a line
+height equally, and the wrong one is the shorter thing to write. Either the doc
+comment must say plainly that `size` is a line height and never a font size, or
+— better — the run-placing callers should go through a `centre_run(band, size,
+weight)` that computes the line height itself, so the mistake is unspellable.
+That is shape 9's rule ("make the wrong call unspellable") applied to a helper
+this campaign introduced.
+
+**If never fixed:** nothing overlaps and nothing crashes at ordinary sizes; text
+sits slightly low in its strip in three apps, and becomes a genuine overflow at
+the band's bottom edge in any strip squeezed to near one line.
+
+### Next
+
+`scripts/count_centrings.py` on 2026-09-01, after crossword: **spades at 6**
+(`apps/spades/src/main.rs:1835, 1851, 2067, 2120, 2159, 2171`), then emojipicker,
+hearts and snippets at 5, then asteroids, camera, gomoku, maze and pomodoro at 4.
+
+A read-ahead of spades predicts crossword's two faults exactly. `text_at` pushes
+`max_width: None` — but unlike crossword's, spades already has a correct
+`bounded` beside it with only **three** `text_at` callers, so shape 9's proper
+form here is to *delete* `text_at` rather than give it a limit, which makes
+"no limit" unspellable rather than merely discouraged. And all six sites are
+`band.y + (band.h - l.title | l.small | l.font) / 2.0` — the font size again, so
+shape 29's test is needed from the start rather than discovered by a survivor.
+Its size grid is already a 7x6 cross-product, which is better than most, but
+`GRID_H` jumps `0.0 -> 57.0`: it needs sliver entries near 14 and 26, the exact
+gap that has now paid out twice.
 
 ---
 
 ## A-IO-URING-UNKNOWN-OPCODE-IS-STILL-AMBIGUOUS (lane A)
 
-**Status:** OPEN 2026-08-31
+**Status:** ✅ FIXED 2026-09-02 in `d9e224706` — see the Resolution at the end
+of this entry. The body below is left as written on 2026-08-31, because the
+"why it was deferred" reasoning is the part worth keeping.
 
 `execute_sqe` in `kernel/src/ipc/io_ring.rs` (~line 851) ends its opcode match
 with
@@ -103893,6 +104170,48 @@ property of the design.
 
 **Trigger:** a caller that needs to feature-probe io_uring opcodes, or the next
 time someone writes a fallback path around a CQE result.
+
+> **Resolution — 2026-09-02, lane A, commit `d9e224706`.**
+>
+> The fallthrough arm now returns `KernelError::NoSuchSyscall` (-10), exactly as
+> the "Proper fix" above specified, and the widening the entry flagged as
+> conditional ("may deserve widening if this lands") was done: `error.rs`'s doc
+> for `NoSuchSyscall` claimed syscall dispatch was its only source, which this
+> change falsifies. It now names both callers and states what the variant
+> actually means — *unregistered entry point* — while keeping the name, since
+> renaming would touch every use for no gain in meaning. Rationale is
+> design-decisions.md §676.
+>
+> **The trigger never fired, and it was still right to act.** This entry was
+> gated on "a caller that needs to feature-probe io_uring opcodes", and none
+> appeared. It was fixed anyway because the blast-radius check that the entry
+> itself demanded be re-run — it warns the no-caller finding is "a fact about
+> the tree on a date, not a property of the design" — came back clean a second
+> time on 2026-09-02 across `posix/`, `userspace/`, `services/` and `init/`.
+> A zero-caller result cuts both ways: it is why the change is not urgent, and
+> it is also why it is free. Doing it while nothing depends on the old code is
+> strictly cheaper than doing it after the first fallback path has been written
+> around the ambiguity — at which point the fix acquires a caller to migrate.
+> Deferring is the correct default for a behavioural change nobody asked for;
+> it stops being correct once the change has become purely subtractive.
+>
+> **The self-test asserts both halves.** `test_unknown_opcode_is_distinguishable_from_a_refusal`
+> checks that the CQE result is -10 *and* that it is not -2. The second
+> assertion looks redundant against the first and is not: an assertion on the
+> new value alone would still pass if someone later collapsed the two codes
+> back together at the `KernelError` level, which is the regression this entry
+> exists to prevent. It also asserts the SQE was *processed* (one completion
+> posted, not silently dropped) — a ring that dropped an unknown opcode would
+> hang a caller waiting on the completion, a worse failure than the ambiguity.
+>
+> The sentinel opcode is `0xFF`, not `last_assigned + 1`. The highest assigned
+> opcode is 17, and a test that picked 18 would begin failing the day an
+> eighteenth opcode is legitimately added — turning a real feature into a
+> spurious self-test failure. `0xFF` is the last number the `u8` opcode field
+> will ever assign.
+>
+> The Linux ABI is unchanged: both codes map to `ENOSYS`, so the distinction is
+> visible only on the native ABI, where the raw code is what the caller sees.
 
 ## B-THE-KERNEL-XATTR-API-LOSES-TWO-THINGS-USERSPACE-NEEDS (lane B, 2026-08-31) — FIXED 2026-08-31
 
@@ -104713,7 +105032,7 @@ documented rather than silent, which is the difference that matters.
 
 ---
 
-### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN (the three instances are FIXED; the hole that produced them is not)**
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED TWICE (the three instances are FIXED; the *domain* half of the missing test landed 2026-09-01 in `63936036a`/`58d6caebe` as `fs::conformance`; the *declared-value* half — the half that would actually have caught this bug — landed 2026-09-01 in `5fa72bc13`. Now **✅ FIXED 2026-09-02** — the green boot the trigger required happened, and both layers ran in QEMU. See the two "Narrowed" sections below and the Resolution at the end.)**
 
 **Lane:** A
 
@@ -104763,6 +105082,184 @@ have caught this specific class on the day it was written.
 **Reproduce (before the fix):** mount any btrfs/zfs/f2fs image containing a
 sticky or setuid file and `stat` it; the special bits read back as 0 while the
 same file on ext4 reports them.
+
+#### NARROWED 2026-09-01 — `kernel/src/fs/conformance.rs` (`63936036a`, `58d6caebe`)
+
+**What landed.** A boot-time harness, dispatched from `main.rs` after every
+per-backend self-test, that reads the *contract* rather than any
+implementation. It runs a memfs fixture it builds itself, then every live VFS
+mount among `/`, `/proc`, `/sys`, `/dev`, `/tmp`, and asserts per object:
+
+| Clause | Catches |
+|---|---|
+| `permissions & !0o7777 == 0` | a mode outside the documented domain |
+| `nlinks >= 1` | a link count of zero on an object that exists |
+| each of the four `*_ns` in `[1e16, 1e19]` when nonzero | a timestamp in the wrong *unit* — seconds, ms or µs all land below the floor; see the constant's doc table |
+| `readdir` `ino` == `stat` `ino` | the cross-route disagreement of `A-GETDENTS64-D-INO-DISAGREES-WITH-ST-INO-ON-PSEUDO-FILESYSTEMS` |
+| `readdir` `entry_type` == `stat` `entry_type` | the same, for type |
+| `readdir` `size` == `stat` `size`, files only | the same, for size (directories excluded: `DirEntry::size` is documented as 0 for them, which is a different quantity, not a disagreement) |
+
+Two structural guards, because a harness that reports a pass it did not earn
+is worse than no harness: a **vacuous-run** check fails the boot if zero
+objects were inspected (the memfs fixture is unconditional, so zero can only
+mean the harness itself broke), and every skip is either read from the mount
+table or classified through `fs::selftest::classify`, so a backend can never
+skip its own check by failing it. That second property is not decoration —
+the first draft got it wrong in three places and the `[selftest-skips]` gate
+caught all three.
+
+**What is still open, and why this is the important half.** The domain layer
+above would **not** have caught the btrfs/zfs/f2fs bug. Masking `& 0o777`
+violates no domain rule: every value it can produce is inside `0o7777`. A
+narrowing is only visible against a fixture that *declares* the bits it wrote,
+and that layer is not built.
+
+**The blocker this entry originally named is gone.** It said the test "requires
+a small fixture per filesystem, which is the reason it does not exist yet."
+That is no longer true: btrfs, f2fs and ntfs already build a synthetic volume
+in RAM (`build_image()` / `mount_image()` in each backend's `tests.rs`) and zfs
+takes one through `ZfsFs::open_source(Box::new(MemorySource::new(bytes)))` —
+all on *every* boot, not only when a disk is attached. The remaining work is
+therefore plumbing, not fixture authoring:
+
+1. Expose each backend's existing image builder as `pub(crate)` so
+   `conformance::check_tree` can drive it as a `dyn FileSystem`.
+2. Set a special bit in each builder — `0o755` → `0o4755` on one file — and
+   assert the mode reads back whole. That single assertion is what turns this
+   from a harness that would have missed the bug into one that catches it.
+
+**Trigger to close:** step 2 landing for btrfs, zfs and f2fs — the three
+backends that had the bug — with the setuid file surviving the round trip on a
+green boot.
+
+#### NARROWED FURTHER 2026-09-01 — the declared-value layer landed (`5fa72bc13`)
+
+**What landed.** Step 2 above, for all four backends that build a synthetic
+volume: btrfs, f2fs, ntfs and zfs. Each backend's `tests.rs` now exports
+
+```rust
+pub(crate) fn conformance_fixture()
+    -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])>
+```
+
+which mounts the volume that backend already built and hands back a table of
+`Declared { path, mode, may_drop }` rows. `conformance::check_declared`
+asserts `meta.permissions == mode & !may_drop` — **equality, not superset**,
+because a superset test would pass a driver that *invented* a bit, and a
+spurious setuid bit is a privilege granted to a file that never had one.
+
+`may_drop` exists for one real case: these fixtures mount read-only, and a
+read-only mount legitimately withholds the write bits. It does not make a
+setuid binary not-setuid, it makes it unmodifiable — hence `may_drop: 0o222`
+and not a blanket `0o777`.
+
+The fixtures were changed to write bits *above* `0o777`, which is the whole
+point: btrfs `/hello.txt` `0o100644` → `0o104644` (setuid) and `/sub`
+`0o040755` → `0o043755` (setgid+sticky), zfs the same two objects, f2fs the
+same two as per-inode overrides rather than in its shared `InodeSpec::file()`
+/ `dir()` constructors — a fixture in which *every* object is setuid cannot
+distinguish "preserved this file's bits" from "returns one mode for
+everything." The paired in-file assertions moved with them in the same commit
+(`0o444` → `0o4444`, `0o555` → `0o3555`).
+
+When the assertion fails, the harness additionally recognises the specific
+shape `got == want & 0o777 && want & !0o777 != 0` and names it as the
+`& 0o777` narrowing this layer exists to catch, so the next occurrence is
+diagnosed rather than merely detected.
+
+**A second gap closed on the way, which was arguably the larger one.** Layer
+one had never run over *any* on-disk driver — only memfs and live VFS mounts.
+On a diskless boot, which is every boot of the boot test, none of the four
+backends whose `FileMeta` actually diverged were being checked at all.
+`check_fixture_backends` now runs `check_tree` over each synthetic volume
+before `check_declared`, so the domain layer finally covers the
+implementations it was written for.
+
+**Three structural guards**, on the same principle as the vacuous-run check
+above — a harness that reports a pass it did not earn is worse than none:
+
+- a fixture that fails to build or mount is a **failure**, not a skip: it is a
+  byte array assembled from constants and depends on nothing about this boot,
+  so there is no environment in which "could not build it" is a legitimate
+  abstention;
+- an **empty `Declared` table is a failure**, because a table with no rows
+  catches no narrowing while still reporting a pass — the
+  `A-GATES-SILENTLY-STOPPED-CHECKING` shape;
+- NTFS is included even though it has no on-disk Unix mode. What it pins is
+  `mod.rs:985`'s *synthesis* (`0o555` dirs / `0o444` files, `may_drop: 0`).
+  Its doc comment says plainly that NTFS cannot carry a bit above `0o777` and
+  therefore cannot detect a narrowing; it is there because a drift to the
+  "obvious" `0o644` would advertise write access on a mount that refuses every
+  write.
+
+**Correction to step 1 of the plan above: it was not needed.** The entry said
+each backend's image builder must be widened to `pub(crate)` so `check_tree`
+could drive it. That turned out to be wrong — `conformance_fixture()` lives
+*inside* each backend's `tests` module and calls the private builders
+directly, so no visibility changed anywhere. Recorded so the next reader does
+not go looking for four widenings that were never made.
+(`design-decisions.md` §671, which planned this layer, carries the same
+expectation, and the same correction applies to it.)
+
+**Status is still OPEN, and deliberately so.** `cargo check -p kernel` is
+clean, but the trigger to close is explicitly *"the setuid file surviving the
+round trip on a green boot"*, and this code has not yet reached QEMU — the
+host has been at its Windows commit limit under three-lane concurrent builds
+(see `A-BOOT-RECORDER-FILES-A-HOST-FORK-FAILURE-AS-A-KERNEL-TIMEOUT`). Do not
+close this on the strength of a clean type-check: every assertion here is
+boot-time, so an unrun harness has demonstrated nothing.
+
+> **Resolution — 2026-09-02, lane A.** The harness reached QEMU and passed.
+> The paragraph immediately above is what set the bar, and it is worth
+> recording that the bar was met on its own terms rather than waived: this is
+> closed on a boot, not on a type-check.
+>
+> **The evidence.** Boot test PASSED end-to-end (`child exited: PASS`, 5192 s,
+> tree at `d9e224706`), and in `build/serial-test.txt`:
+>
+> ```
+> [fsconform] Running cross-backend FileMeta conformance...
+> [fsconform] Conformance passed (2347 clause(s) over 521 object(s), 0 voided).
+> ```
+>
+> Zero `[fsconform] FAIL` lines anywhere in the 47,087-line serial log. The
+> boot recorder logged it as a tracking run, not an experiment, so it extends
+> the streak (now 2 consecutive clean) — which matters here because the
+> `--no-rootfs` experiments deliberately test *less* and are excluded from
+> exactly this kind of claim.
+>
+> **Why that summary line is sufficient, given this entry's own thesis.** The
+> thesis is that a test which does not run proves nothing, so a bare "passed"
+> would be a weak thing to close on — the pass line names no backend. It is
+> sufficient because the harness cannot emit it while a backend is missing:
+>
+> | Failure mode | What `check_fixture_backends` does |
+> |---|---|
+> | A backend absent from the run | Impossible — `FIXTURES` is a fixed 4-entry table (`btrfs`, `f2fs`, `ntfs`, `zfs`) iterated unconditionally |
+> | A fixture that will not build or mount | `r.failed += 1` — a **failure, not a skip**, because the images are byte arrays built from constants and depend on nothing about the boot |
+> | A fixture that declares an *empty* mode table | `r.failed += 1`, with the reason given in the source as "the shape of `A-GATES-SILENTLY-STOPPED-CHECKING`" — opting out of the only layer that catches a narrowing, while still appearing in the pass line |
+>
+> So "passed, 0 voided" entails that all four backends built, mounted, and
+> checked a non-empty declared table. The third row is the one that makes this
+> closable: it is the guard against precisely the failure this entry is about,
+> written into the harness rather than left to a reader to notice.
+>
+> **What was actually proven.** `check_declared` asserts
+> `meta.permissions == mode & !may_drop` — equality, not superset — over
+> fixtures whose objects carry bits *above* `0o777` (btrfs and zfs
+> `/hello.txt` at `0o104644` setuid and `/sub` at `0o043755` setgid+sticky,
+> f2fs the same two as per-inode overrides). A driver that masked to `0o777`,
+> which is the original bug, now fails. So does one that *invented* a bit,
+> which is why the check is equality: a spurious setuid bit is a privilege
+> granted to a file that never had one.
+>
+> **Not closed:** the `0o777` narrowing as a *class* across all thirteen
+> `FileMeta` implementations. This closes it for the four that build a
+> synthetic volume — including all three that had the bug. The nine that do
+> not build one are still only covered by the domain layer, which by this
+> entry's own analysis "would **not** have caught the btrfs/zfs/f2fs bug."
+> Extending the declared-value layer to a backend needs that backend to grow a
+> synthetic fixture first; that is the trigger if one ever does.
 
 ### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
 
@@ -106741,6 +107238,745 @@ missing is a quiet boot, not an explanation.
 contaminated. Nothing depends on it — the parent entry's conclusion never rested
 on the magnitude, only on the direction, and the direction is unchanged.
 
+## A-PROC-VERSION-AND-LOADAVG-DOUBLE-FREE-A-256-BYTE-SLOT
+
+**Found:** 2026-09-01, by `fs::conformance` on its first live boots.
+**Status:** **CLOSED** 2026-09-01 by `e24ce4ad6`, confirmed by boot
+`bv39hyr6h`: `[syshealth] Tests complete: 24 passed, 0 failed`, and the only
+`DOUBLE-FREE detected!` line left in the serial log is the deliberate one from
+`poison_self_test` Test 3. The new Test 5 — the regression for this exact shape
+— prints `Magic constant in live data: OK (not a double-free)`. That satisfies
+the closing criterion at the foot of this entry in full, including its stricter
+half: no diagnostic instrumentation is compiled in, because the free-trace was
+deleted along with the fix rather than left in place.
+
+**It was not a double-free at all** — it was a false positive in the
+allocator's own detector. Everything below the "What it actually was" section is
+the diagnosis as it stood *before* the cause was found, kept because the wrong
+turns are the useful part; where it contradicts that section, that section wins.
+
+### What it actually was (2026-09-01, final)
+
+`POISON_MAGIC` was a **fixed constant**, so the allocator leaves a copy of it on
+the kernel stack every time `poison_free` or `check_poison` runs. `TaskInfo` —
+DWARF says size 176 — puts `stack_used: Option<usize>` at offset 0 with its
+payload at bytes **8..16**, which is exactly where the signature lives. That
+field is `None` for the idle task, so those 8 bytes are *never written*, and the
+struct was `memcpy`'d into the heap still carrying `FE ED FA CE FE ED FA CE` —
+the allocator's own magic — off the stack. `gen_loadavg`'s single free then read
+it back as proof of a previous one.
+
+Corroborated by every other byte in the slot: `id=0`, `name="idle"`,
+`name_len=4`, and `len=1 cap=1` (one task exists at that point in boot, so
+`collect()` allocates once and never grows).
+
+Nothing in `procfs`, `sched`, or the slab allocator was wrong. The fix is in the
+detector: the signature is now `POISON_MAGIC_BASE ^ slot_addr`, 8 bytes at
+offsets 8..16, so a leaked copy can only match the slot it came from — see
+`design-decisions.md` §672 and `poison_self_test` Test 5, which reproduces this
+exact shape. The free-trace instrumentation is removed: it was built to identify
+the *first* free, and there was only ever one.
+
+Two corrections to what is written below:
+
+- **"Two files double-free" was one bug, not two, and now zero.** `/proc/version`
+  was a `HeapWatch` labelling artefact — it names whichever path is under
+  inspection when the global counter moves, and `readdir` generates every
+  entry's content.
+- **The unexplained 61-byte-string-in-a-256-byte-class mismatch is explained.**
+  The block was never the version string; it is a capacity-1 `Vec<TaskInfo>`,
+  and `TaskInfo` is 176 bytes.
+
+The `/proc/heapinfo` readdir-vs-stat size disagreement is a **separate** bug and
+is not fixed by this — it persisted in boot `bv39hyr6h`, which had zero heap
+violations and still reported `2507 clause(s) held, 1 broke`. Cause:
+`gen_heapinfo` prints `slab_allocs`/`total_allocs`/etc., which the harness's own
+allocations increment between the `readdir` and the `stat`, moving a decimal
+digit and changing the byte length. **The defect was in the harness, not in
+procfs** — both sizes were true when they were taken, and the clause asserted
+that the file held still without ever establishing that it had. Fixed in
+`707defe2b` by bracketing the stat between two listings and voiding, rather than
+passing, a comparison whose two readings saw different states; see
+`design-decisions.md` §673.
+
+**In short:** reading two files under `/proc` — `version` and `loadavg` — each
+hands the same 256-byte block of memory back to the allocator twice. The
+allocator notices, refuses to reuse the block (so nothing is corrupted), and
+bumps a counter. That counter is global, so a *completely different* check
+three subsystems away — `syshealth`'s "Heap safety" line — then reports
+`2 violation(s)`, and `kshell::self_test` rung 21 panics the kernel on it. The
+panic names none of the above.
+
+### How it presents
+
+```
+[fsconform] Running cross-backend FileMeta conformance...
+[heap] DOUBLE-FREE detected! slot=0xffff80007e3a1900, class=256
+[fsconform] FAIL heap:/proc/version — the allocator's corruption counters moved …
+[heap] DOUBLE-FREE detected! slot=0xffff80007e3a1500, class=256
+[fsconform] FAIL heap:/proc/loadavg — …
+…
+       [FAIL] Heap safety: 2 violation(s)
+!!! KERNEL PANIC !!! kernel\src\kshell.rs:11139
+```
+
+Fully deterministic: **the same two slot addresses across separate boots**, and
+exactly two events over 496 inspected objects, so it is not allocation-volume
+dependent. The two slots are `0x400` apart — four class-256 slots — i.e. the
+same slab page.
+
+`/proc/heapinfo`'s "readdir and stat disagree about a regular file's size"
+failure is *collateral*, not a third bug: heapinfo's text reports these very
+counters, so the count going 0→2 between its `readdir` and its `stat` changes
+the text's length. It is expected to disappear with the fix, and if it does not
+it needs its own entry.
+
+### What has been ruled out (do not re-derive these)
+
+- **It is not a false positive from stale poison.** The theory was that a slot
+  recycled without re-poisoning keeps `POISON_MAGIC` at bytes 8..11, so a later
+  free misreads it. It cannot happen: every slab allocation goes through
+  `pcpu_slab_alloc` or `slab_alloc`, both of which call `poison_alloc`, which
+  fills the **whole** slot with `ALLOC_POISON` (`0xCD`) and destroys the magic.
+- **It is not the owner's own bytes colliding with the magic.** That needs bytes
+  8..11 to be `FE ED FA CE`; both payloads are ASCII text there.
+- **It is not `realloc`.** The allocator supplies no `realloc` override, so `Vec`
+  growth uses the default alloc/copy/dealloc, which frees the old block once.
+
+So it is a real double-free.
+
+### What makes it hard, and what was built for it
+
+Neither generator is at fault on inspection, and the two share no code:
+`gen_version` is a `format!` of three `const &str`s plus `into_bytes`;
+`gen_loadavg` calls `sched::task_list()` and formats. The 61-byte version string
+does not obviously want a 256-byte class either, which suggests the doubly-freed
+block may not be the text at all.
+
+Two pieces of permanent diagnostic machinery came out of this and should be kept
+regardless of the fix:
+
+- `fs::conformance`'s `HeapWatch` samples the corruption counters per inspected
+  path, which is what turned "somewhere in ~200 `/proc` generators" into two
+  named files.
+- `poison_free` now walks the frame chain on detection (`866ffbcb2`), so the
+  report names the freeing call site. Resolve the printed addresses with
+  `python scripts/symbolize.py --log build/serial-test.txt`.
+
+### What the frames said (2026-09-01)
+
+Sixteen frames (`a9599b35e`) resolved it. **Neither event is `/proc/version`.**
+Both are the same drop, in the same function, at the same instruction:
+
+```
+0..7   poison_free / slab_dealloc / dealloc / __rust_dealloc /
+       Global::deallocate / RawVecInner::deallocate / RawVec::drop /
+       drop_in_place<RawVec<sched::TaskInfo>>
+8      drop_in_place<Vec<sched::TaskInfo>>
+9      procfs::gen_loadavg+0x3e6          <-- both events, same offset
+10     procfs::generate
+11     ProcFs::readdir::{{closure}}   (event 1)
+       ProcFs::stat                   (event 2)
+```
+
+Two consequences that overturn the sections above:
+
+- **The `/proc/version` label was a red herring.** `HeapWatch` names whichever
+  path was under inspection when the global counter moved; the counter moved
+  because `readdir` walks the whole directory and calls `generate` for
+  *`loadavg`* while `version` happened to be the entry being sampled. There is
+  one bug, not two, and `gen_version` is not involved at all.
+- **The doubly-freed block is the `Vec<TaskInfo>` from `sched::task_list()`**,
+  not any generated text — which is why 256 bytes never fitted the 61-byte
+  version string. `TaskInfo` is ~160 bytes, so a 256-byte class is a `Vec` of
+  capacity 1: the buffer `collect()` allocates first and frees again when it
+  grows to capacity 2.
+
+`gen_loadavg` therefore double-frees **on every call**, which also explains why
+twelve prior boots were green: nothing read `/proc/loadavg` during boot until
+`fs::conformance` walked `/proc`. The harness exposes the bug; it does not
+create it.
+
+`sched::task_list()` and `gen_loadavg` both read clean, and every slab
+alloc/dealloc path has now been audited (including both `slab_dealloc` call
+sites in `GlobalAlloc::dealloc`, the quarantine-eviction one being default-off).
+Since `POISON_MAGIC` survives to the second free, and `poison_alloc` would have
+destroyed it, no allocation of that slot intervened: the `Vec` that
+`gen_loadavg` drops points at memory freed earlier and never handed back out.
+
+### Recording the first free
+
+Done in `3ac226bfa`, along the lines sketched below. `poison_free` writes 8
+return addresses into bytes 12..76 of every freed slot in a class large enough
+to hold them, and prints them as `first-free frame N` on detection;
+`check_poison` scans for `FREE_POISON` from byte 76 instead of 12 on those
+classes. `gen_loadavg` also prints its `Vec`'s pointer/len/capacity, which says
+directly whether the `Vec` was born over already-freed memory. Both are
+temporary and come out with the fix.
+
+The original sketch is kept because the constraint in its last sentence is the
+part that is easy to get wrong:
+
+> Escalate to recording the **first** free's return addresses in the slot's own
+> poison payload (bytes 12..44, which currently hold `FREE_POISON`), and print
+> them on detection. "Who freed it the first time?" is the harder and more
+> useful half, and the slot is already being written at exactly that moment.
+> Note that `check_poison` verifies the `FREE_POISON` fill on allocation, so it
+> must be taught to skip whatever range the provenance record occupies —
+> otherwise the provenance itself reads as a use-after-free.
+
+### It stopped reproducing, which is not the same as being fixed (2026-09-01)
+
+The boot carrying both instruments (`3ac226bfa`) **did not reproduce it at
+all**. `syshealth` went to 24 passed / 0 failed, the `kshell` rung-21 panic
+disappeared, and the boot test passed. The `gen_loadavg` print shows the very
+slot that had been reported double-freed on the two preceding boots being used
+cleanly:
+
+```
+[fsconform] Running cross-backend FileMeta conformance...
+[loadavg-dbg] tasks ptr=0xffff80007e3a1900 len=1 cap=1 elem=176
+[loadavg-dbg] tasks ptr=0xffff80007e3a1800 len=1 cap=1 elem=176
+```
+
+Note `len=1 cap=1`: at that point in boot the scheduler holds one task, so
+`collect()` allocates once and never grows. **The "buffer freed by a growth
+`realloc`" explanation in the section above is therefore wrong** — there is no
+growth. The `Vec` is a single 176-byte element in a 256-byte class, allocated
+once and dropped once, and it still managed to be freed twice.
+
+That combination is what makes this serious rather than solved. A double-free
+of a `Vec` that is allocated exactly once, and that disappears when a serial
+write is inserted between the allocation and the drop, is not a defect in
+`gen_loadavg` — the function does not have enough moving parts to hold one. It
+points instead at the slot being handed to two owners in the first place, which
+the earlier "magic survives, so no allocation intervened" argument does **not**
+rule out: that argument constrains what happens *between* the two frees, and
+aliasing happens *before* both of them.
+
+Do not close this on the strength of a green boot. The next boot (`1d96d8b58`)
+removes the `gen_loadavg` print and keeps the heap-side trace, which splits the
+two variables:
+
+| Outcome | Reading |
+|---|---|
+| Double-free returns | The print was the perturbation; the trace now names the first freer, which is the open question. |
+| Stays away | The perturbation is on the allocator side — the per-free backtrace walk changes the timing of every free — and the bug is a race, not a `procfs` defect. |
+
+**Trigger for closing:** a boot whose `syshealth` "Heap safety" line reads
+`[PASS]` with `fs::conformance` running **and with no diagnostic
+instrumentation compiled in**, and where `/proc/heapinfo` no longer disagrees
+with itself about its size. A green boot that still carries the free-trace does
+not count — the instrument is itself a suspect.
+
+**Resolution of that trigger (2026-09-01):** the discriminating boot ran and the
+double-free returned, which settled the table above on the first row — the print
+*was* the perturbation. What the trace then showed was not a first freer but
+live object data, and decoding it against DWARF gave the cause recorded at the
+top of this entry. The free-trace has since been deleted, so the "no diagnostic
+instrumentation compiled in" half of the trigger is now satisfied by
+construction; what remains is one green boot on `e24ce4ad6`, and the separate
+`/proc/heapinfo` size bug.
+
+## The boot recorder filed a host fork failure as a kernel TIMEOUT (lane A) — FIXED
+
+**Status:** fixed in `a85a5b5b4`; the one corrupted row is corrected in place.
+
+**In short:** on 2026-09-02 a boot ran for 395 of its allowed 4500 seconds and
+was in the middle of a userspace test when the *host* refused to fork a
+process — Windows was at 96% of its commit limit, so `bash` could not start the
+next helper and `boot-test.sh` exited 127. `boot-history.py` recorded that as a
+`TIMEOUT`: a claim that the kernel failed to reach its marker. It reset the
+consecutive-clean streak that four entries in this file use as their closure
+bar, and it matched the run to lane B's `B-FORKEXEC-BOOT-HANG` — a *hang*
+fingerprint, filed against a boot whose own stored tail shows it still making
+progress at the moment the harness died.
+
+**Why the existing guard missed it.** There was already a `HOST_FAIL` verdict
+for exactly this class of event, and it is built on a good principle: it reads
+QEMU's stderr and nothing else, because the guest cannot write to that stream,
+so a kernel that prints `Failed to CreateFileMapping` cannot excuse itself. But
+the fork that failed here was not QEMU's. QEMU was running fine; the harness
+around it was what could not allocate. There was no host evidence to read,
+because the process that would have produced it was never started.
+
+**The fix.** The harness's own exit status has the same unforgeable property
+from the other side: it is set by the shell, above the emulator, after the
+kernel has had its say. `boot-test.sh`'s vocabulary is 0 (pass), 1 (kernel or
+self-test failure), 2 (wedge), 3 (booted but produced no artefact) and 4 (boot
+lock held). 126 and 127 are not in it — they are the shell's own statuses for
+"could not execute" and "could not run at all", which is what a refused `fork()`
+looks like from outside. `classify()` now treats those as a host failure.
+
+**The trap that the first draft fell into, and the boot that caught it.** The
+obvious rule — "any 126/127 means the host failed" — is wrong, and the history
+already contained the proof. The boot of 2026-09-01T11:06 exited 127 **and**
+its log ends `FATAL: virtio-gpu render-resource self-test failed`. Both things
+happened: the kernel died, and then the harness stumbled on its way out.
+Excusing every 127 would have rewritten that row to `HOST_FAIL` and removed a
+real FATAL from the counts — the precise direction `boot-history.py` exists to
+prevent, since a manufactured clean streak is what closes issues.
+
+So the override is bounded by *what the verdict rests on*:
+
+| Verdict | Rests on | Retracted by exit 127? |
+|---|---|---|
+| `PANIC` | the kernel's own words in the log | **No** — a harness that stumbled afterwards cannot un-say them |
+| `TIMEOUT` | a marker that never arrived | Yes — absence is what a stopped harness cannot testify to |
+| `SELFTEST_FAIL` | a gate that reported a failure | Yes — under 127 the gate never reported at all |
+| `PASS` / `PASS_TOOLING` / `BENCH_INCOMPLETE` | the marker being reached | Unreachable: each needs an exit status the harness *does* produce |
+
+`124` stays outside the rule even though it is also outside the vocabulary: it
+is `run-timeout.py`'s expiry, which genuinely *is* a statement about something
+not finishing, and excusing it would delete the loudest hang signal the harness
+has.
+
+The stderr half keeps its wider reach and still overrides `PANIC` — "cannot set
+up guest memory" is evidence about *why* the guest died, whereas a fork that
+failed minutes later is evidence about nothing but the fork.
+
+**Where it lives:** `scripts/boot-history.py` — `HARNESS_ABORT_EXITS`,
+`harness_abort()`, `LOG_EVIDENCED_VERDICTS`, `not_about_the_tree()`, and the
+restructured `classify()`. Tests in `scripts/test-boot-history.py`, including
+the 2026-09-01 counter-example as a regression case.
+
+**The corrupted row:** corrected in place, mechanically, by applying the new
+rule to fields the row already stored — verdict to `HOST_FAIL`, the false
+`B-FORKEXEC-BOOT-HANG` fingerprint dropped, and a `corrected` field recording
+what changed and why. The 2026-09-01 `PANIC` was left untouched, which is the
+check that the new rule is narrow rather than convenient.
+
+## Three lanes building at once exhausts the Windows commit limit (all lanes) — OPEN
+
+**In short:** this machine's commit limit is ~262 GB (RAM plus pagefile). With
+all three lanes compiling, it sits at 96-97% — and at that point *any* process
+that tries to start fails, including the ones a boot test needs. This is not
+hypothetical: it has now cost two boot runs, on 2026-09-01 and 2026-09-02, one
+of which also corrupted the boot-history evidence base (see the entry above).
+
+**What it looks like when it bites:** `dofork: child -1 ... exit code
+0xC000012D, errno 11` followed by `fork: retry: Resource temporarily
+unavailable`. `0xC000012D` is `STATUS_COMMIT_LIMIT`. Free *physical* memory can
+look healthy — 20 GB free while commit is at 97% is the normal shape — so
+watching free RAM does not predict it.
+
+**Why it is not simply fixed.** The obvious response, killing the other lanes'
+builds, is forbidden: they are another agent's in-flight work, and the standing
+rule is to kill only processes you started, by PID. Raising the pagefile is a
+system-wide change that needs the operator. And a boot test is the single most
+expensive thing to lose to this — 8-50 minutes, discarded at the very end.
+
+**Mitigation in use now:** check commit charge before starting a boot
+(`Get-CimInstance Win32_OperatingSystem`, `TotalVirtualMemorySize -
+FreeVirtualMemory`), and do code work rather than boot work while it is above
+~90%. With the fix above, a run lost this way is at least recorded honestly
+instead of being blamed on the kernel.
+
+**What a proper fix looks like:** the boot lock already serialises QEMU across
+lanes; the same mechanism could serialise *builds*, or `boot-test.sh` could
+refuse to start — with a distinct exit status, not a boot verdict — when commit
+charge is above a threshold, so the cost is paid in seconds rather than at the
+end of a 50-minute run. The second is lane A's to do and is the smaller change.
+
+### Addendum 2026-09-02: it also costs wall clock in a way that has nothing to do with the commit limit, and that is the failure mode you will hit first
+
+Concurrency does not have to reach `STATUS_COMMIT_LIMIT` to lose a run. On
+2026-09-02, with lane B running a boot test in parallel, a lane-A boot test was
+killed by its own 1800s budget having **never reached QEMU** — the pre-build
+static gates alone consumed the entire budget. No fork failed, commit charge
+never tripped the floor, and every gate that ran passed. The run was simply
+too slow to finish.
+
+**The measurement, because the first diagnosis was wrong.**
+`check-variant-lists.py` sat for ~400s and looked like a hang; the hypothesis
+was that its file walk had wandered into a `target/` tree. It had not — the
+walk enumerates 6441 `.rs` files in 6.4s and the `target` filter discards
+exactly zero of them, because the build directories are at the workspace root
+and not under any scanned prefix. Timing `Path.read_text()` over the same
+6441 files under live contention gave:
+
+| | value |
+|---|---|
+| total | **368.5s** |
+| mean per file | 57 ms |
+| slowest single file | 0.86s (`userspace/psalm-cli/src/main.rs`) |
+
+The distribution is the finding. There is no outlier and no pathological
+input: every read is uniformly ~2 orders of magnitude slower than it should
+be. That is a saturated disk, not a bug in the gate — the gate is innocent and
+should not be "optimised" in response to this.
+
+**What to take from it.** Two things, and the second is the one that bites.
+
+1. **Do not size a boot-test timeout from an uncontended run.** The harness's
+   own header cites 1004s of gates before it "says a word"; under a second
+   lane that becomes the whole of a 30-minute budget. Budget 7200s when
+   another lane is building, as lane B already does.
+2. **A slow gate is not a hung gate, and the difference is not visible from
+   the log.** Both look identical — a heartbeat line every N seconds against a
+   header that never advances. The only thing that separated them here was
+   measuring, and the cheap measurement (`faulthandler.dump_traceback_later`,
+   which named `read_text` and cleared the regexes) is worth reaching for
+   before forming a theory about the gate's *logic*. The first theory was
+   wrong in a way that would have produced a real change to a correct file.
+
+---
+
+### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
+
+**In short:** every boot test in a lane worktree prints `WARNING: fastpy would
+not resolve any SlateOS sysroot`, which reads as "the C fixtures in this image
+were linked against a libc nobody can identify, so their results cannot be
+attributed to any `posix/` revision." The alarming part is true. The reason is
+not what the message implies: the lane's `libc.a` exists and is perfectly
+identifiable — the search simply never looks in the lane's own tree. It looks
+only in a sibling checkout literally named `os`, which in the three-worktree
+layout is the *integration* tree, and which has no sysroot at all.
+
+**Lane:** A (`scripts/boot-test.sh`, and fastpy's own
+`_find_slateos_sysroot_lib`, which the gate deliberately mirrors).
+**Found:** 2026-09-01, in the `bdl8f0gxl` boot run.
+
+**Evidence, on this machine, right now:**
+
+| path | `libc.a` |
+|---|---|
+| `os-lane-a/toolchain/sysroot/lib/` (the tree under test) | **present**, 12,645,582 bytes, 2026-08-31 |
+| `os/toolchain/sysroot/lib/` (the only place searched) | **absent** |
+
+The candidate list in `boot-test.sh` (~:646–658) is, in order:
+`$FASTPY_SLATEOS_SYSROOT/lib`, `$FASTPY_SLATEOS_SYSROOT`, then
+`${FASTPY_DIR:-$PROJECT_ROOT/../fastpy}/../os/toolchain/sysroot/lib`. Both
+environment variables are unset in the lane shells, so only the third is ever
+tried, and that third hard-codes the directory name `os`. `$PROJECT_ROOT` — the
+tree whose kernel is being booted and whose `libc.a` is sitting right there — is
+not a candidate at any point.
+
+**Why this is worse than a stale-artifact warning.** It is unconditional. It
+fired on this run, it fires on every lane-A run, and by construction it fires on
+lane B's and lane C's too, since none of the three worktrees is named `os`. A
+warning that cannot ever *not* fire carries no information, and the cost is
+precisely the failure mode `A-GATES-SILENTLY-STOPPED-CHECKING` describes from
+the other direction: readers learn to scroll past it, so on the day the sysroot
+genuinely is unresolvable — or genuinely is the wrong one — the message that
+says so will look exactly like the noise it has been printing for weeks.
+
+Note the irony that makes this worth writing down rather than silencing: the
+gate's own comment says it mirrors fastpy's search "so it is written to be read
+side-by-side with that function", and warns that if the two ever disagree "the
+gate becomes worse than nothing -- it would report on a file fastpy does not
+use." The mirroring is faithful. The defect is in the thing being mirrored, and
+faithfully copying it is what propagated the defect into the harness.
+
+**What a proper fix looks like.** Two candidates, and they are not exclusive:
+
+1. ~~**Harness-side, small and local to lane A:** `boot-test.sh` exports
+   `FASTPY_SLATEOS_SYSROOT="$PROJECT_ROOT/toolchain/sysroot"` before the check
+   when that directory holds a `libc.a`. This makes the first candidate hit,
+   makes the warning informative again, and is correct on its face — the tree
+   under test is the tree whose libc the fixtures should be attributed to.~~
+   **← WRONG. Do not do this. Struck 2026-09-02, lane A, before implementing
+   it.** It does not make the warning informative; it deletes the gate.
+
+   `check_sysroot_identity` ends in `cmp -s "$resolved/libc.a" "$ours"`. Export
+   that variable and `$resolved` *becomes* `$ours`, so the comparison reads our
+   own `libc.a` against itself, always matches, and returns silently — forever,
+   on every lane, whatever the fixtures were actually linked against.
+
+   The reasoning error was assuming `boot-test.sh` links the fixtures. It does
+   not: it runs `ctest-fixtures.py image-check` and `sysroot-check` only, never
+   `build`, and its own comment at :460 says the rootfs rebuild is something
+   "the boot test does not run". The fixtures in the image were linked by an
+   earlier, separate invocation, and no variable set inside `boot-test.sh` can
+   retroactively change what they linked against. Setting it at check time
+   changes only the *report*, not the fact reported on.
+
+   So the proposal would have converted a warning that is annoying-but-true
+   into a gate that passes without checking — `A-GATES-SILENTLY-STOPPED-CHECKING`
+   exactly, and self-inflicted by an entry that cites that failure mode two
+   paragraphs earlier. The environment variable is the right lever; **the place
+   to pull it is the fixture *build*, not the boot test.**
+2. **Root-cause, and cross-project:** fastpy's `_find_slateos_sysroot_lib`
+   should walk up from the *current* project root before falling back to a
+   sibling named `os`. Hard-coding a checkout's directory name is what breaks
+   the moment anyone uses `git worktree`, which this project now does by policy
+   for all three lanes.
+
+(2) is what actually fixes this, and it **is not lane A's tree** — fastpy lives
+at `D:\visual studio projects\fastpy` — so it needs either a request or an
+operator decision about who owns it. Anything invoking fastpy against a lane
+tree has the same blind spot, with no harness to compensate.
+
+**What lane A did instead, 2026-09-02 (partial — the entry stays OPEN).** The
+warning was *misdiagnosing* its own cause, which is separable from the cause
+and was fixed. It read:
+
+> Neither `$FASTPY_SLATEOS_SYSROOT` nor the sibling 'os' checkout holds a
+> `libc.a`. The fixtures in the image were linked against **something this host
+> can no longer name**…
+
+That describes a missing or unidentifiable libc. Ours is present, 12.6 MB, at a
+path the function already holds in `$ours` — the early return above the warning
+*proves* it exists, since the check bails out when it does not. The failure is
+a search that never looks there. A reader told "this host can no longer name
+it" goes and rebuilds a sysroot that was never missing.
+
+The message now names the real cause, prints `$ours` as "present, never
+searched", gives a repair that sets the variable **at fixture-build time**
+(quoted — every checkout of this project is under a path containing a space, so
+an unquoted assignment is a repair line that fails when pasted), and states in
+the output itself why the script does not set the variable around the check.
+That last line exists so the struck proposal above is not re-invented by
+someone reading only the script: the refutation lives where the temptation is.
+
+This does not stop the warning firing — it *should* fire, because attribution
+genuinely is impossible until (2) lands. It stops it being wrong about why.
+`bash -n` and `shellcheck --severity=warning` clean; the branch was exercised
+by extracting the real function and running it with both variables unset.
+
+**Not to be confused with** the `[ctest] ERROR: ... libc.a was built from 7
+input(s) that have since changed` block printed just above it on the same run.
+That one is a genuine staleness report about lane B's `posix/` sources, it is
+accurate, and it is separately actionable by rebuilding the sysroot. This entry
+is only about the *attribution* warning that follows it.
+
+---
+
+### A-KILL-QEMU-PRINTS-A-BARE-NO-SUCH-FILE-AFTER-A-PASSING-RUN. The `[ -f ]` guard on the pidfile does not make the read that follows it safe, and the read's own `2>/dev/null` cannot suppress the message — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A; the fix below was applied verbatim once the in-flight boot test released `scripts/`. `bash -n` and `shellcheck --severity=warning` both clean.)
+
+**Fixed as described.** The `[ -f ]` wrapper is gone, the read is attempted
+unconditionally, and the stderr redirect moved to the group so it covers the
+shell's own diagnostic. One thing was added beyond the plan: the stale docblock
+claimed a kill-by-image-name fallback that no longer exists, and rather than
+just deleting the sentence the replacement records *why* there must never be
+one again — with three lanes live, killing `qemu-system-x86_64.exe` by image
+name would take down another lane's boot test along with ours. A removed
+fallback that is only deleted invites its own reintroduction.
+
+**In short:** after a *successful* boot test, the harness sometimes prints one
+stray line — `./scripts/boot-test.sh: line 1329: .../build/qemu.pid: No such
+file or directory` — and then exits 0 anyway. Nothing is broken; the run is
+genuinely green. But an unexplained error printed on a passing run is exactly
+the thing that makes a reader distrust the next one, and it costs someone a
+diff-read to establish that it means nothing.
+
+**Where it lives.** `scripts/boot-test.sh:1327-1329`, in `kill_qemu()`:
+
+```bash
+    if [ -f "$PIDFILE" ]; then
+        local win_pid
+        win_pid="$(tr -cd '0-9' < "$PIDFILE" 2>/dev/null || true)"
+```
+
+**Two independent defects, and the second is the interesting one.**
+
+1. **A TOCTOU race.** QEMU unlinks its own `-pidfile` as it exits. On the happy
+   path the guest reaches BOOT_OK and QEMU is on its way out under its own
+   power, so the file can — and sometimes does — vanish between the `[ -f ]` on
+   1327 and the redirection on 1329. That the message shows up *after a passing
+   run* rather than a failing one is not a coincidence; it is the signature.
+
+2. **`2>/dev/null` is attached to the wrong thing, and cannot be attached to
+   the right one from where it sits.** A failed *input redirection* is
+   diagnosed by the shell, which never execs `tr` at all — so `tr`'s stderr
+   redirection is never in effect when the message is produced, and the message
+   goes to the script's stderr. `|| true` then swallows the *status*, which is
+   why the run stays green and the line appears alone with nothing else wrong.
+   Verified directly:
+
+   ```
+   $ bash -c 'v="$(tr -cd "0-9" < /tmp/missing 2>/dev/null || true)"; echo "[$v]"'
+   bash: line 1: /tmp/missing: No such file or directory
+   []
+   $ bash -c 'v="$( { tr -cd "0-9" < /tmp/missing; } 2>/dev/null || true)"; echo "[$v]"'
+   []
+   ```
+
+**The proper fix — remove the race, do not narrow it.** Delete the `[ -f ]`
+wrapper and let the read simply be attempted, with the *group's* stderr
+redirected so it covers the shell's own diagnostic as well as `tr`'s:
+
+```bash
+    # QEMU unlinks its own pidfile as it exits, so a test-then-read races the
+    # very teardown this function exists to perform, and loses most often on
+    # the happy path. Attempt the read unconditionally instead: an absent file
+    # yields an empty pid, which the `-n` below already handles. The stderr
+    # redirect is on the *group* because a failed input redirection is reported
+    # by the shell before `tr` is ever exec'd, so `tr`'s own 2>/dev/null never
+    # covers it -- which is how this printed a bare "No such file or directory"
+    # on runs that passed.
+    local win_pid
+    win_pid="$( { tr -cd '0-9' < "$PIDFILE"; } 2>/dev/null || true)"
+    if [ -n "$win_pid" ]; then
+        taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
+    fi
+```
+
+Dropping the `[ -f ]` is part of the fix and not a simplification of it. Left
+in place it reads to the next person as though it establishes that the file is
+there for the line beneath it, which is the property it does not have and
+cannot have. That is the same defect as `A-GATES-SILENTLY-STOPPED-CHECKING` and
+as lane B's `check_shellcheck` observation — *a guard that reports a fact it has
+not checked costs more than the finding does* — arriving from a third
+direction, this time as a guard rather than a report.
+
+**Why the fallback comment above it is also now wrong.** `kill_qemu`'s docblock
+at :1311-1312 says it "falls back to killing by image name only if the pidfile
+is missing (should not happen)." Both halves are stale: there is no
+kill-by-image-name fallback in the body any more, and the pidfile going missing
+demonstrably *does* happen and is in fact the normal case on a clean exit. The
+comment should go with the fix.
+
+---
+
+### A-CANARY-OCCUPANCY-CEILING-IS-DERIVED-FROM-THE-WRONG-ERROR-MODEL. A live timing self-test refused to build a boot test at `occupancy_measured 1.089 > ceiling 1.078`, on a 0.2s span whose instrument cannot resolve 1% — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A)
+
+> **Resolution 2026-09-02 (commit `7a504ebb6`).** The title is wrong, and that
+> is the finding. The error model was *right*; the span it was applied to was
+> not the span the numerator covered. The ceiling was correctly reporting an
+> impossibility — just not the one anybody guessed.
+>
+> **Cause.** Each spinner published a bare CPU number, and the controller
+> divided it by an interval it stamped itself. Those are not the same interval.
+> A spinner parked in `go.wait(1.0)` may have published up to a second earlier,
+> so the numerator began wherever it last spoke while the denominator began at
+> the controller's stamp. Windows charges a whole 15.6 ms tick to whichever
+> process the 64 Hz sampler catches, however briefly it ran — so a *single*
+> tick landing in that gap is 7.8% of a 0.2 s window, and the entire allowance
+> was one tick.
+>
+> **Fix.** Spinners publish `(cpu_seconds, monotonic)` as a locked pair, and
+> each spinner's span is its own clock delta over the same interval as its own
+> CPU figure. Numerator and denominator are now the same interval by
+> construction, so quantisation is the only error left and `1 + g/span` is a
+> hard bound again. Barriers at both window edges (`fired_count`, `done_count`)
+> keep the pairs fresh — the controller may not snapshot until every spinner
+> has published after `go`, nor close until every one has published after
+> `stop`.
+>
+> **What was rejected, and why it matters.** Widening the tolerance. It would
+> have retired the only check that noticed, which is precisely the mistake the
+> old hardcoded `2.0` had already made once — it let 1.82 cores per
+> single-threaded spinner through for as long as the host stayed quiet. A bound
+> that is loosened every time it fires stops being a bound.
+>
+> **Two suspects were measured and cleared rather than patched around.** The
+> first theory was that the controller's snapshot read was losing milliseconds
+> to descheduling; measured, it takes **0–20 µs**, and the stamping order it
+> was blamed on is now merely correct rather than load-bearing. This is the
+> second time today a plausible cause survived until it was measured and then
+> did not (see the `check-variant-lists.py` entry) — the pattern is that a
+> mechanism which *could* explain the magnitude is not evidence that it *did*.
+>
+> **A second, independent flake surfaced during the repro** and is fixed in the
+> same commit: the live test's `occupancy` *floor*. A 14-run probe caught it at
+> `0.304` on an otherwise idle host. Over 0.2 s a single unrelated process can
+> take most of the CPU, and the instrument cannot tell that from a load that
+> was never applied — so this would have refused a boot test for a fact about
+> the host rather than about the code. The live window goes 0.2 s → 0.6 s,
+> which both bounds needed in opposite directions: the floor gets enough ticks
+> to average a transient away, and the ceiling's allowance falls from 7.8% to
+> 2.6%, tripling the check's power.
+>
+> **Measured, 14 runs each, same host:**
+>
+> | | `occupancy_measured` range | ceiling | over ceiling |
+> |---|---|---|---|
+> | before (0.2 s, unpaired) | 0.278 – 1.037 | 1.062 – 1.077 | 0/14 quiet, 1 seen loaded |
+> | after (0.6 s, paired) | **0.811 – 1.004** | 1.022 – 1.026 | **0/14** |
+>
+> The pre-fix probe also caught `1.009` on an *idle* host — impossible for a
+> single-threaded process, and the observation that moved this from "flaky
+> tolerance" to "the ratio is malformed".
+
+**In short:** the harness runs its own test suites before it builds anything,
+and one of them — `test-canary-load.py` — starts two CPU-burning processes and
+checks that they really did burn CPU. It also checks the reverse: that they did
+not somehow burn *more* CPU than the time they were measured over, which would
+mean the measurement was self-inconsistent. Under two lanes' concurrent load
+that upper check failed, by about 1%, on a measurement whose clock is only
+accurate to about 8%. A whole boot test was refused over it, before building.
+
+**The failure, verbatim:**
+
+```
+1 FAILURE(S)
+  - and does not exceed what the measured span allows:
+    occupancy_measured 1.089 > ceiling 1.078 (span 0.2008s, window 0.2007s)
+```
+
+`check_python_suites` (`scripts/boot-test.sh:4166-4175`) exits 1 when any suite
+fails, so this ends the run at the gate with `ERROR: refusing to build`. That
+behaviour is correct and should not change — these suites *are* the harness,
+and its own comment is right that "a failure here means the numbers this run
+would produce cannot be trusted." The defect is that the assertion is false,
+not that the gate believed it.
+
+**Where it lives.** `scripts/canary-load.py:212-225` (`occupancy_ceiling`) and
+`scripts/test-canary-load.py:823-827`, the live two-spinner case at :782-790.
+
+**The arithmetic, which is the whole diagnosis.**
+
+```python
+return 1.0 + CPU_CLOCK_GRANULARITY_S / span_seconds   # 15.6 ms / span
+```
+
+At `span = 0.2008s` that is `1 + 0.0777 = 1.078`. The span holds **12.9 timer
+ticks**, so the entire allowance the ceiling grants is *one tick*. The observed
+overshoot of 0.011 is about 1.14 ticks of aggregate over-charge across the two
+spinners. The reading is not a physical violation; it is one tick of noise on
+an instrument with thirteen ticks of range.
+
+**Why the error model is wrong, and it is wrong in a way the comment argues
+for.** `occupancy_ceiling`'s docstring is careful and mostly right — it
+explicitly refuses a hardcoded tolerance, derives the bound from the span, and
+notes that a fixed tolerance "is either too tight for a short span or too loose
+for a long one." All true. But it models the clock as **quantised**: a true CPU
+time rounded to a 15.6 ms grid, so at most one grid step high.
+
+Windows' `GetProcessTimes` is not quantised, it is **sampled**. At each timer
+interrupt the whole tick is charged to whichever thread was running on that CPU
+at that instant. A process that is runnable but time-slicing against other work
+can be charged ticks it did not fully consume. Over many ticks the
+over- and under-charges cancel and the ratio converges; over thirteen ticks
+they do not. So the error is not bounded by one grid step — it is a sampling
+error that shrinks with the *number of ticks in the span*, which is precisely
+the regime a 0.2s window puts it in the worst case of.
+
+That also explains why this has passed for weeks and failed today: on a quiet
+host a spinner has a core to itself and is charged correctly, so the sampling
+error is near zero and the quantisation model is indistinguishable from the
+truth. It is contention that separates them. Same root cause as the addendum to
+"Three lanes building at once…" above, arriving as a false *assertion* rather
+than as a timeout.
+
+**What is NOT yet established, and why this entry says OPEN rather than naming
+a fix.** The account above is a model, and the last time a plausible model was
+adopted without measuring — earlier the same day, on `check-variant-lists.py` —
+it was wrong and would have produced a change to a correct file. So the
+reproduction is running before the fix is written: the suite is being run
+repeatedly under load to get a **failure rate** and a distribution of
+`occupancy_measured`. What that has to settle:
+
+- Is the overshoot rare (a tail event, argues for a longer span) or routine
+  (argues the ceiling is structurally too tight)?
+- Does it scale as `1/span` (quantisation, the current model) or as
+  `1/sqrt(ticks)` (sampling)? These predict different fixes and the numbers can
+  distinguish them.
+
+**What a proper fix will *not* be.** Loosening the ceiling by a constant. The
+docstring is right that a constant tolerance is what let a systematically
+biased ratio pass unnoticed, and that argument survives this finding intact —
+whatever replaces the bound has to be derived from the span too, just from the
+correct error law. Deleting the clause is also out: it is the only check that
+the measurement is self-consistent, and §673 (a clause that cannot be judged is
+voided, never passed) is the precedent for what to do when an instrument cannot
+support a question — void it loudly and count the voids, not pass it quietly.
+
+**Meanwhile:** any lane whose boot test dies here has not found a bug in its own
+change. Re-run; it is load-dependent. *(Superseded by the resolution at the head
+of this entry: it is fixed, not merely load-dependent.)*
+
 ---
 
 ## B-CP-SYMLINK-OWNERSHIP-FAILURE-QUOTED-A-NAME-GNU-LEAVES-BARE — FIXED 2026-09-01
@@ -107070,5 +108306,156 @@ matches the commit, which is most pushes. The exposure is bounded and does not
 grow with time. It bites exactly when someone commits, tidies, and pushes
 without committing the tidy — which is a common enough sequence that it has
 already cost this project two published-unformatted commits.
+
+---
+
+### A-PIPING-A-BACKGROUNDED-RUN-THROUGH-`tail`-REPORTS-SOMEBODY-ELSE'S-EXIT-STATUS — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A; a working-practice fix, no code change)
+
+**In short:** a boot test that *failed* was reported to me as "completed, exit
+code 0", and I was one step from closing a bug and merging to `main` on the
+strength of it. The cause was not the harness. It was that I had started the
+run as `./scripts/boot-test.sh … | tail -80`, and a shell pipeline exits with
+the status of its **last** command — `tail`, which succeeds at tailing the
+output of a program that just died. The failure was sitting in the text I did
+have; the status that would have made me read it said everything was fine.
+
+**What it looked like.**
+
+```
+ERROR: refusing to build.  1 tooling test suite(s) failed:
+    test-check-design-decisions-bands.py
+[run-timeout] child exited: FAIL (exit 1), 3242s elapsed
+```
+
+…delivered under a completion notice reading `completed (exit code 0)`.
+
+**Why this is worth an entry rather than a shrug.** The truncation half of this
+trap is already recorded immediately above — "capture the run's output to a
+file in full rather than reading a truncated background-task tail". That advice
+is right and it is not sufficient, because it is about *losing* information. The
+sharper defect is that the pipe does not merely hide the verdict, it **replaces
+the verdict with a different program's success**. Lost output announces itself
+the moment you go looking; a fabricated `0` does not, and it is trusted
+precisely at the moment a decision hangs on it — "is the tree green enough to
+merge?".
+
+This is the shape this file already names twice from other directions:
+`A-GATES-SILENTLY-STOPPED-CHECKING` (a gate parsing a fraction of the tree and
+reporting "clean") and the `[ -f ]` guard in `A-KILL-QEMU-PRINTS-A-BARE-NO-SUCH-
+FILE` — *a guard that reports a fact it has not checked costs more than the
+finding does*. Here the "guard" is an exit status, and the fact it had not
+checked was whether the thing I actually ran succeeded. Arriving from a third
+direction is the argument for writing it down.
+
+**The rule.** Never pipe a command whose exit status you intend to believe.
+For a backgrounded run, redirect instead, and read the status explicitly:
+
+```bash
+# WRONG — notification reports tail's status, not the build's
+python scripts/run-timeout.py 7200 ./scripts/boot-test.sh 2>&1 | tail -80
+
+# RIGHT — full output kept, status preserved and printed
+python scripts/run-timeout.py 7200 ./scripts/boot-test.sh > /tmp/boot.log 2>&1
+echo "EXIT=$?"
+```
+
+`tee` is the exception worth knowing, since it is the reason the advice above
+reaches for it: `cmd | tee f` has the same defect, but `set -o pipefail` or
+`${PIPESTATUS[0]}` recovers the real status, and `run-timeout.py` also prints
+`child exited: …` in its own output regardless of how the pipeline is wired.
+The cheapest habit is still redirect-then-read.
+
+**Cost this time:** 54 minutes of wall clock on a run that refused to build in
+its first phase, plus a near-miss on closing
+`A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST` against a boot that never
+happened — an entry whose own text warns, in as many words, that "every
+assertion here is boot-time, so an unrun harness has demonstrated nothing."
+The gate that caught the underlying problem (`check-design-decisions-bands`,
+on a §675 entry missing its `**Lane:** A` field) worked exactly as designed.
+The only thing that failed was my reading of whether it had run.
+
+---
+
+## C-USERSPACE-2288-TOOLS-REPORT-SUCCESS-FOR-WORK-THEY-NEVER-DID — OPEN 2026-09-02 (lane C found; lane B's tree)
+
+**In short:** 2,288 of the 2,756 crates under `userspace/` (83%) print a
+report about a file, a device or a machine, contain no call that could have
+looked at one, and then exit **0**. The exit code is the bug. A stub that
+says "not implemented" and exits 1 is harmless — every caller already knows
+what to do with it. A stub that prints a plausible measurement and exits 0
+is indistinguishable from the real tool to a shell script, a `Makefile`, or
+a person.
+
+**Where:** `userspace/**`, which is lane B's under the ownership map. Filed
+as `requests/c-b-2288-userspace-tools-report-success-for-work-they-never-did.md`.
+Lane C has edited nothing in that tree.
+
+**How to reproduce the number:**
+
+```
+$ python scripts/audit-cli-fabrication.py --list
+userspace crates with sources : 2756
+assert a fact, do no I/O      : 2288
+                              : 83.0%
+```
+
+The scanner counts a crate only when it *both* (a) contains none of
+`std::fs`/`File::open`/`std::net`/`Command::new`/`libc::`/`unsafe {`/… — i.e.
+nothing that could have observed anything — and (b) prints a line asserting a
+fact (a decimal measurement, a 3+-digit count, `PASS`/`OK`/`found`, or one of
+`bitrate`/`duration`/`fps`/`Hz`/`kb/s`/`MB`/`GB`). Crates that only print
+usage text are not counted; tools whose correct behaviour genuinely *is* a
+pure function of argv (`echo`, `basename`, `printf`, `seq`, `yes`, …) are
+excluded by name. So 2,288 is a floor.
+
+**The three worst instances, in severity order:**
+
+1. **`userspace/age` ships a private key.** `generate_keypair()`
+   (`main.rs:64`) returns the same X25519 pair to every caller on every
+   machine, with `AGE-SECRET-KEY-1QVAHC9TQPAZ…` as a string literal in the
+   repository. Anything encrypted to the matching public key is readable by
+   anyone with a checkout. The crate's own test (`main.rs:290`) asserts only
+   `kp.public_key.starts_with("age1")`, which a constant satisfies — so the
+   test certifies the bug rather than catching it. **This is three lines and
+   should be deleted independently of whether the tool is ever finished.**
+2. **`age` and `ffmpeg-cli` claim writes that do not happen.** `age` prints
+   `age-keygen: key written to {path}` and `(binary encrypted data written
+   to {output})`; the crate contains no filesystem call at all.
+   `ffmpeg -i in.mov out.mp4` prints a duration, bitrate, resolution and
+   frame count for a file it never opened, produces no output file, and
+   exits 0 — so `ffmpeg … && rm in.mov` destroys the source. Note that `age`
+   marks *two* of its lines `(simulated)` and not these two, which is worse
+   than marking none: the honest markers read as evidence that the unmarked
+   lines are real.
+3. **`userspace/vulkan-cli` reports a GPU that is not in the machine.**
+   `vulkaninfo` prints `deviceName = llvmpipe (LLVM 17.0.6, 256 bits)`;
+   `vkvia` prints `Drivers: 1 ICD(s) found` and `Result: PASS` on a system
+   with zero ICDs; `vkcube` prints `Frames: 60 FPS: 60.0` without drawing
+   one. This one collides with lane C's own roadmap: `roadmap.md` §3.2 has
+   lane C building the Vulkan loader, and `vkvia` is the tool that is
+   supposed to say whether the loader found anything. It answers PASS today.
+
+**Roadmap status is affected but not corrected here.** `roadmap.md` lines
+3872 (`vulkan-cli`), 4882 (`vkbasalt-cli`) and 4887 (`dxvk-cli`) are marked
+`[x]`. Lane C is not editing them because the crates are lane B's and B may
+want to re-scope rather than un-tick.
+
+**The proper fix, per the request:** not 2,288 implementations — one
+mechanical property, *a tool that did not do the thing must not exit 0*.
+Refusal (stderr + non-zero) for anything claiming a write; a `SIMULATED:`
+prefix plus a non-zero exit is acceptable for the inert reporters. A large
+part of the 2,288 is probably better **deleted** than made honest: the list
+includes `ableton-cli`, `adobe-cli`, `affinityphoto-cli`, `aftereffects-cli`
+and many more front-ends for proprietary applications that will never run
+on this OS.
+
+**Why `scripts/audit-cli-fabrication.py` is not a `check-*.py`.**
+`scripts/pre-boot.py` globs `scripts/check-*.py` into every lane's gate
+(line 297), so that name would hand lanes A and C a red gate over lane B's
+tree that they cannot clear — which is the separate defect filed as
+`requests/c-b-check-libc-shape-grades-a-build-artifact-without-checking-its-age.md`.
+Run it by hand. Converting it to a pinned ratchet in the shape of
+`scan-orphan-modules.py` is offered in the request, but the baseline it
+would pin is lane B's to accept.
 
 ---

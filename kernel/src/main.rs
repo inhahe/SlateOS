@@ -1756,6 +1756,19 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::sysfs::self_test() {
                 serial_println!("WARNING: SysFs self-test failed: {:?}", e);
             }
+            // Cross-backend FileMeta conformance. Runs *after* every per-backend
+            // self-test above, and asks a different question from all of them:
+            // each of those checks what one driver does, and a field whose
+            // meaning drifts *between* two drivers passes every one of them —
+            // which is how btrfs, zfs and f2fs came to report a nine-bit mode
+            // under a twelve-bit contract for months with their own tests green.
+            // Placed here rather than earlier so devfs and sysfs have already
+            // initialised and are reachable through the VFS. See
+            // fs::conformance's module docs and known-issues.md
+            // A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST.
+            if let Err(e) = fs::conformance::self_test() {
+                serial_println!("WARNING: FileMeta conformance self-test failed: {:?}", e);
+            }
             // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
             // backend dispatch on a scratch tmpfs mount — runs on any root).
             if let Err(e) = fs::vfs::mount_self_test() {

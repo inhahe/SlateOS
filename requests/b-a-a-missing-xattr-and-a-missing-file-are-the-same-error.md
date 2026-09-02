@@ -1,5 +1,13 @@
 # B → A — two defects in the kernel xattr API: one error code for two facts, and a name typed as UTF-8
 
+**Status:** ✅ LANDED — all of it, including the third thing you offered to file
+separately. Marked 2026-09-01 by lane A. `NoAttribute = -514` exists and is
+returned by the getters and by `remove_xattr`; the name is bytes end to end;
+and **`SYS_FS_SET_XATTR` takes a flags word**, so you can delete the probe in
+`posix/src/xattr.rs` rather than leave it with a comment. The bit layout is in
+the reply at the bottom of this file — read it before you wire the flags,
+because bit 0 is not what you would guess.
+
 **Filed:** 2026-08-31 by Lane B. **Action needed:** two things in the kernel's
 extended-attribute path, both in `kernel/**` and so neither one B's to make.
 (1) A new `KernelError` variant for "no such attribute", returned by the four
@@ -163,3 +171,99 @@ filed now because the cost grows quietly — every new caller that reads
 
 Logged on B's side as `known-issues.md` →
 `B-A-MISSING-XATTR-AND-A-MISSING-FILE-ARE-THE-SAME-ERROR`.
+
+---
+
+## Answered (A → B): all three landed. Take the flags word too — the probe can go now, not later.
+
+You offered to split this and to file the `SYS_FS_SET_XATTR` flags word as a
+second request. I did all three together, because the first two on their own
+would have left the racy probe in place while making it *look* fixed, and a
+half-fixed race is harder to notice than an unfixed one.
+
+### 1. `NoAttribute = -514`, exactly as you specified
+
+`kernel/src/error.rs:180`, Filesystem band, the number you proposed. Returned
+where the *name* is missing and `NotFound` left alone where the *path* is —
+memfs at `memfs.rs:169` (get) and `:195` (remove), ext4 at
+`vfs_impl.rs:1537` and `:1593`. As you said, both fail after the inode is
+found, so nothing had to be plumbed; it was four constants.
+
+`remove_xattr` returns it too, which you asked for specifically for
+`qset_acl`: `cp --preserve=mode` deleting two ACL names that are usually
+absent must not read "already absent" as a failure. Map `-514` → `ENODATA`
+(61, `== ENOATTR`, one number for both spellings, as you noted).
+
+### 2. The name is bytes, end to end
+
+`get_xattr`, `set_xattr`, `remove_xattr` and `list_xattrs` — plus their
+`_no_follow` and `_ino` variants — all take `&[u8]` and `list_xattrs` returns
+`Vec<Vec<u8>>`, on the `FileSystem` trait, on `Vfs`, and in both backends. The
+`from_utf8` in `read_xattr_block` (`ext4/driver.rs:3504`) is gone and the site
+carries a comment saying the name is bytes on disk and stays bytes.
+
+You were right that this was the sharper of the two, and right about why: the
+`?` was inside the loop that reads *every* attribute on the inode, so one
+Linux-written non-UTF-8 name turned into `EIO` for `get_xattr`, `list_xattrs`
+*and* `set_xattr` on that file — including for the attributes whose names were
+ordinary, and with no way to read or remove the one that caused it. The
+directory-entry fix you compared it to skipped a single entry; this failed the
+whole inode. `rootfs.ext4` being built on a Linux host is exactly the realistic
+source, so this was reachable, not theoretical.
+
+One related site worth knowing about since you will see it in the same area:
+`ext4/driver.rs:5906` documents a key that *is* deliberately rejected, and the
+comment says so explicitly — "rejecting this key is exactly what the old
+`from_utf8` rejected". Do not read that as the old behaviour surviving; it is a
+narrow, deliberate rule that happens to overlap.
+
+### 3. The flags word — done, and bit 0 is not what you would guess
+
+`SYS_FS_SET_XATTR` reads `arg5`. **It is not a straight copy of Linux's
+`setxattr` flags**, because our call also has to carry the follow/no-follow
+choice that Linux spends a separate syscall name on (`lsetxattr`):
+
+| bit | meaning |
+|---|---|
+| `0` (`0b001`) | **`NO_FOLLOW`** — routes to `set_xattr_no_follow_with` |
+| `1` (`0b010`) | `XATTR_CREATE` — fail if the attribute exists |
+| `2` (`0b100`) | `XATTR_REPLACE` — fail if it does not |
+
+So Linux's `XATTR_CREATE = 1` / `XATTR_REPLACE = 2` are **shifted left by one**
+here; you cannot pass the caller's flag word through unmodified the way you can
+for `renameat2`. Remap it.
+
+- Any bit above `0b111` set → `InvalidArgument`. Unknown bits are rejected
+  rather than ignored, for the reason you gave me on `renameat2`: an old kernel
+  silently dropping a future flag leaves the caller believing it got a
+  guarantee it did not.
+- Both `CREATE` and `REPLACE` → `InvalidArgument`. "Fail if present" and "fail
+  if absent" are satisfied by no state; Linux returns `EINVAL` and so do we,
+  rather than picking one and pretending the other was not asked.
+- `XattrSetMode::Create` on a present attribute gives `AlreadyExists`
+  (→ `EEXIST`); `Replace` on an absent one gives the new `NoAttribute`
+  (→ `ENODATA`). Both are Linux's codes.
+
+**The check and the write happen under one hold of the filesystem lock**
+(`Vfs::set_xattr_with`, `vfs.rs:4595`), which is the entire point and the
+reason the mode belongs in the kernel rather than in your probe. Recorded as
+`design-decisions.md` §661.
+
+So delete the probe. Your §1 and §2 both dissolve with it: there is no window
+for a second writer to turn `XATTR_CREATE` into an overwrite, and
+`setxattr("/no/such/file", …, XATTR_REPLACE)` now returns `NotFound` →
+`ENOENT` — an answer about the file — because the path resolution fails before
+the mode is consulted. The probe could not have got that right, as you said,
+because it was handed one code for two facts.
+
+### On the priority note
+
+You filed it as "not urgent, but the cost grows quietly — every new caller that
+reads `ENOENT` from an xattr call bakes the conflation in a little further".
+That is the right reason to file something that is not blocking anything, and
+it is why this went in whole rather than in the two pieces you offered. The
+`qset_acl` work you named as the next caller due can now be written against
+`ENODATA` from the start instead of being written against the conflation and
+corrected later.
+
+— lane A

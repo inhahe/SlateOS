@@ -527,18 +527,19 @@ MUTATIONS = [
     # ── The text ──────────────────────────────────────────────────────────
     (
         "a clue is cut by the panel rather than by the renderer",
-        "                max_width: Some((r.w - l.pad * 0.6).max(0.0)),\n"
-        "                overflow: TextOverflow::Ellipsis,",
-        "                max_width: None,\n                overflow: TextOverflow::Clip,",
+        "                    (r.w - l.pad * 0.6).max(0.0),",
+        "                    f32::INFINITY,",
         ["a_clue_is_handed_to_the_renderer_whole_and_bounded_by_width"],
     ),
     (
         "a clue is cut at a byte offset before it reaches the renderer",
-        '                text: format!("{}{}. {}", clue.number, '
+        '                    &format!("{}{}. {}", clue.number, '
         "clue.direction.initial(), clue.text),",
-        '                text: format!(\n                    "{}{}. {}",\n'
-        "                    clue.number,\n                    clue.direction.initial(),\n"
-        "                    &clue.text[..clue.text.len().min(24)]\n                ),",
+        '                    &format!(\n                        "{}{}. {}",\n'
+        "                        clue.number,\n"
+        "                        clue.direction.initial(),\n"
+        "                        &clue.text[..clue.text.len().min(24)]\n"
+        "                    ),",
         ["a_clue_with_an_accent_in_it_is_drawn_rather_than_aborting"],
     ),
     (
@@ -549,17 +550,266 @@ MUTATIONS = [
     ),
     (
         "the banner is unbounded",
-        "            max_width: Some((l.banner.w - l.pad * 2.0).max(0.0)),",
-        "            max_width: None,",
+        "                (l.banner.w - l.pad * 2.0).max(0.0),",
+        "                f32::INFINITY,",
         ["the_banner_names_the_word_the_cursor_is_in"],
     ),
     (
         "a heading is centred by a literal rather than by measuring it",
         "    let measured = text::measure(s, size, weight);\n"
-        "    text_at(f, x + (w - measured) / 2.0, y, s, color, size, weight);",
-        "    let _ = (w, weight);\n    text_at(f, x + 100.0, y, s, color, size, "
-        "FontWeightHint::Bold);",
+        "    let start = (x + (w - measured) / 2.0).max(x);\n"
+        "    text_at(f, start, y, s, color, size, weight, x + w - start);",
+        "    let _ = (w, weight);\n"
+        "    text_at(f, x + 100.0, y, s, color, size, FontWeightHint::Bold, f32::INFINITY);",
         ["a_heading_is_centred_by_measuring_it_rather_than_by_a_literal"],
+    ),
+    (
+        "a centred run may start left of the box that holds it",
+        "    let start = (x + (w - measured) / 2.0).max(x);",
+        "    let start = x + (w - measured) / 2.0;",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a centred run is not bounded to what is left of its box",
+        "    text_at(f, start, y, s, color, size, weight, x + w - start);",
+        "    text_at(f, start, y, s, color, size, weight, f32::INFINITY);",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    # ── centre_line, and what it replaced ─────────────────────────────────
+    (
+        "centring is an offset again: a run taller than its band is placed "
+        "above the band's top edge",
+        "    if band.is_empty() || size <= 0.0 || size > band.h {\n"
+        "        return None;\n    }\n"
+        "    Some(band.y + (band.h - size) / 2.0)",
+        "    if band.is_empty() {\n        return None;\n    }\n"
+        "    Some(band.y + (band.h - size) / 2.0)",
+        [
+            "centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative",
+            "no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out",
+            "a_header_too_short_for_its_title_drops_the_name_rather_than_spilling_it",
+        ],
+    ),
+    (
+        "a run exactly as tall as its band is refused",
+        "    if band.is_empty() || size <= 0.0 || size > band.h {",
+        "    if band.is_empty() || size <= 0.0 || size >= band.h {",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a run is centred on the top half of its band",
+        "    Some(band.y + (band.h - size) / 2.0)",
+        "    Some(band.y + (band.h - size) / 4.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    # ── text_at is the one place a run gets a bound ───────────────────────
+    (
+        "a run is handed to the renderer with no width to fit in",
+        "        max_width: Some(limit),\n        overflow: TextOverflow::Ellipsis,",
+        "        max_width: None,\n        overflow: TextOverflow::Clip,",
+        [
+            "a_clue_is_handed_to_the_renderer_whole_and_bounded_by_width",
+            "no_pass_paints_outside_the_region_it_owns",
+        ],
+    ),
+    (
+        "an empty run is drawn anyway",
+        "    if s.is_empty() || font_size <= 0.0 || limit <= 0.0 {",
+        "    if font_size <= 0.0 || limit <= 0.0 {",
+        ["text_at_refuses_a_run_with_no_room_to_draw_it"],
+    ),
+    (
+        "a run of no size is drawn anyway",
+        "    if s.is_empty() || font_size <= 0.0 || limit <= 0.0 {",
+        "    if s.is_empty() || limit <= 0.0 {",
+        ["text_at_refuses_a_run_with_no_room_to_draw_it"],
+    ),
+    (
+        "every run is refused",
+        "    if s.is_empty() || font_size <= 0.0 || limit <= 0.0 {",
+        "    if true {",
+        ["text_at_refuses_a_run_with_no_room_to_draw_it"],
+    ),
+    (
+        "a run with no room at all is drawn anyway",
+        "    if s.is_empty() || font_size <= 0.0 || limit <= 0.0 {",
+        "    if s.is_empty() || font_size <= 0.0 {",
+        [
+            "text_at_refuses_a_run_with_no_room_to_draw_it",
+            "no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out",
+        ],
+    ),
+    # ── The bands, one site at a time ─────────────────────────────────────
+    (
+        "the header centres the title on its font size rather than its line",
+        "        if let Some(y) = centre_line(l.header, "
+        "text::line_height(l.title, FontWeightHint::Bold)) {",
+        "        if let Some(y) = centre_line(l.header, l.title) {",
+        ["a_header_too_short_for_its_title_drops_the_name_rather_than_spilling_it"],
+    ),
+    (
+        "the banner centres its clue on the font size rather than the line",
+        "        let line = text::line_height(l.font, FontWeightHint::Regular);\n"
+        "        if let Some(y) = centre_line(l.banner, line) {",
+        "        let line = l.font;\n        if let Some(y) = centre_line(l.banner, line) {",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        # A clue row is `small * 1.7` and a line is about `small * 1.33`, so a
+        # run centred on the font size is still *inside* its row -- a sixth of
+        # a line low.  No containment sweep can see that, at any window size or
+        # any squeeze, because nothing has left anything.  It took a test that
+        # asks a stronger question than containment: where the drawing fills a
+        # box and writes in it, the fill is the band and the two must share a
+        # centre line.
+        "a clue row centres its text on the font size rather than the line",
+        "            if let Some(ty) = centre_line(r, text::line_height(l.small, weight)) {",
+        "            if let Some(ty) = centre_line(r, l.small) {",
+        ["a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_inside_it"],
+    ),
+    (
+        "a direction heading is written at the top of its row rather than in it",
+        "                    if let Some(ty) =\n"
+        "                        centre_line(r, text::line_height(l.small, FontWeightHint::Bold))\n"
+        "                    {",
+        "                    if let Some(ty) = Some(r.y - l.small) {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a footer button centres its label on the font size rather than the line",
+        "            if let Some(ty) = centre_line(r, text::line_height(size, "
+        "FontWeightHint::Bold)) {",
+        "            if let Some(ty) = centre_line(r, size) {",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        # The expectation here is not the containment sweep, and the reason is
+        # worth keeping: `centre_line` turns this overrun into a *refusal*.  A
+        # strip taller than the footer cannot be centred in it, so the pass
+        # returns and draws nothing at all -- so nothing escapes the footer and
+        # containment has nothing to say.  What notices is the pair of tests
+        # that ask for the buttons to exist.  That is the shape of a bound that
+        # refuses rather than clamps: the failure moves from "drawn in the
+        # wrong place" to "not drawn", and it is a different test that sees it.
+        "the button strip is taller than the footer that holds it",
+        "        let h = (l.footer.h - gap).max(0.0);",
+        "        let h = l.footer.h + gap;",
+        [
+            "every_button_is_drawn_where_a_click_can_reach_it",
+            "the_buttons_and_the_keys_do_the_same_thing",
+        ],
+    ),
+    (
+        "a cell number is drawn whatever the room in the corner",
+        "                    if text::line_height(size, FontWeightHint::Regular) <= corner.h {",
+        "                    if true {",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a cell number is unbounded across its cell",
+        "                            corner.w,",
+        "                            f32::INFINITY,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a letter is centred on its font size rather than on its line",
+        "                    if let Some(y) = centre_line(r, "
+        "text::line_height(size, FontWeightHint::Bold)) {",
+        "                    if let Some(y) = centre_line(r, size) {",
+        ["a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_inside_it"],
+    ),
+    (
+        "the menu heading is written at a fixed offset from the window's top",
+        "        let head = Rect::new(\n            l.window.x,\n"
+        "            l.window.y,\n            l.window.w,\n"
+        "            (l.pad + l.title * 2.2).min(l.window.h),\n        );",
+        "        let head = Rect::new(\n            l.window.x,\n"
+        "            l.window.y,\n            l.window.w,\n"
+        "            l.pad + l.title * 2.2,\n        );",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "the menu heading is centred on its font size rather than its line",
+        "        if let Some(ty) = centre_line(head, "
+        "text::line_height(l.title, FontWeightHint::Bold)) {\n"
+        "            centred(\n                f,\n                head.x,",
+        "        if let Some(ty) = centre_line(head, l.title) {\n"
+        "            centred(\n                f,\n                head.x,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    # NOT A MUTATION.  The row that stood here replaced the menu's
+    #
+    #     let mut y = head.bottom();
+    #
+    # with the literal `l.pad + l.title * 2.2` it is cut from, and it survived.
+    # That is an *equivalent mutant* and the proof is short: `head.h` is that
+    # very expression `.min(l.window.h)`, so the two differ only when the
+    # window is shorter than the heading band -- and in that case the mutated
+    # `y` is past the window's bottom, so the row built from it has
+    # `r.bottom() > l.window.h - l.pad` and the loop breaks before drawing.  So
+    # does the unmutated one, whose `y` is the window's own bottom edge.  No
+    # window can tell them apart because neither draws a row.
+    #
+    # `head.bottom()` stays, because it says what the code means -- the rows
+    # start below the heading -- and because the fence that actually stops a
+    # row leaving the window is the loop's own, which the row below mutates.
+    (
+        "the menu draws a row that has left the window",
+        "            if r.bottom() > l.window.h - l.pad {\n"
+        "                break;\n            }",
+        "            if false {\n"
+        "                break;\n            }",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    # ── The two cards ─────────────────────────────────────────────────────
+    (
+        "the help card's heading is written at a fixed offset from the card's top",
+        "        let head = Rect::new(card.x, card.y, card.w, (l.title * 1.8).min(card.h));",
+        "        let head = Rect::new(card.x, card.y, card.w, l.title * 1.8);",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    (
+        "the help card's rows are fenced by their font size rather than their line",
+        "            if y + line > card.bottom() {",
+        "            if y + l.small > card.bottom() {",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    # NOT A MUTATION, and the difference matters.  The row that used to be
+    # here turned the help card's
+    #
+    #     line_height(small, Bold).max(line_height(small, Regular))
+    #
+    # into a `.min(..)`, and it survived every test.  It is an *equivalent
+    # mutant*, not a hole: the two are the same number.  Probed rather than
+    # argued -- the built-in UI face reports 10.640625 at 8pt, 11.970703 at
+    # 9pt and 17.291016 at 12.6pt for **both** weights, because `osfont` gives
+    # the bold and regular faces identical vertical metrics.  So `max` and
+    # `min` compute the same thing today and no test can tell them apart.
+    #
+    # The `.max(..)` stays in the source anyway.  Two runs in two different
+    # faces are drawn on that line, and the *reason* the bound is the taller
+    # of them does not depend on today's metrics being equal -- a face swap or
+    # a second family would make them differ, and then `min` is a fence a
+    # third of a line short.  A line that is correct for a reason no current
+    # input can exercise is the thing to leave alone and record here, not to
+    # simplify into something that merely happens to be right.
+    (
+        "the help card's description column runs past the card",
+        "        let desc_limit = room(desc_x);",
+        "        let desc_limit = f32::INFINITY;",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    (
+        "the help card's key column runs into the description",
+        "        let key_limit = key_w.min(room(key_x));",
+        "        let key_limit = f32::INFINITY;",
+        ["every_run_a_card_draws_stays_inside_the_card"],
+    ),
+    (
+        "the end card's rows are fenced by their font size rather than their line",
+        "            if y + text::line_height(size, weight) > card.bottom() {",
+        "            if y + size > card.bottom() {",
+        ["every_run_a_card_draws_stays_inside_the_card"],
     ),
     # ── The menu, and the frame ───────────────────────────────────────────
     (

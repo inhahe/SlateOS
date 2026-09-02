@@ -1,0 +1,27 @@
+[package]
+name = "hmac"
+version = "0.1.0"
+edition = "2024"
+description = "HMAC (RFC 2104) and PBKDF2 (RFC 8018) over the tree's own SHA-1 and SHA-256, written once."
+
+[lib]
+path = "src/lib.rs"
+
+# `no_std` with no `alloc`, like `sha1` and `sha2` beneath it. HMAC needs two
+# scratch blocks and nothing else, and PBKDF2 writes into a caller-supplied
+# buffer, so there is nothing here to allocate — which is what lets the
+# wireless driver and the supplicant share one copy.
+#
+# This crate exists because `userspace/wpa` had grown a private SHA-1 *and* a
+# private HMAC-SHA1 on top of it, built out of `Vec`, at a point when the
+# dependency-free `sha1` crate already existed. That is the fifth-copy-of-CRC-32
+# failure (see `crc32`'s own manifest, and design-decisions §610) reappearing
+# one layer up: a keyed hash is worse to duplicate than a checksum, because a
+# copy that is subtly wrong does not fail loudly — it authenticates nothing and
+# looks like a network problem.
+[dependencies]
+sha1 = { path = "../sha1" }
+sha2 = { path = "../sha2" }
+
+[lints]
+workspace = true

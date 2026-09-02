@@ -98,18 +98,82 @@ pub fn poison_violations() -> u32 {
     POISON_VIOLATIONS.load(Ordering::Relaxed)
 }
 
-/// 4-byte magic signature written at bytes 8..12 of poisoned slots.
+/// Base value of the 8-byte free signature written at bytes 8..16 of poisoned
+/// slots.  Never used directly — see [`poison_magic_for`], which mixes in the
+/// slot's own address.
 ///
-/// `check_poison` looks for this first — if absent, the slot was never
+/// `check_poison` looks for the signature first — if absent, the slot was never
 /// freed through the poison path (e.g., carved from a fresh frame) and
 /// the check is skipped.  This eliminates false positives from the
 /// "cold start" period after poisoning is enabled.
-const POISON_MAGIC: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCE];
+const POISON_MAGIC_BASE: u64 = 0xFEED_FACE_FEED_FACE;
 
-/// Fill bytes 8..class_size with FREE_POISON, prefixed by POISON_MAGIC.
+/// End of the free signature: it occupies bytes 8..16, so the poison fill and
+/// the use-after-free scan both start here.
+const POISON_MAGIC_END: usize = 16;
+
+/// The free signature a slot at `addr` carries while it sits on a free list.
+///
+/// **Tied to the slot's own address on purpose.** A fixed constant is not a
+/// sound "this memory is free" signal, because the allocator itself puts that
+/// constant on the kernel stack every time it reads or writes it — from where
+/// uninitialised struct padding can pick it up and carry it back into the heap.
+/// That is not hypothetical: it is exactly how `procfs::gen_loadavg` came to be
+/// reported as double-freeing a `Vec<TaskInfo>` it had allocated once. The
+/// idle task's `stack_used: Option<usize>` is `None`, whose 8-byte payload sits
+/// at offsets 8..16 of the struct — the signature's own bytes — and is never
+/// written, so it arrived in the heap still holding the allocator's magic.
+///
+/// XOR-ing with the address makes the expected word different for every slot,
+/// so a value that leaks out of the allocator onto the stack can only ever
+/// match the one slot it came from, and only if it also lands at exactly the
+/// right offset. Eight bytes rather than four for the same reason: this word
+/// has to be evidence, not a coincidence.
+#[inline]
+const fn poison_magic_for(addr: usize) -> u64 {
+    POISON_MAGIC_BASE ^ (addr as u64)
+}
+
+/// Read the 8-byte free signature stored at bytes 8..16 of a slot.
+///
+/// # Safety
+///
+/// `ptr` must point to a slab slot of at least 16 bytes.
+#[inline]
+unsafe fn read_free_signature(ptr: *const u8) -> u64 {
+    let mut bytes = [0u8; 8];
+    for (b, out) in bytes.iter_mut().enumerate() {
+        // SAFETY: b < 8, so 8 + b < 16 <= class_size (precondition).  `rawmem`
+        // keeps the volatility that stops the optimizer constant-propagating
+        // through the dealloc->alloc boundary, without the instrumentation a
+        // `core` generic would carry — see `mm::rawmem`.
+        *out = unsafe { rawmem::read_u8(ptr.add(8usize.saturating_add(b))) };
+    }
+    u64::from_le_bytes(bytes)
+}
+
+/// Write the 8-byte free signature into bytes 8..16 of a slot.
+///
+/// # Safety
+///
+/// `ptr` must point to a slab slot of at least 16 bytes that the caller has
+/// exclusive access to.
+#[inline]
+unsafe fn write_free_signature(ptr: *mut u8, sig: u64) {
+    for (b, byte) in sig.to_le_bytes().iter().enumerate() {
+        // SAFETY: b < 8, so 8 + b < 16 <= class_size (precondition).
+        unsafe {
+            rawmem::write_u8(ptr.add(8usize.saturating_add(b)), *byte);
+        }
+    }
+}
+
+/// Fill bytes 16..class_size with FREE_POISON, prefixed by the slot's free
+/// signature at bytes 8..16.
 ///
 /// Skips the first 8 bytes (used by the FreeSlot::next pointer).
-/// For slots < 16 bytes, there's not enough room for the magic + poison.
+/// For slots < 16 bytes, there's not enough room for the signature at all; a
+/// 16-byte slot carries the signature and no poison bytes.
 ///
 /// Both `#[inline(never)]` and `write_volatile` are required here.
 /// Under thin LTO + O3, the compiler can constant-propagate through the
@@ -129,57 +193,76 @@ const POISON_MAGIC: [u8; 4] = [0xFE, 0xED, 0xFA, 0xCE];
 /// slot is better than cascading corruption.
 #[inline(never)]
 unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
-    if class_size < 16 {
-        return false; // Need at least 8 (next ptr) + 4 (magic) + some poison.
+    if class_size < POISON_MAGIC_END {
+        return false; // Need at least 8 (next ptr) + 8 (signature).
     }
-    // Double-free detection: if the magic signature is already present,
-    // this slot was freed before without being re-allocated in between.
+    let expected = poison_magic_for(ptr as usize);
+    // Double-free detection: if the slot's own free signature is already
+    // present, this slot was freed before without being re-allocated in
+    // between.
     // Reads go through `mm::rawmem`, not `core::ptr::read_volatile`: this slot
     // is exactly the memory KASAN poisons, and the `core` generic monomorphises
     // into this crate *instrumented* despite the module-level opt-out, so a
     // plain volatile read reports a use-after-free on every single free. Same
     // volatility guarantee, no instrumentation — see `mm::rawmem`.
-    // SAFETY: ptr is valid for class_size bytes (>= 16).
-    let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
-    let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
-    let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
-    let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-    if m0 == POISON_MAGIC[0]
-        && m1 == POISON_MAGIC[1]
-        && m2 == POISON_MAGIC[2]
-        && m3 == POISON_MAGIC[3]
-    {
+    // SAFETY: ptr is valid for class_size bytes (>= POISON_MAGIC_END).
+    let found = unsafe { read_free_signature(ptr) };
+    if found == expected {
         DOUBLE_FREE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
         serial_println!(
             "[heap] DOUBLE-FREE detected! slot={:#x}, class={}",
             ptr as usize,
             class_size
         );
+        // Name the call site, not just the slot. A slot address identifies the
+        // memory and nothing about the code, so the report alone left ~200
+        // candidate `/proc` generators when `fs::conformance` first hit this;
+        // the frames say which `drop` ran twice.
+        //
+        // Safe to walk from inside the allocator, which is the only reason this
+        // is done here rather than by the caller: `capture` fills a fixed
+        // 32-frame array and allocates nothing, so it cannot re-enter the heap,
+        // and `is_valid_frame_ptr` is three range checks against statics — no
+        // lock, so no new edge under the heap lock this may be holding.
+        //
+        // 16 frames, not 8. Eight was chosen on the guess that the freeing call
+        // site sits two or three above `dealloc`; the first capture disproved
+        // it. The allocator and `alloc`'s own drop glue occupy frames 0..8
+        // exactly — poison_free, slab_dealloc, dealloc, __rust_dealloc,
+        // Global::deallocate, RawVecInner::deallocate, RawVec::drop,
+        // drop_in_place<RawVec<T>> — so a cap of 8 names the *type* being freed
+        // and never the code that owns it, which is the actual question.
+        let bt = crate::backtrace::capture();
+        for (i, f) in bt.frames.iter().take(bt.count).take(16).enumerate() {
+            serial_println!("[heap]   double-free frame {i}: {:#x}", f.return_addr);
+        }
         return true;
     }
 
-    // Write the magic signature at bytes 8..12.  `rawmem` keeps the volatile
+    // Write the free signature at bytes 8..16.  `rawmem` keeps the volatile
     // guarantee — the optimizer must not dead-store-eliminate these writes even
     // with full LTO visibility — without the instrumentation a `core` generic
     // would carry (see the read above).
-    // SAFETY: ptr is valid for class_size bytes (>= 16), so offsets
-    // 8..12 are in-bounds.  We have exclusive access to this slot
+    // SAFETY: ptr is valid for class_size bytes (>= POISON_MAGIC_END), so
+    // offsets 8..16 are in-bounds.  We have exclusive access to this slot
     // (it's being freed — the caller no longer uses it).
     unsafe {
-        rawmem::write_u8(ptr.add(8), POISON_MAGIC[0]);
-        rawmem::write_u8(ptr.add(9), POISON_MAGIC[1]);
-        rawmem::write_u8(ptr.add(10), POISON_MAGIC[2]);
-        rawmem::write_u8(ptr.add(11), POISON_MAGIC[3]);
+        write_free_signature(ptr, expected);
     }
-    // Fill bytes 12..class_size with FREE_POISON.  One bulk `rep stosb` rather
+    // Fill bytes 16..class_size with FREE_POISON.  One bulk `rep stosb` rather
     // than a per-byte loop: the byte helper would emit an `asm!` block per
     // iteration in a debug build, and this runs on every free.
-    // SAFETY: ptr is valid for class_size bytes and class_size >= 16 > 12 (the
-    // early return above guarantees it), so the range 12..class_size is
-    // in-bounds.  `saturating_sub` rather than `-` for the lint; it cannot
-    // actually saturate here.
+    // SAFETY: ptr is valid for class_size bytes and class_size >=
+    // POISON_MAGIC_END (the early return above guarantees it), so the range
+    // POISON_MAGIC_END..class_size is in-bounds — empty when they are equal.
+    // `saturating_sub` rather than `-` for the lint; it cannot actually
+    // saturate here.
     unsafe {
-        rawmem::fill_u8(ptr.add(12), FREE_POISON, class_size.saturating_sub(12));
+        rawmem::fill_u8(
+            ptr.add(POISON_MAGIC_END),
+            FREE_POISON,
+            class_size.saturating_sub(POISON_MAGIC_END),
+        );
     }
     false
 }
@@ -295,11 +378,12 @@ fn free_link_valid(link: *mut FreeSlot, slot: *mut FreeSlot, class_size: usize) 
 
 /// Check poison integrity on a slot being allocated.
 ///
-/// First verifies the POISON_MAGIC signature at bytes 8..12.  If not
-/// present, this slot was never freed through the poison path (e.g.,
-/// carved from a fresh frame during refill) — skip the check silently.
+/// First verifies the slot's own free signature at bytes 8..16 (see
+/// [`poison_magic_for`]).  If not present, this slot was never freed through
+/// the poison path (e.g., carved from a fresh frame during refill) — skip the
+/// check silently.
 ///
-/// If the magic IS present, checks bytes 12..class_size for FREE_POISON.
+/// If the signature IS present, checks bytes 16..class_size for FREE_POISON.
 /// Any modification indicates a use-after-free write.
 ///
 /// # Safety
@@ -314,33 +398,27 @@ fn free_link_valid(link: *mut FreeSlot, slot: *mut FreeSlot, class_size: usize) 
 /// memory read that can't be elided.
 #[inline(never)]
 unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
-    if class_size < 16 {
+    if class_size < POISON_MAGIC_END {
         return;
     }
-    // Check the magic signature.  `rawmem::read_u8` keeps the volatility that
+    // Check the free signature.  `rawmem::read_u8` keeps the volatility that
     // stops the optimizer constant-propagating through dealloc→alloc boundaries
     // (it can't assume it knows what's at ptr+8 even with full LTO visibility
     // into poison_free), and unlike `core::ptr::read_volatile` it is not
     // instrumented — this slot is marked freed in the KASAN shadow.
-    // SAFETY: ptr is valid for class_size bytes (>= 16, checked above),
-    // so offsets 8..12 are in-bounds.  Read-only access, no aliasing.
-    let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
-    let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
-    let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
-    let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-    if m0 != POISON_MAGIC[0]
-        || m1 != POISON_MAGIC[1]
-        || m2 != POISON_MAGIC[2]
-        || m3 != POISON_MAGIC[3]
-    {
+    // SAFETY: ptr is valid for class_size bytes (>= POISON_MAGIC_END, checked
+    // above), so offsets 8..16 are in-bounds.  Read-only access, no aliasing.
+    let found = unsafe { read_free_signature(ptr) };
+    if found != poison_magic_for(ptr as usize) {
         return; // Virgin slot — never been through poison_free.
     }
 
-    // Magic is intact.  Now check the poison zone (bytes 12..class_size).
-    if class_size <= 12 {
+    // The signature is intact.  Now check the poison zone, which begins where
+    // the signature ends.
+    if class_size <= POISON_MAGIC_END {
         return;
     }
-    for i in 12..class_size {
+    for i in POISON_MAGIC_END..class_size {
         // SAFETY: ptr is valid for class_size bytes (precondition) and
         // i < class_size, so ptr.add(i) is in-bounds.
         let byte = unsafe { rawmem::read_u8(ptr.add(i)) };
@@ -1852,22 +1930,15 @@ pub fn audit_free_lists() -> HeapAuditResult {
             count += 1;
 
             // Check poison integrity on this free slot.
-            if poison_on && class_size >= 16 {
+            if poison_on && class_size >= POISON_MAGIC_END {
                 let ptr = slow.cast::<u8>();
                 // `rawmem` rather than `core::ptr::read_volatile`: every slot on
                 // the free list is poisoned in the KASAN shadow, so this scan
                 // would otherwise report a use-after-free per slot walked.
                 // SAFETY: slot is in the free list, still owned by allocator,
-                // and HHDM-mapped.  Reading bytes 8..12 is safe.
-                let m0 = unsafe { rawmem::read_u8(ptr.add(8)) };
-                let m1 = unsafe { rawmem::read_u8(ptr.add(9)) };
-                let m2 = unsafe { rawmem::read_u8(ptr.add(10)) };
-                let m3 = unsafe { rawmem::read_u8(ptr.add(11)) };
-                if m0 != POISON_MAGIC[0]
-                    || m1 != POISON_MAGIC[1]
-                    || m2 != POISON_MAGIC[2]
-                    || m3 != POISON_MAGIC[3]
-                {
+                // and HHDM-mapped.  Reading bytes 8..16 is safe.
+                let found = unsafe { read_free_signature(ptr) };
+                if found != poison_magic_for(ptr as usize) {
                     corrupted += 1;
                 }
             }
@@ -2066,6 +2137,34 @@ fn double_free_slot(ptr: *mut u8, layout: Layout) {
     }
 }
 
+/// Helper: plant the bare signature *base* constant into a live slot's bytes
+/// 8..16, then free the slot once.
+///
+/// This reproduces the exact shape of the false positive that motivated
+/// address-tying the signature (see [`poison_magic_for`]): a struct with
+/// uninitialised bytes at offsets 8..16 picks up the allocator's own constant
+/// off the kernel stack and carries it into the heap, where a fixed-constant
+/// signature check cannot tell it apart from a genuine second free.
+///
+/// `#[inline(never)]` and the volatile `rawmem` stores for the same reason as
+/// the other helpers here: with the plant and the free both visible, thin LTO
+/// constant-propagates through the boundary and the detection branch folds away
+/// — which would make this test pass without testing anything.
+#[inline(never)]
+fn plant_base_magic_and_free(ptr: *mut u8, layout: Layout) {
+    for (b, byte) in POISON_MAGIC_BASE.to_le_bytes().iter().enumerate() {
+        // SAFETY: `ptr` points to a live 64-byte allocation, so offsets 8..16
+        // are in-bounds and exclusively ours.
+        unsafe {
+            rawmem::write_u8(ptr.add(8usize.saturating_add(b)), *byte);
+        }
+    }
+    // SAFETY: `ptr` was allocated with `layout` and has not been freed.
+    unsafe {
+        alloc::alloc::dealloc(ptr, layout);
+    }
+}
+
 #[inline(never)]
 fn corrupt_and_realloc(slot_addr: usize, layout: Layout) -> *mut u8 {
     // SAFETY: slot_addr points to a 64-byte slab slot that was just freed
@@ -2232,6 +2331,36 @@ pub fn poison_self_test() {
         "poison test: red zone overflow not detected"
     );
     serial_println!("[heap]   Buffer overflow (red zone) detection: OK");
+
+    // --- Test 5: the signature constant in live data is NOT a double-free ---
+    //
+    // Regression test for the false positive that made `poison_free` report
+    // `procfs::gen_loadavg` as double-freeing a `Vec<TaskInfo>` it had
+    // allocated exactly once.  `TaskInfo.stack_used: Option<usize>` is `None`
+    // for the idle task, so its 8-byte payload — sitting at offsets 8..16, the
+    // signature's own bytes — is never written, and the struct reached the heap
+    // still carrying whatever was on the stack.  What was on the stack was the
+    // allocator's magic, which `poison_free` and `check_poison` leave there
+    // every time they run.  A fixed-constant signature therefore cannot
+    // distinguish "freed" from "live data that happens to hold the constant".
+    //
+    // Planting the bare base constant in a live slot and freeing it once must
+    // now leave the double-free counter untouched, because the signature this
+    // slot would carry when free is `POISON_MAGIC_BASE ^ addr`, not the base.
+    // SAFETY: layout is valid, allocator initialized.
+    let p7 = unsafe { alloc::alloc::alloc(layout) };
+    assert!(
+        !p7.is_null(),
+        "poison test: alloc for magic-in-data test failed"
+    );
+    let mid_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    plant_base_magic_and_free(p7, layout);
+    let mid_post = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
+    assert_eq!(
+        mid_post, mid_pre,
+        "poison test: live data holding the magic constant reported as a double-free"
+    );
+    serial_println!("[heap]   Magic constant in live data: OK (not a double-free)");
 
     // SAFETY: restoring the interrupt state disabled at the start of
     // this test.  All allocations have been freed.

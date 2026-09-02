@@ -98260,6 +98260,64 @@ untouched. The name collision is itself part of why this was easy to miss.
 
 ## A-CREATE-MODE-SYSCALLS-SILENTLY-DROP-SETUID-SETGID-STICKY
 
+**Status: FIXED** — found 2026-08-30, fixed in two steps (`SYS_FS_OPEN_MODE`
+2026-08-30, `SYS_FS_MKDIR_MODE` 2026-09-01), **marked fixed 2026-09-01 by
+lane A, late.** The entry sat at `OPEN` after both halves had landed, which is
+the same failure this file records elsewhere about a heading that said `OPEN`
+for five days after the fix. Found by re-reading the entry while answering lane
+B's `666-669` request, not by any gate — there is still nothing that checks a
+`Status:` line against the code it describes.
+
+**The fix took the branch this entry argued *against*, and that is the
+interesting part.** The proposed fix below was to **refuse** `mode & 0o7000`,
+reasoning that the create path could not represent the bits and that a request
+the kernel cannot honour should be an error rather than a silent rounding-down.
+That was correct given the facts at the time — but the premise stopped being
+true: the create path *was* plumbed through, so the bits could simply be
+**accepted** instead. Accepting is strictly better than refusing, because it
+gives the caller what it asked for rather than a diagnosable failure, and it
+needed no ABI negotiation with lanes B and C — which is what this entry named
+as the reason it could not be fixed unilaterally. Worth noting for the next
+entry of this shape: a fix blocked on "this would break other lanes" is worth
+re-examining after the blocking constraint moves, because the *reason* it was
+blocked can expire without anyone revisiting the entry.
+
+Current state, each settled with lane B rather than unilaterally:
+
+| syscall | mask now | decision |
+|---|---|---|
+| `SYS_FS_OPEN_MODE` (`handlers.rs:9180`) | `0o7777` | `design-decisions.md` §639 |
+| `SYS_FS_MKDIR_MODE` (`handlers.rs:8868`) | `0o1777` | §663 |
+| `SYS_FS_MKDIRAT_PINNED` (666) | `0o1777` | §663, moved in the same change |
+
+`kernel/src/fs/handle.rs:588` stamps `create_mode & 0o7777`, so the twelve bits
+reach the file rather than being masked again one layer down — which is the
+line this entry quoted as evidence that the mask was legitimate.
+
+**One residual, deliberate and Linux-matching:** `mkdir` still drops setuid and
+setgid without an error. That is not the defect above returning. `mkdir(2)` has
+no channel for them — a new directory's setgid bit is *inherited from the
+parent*, never taken from the mode word — and Linux's own `vfs_mkdir` does
+`mode &= (S_IRWXUGO | S_ISVTX)` just as silently. Honouring them would offer an
+authority Linux does not, in the one bit that decides who owns files created in
+that directory later; and since we do not implement the inheritance either, the
+bit would additionally assert a semantic the kernel does not perform. Lane B
+sourced this (`requests/b-a-666-669-are-wired-two-answers-and-one-bug-that-was-mine.md`
+§2); it is a decision, not an oversight.
+
+**The widening is not yet reaching userspace, and that line is now lane B's to
+move.** `posix`'s `apply_umask_mkdir` masks to `0o777`, so a caller asking for
+`0o1777` still gets `0o777` and no error — the kernel is simply no longer the
+one discarding it. Flagged to lane B in the reply on that request. This is the
+general trap lane B named in §4 of it: **when one lane widens what it accepts,
+the other lane's narrowing becomes silent**, with no error on either side,
+because "the bit is missing" and "the bit was never requested" produce
+identical files. Second instance of that shape in a week.
+
+---
+
+### Original entry, kept for the reasoning
+
 **Status: OPEN** (found 2026-08-30, lane A)
 
 **In short:** Two syscalls let a program create a file or directory and say

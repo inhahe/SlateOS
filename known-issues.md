@@ -107114,6 +107114,48 @@ refuse to start — with a distinct exit status, not a boot verdict — when com
 charge is above a threshold, so the cost is paid in seconds rather than at the
 end of a 50-minute run. The second is lane A's to do and is the smaller change.
 
+### Addendum 2026-09-02: it also costs wall clock in a way that has nothing to do with the commit limit, and that is the failure mode you will hit first
+
+Concurrency does not have to reach `STATUS_COMMIT_LIMIT` to lose a run. On
+2026-09-02, with lane B running a boot test in parallel, a lane-A boot test was
+killed by its own 1800s budget having **never reached QEMU** — the pre-build
+static gates alone consumed the entire budget. No fork failed, commit charge
+never tripped the floor, and every gate that ran passed. The run was simply
+too slow to finish.
+
+**The measurement, because the first diagnosis was wrong.**
+`check-variant-lists.py` sat for ~400s and looked like a hang; the hypothesis
+was that its file walk had wandered into a `target/` tree. It had not — the
+walk enumerates 6441 `.rs` files in 6.4s and the `target` filter discards
+exactly zero of them, because the build directories are at the workspace root
+and not under any scanned prefix. Timing `Path.read_text()` over the same
+6441 files under live contention gave:
+
+| | value |
+|---|---|
+| total | **368.5s** |
+| mean per file | 57 ms |
+| slowest single file | 0.86s (`userspace/psalm-cli/src/main.rs`) |
+
+The distribution is the finding. There is no outlier and no pathological
+input: every read is uniformly ~2 orders of magnitude slower than it should
+be. That is a saturated disk, not a bug in the gate — the gate is innocent and
+should not be "optimised" in response to this.
+
+**What to take from it.** Two things, and the second is the one that bites.
+
+1. **Do not size a boot-test timeout from an uncontended run.** The harness's
+   own header cites 1004s of gates before it "says a word"; under a second
+   lane that becomes the whole of a 30-minute budget. Budget 7200s when
+   another lane is building, as lane B already does.
+2. **A slow gate is not a hung gate, and the difference is not visible from
+   the log.** Both look identical — a heartbeat line every N seconds against a
+   header that never advances. The only thing that separated them here was
+   measuring, and the cheap measurement (`faulthandler.dump_traceback_later`,
+   which named `read_text` and cleared the regexes) is worth reaching for
+   before forming a theory about the gate's *logic*. The first theory was
+   wrong in a way that would have produced a real change to a correct file.
+
 ---
 
 ### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**

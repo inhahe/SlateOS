@@ -14623,6 +14623,7 @@ known one rather than a surprise.
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -14721,6 +14722,7 @@ different files for it.
 ## §401 — Kerning reads GPOS in preference to the legacy `kern` table, and reads both
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -14817,6 +14819,7 @@ measurement and drawing), `gui/compositor/src/main.rs`
 ## §402 — Text is shaped once into a run; ligatures are `liga` + `rlig` only, in a single pass
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Decision.** Every consumer of a string's layout — measuring, drawing,
@@ -14914,6 +14917,7 @@ oracle list as "at least one of these" rather than "all of these".
 ## §403 — Combining marks: attach from GPOS anchors, zero their advance, and decide mark-ness from GDEF ∪ coverage
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Kerning (§401) and ligatures (§402) are refinements: get them
@@ -15005,6 +15009,7 @@ with GSUB and kerning), `gui/font/src/sfnt.rs` (`Face::is_mark`,
 ## §404 — Configuration is edited as text, not serialized: a format-preserving YAML document with a line index
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `design.txt` mandates YAML for configuration, "processed with a
@@ -15103,6 +15108,7 @@ file" section of `gui/desktop/src/appearance_settings.rs`
 ## §405 — The accent is a role with two values, and it is chosen for contrast rather than fidelity to Catppuccin
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Wiring the saved appearance settings into the shell meant the
@@ -15184,6 +15190,7 @@ from_settings}`, `readable_on`, `emphasized`, `taskbar_alpha` and
 ## §406 — GSUB is an ordered list of lookups, not a bag of subtables; single substitution and `ccmp` before contextual (GSUB 5/6)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §402 read GSUB for one purpose — find LookupType 4 anywhere in
@@ -15276,6 +15283,7 @@ apply_single, single_at, apply_ligature}` in `gui/font/src/gsub.rs`;
 ## §407 — A cluster is a boundary, not an index: `ShapedRun` works in whole clusters, and GSUB LookupType 2 (Multiple Substitution)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §406 left LookupType 2 out with a reason and a plan: one glyph
@@ -15362,6 +15370,7 @@ fit_end, offset_at}` and the `ShapedGlyph::cluster` doc in
 ## §408 — A lookup type is a rule about one position; the pass belongs to a shared driver (GSUB 5/6)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### Context
@@ -15470,6 +15479,7 @@ the faces taking the contextual route.
 ## §409 — Shape every installed face against HarfBuzz, and set limits from what that measures
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### Context
@@ -15567,6 +15577,7 @@ protects against and what it must clear.
 ## §410 — Normalize to NFC before shaping, as a layer that knows nothing about the font
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Shaping used to ask `cmap` for exactly the characters the caller typed. So
@@ -15672,6 +15683,7 @@ tracked as a defect:
 ## §411 — Choose `GSUB` features by the run's script; decode them once per face
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 An OpenType feature tag is not unique. A face that supports both Arabic and
@@ -15795,6 +15807,7 @@ which is what UAX #24 says and what any real itemizer does.
 ## §412 — A positional feature is gated by a per-glyph mask, not by its tag; and the mask belongs to the (script, lookup) pair
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -15929,6 +15942,7 @@ Checked by `installed_fonts_join_arabic_letters` in
 ## §413 — One skipping iterator for every matcher: skipping is not the same as not matching, and the feature mask gates the input only
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Every GSUB lookup carries a `lookupFlag` naming glyph classes it
@@ -16020,6 +16034,7 @@ walkers in `gui/font/src/gsub.rs`, the `Substitutions::parse` call in
 ## §414 — Kerning reads across a mark by being told what stood between the pair, not by becoming run-aware
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §413 gave GSUB a skipping iterator, but GPOS was left alone.
@@ -16102,6 +16117,7 @@ in `gui/font/src/kern.rs`; `Face::kern_across` in `gui/font/src/sfnt.rs`; the
 ## §415 — Bidi belongs inside the shaper: glyphs stay in logical order and carry a permutation beside them
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `gui/font/src/bidi.rs` implements UAX #9 and passes all 91,707
@@ -16202,6 +16218,7 @@ accumulated *ink positions* and the total width, not raw advances.
 ## §416 — Place a mark by measurement when the face has no `GPOS` at all, reimplementing HarfBuzz bug-for-bug, and refuse the scripts whose clusters need a shaper we do not have
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `tools/harfbuzz_sweep.py` compares this crate against HarfBuzz
@@ -16306,6 +16323,7 @@ changed by substitution; `gui/font/src/scaled.rs` — `synthesize_marks`, the
 ## §417 — One `GPOS` pass over a segmentation shared with `GSUB`; and a `GPOS` kern is not moved when the run reverses
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `GPOS` has eight lookup types. This crate read three of them, and
@@ -16395,6 +16413,7 @@ the `recharge_kerns` gate, and the deleted `attach_marks`;
 ## §418 — Ligature component numbers are carried on the glyph run, not inferred at positioning time
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `GPOS` type 5, mark-to-ligature attachment, is the lookup that
@@ -16484,6 +16503,7 @@ corpus string that can see the difference.
 ## §419 — Marks are sorted twice: once into canonical order, once into the order they are drawn
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Unicode's canonical combining classes are an *ordering*, chosen so that two
@@ -16558,6 +16578,7 @@ whose doc records why matching real classes still selects the right characters.
 ## §420 — The HarfBuzz sweep reports mixed-script strings apart from its verdict
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 `gui/font/tools/harfbuzz_sweep.py` shapes a 23-string corpus with both this
@@ -16614,6 +16635,7 @@ it in `main`, and the `mixed` line in the report.
 ## §421 — Transcribe HarfBuzz's Indic shaper, not the Universal Shaping Engine it superseded
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER` proposed "a Universal Shaping
@@ -16666,6 +16688,7 @@ needs all three and none of them assumes Indic.
 ## §422 — The face chooses the shaper, not the character
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Which shaper a run gets looked like a property of the text: Devanagari
@@ -16803,6 +16826,7 @@ because it would invert this same layering for a different script.
 ## §424 — A program may request a default fold depth for its own activity log, as a hint the user overrides
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Operator (Claude proposed this option and recommended it)
 
 `roadmap-detailed.md` §4.14 gives every process an activity stream whose
@@ -16871,6 +16895,7 @@ call-tree view.
 ## §425 — A monospace face is a *scoped render-tree state*, not a field on every text command
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** gui-toolkit / gui-core / apps
 
@@ -16952,6 +16977,7 @@ preserve the appearance.
 ## §426 — On-disk records store paths percent-encoded from their bytes, behind a format version marker
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** apps
 
@@ -17026,6 +17052,7 @@ that can be asserted on a non-Unix test host.
 ## §427 — Text that does not fit carries an overflow policy on the draw command, and the compositor draws the ellipsis
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Operator (answering `open-questions.md` Q45 — "q45: a."; Claude
 raised the question and recommended A)
 **Zone:** gui-core, gui-toolkit, apps
@@ -17113,6 +17140,7 @@ in `gui/**` and `apps/**`. Closes `known-issues.md` →
 ## §428 — Normalization stays font-blind; the font-fitting stage decomposes what the face cannot draw
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Operator (answering `open-questions.md` C-Q1 — "c-q1: c.";
 Claude raised the question and recommended C)
 **Zone:** gui-core
@@ -17200,6 +17228,7 @@ HarfBuzz `src/hb-ot-shape-normalize.cc`,
 ## §429 — A required field on a shared type is added and filled in one commit, across lane boundaries
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** The project is worked by three agents who each own a slice of the
@@ -17320,6 +17349,7 @@ this is the answer for it.
 ## §430 — A language is a *list* of OpenType tags generated from HarfBuzz, and the first one the font registers wins
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A font can hold rules that apply to one language and not another
@@ -17407,6 +17437,7 @@ unit tests could not see.
 ## §431 — When the host cannot falsify a shaping pass, synthesize a font that can
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Everything the font crate does is checked by shaping the same
@@ -17481,6 +17512,7 @@ own strings instead of bloating the built-in corpus.
 ## §432 — The Thai SARA AM pass runs between decomposition and the mark sort, not after normalization
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Thai has one letter, SARA AM, that is drawn as two separate
@@ -17542,6 +17574,7 @@ precedent), `known-issues.md` →
 ## §433 — A feature belongs to exactly one stage, enforced where the stages are built rather than where they are applied
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A font's shaping rules are grouped into named "features"
@@ -17622,6 +17655,7 @@ tests), `gui/font/src/indic_shape.rs` (the same four), `gui/font/src/gsub.rs`
 ## §434 — What a lookup wants at a position travels *into* the skip walk, and the never-drawn characters get a third answer
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some characters are typed to instruct the text engine and are
@@ -17753,6 +17787,7 @@ transparency of an erased glyph), `gui/font/src/gpos.rs` and `kern.rs` (the
 ## §435 — Mark-advance zeroing is a three-valued question, not a boolean, because *when* it happens changes the width
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A combining mark — an accent, a vowel sign, a dot under a
@@ -17800,6 +17835,7 @@ HarfBuzz's shaper table, not guessed, and the sweep pins them.
 ## §436 — The two mark-zeroing routes are modelled separately, and the fallback owns the marks it places
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** There are two entirely separate reasons a combining mark's width
@@ -17874,6 +17910,7 @@ sweep 58/58; full sweep back to its recorded `misplaced 170` baseline with
 ## §437 — The shared documents are lane-*partitioned*, not append-only, because append-only does not prevent the conflict it was adopted to prevent
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Operator (operator's own challenge to the rule; Claude proposed this replacement)
 
 **In short:** Four documents that all three lanes write — the bug list, the
@@ -17966,6 +18003,7 @@ EOF-appenders into three disjoint insertion points.
 ## §438 — The font engine — own the bytes, reject CFF loudly, no hinting, signed-area rasterization
 
 **Date:** 2026-08-13
+**Lane:** C
 
 **Decided by:** Claude (autonomous)
 
@@ -18073,6 +18111,7 @@ above both), `gui/font/tests/host_fonts.rs` (the 556-font sweep that measured
 ## §439 — A two-part vowel is never recomposed on the drawing path, and is put back together only when the face cannot draw the halves
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** gui-core
 
@@ -18198,6 +18237,7 @@ Sinhala lines that measure it.
 ## §440 — Device corrections are folded into the value at read time, against a size the face itself does not have
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** OpenType lets a font say "this accent sits a bit lower when
@@ -18280,6 +18320,7 @@ measure any of it.
 ## §441 — Script runs resolve through `Script_Extensions`, one row per OpenType tag pair, with direction cut in afterwards
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some characters are shared between writing systems. The Arabic
@@ -18362,6 +18403,7 @@ generated, `SCRIPT_EXT_RANGES` / `SCRIPT_EXT_POOL` / `WIDEST_EXTENSION`;
 ## §442 — A caret is a position on the screen with an affinity, and the run carries its bidi levels to answer for one
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When a line mixes English and Hebrew, one place in the *text* can
@@ -18437,6 +18479,7 @@ same on both sides of a boundary.
 ## §443 — A base direction is a third argument to one full `shape_with`, and it switches off the left-to-right fast path
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Which way a line of text runs is usually decided by the text
@@ -18516,6 +18559,7 @@ is that each answer is self-consistent, drawn width equal to measured width.
 ## §444 — A selection is a set of boxes, not a box
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you drag across text to highlight it, the highlight was
@@ -18585,6 +18629,7 @@ checks all 28 sub-ranges of a six-character bidi string);
 ## §445 — Syntax state entering a line is memoized per line and invalidated from the first edited line
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A block comment opened near the top of a file colours everything
@@ -18651,6 +18696,7 @@ not part of the document's value, it is a derived fact about it, and
 ## §446 — An undo entry records what the lines were, not what the edit was
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The editor's undo used to store a description of each edit —
@@ -18715,6 +18761,7 @@ and the `undo_tests` module.
 ## §447 — One shared `randrange` crate, with the generator's output permuted as well as its reduction fixed
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Twenty-seven of this tree's applications each contained a
@@ -18823,6 +18870,7 @@ rationale as `yamldoc`), `no_std` with no `alloc`.
 ## §448 — A variable font's chosen instance belongs to the scaled font, and the number it is chosen with is HarfBuzz's
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some fonts are adjustable — one file can draw at any weight from
@@ -18945,6 +18993,7 @@ implementations of the same misunderstanding are one implementation.
 ## §449 — `gvar` hands back a delta per point, spaces glyphs at the default width, and is proved by a font we wrote ourselves
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** An adjustable font (§448) stores its *shapes* as a base outline
@@ -19065,6 +19114,7 @@ test needs a liveness assertion, or the null implementation passes it.
 ## §450 — One table owns each varying number: `HVAR` the advance, `MVAR` the line box, and the outline itself the cap-height
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** an adjustable ("variable") font stores several numbers *twice*.
@@ -19158,6 +19208,7 @@ synthetic stores in `varstore.rs`'s own test module instead:
 ## §451 — Size and instance are two arguments, not one: `Ppem` answers device tables, `Corrections` answers both
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** fonts can ship hand-written nudges that say "at *this* size, move
@@ -19255,6 +19306,7 @@ called proved.
 ## §452 — A caret slot is named by the character just crossed, so pixels round-trip and byte offsets need not
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** when text on one line runs both ways -- an English sentence with
@@ -19361,6 +19413,7 @@ above and C-Q2.
 ## §453 — A performance guard asserts a *ratio* against an in-process control, not a wall-clock figure
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** text shaping was ~1400x slower than it should be, and after
@@ -19456,6 +19509,7 @@ that produced the numbers quoted here.
 ## §454 — A benchmark reports its *fastest* sample, because the noise is one-sided
 
 **Date:** 2026-08-17. **Decided by:** Claude (autonomous).
+**Lane:** C
 
 **In short:** When you time the same piece of code many times, you get many
 different answers, and you have to pick one number to report. The obvious pick
@@ -19567,6 +19621,7 @@ believed on this one).
 ## §455 — Multi-coloured text crosses the wire as byte-ranged spans, not as positioned glyphs
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the text editor colours its keywords, strings and comments by
@@ -20743,6 +20798,7 @@ failing, it is unmeasurable.
 ## §456 — Scancodes become key names in the compositor, and the raw code rides along anyway
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you press a key, the hardware reports *which switch closed* —
@@ -20826,6 +20882,7 @@ would be additive rather than a break.
 ## §457 — One connection carries every window, and a draw frame says which one it is for
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A program can have several windows open at once — a text editor
@@ -20959,6 +21016,7 @@ correct and could simply become redundant.
 ## §458 — A connection owns the windows opened over it, and that set is both the address book and the permission check
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you press a key, the compositor (the program that draws the
@@ -21063,6 +21121,7 @@ rather than substitute for it.
 ## §459 — The fake compositor ships in the library, unconditionally
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** To test a graphical program you have to pretend there is a
@@ -21130,6 +21189,7 @@ if the harness grows enough that it wants its own crate. Neither is true at
 ## §460 — The first transport is a TCP socket, because this protocol was always a remote one
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Applications draw pictures and the compositor (the program that
@@ -21218,6 +21278,7 @@ and a real authentication step (or option 2's mode bits) has to arrive.
 ## §461 — The compositor draws through a `Present` trait, and the first implementation is raw Win32
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor assembled a complete picture of the desktop every
@@ -22508,6 +22569,7 @@ enough to reach exponent 2 and both sides of the 999500 boundary.
 ## §462 — A generator that cannot reach the kernel CSPRNG refuses to generate
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The password generator needs real randomness, which on this
@@ -25042,6 +25104,7 @@ at once.
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lane C had grown *two* shared "stop hand-rolling random number
@@ -25137,6 +25200,7 @@ fine.
 ## §464 — A vault's salt is drawn from the kernel at creation, and a vault cannot be created without one
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the credential manager mixed a fixed word — the same word on
@@ -25249,6 +25313,7 @@ change that adds a fallback fails the suite rather than passing it quietly.
 ## §465 — Randomness has two tiers: a secret refuses without entropy, novelty falls back
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Programs want unpredictable numbers for two very different
@@ -25346,6 +25411,7 @@ readable ASCII, which makes a copied one look wrong on sight.
 ## §466 — One password derivation, in its own crate, extracted before the two callers were wired together
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** two different programs in this tree each turned a password into
@@ -25903,6 +25969,7 @@ list does not move as the list grows.
 ## §471 — The kanban board scrolls as one, not one column at a time
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A kanban board is a row of columns ("To Do", "Doing", "Done"),
@@ -25967,6 +26034,7 @@ this should be revisited rather than defended.
 ## §472 — The podcast sidebar scrolls as one; only its title is pinned
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The podcast app's sidebar is a single column holding a library
@@ -26024,6 +26092,7 @@ behaviour and this should be reversed rather than defended.
 ## §473 — A collapsed panel keeps its scroll position, measured against the size it has when open
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The partition manager has a "Pending Operations" panel at the
@@ -26078,6 +26147,7 @@ than a compile-time one. The shape of the decision is unchanged — it is still
 ## §474 — Space *around* a row belongs to that row; space *between* cards belongs to neither
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lists in this OS leave a few blank pixels around each row so the
@@ -26161,6 +26231,7 @@ than a flag on one of these.
 ## §475 — A settings page is described once and interpreted twice: drawing and hit-testing are two readings of one walk
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app used to say where each row went in two separate
@@ -26282,6 +26353,7 @@ tests fail.
 ## §476 — A slider is one mapping read in two directions, measured from the track the page says it drew
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** all eight sliders in the Settings app painted their value
@@ -26396,6 +26468,7 @@ recomputing row positions.
 ## §477 — A pane's grid is its drawn rectangle, converted once
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** every terminal pane in the tmux app was a fixed 80 columns by 24
@@ -26509,6 +26582,7 @@ because it cost real mutation-testing time to rediscover.
 ## §478 — A control that cannot act is drawn from the fact that it cannot act
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app drew seven push buttons that looked completely
@@ -26601,6 +26675,7 @@ part.**
 ## §479 — A control drawn inside a closure has nowhere to hang a click band
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app offered six little pictures to choose an account
@@ -26690,6 +26765,7 @@ companion to any single-expression collapse.
 ## §480 — A test that only ever uses the input that works proves the code works on that input
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the emoji picker stapled the chosen skin tone onto every emoji,
@@ -26771,6 +26847,7 @@ number, and all five were the same test.
 ## §481 — A control's click cell is the space it owns, not the ink it draws
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the emoji picker draws six skin-tone swatches as 18-pixel circles
@@ -26849,6 +26926,7 @@ sweeps the whole window now.
 ## §482 — A convention the code invents for itself is a convention nothing can contradict
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the checkers board was built mirror-image — the bottom-left
@@ -26935,6 +27013,7 @@ paints light.
 ## §483 — An inverse tells you which cell a point is in, never where in the cell it is
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** chess drew its board and hit-tested clicks from the same
@@ -27019,6 +27098,7 @@ that `CLAUDE.md` prescribes for `#[cfg(test)]`, clearing its remaining three.
 ## §484 — A hit test that rejects an out-of-range index has two edges; one that clamps has one
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** in gomoku a click slightly *outside* the board still lands on a
@@ -27142,6 +27222,7 @@ asserts the stone count is zero (§480 again).
 ## §485 — A board that numbers its rows the other way, and the geometry checklist that is now reusable
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** reversi is the fourth board game in `apps/` to have its screen
@@ -27242,6 +27323,7 @@ then asserted only that *some* move had been played; it now clicks
 ## §486 — A test that measures a twin of the shipped code is worse than no test
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** sudoku is the fifth board game in `apps/` whose screen geometry
@@ -27357,6 +27439,7 @@ binary clippy unchanged at 95.
 ## §487 — "Inside the window" is not a constraint: measure the frame, not the containment
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** when a test checks that a game board is drawn *inside* its window,
@@ -27639,6 +27722,7 @@ mechanism rather than the shared one.
 ## §488 — The compositor's rendering seam is cut at the primitive, not at the pixel and not at the scene
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor draws every pixel with the CPU. To ever use the
@@ -27727,6 +27811,7 @@ is filed as `requests/c-a-virtgpu-render-ioctl-dispatch-blocks-compositor-gpu.md
 ## §489 — Binary units are the house convention, and the base travels with the name
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** SlateOS shows file and disk sizes to people, and until now every
@@ -27814,6 +27899,7 @@ described as `4096.00 GB`.
 ## §490 — A duration has several honest shapes, but only one of each; and the shape says how the number was obtained
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lots of Slate's programs show you a length of time — how long a
@@ -27918,6 +28004,7 @@ could not count past their largest unit.
 ## §491 — An instant is rendered where the zone is known, and the zone is an argument that is never defaulted
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** All over Slate, programs show you *when* something happened — when
@@ -28537,6 +28624,7 @@ definition, and they are rebuilt in the same change.
 ## §492 — The taskbar clock abbreviates the date the calendar popup spells out
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Date & Time settings page has two switches, "show day of
@@ -29012,6 +29100,7 @@ console prompt without ever having had root.
 ## §493 — The extra clocks surface in the calendar popup, not stacked in the tray
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Date & Time settings page lets you add up to four extra
@@ -29088,6 +29177,7 @@ way.
 ## §494 — Stacking is three named bands, not a depth number, and a raise never leaves its band
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A desktop has three kinds of surface: a wallpaper that belongs
@@ -29160,6 +29250,7 @@ the concept exists.
 ## §495 — A shell learns the desktop by subscribing to a pushed snapshot, and the compositor decides it is stale by comparing bytes rather than counting changes
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A taskbar has to show a button per open window, but until now a
@@ -29254,6 +29345,7 @@ receives one.
 ## §496 — A remembered "allow" expires after eight hours; a remembered "deny" never does
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When the desktop asks "may this program use your microphone?",
@@ -29335,6 +29427,7 @@ replacing `saturating_sub` with `-` panics the backwards-clock test with
 ## §497 — Window decorations are scaled per-window from the display the window mostly sits on, and the scale is re-derived every frame rather than maintained on every move
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A "scale factor" is how a computer copes with a screen whose
@@ -29486,6 +29579,7 @@ raw `SHADOW_SIZE`.
 ## §498 — Rounded rectangles are rasterized as scanline spans inside the compositor, with coverage carried on the existing opacity channel rather than a new backend primitive
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lots of things on screen are supposed to have rounded corners —
@@ -30956,6 +31050,7 @@ in `bare-metal-boot.md` §6 so they are not rediscovered as bugs.
 ## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings app has a switch for how round window corners should
@@ -31135,6 +31230,7 @@ distinguishes that from the correct shape. It is a real property with no guard.
 ## 500. A settings change reaches a running compositor as a notification that carries nothing
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** After §499 the compositor finally drew window corners and drop
@@ -31263,6 +31359,7 @@ settings live or what a missing file means.
 ## 501. The window frame's colours are resolved once, in the settings crate
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two programs draw the title bar at the top of every window — the
@@ -31393,6 +31490,7 @@ what the old hardcoded palette would also have passed.
 ## 502. Double-click-to-maximize moves to the compositor rather than dying with the shell's decorator
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Clicking a window's title bar twice quickly makes it fill the
@@ -31511,6 +31609,7 @@ desktop and pass for the wrong reason.
 ## 503. A shell surface's screen offset is applied in both directions by one type, with the outbound half expressed as a translation command rather than rewritten coordinates
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell works out where things are in whole-screen
@@ -32109,6 +32208,7 @@ went first. Tracked in known-issues.md as
 ## 504. Snapping a window is a named edge sent to the compositor, not a rectangle computed by the shell
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** pressing Super+Left should tile the focused window to the left
@@ -32159,6 +32259,7 @@ build.
 ## 505. A keyboard shortcut returns a *list* of requests, and the shell's two input paths converge on one request type
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop's keyboard shortcuts (Alt+F4, Super+D, Super+Left…)
@@ -32201,6 +32302,7 @@ sweep, failing four tests.
 ## 506. The shell's private window manager is deleted rather than fixed, and `snap.rs` is kept as a library with no caller
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell used to keep its own copy of where every window
@@ -33203,6 +33305,7 @@ then would be to look at what moved before changing anything.
 ## 507. The zone *shapes* move into the protocol crate; the shell keeps only the chooser, and pulls its work area on use
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** The desktop has a "snap layouts" feature — press Super+Z and a
@@ -33296,6 +33399,7 @@ Nothing on the roadmap implies such a program.
 ## 508. Edge-drag tiling lives in the compositor; the shell's copy was deleted rather than connected
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** Dragging a window to the edge of the screen and letting go should
@@ -33387,6 +33491,7 @@ here, and it keeps the preview local either way.
 ## 509. A tiling drop follows the monitor under the *pointer*, not the one under the window
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** When you drag a window to the edge of a screen and let go, the
@@ -33480,6 +33585,7 @@ does.
 ## 510. A panel reserves screen edge space by naming its own window, and a greedy claim is clamped rather than refused
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** A taskbar needs a way to tell the compositor "keep the bottom 40
@@ -33602,6 +33708,7 @@ undone to be extended.
 ## 511. The compositor's scanout is split in three, so that the two-thirds that can be wrong is testable on a machine with no graphics card
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor can now put pixels on a real screen. Talking to a
@@ -33831,6 +33938,7 @@ beyond 4096, which is what bounds the memory.
 ## 512. A display resize re-derives everything placed by a rule, and rescues only what the user could no longer reach
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When the screen resolution changes, the desktop has to be put back
@@ -33931,6 +34039,7 @@ not a guard.
 ## 513. A window is never placed where it cannot be reached, and "reachable" is a question about the whole desktop
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** §512 stopped a *resize* from leaving a window off the screen. It
@@ -34011,6 +34120,7 @@ nobody knows what they cover.
 ## 514. The composited surface *is* the virtual desktop; a monitor is a viewport onto it, and fullscreen covers one monitor rather than the surface
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** SlateOS's compositor already believed it could drive two monitors —
@@ -34163,6 +34273,7 @@ model first.
 ## 515. A CRTC drives at most one monitor, each monitor copies out its own rectangle of the one composited frame, and a monitor that fails is dropped rather than fatal
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** §514 taught the compositor that a second monitor exists; this
@@ -34332,6 +34443,7 @@ pipeline instead of one.
 
 ## 516. A monitor leaving is a monitor arriving in reverse, but the order is inverted and the survivors do not move
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** unplugging one of two monitors used to do nothing to the desktop's
@@ -34432,6 +34544,7 @@ fmt clean.
 
 ## 517. Monitor hotplug is a polled whole-set reconciliation keyed on the connector id
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the compositor could add a monitor (§514) and drop one (§516), and
@@ -34695,6 +34808,7 @@ every `match` in the tree must answer for, and its presence would tell the next
 reader that block device nodes exist somewhere in this system. They do not.
 ## 518. A virtual desktop is a number on a window that the compositor reads, not a filter the taskbar applies
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop had four "virtual desktops" — four separate screenfuls
@@ -34994,6 +35108,7 @@ compositor's `main.rs` is compiled at all); fmt clean.
 
 ## 519. The window list reports each window's rectangle; nothing lets a shell set one
 
+**Lane:** C
 **Decided by:** Claude (autonomous) — flagged to the operator before starting; see
 "Flagged, and proceeded on the default" below.
 
@@ -35152,6 +35267,7 @@ commit backed out and the overview left filed as dead code.
 ## 520. The overview is a fullscreen modal that takes input before the shell does, and one layout pass answers both "where is it drawn" and "what did I click"
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop has an Exposé screen — press a key, see a card for
@@ -35333,6 +35449,7 @@ module.*
 ## 521. The frame clock is a local, one-shot deadline on the loop's own park — not a compositor callback, not a fixed-rate timer
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Nothing on the desktop could move by itself. A menu could not
@@ -35621,6 +35738,7 @@ is *derived*.
 ## 522. An animation counts milliseconds, and its resting state is *finished* — so a caller with no clock still gets a working screen
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell had an animation module (fades, slides, window
@@ -36081,6 +36199,7 @@ precisely so it stays cheap to reverse.
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Settings had a complete user interface and no way to run: no
@@ -36311,6 +36430,7 @@ the underlying process hazard is logged as
 ## 524. One crate owns the double-click numbers, `ReloadInput` is its own verb, and the Mouse page offers exactly the settings something consumes
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop had a Mouse settings panel whose double-click slider
@@ -37097,6 +37217,7 @@ other.
 ## 525. One resolved `Palette`, with roles rather than colours — and the five judgement calls inside it
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop's settings page lets a user pick light or dark mode,
@@ -37310,6 +37431,7 @@ on the same side.
 ## 526. A window's sampled colour is an `Option`, because "nobody has looked yet" is not a colour, and the placeholder for it belongs to the renderer
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Hovering a taskbar button pops up a small preview of that
@@ -37379,6 +37501,7 @@ frame *marked* as stale, or it gets nothing.
 ## 527. The logo is the product's colour and the tab strip is the user's, so two sites that drew the same blue now mean different things
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The About dialog draws blue in two places: the square logo tile
@@ -37426,6 +37549,7 @@ because the stock accent *is* `blue`.
 ## 528. A calendar event's colour is an `Option`, because a parser that reads the theme lets a display setting edit the user's file
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Each event in the calendar can have a colour you picked, saved in
@@ -37499,6 +37623,7 @@ to accept it, and a membership test cannot check a value it was told to accept.
 ## 529. A selection highlight may be a raised `surface0` only if everything drawn on it is full-strength text; otherwise it recedes to `mantle`
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you pick an item in a list, the shell marks it by painting a
@@ -37572,6 +37697,7 @@ finding it afterwards means redoing the fixture that pins the row.
 ## 530. A contrast test reads its ink-on-fill pairings out of the rendered output, not out of a table written by hand
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Several shell modules carry a test that checks their text is dark
@@ -40902,6 +41028,7 @@ boot-only version and is fixed, and `AddressBusy` is the tripwire if it recurs.
 ## 531. Blur tint weights are anchored at the most-transparent setting and interpolated up to opaque, rather than being independent of the setting
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop blurs what is behind a taskbar, a menu or a
@@ -40970,6 +41097,7 @@ produce and no one has approved.
 ## 532. `readable_on` ink is declared per module, not exempted globally, in the palette-conversion sweep
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The automated check that proves a shell module was converted off
@@ -41441,6 +41569,7 @@ comment on `before_diagnostic`, which says so in as many words, and by
 ## 533. The screen magnifier's lens is opaque, and does not follow the transparency setting
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The screen magnifier draws a lens that follows the pointer and
@@ -41507,6 +41636,7 @@ the crosshairs used to be white at alpha 128, which over Latte `base` measures
 ## 534. A repeated control gets a module that draws it, and the ink is chosen for whatever the shape's outline is read against
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two controls in the desktop shell — the on/off switch and the
@@ -41618,6 +41748,7 @@ beside it.
 ## 535. A refactor that deletes call sites must resolve the reintroduction defects it strands, splitting them into re-targeted and retired-by-construction
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** We keep a harness that proves our tests are real, by putting each
@@ -41740,6 +41871,7 @@ and inverted both — and their successors are proved.
 ## 536. `readable_on` measures the contrast ratio rather than estimating brightness, and so guarantees a floor for colours nobody chose in advance
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The shell picks black-ish or white-ish lettering for anything drawn on a coloured fill — a switch knob, a title bar, the label on a selected chip. It used to guess which one by adding up the red, green and blue of the fill and comparing that sum against a fixed number. That guess is close enough for the fourteen accent colours the settings page offers, but the user can also pick *any* colour with a custom-accent picker, and for some of those the guess is badly wrong: a bright green gets pale lettering that is nearly invisible on it. The fix is to stop guessing. Ask the actual legibility ratio — the same number the accessibility standards and all our own tests are stated in — and use whichever of the two inks scores higher.
@@ -41814,6 +41946,7 @@ In all three the repair was the same shape, and it is the rule this decision lea
 ## 537. The contrast arithmetic moves down into the toolkit, so the crate every widget depends on holds the only copy
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two different parts of the desktop were each working out, on their own, whether to write on a coloured button in dark ink or light ink. The appearance settings had a correct method as of §536; the widget toolkit had its own, and the toolkit's was wrong for nearly half of all colours — on a plain red button it chose white lettering when black is noticeably easier to read. The toolkit could not simply call the good one, because the good one lived in a crate that sits *above* it. So the good one moved down into the toolkit, and the appearance crate now points at it instead of keeping a copy. There is one implementation in the tree again.
@@ -41883,6 +42016,7 @@ The `known-issues.md` entry filed the day before had predicted "a run of pinned-
 ## 538. Lanes publish to `main` with a fast-forward push from their own worktree, not by merging inside the shared `os` checkout
 
 **Date:** 2026-08-21 (answered), written up 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q3, answered `b`
 
 **In short:** The three agents each work in their own private copy of the source tree, which is what stops them overwriting one another. But the last step of every finished task used to send all three into **one shared copy** — the `os` folder — to publish. Two agents were in there at the same moment on 2026-08-21 and their publish steps tangled. From now on nobody enters that folder to publish: each lane publishes with a single server-side command that needs no folder at all, and if another lane got there first the command is simply refused, so you pull their work in, re-test, and try again.
@@ -41920,6 +42054,7 @@ The ability to resolve a genuine merge conflict *during* publication. That was n
 ## 539. Cryptographic primitives are ported from vetted implementations; the format and plumbing around them stay ours
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q5, answered `c`
 
 **In short:** the code that protects saved passwords, login and the lock screen is cryptography this project wrote itself — including eleven separate hand-written copies of the same hash function. From now on, the *primitives* (the hash, the cipher, the password hash) are ported from implementations that other people have already spent twenty years attacking and repairing. Everything built on top of them — the vault file format, the credential service, the login flow — stays ours. The reason for the split is that hand-written crypto fails in a way this project's usual defence does not catch: the code computes the right answer and still leaks the secret, through how long it took to compute it. No test we can write notices that.
@@ -41959,6 +42094,7 @@ So: borrow where testing cannot reach, write where it can. That is also what pro
 ## 540. Printing is a background service applications submit jobs to, not a library they link
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended B, the shared library; operator chose C) — `open-questions.md` → C-Q4, answered `c`: *"let's do c since we should do it eventually anyway, no point putting it off with a stop-gap solution in its place"*
 
 **In short:** nothing in this OS can print. Two halves of a printing system exist and have never been introduced to each other — the PDF viewer knows how to work out *which pages* to print, and the desktop knows about *printers*, paper sizes, copies and a job queue. The connection between them will be a **background service**: an application hands a print job to a running system service and is then done with it. The job survives the application closing, and it can be cancelled from anywhere. This is more work than either shorter path, and it was chosen on the grounds that it is where printing has to end up anyway, so a stop-gap would be built only to be thrown away.
@@ -42010,6 +42146,7 @@ Recorded because the estimate was not wrong and the conclusion still was: **"che
 ## 541. Arrow keys move the caret by what is on the screen, not by position in the sentence
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q2, answered `b` (visual)
 
 **In short:** Hebrew and Arabic are written right to left, and one line can mix them with English — *"I said שלום to him"*. On such a line the order the characters are stored in is not the order they are drawn in, so the Right arrow key has two possible meanings that disagree. It now means **one step to the right on the screen**. Previously it meant "the next character in reading order", which made the caret occasionally jump a whole word sideways between two presses of the same key. The cost of the new rule is that the caret's *position in the sentence* can move backwards while it moves rightwards on screen.
@@ -42058,6 +42195,7 @@ So a half-implemented "visual" — switching the arrow keys without also making 
 ## 542. The installer refuses an ambiguous size suffix rather than guessing which one the author meant
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended B weakly, and named C the honest option; operator chose C) — `open-questions.md` → Q55, answered `c`
 
 **In short:** an unattended-install config file describes each disk partition with a size like `"100 GB"` or `"32 GiB"`. The installer treated both spellings as the same number — the binary one — so a config asking for `500 GB` on a 500 GB drive actually asked for 537 GB and the install failed to fit. It now **refuses `GB` outright**, with an error naming both alternatives, and accepts only the unambiguous `GiB` and bare `G`. A config using `GB` stops installing until someone edits it. Nothing is ever silently resized.
@@ -42092,6 +42230,7 @@ This generalises past the installer: when an input has two established meanings 
 ## 543. Moving the caret follows the screen; editing and masking still follow the string
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (operator-approved scope) — §541 is the operator's decision; which *other* keys follow it is mine
 
 **In short:** §541 says the Left and Right arrow keys move the caret by what is
@@ -42184,6 +42323,7 @@ the only two such tests in the tree.
 ## 544. Reading the keyboard and mouse: six decisions the kernel's device nodes left to us
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The kernel now offers the keyboard and mouse as files the
@@ -42376,6 +42516,7 @@ skimmed.
 ## 545. The lock screen asks someone else whether the password was right, and gets a one-shot ticket back
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous), except the passwordless-account policy, which is deferred to the operator (`open-questions.md`)
 
 **In short:** The lock screen used to check the typed password itself, against a
@@ -42438,6 +42579,7 @@ so answering it is a one-line change either way.
 ## 546. The toolkit gets a focus, because without one every keystroke went to the last text field in the window
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The widget toolkit had no idea which control the user was typing
@@ -42521,6 +42663,7 @@ nothing — indistinguishable, to the user, from the bug this entry is about.
 ## 547. A dialog learns where it is by being drawn, so the only thing you can click is the thing that was drawn
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Every button on every pop-up dialog in the toolkit — the alert's
@@ -42614,6 +42757,7 @@ recomputed from a guess again, and every one of them a defect that compiles.
 ## 548. The compositor carries the user's input settings but does not own the pointer, so the display loop asks once a tick rather than being told
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings → Mouse page lets you change how fast the pointer
@@ -42830,6 +42974,7 @@ strictly a refinement of the non-zero space.
 ## 549. The keyboard layout is one table in a leaf crate, because the shell was drawing a keyboard nobody could type on
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Choosing a keyboard layout in the desktop shell used to change
@@ -42933,6 +43078,7 @@ absent one — the user has no way to tell a wrong table from a broken keyboard.
 ## 550. A keystroke carries a string, not a character, and a composition that fails types both keys
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** On a French, German or Spanish keyboard some keys type nothing on
@@ -43058,6 +43204,7 @@ machine would make both harder to review and impossible to bisect.
 ## 551. What a dead key does with the *next* keystroke: three rules the design files did not decide
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A dead key is one that types nothing when you press it and
@@ -43171,6 +43318,7 @@ none is visible to a client — the client sees only the resulting text.
 ## 552. A mode-set the kernel refuses does not decline the display; the page-flip that follows decides
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** To put a picture on a monitor the compositor has to tell the
@@ -43743,6 +43891,7 @@ here for three reasons that are specific to this crate.
 ## 553. An application announces a rewritten config file after every event, not once per batch of them
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some settings live in files that a *different* program reads. When
@@ -45019,6 +45168,7 @@ next occurrence must produce a RIP, and today's could not."*
 ## 554. A render command with no backend is a command that draws nothing; the compositor now owns an image store
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The GUI toolkit has always let a program say "draw picture number
@@ -45133,6 +45283,7 @@ and is logged in `known-issues.md`.
 ## 555. One glob matcher for the two search tools, two dialects for the desktop
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shipped with four separate pieces of code that each
@@ -45239,6 +45390,7 @@ The defect inventory and the measurement method are in `known-issues.md` →
 ## 556. A program in another process can hand the compositor a picture, and is refused rather than throttled when it hands over too many
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor could draw pictures, but the only way to give it
@@ -45369,6 +45521,7 @@ documented overflow past it.
 ## 557. A wallpaper that cannot be shown costs a wallpaper, not a desktop — and the shell, not the wallpaper model, is what opens the file
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop can now actually display a picture as the wallpaper.
@@ -45482,6 +45635,7 @@ documented overflow past it.
 ## 558. Every application gets one route for pixels, and the image viewer is the first to use it: one id reused, a queue that supersedes, and a window that opens even when the file will not
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the image viewer now actually shows the photograph you opened.
@@ -45641,6 +45795,7 @@ documented overflow past it.
 ## 559. The file manager's picture cache is also its eviction policy: what falls out of the cache is what the display server is told to forget
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the file manager makes small previews ("thumbnails") of the files
@@ -45710,6 +45865,7 @@ changes the other. That is written at `take_evicted_image_ids`.
 ## 560. A preview's number is keyed on the same three facts as the cache entry it belongs to
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** each preview picture is given a number, and the display server
@@ -45765,6 +45921,7 @@ or storing them on every thumbnail.
 ## 561. "ARGB" names two opposite byte orders, so the conversion is named after the wire format and lives in exactly one place
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** a colour is four bytes — red, green, blue, and transparency — and
@@ -45831,6 +45988,7 @@ tests), `apps/explorer/src/thumbs.rs` (`Thumbnail::to_wire_bytes`),
 ## 562. A panel that slides open must be fully open for a caller with no clock, and rewound into the slide by one that has
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop's notification panel slides in from the right edge of
@@ -46265,6 +46423,7 @@ the kernel could only produce `` a element id ``.
 ## 563. A panel opened from a button stops short of that button, so the second press closes it
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop grew a bell in the system tray — the little clock
@@ -46348,6 +46507,7 @@ them is the thing being avoided.
 ## 564. Do Not Disturb hides the interruption, never the record — and the two switches that spell it are views of one mode
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop has a "Do Not Disturb" switch. Until now it moved
@@ -46490,6 +46650,7 @@ wrappers around `handle_mouse` / `handle_hotkey`.
 ## 565. A shortcut belongs to the shell even while another window has the keyboard, and the key that *ends* the gesture is owed to both of them
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Until now, every keyboard shortcut the desktop defines — Alt+Tab,
@@ -46628,6 +46789,7 @@ close — the same harm the conditional grab exists to avoid, inverted.
 ## 566. A window can be told to be invisible to the mouse, and that is a different fact from being see-through
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop wants to flash a volume indicator over the middle of
@@ -46761,6 +46923,7 @@ version bump. `gui/compositor/src/lib.rs` — `Window::input_transparent`,
 ## 567. The volume keys act, on their own surface, off a clock the shell keeps itself
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** pressing the volume key on a keyboard now actually changes the
@@ -46871,6 +47034,7 @@ needed three more frames to retire whatever its own clock said. It now advances
 ## 568. The keyboard gets its own way to say "start this program", and the Run box is what needed one
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop now has a Run box — press the Windows key and R, type
@@ -47061,6 +47225,7 @@ omitted-offset form still copies to the start.
 ## 569. A window says which program it belongs to, once, in one field — and that is what a window rule matches
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings panel has always let you write rules like *"the
@@ -47164,6 +47329,7 @@ executable's stem, lower-cased), `gui/compositor/src/lib.rs` (`Window::app_id`),
 ## 570. A window rule fires once, when the window arrives — and the shell hands the requests back rather than sending them
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Window rules say things like *"open the editor maximised"*. The
@@ -47397,6 +47563,7 @@ twenty-sixth and twenty-seventh burn-down batches of
 ## 571. One shortcut table, not two: the configurable registry became the live one
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop had *two* lists of keyboard shortcuts. One was live
@@ -47509,6 +47676,7 @@ grab loop and `reconcile_escape_grab`.
 ## 572. The shortcut card grows sideways: columns rather than a taller card or a scrollbar
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop can show a card listing every keyboard shortcut. Until
@@ -47594,6 +47762,7 @@ there is no division by a count a later edit could let reach zero.
 ## 573. A dialog button carries its own label: the closed four-variant enum became an open struct
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The toolkit has a ready-made dialog box (`AlertDialog`), fully

@@ -59465,6 +59465,19 @@ that reports success.
   **OPEN**. Its original blocker ("requires a small fixture per filesystem") is
   retracted — that is no longer what stands in the way; four `pub(crate)`
   changes are.
+  - **Correction, 2026-09-01 (`5fa72bc13`), when this section was
+    implemented:** the four `pub(crate)` changes were not needed either, so
+    that second blocker is retracted too. This section reasoned that
+    `conformance` would have to reach *into* each backend to drive its
+    builder. It does not: the last clause of this section's own title —
+    "the declarations live in each backend's own test module" — already
+    implies the inverse, and that is what was built. `conformance_fixture()`
+    lives *inside* each `tests` module, calls the private builders as a
+    neighbour, and hands back a `Box<dyn FileSystem>`. Visibility changed
+    nowhere. The lesson is narrow but repeatable: when a plan says a
+    consumer needs wider access to a producer, check first whether the code
+    can be written on the producer's side instead, where the access already
+    exists.
 - The harness now perturbs global allocator state, which a distant checker reads
   and fails on. `HeapWatch` samples the corruption counters per inspected path
   for that reason, and the general rule it encodes — a self-test that moves

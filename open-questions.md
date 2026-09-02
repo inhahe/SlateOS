@@ -1419,6 +1419,78 @@ answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
 
+## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
+
+**In short:** part of our test suite compiles small C programs and runs them
+inside the OS. To build them, the compiler (**fastpy** — a separate project of
+yours, in `D:\visual studio projects\fastpy`) has to find our C library. It
+looks for a folder next to itself named exactly `os`. But we stopped working in
+a folder named `os` — each of the three parallel workers now has its own
+checkout named `os-lane-a`, `os-lane-b`, `os-lane-c` — so the compiler finds
+nothing, every time, for all three. The library it wants is sitting right there
+in the folder it was launched from; it just never looks there. The question is
+who is allowed to change fastpy to fix it, since that is not this project's code.
+
+### What this actually costs
+
+Nothing is broken or wrong — the OS builds and boots fine, and this has no
+effect on the kernel. What is lost is *attribution*: when one of those C
+programs passes or fails, we cannot say which version of our C library it was
+built against, so the result proves less than it appears to. Every boot test
+prints a warning saying so.
+
+I already fixed the half that was in our tree (commit `1367f04ac`): the warning
+used to claim the library could not be *found*, which sent the reader off to
+rebuild something that was never missing. It now names the real cause and gives
+a repair line that works. **So this is not urgent** — it is a known, clearly
+labelled gap rather than a silent one.
+
+### Why I did not just fix fastpy myself
+
+Two reasons, and the second is the one I want your call on.
+
+1. **It needs a judgement, not just an edit.** With four checkouts side by side
+   (`os`, `os-lane-a`, `os-lane-b`, `os-lane-c`), "find the OS folder" no longer
+   has one answer. The sensible rule is "walk up from wherever you were launched
+   and use the checkout you are inside of" — but that is a behaviour change for
+   anything else using fastpy, not a typo fix.
+2. **It is a different repository, and three of us share it.** All three lanes'
+   builds call fastpy. Our own rules say I file a request rather than edit
+   another owner's tree, and fastpy has no lane — so there is nobody to file it
+   with. It also has its own version-bump-and-release discipline that a drive-by
+   commit from the OS project would sit oddly inside.
+
+### The options
+
+**A — I fix fastpy directly** (walk up from the launch directory; keep the old
+`os` lookup as a fallback so nothing that works today stops working), bump its
+version per its own rules, and commit there but do not push.
+*What changes:* the warning stops appearing on all three lanes and the C-test
+results become attributable again. You get a commit in the fastpy repo from OS
+work.
+
+**B — Each lane sets the location explicitly when it builds the fixtures**, and
+fastpy is left alone.
+*What changes:* nothing visible until someone re-builds the C fixtures; the
+warning stays until then. Keeps fastpy untouched, but the same blind spot bites
+anything else that calls it.
+
+**C — Leave it. Keep the accurate warning and treat those C-test results as
+unattributed.**
+*What changes:* nothing. The warning keeps printing on every boot on every lane.
+
+**My recommendation: A.** The hard-coded folder name is a plain bug — it broke
+the moment the project adopted `git worktree`, which is now policy — and B fixes
+the symptom for one caller while leaving the cause. I am flagging it rather than
+doing it only because it is your other repository.
+
+### If this is never answered
+
+Nothing degrades and nothing is blocked. The warning keeps printing on every
+boot for all three lanes, and C-test results stay unattributable. The one real
+risk is the ordinary one for a permanent warning: people stop reading it, so the
+day it has something new to say, it looks like the noise it has been all along.
+
 The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.
 `(§n)` cites `design-decisions.md`.

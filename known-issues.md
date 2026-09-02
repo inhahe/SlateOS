@@ -107055,3 +107055,76 @@ lanes; the same mechanism could serialise *builds*, or `boot-test.sh` could
 refuse to start — with a distinct exit status, not a boot verdict — when commit
 charge is above a threshold, so the cost is paid in seconds rather than at the
 end of a 50-minute run. The second is lane A's to do and is the smaller change.
+
+---
+
+### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
+
+**In short:** every boot test in a lane worktree prints `WARNING: fastpy would
+not resolve any SlateOS sysroot`, which reads as "the C fixtures in this image
+were linked against a libc nobody can identify, so their results cannot be
+attributed to any `posix/` revision." The alarming part is true. The reason is
+not what the message implies: the lane's `libc.a` exists and is perfectly
+identifiable — the search simply never looks in the lane's own tree. It looks
+only in a sibling checkout literally named `os`, which in the three-worktree
+layout is the *integration* tree, and which has no sysroot at all.
+
+**Lane:** A (`scripts/boot-test.sh`, and fastpy's own
+`_find_slateos_sysroot_lib`, which the gate deliberately mirrors).
+**Found:** 2026-09-01, in the `bdl8f0gxl` boot run.
+
+**Evidence, on this machine, right now:**
+
+| path | `libc.a` |
+|---|---|
+| `os-lane-a/toolchain/sysroot/lib/` (the tree under test) | **present**, 12,645,582 bytes, 2026-08-31 |
+| `os/toolchain/sysroot/lib/` (the only place searched) | **absent** |
+
+The candidate list in `boot-test.sh` (~:646–658) is, in order:
+`$FASTPY_SLATEOS_SYSROOT/lib`, `$FASTPY_SLATEOS_SYSROOT`, then
+`${FASTPY_DIR:-$PROJECT_ROOT/../fastpy}/../os/toolchain/sysroot/lib`. Both
+environment variables are unset in the lane shells, so only the third is ever
+tried, and that third hard-codes the directory name `os`. `$PROJECT_ROOT` — the
+tree whose kernel is being booted and whose `libc.a` is sitting right there — is
+not a candidate at any point.
+
+**Why this is worse than a stale-artifact warning.** It is unconditional. It
+fired on this run, it fires on every lane-A run, and by construction it fires on
+lane B's and lane C's too, since none of the three worktrees is named `os`. A
+warning that cannot ever *not* fire carries no information, and the cost is
+precisely the failure mode `A-GATES-SILENTLY-STOPPED-CHECKING` describes from
+the other direction: readers learn to scroll past it, so on the day the sysroot
+genuinely is unresolvable — or genuinely is the wrong one — the message that
+says so will look exactly like the noise it has been printing for weeks.
+
+Note the irony that makes this worth writing down rather than silencing: the
+gate's own comment says it mirrors fastpy's search "so it is written to be read
+side-by-side with that function", and warns that if the two ever disagree "the
+gate becomes worse than nothing -- it would report on a file fastpy does not
+use." The mirroring is faithful. The defect is in the thing being mirrored, and
+faithfully copying it is what propagated the defect into the harness.
+
+**What a proper fix looks like.** Two candidates, and they are not exclusive:
+
+1. **Harness-side, small and local to lane A:** `boot-test.sh` exports
+   `FASTPY_SLATEOS_SYSROOT="$PROJECT_ROOT/toolchain/sysroot"` before the check
+   when that directory holds a `libc.a`. This makes the first candidate hit,
+   makes the warning informative again, and is correct on its face — the tree
+   under test is the tree whose libc the fixtures should be attributed to.
+2. **Root-cause, and cross-project:** fastpy's `_find_slateos_sysroot_lib`
+   should walk up from the *current* project root before falling back to a
+   sibling named `os`. Hard-coding a checkout's directory name is what breaks
+   the moment anyone uses `git worktree`, which this project now does by policy
+   for all three lanes.
+
+Do (1) and the warning starts meaning something on the next boot; (2) still
+wants doing, because anything else invoking fastpy against a lane tree has the
+same blind spot and no harness to compensate. **(2) is not lane A's tree** —
+fastpy lives at `D:\visual studio projects\fastpy` — so it needs either a
+request or an operator decision about who owns it.
+
+**Not to be confused with** the `[ctest] ERROR: ... libc.a was built from 7
+input(s) that have since changed` block printed just above it on the same run.
+That one is a genuine staleness report about lane B's `posix/` sources, it is
+accurate, and it is separately actionable by rebuilding the sysroot. This entry
+is only about the *attribution* warning that follows it.

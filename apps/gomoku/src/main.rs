@@ -2084,8 +2084,14 @@ mod tests {
     fn the_coordinate_labels_are_dropped_when_they_do_not_fit() {
         let app = GomokuApp::new();
         let roomy = app.frame(W.0, W.1);
+        // `says` would be wrong for "A": the panel and the status band both
+        // paint strings containing one, so a whole-frame assertion passes
+        // with every coordinate label dropped. The claim is about the board's
+        // margin, so it names the board's rect -- which `Layout` documents as
+        // including the margin the labels are drawn in.
+        let board = Layout::solve(W.0, W.1).board;
         assert!(
-            says(&roomy, "A") && says(&roomy, "15"),
+            says_in(&roomy, "A", board) && says_in(&roomy, "15", board),
             "a 900x640 window has room for the coordinates and drew none"
         );
 

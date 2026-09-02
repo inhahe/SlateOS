@@ -46,6 +46,7 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::blocksrc::MemorySource;
+use crate::fs::conformance::Declared;
 use crate::fs::path::Path;
 use crate::fs::vfs::{EntryType, FileSystem};
 use crate::serial_println;
@@ -1897,7 +1898,11 @@ fn build_pool() -> Pool {
     // different order. Its size therefore does *not* sit at byte 8.
     let hello_attrs = Attrs::for_obj(
         OBJ_HELLO,
-        0o100_644,
+        // setuid, deliberately: a mode bit *outside* `0o777`. Every mode in this
+        // fixture used to sit inside `0o777`, which is exactly the range a
+        // `& 0o777` narrowing cannot disturb — so the bug that masked setuid,
+        // setgid and sticky away passed this suite unchallenged. See `DECLARED`.
+        0o104_644,
         u64::try_from(HELLO_TEXT.len()).unwrap_or(0),
         OBJ_ROOT,
     );
@@ -1914,7 +1919,9 @@ fn build_pool() -> Pool {
         },
     );
 
-    let sub_attrs = Attrs::for_obj(OBJ_SUB, 0o040_755, 0, OBJ_ROOT);
+    // setgid + sticky: the other two bits above `0o777`, and the realistic case
+    // for a directory (`/tmp` is sticky, a group-shared tree is setgid).
+    let sub_attrs = Attrs::for_obj(OBJ_SUB, 0o043_755, 0, OBJ_ROOT);
     let sub_bonus = sa_buffer(1, &[], &sa_values(&IMG_LAYOUT_1, &sub_attrs, &[]));
     put_dnode(
         &mut fs_dn,
@@ -2158,6 +2165,36 @@ fn mount(bytes: Vec<u8>) -> KernelResult<ZfsFs> {
     ZfsFs::open_source(Box::new(MemorySource::new(bytes)))
 }
 
+/// The modes [`build_pool`] writes, for the cross-backend conformance harness.
+///
+/// `may_drop` is `0o222`: this mount is read-only, which entitles the driver to
+/// withhold write permission and nothing else — see the `0o7555` masking note in
+/// `super::mod`'s metadata path.
+///
+/// `/sub` is a directory and `/hello` a file, so the two carry different bits
+/// above `0o777` (setgid+sticky and setuid respectively). Splitting them that
+/// way matters: a driver that preserved the high bits for one `entry_type` and
+/// masked them for the other would pass a table that only ever declared one
+/// kind, and `metadata` does branch on `entry_type` immediately above the mode.
+const DECLARED: &[Declared] = &[
+    Declared {
+        path: "/hello",
+        mode: 0o4644,
+        may_drop: 0o222,
+    },
+    Declared {
+        path: "/sub",
+        mode: 0o3755,
+        may_drop: 0o222,
+    },
+];
+
+/// Build and mount the synthetic pool for `fs::conformance`.
+pub(crate) fn conformance_fixture() -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])> {
+    let fs = mount(build_pool().bytes)?;
+    Ok((Box::new(fs), DECLARED))
+}
+
 fn test_pool_mount(c: &mut Checks) -> KernelResult<()> {
     let pool = build_pool();
     let mut fs = match mount(pool.bytes) {
@@ -2228,7 +2265,10 @@ fn test_pool_mount(c: &mut Checks) -> KernelResult<()> {
 
     let meta = fs.metadata(Path::new(b"/hello"))?;
     c.check_u64(meta.ino, OBJ_HELLO, "/hello inode is its object number");
-    c.check(meta.permissions == 0o444, "/hello mode, write bits masked");
+    c.check(
+        meta.permissions == 0o4444,
+        "/hello mode, write bits masked and setuid kept",
+    );
     c.check(meta.nlinks == 1, "/hello link count");
     c.check_u64(
         meta.modified_ns,

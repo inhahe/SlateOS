@@ -40,7 +40,6 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
 
 VER="${CPYTHON_VER:-3.12.3}"
-SYSROOT="$SLATE_SYSROOT"
 # Keyed by worktree so two lanes building at once cannot write each other's
 # objects. Durable ($SLATE_WORK), not /tmp — see worktree.sh.
 WORK="$SLATE_WORK/cpython-spike"

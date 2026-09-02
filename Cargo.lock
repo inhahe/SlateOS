@@ -6150,6 +6150,7 @@ dependencies = [
  "deflate",
  "ere",
  "log",
+ "net80211",
  "netipc",
  "netring",
  "sha2",

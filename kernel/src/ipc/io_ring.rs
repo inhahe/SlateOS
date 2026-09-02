@@ -848,7 +848,29 @@ fn execute_sqe(sqe: &SqEntry) -> i64 {
         IO_OP_TIMEOUT_CANCEL => exec_timeout_cancel(sqe),
         IO_OP_SERVICE_CONNECT => exec_service_connect(sqe),
         IO_OP_SLEEP => exec_sleep(sqe),
-        _ => KernelError::NotSupported.code() as i64,
+        // An opcode this kernel has never heard of is a *missing entry point*,
+        // not a registered handler declining the work — the same distinction
+        // design-decisions.md §656 drew for the syscall dispatch table, arriving
+        // here on the CQE `res` field instead of a syscall return value.
+        //
+        // This used to be `NotSupported` (-2), which is exactly what an
+        // `exec_*` above returns when it ran and could not do the thing on this
+        // handle. One code, two facts, opposite correct responses: a caller
+        // feature-probing for (say) `IO_OP_FH_PWRITE` must fall back to the
+        // synchronous route on "no such opcode" and must *not* fall back on
+        // "the opcode exists and this file refused". `NoSuchSyscall` (-10)
+        // makes the two distinguishable so no caller has to guess.
+        //
+        // Pre-emptive rather than corrective, and worth saying so: no caller in
+        // the tree compares a CQE `res` against `-2` today (re-verified across
+        // posix/, userspace/, services/ and init/ on 2026-09-02). This closes
+        // the ambiguity before the first fallback path is written around it,
+        // which is cheaper than discovering it from a caller that guessed wrong.
+        //
+        // The Linux ABI is unchanged: both codes map to `ENOSYS`, so the
+        // distinction is visible only on the native ABI where the raw code is
+        // what the caller sees.
+        _ => KernelError::NoSuchSyscall.code() as i64,
     }
 }
 
@@ -1297,6 +1319,7 @@ pub fn self_test() -> KernelResult<()> {
 
     test_ring_create_destroy()?;
     test_nop_submission()?;
+    test_unknown_opcode_is_distinguishable_from_a_refusal()?;
     test_console_write_batch()?;
     test_fh_read_write(&mut skips)?;
     test_fh_positioned_io_leaves_the_cursor_alone(&mut skips)?;
@@ -1439,6 +1462,107 @@ fn test_nop_submission() -> KernelResult<()> {
 
     destroy(handle)?;
     serial_println!("[io_ring]   NOP submission (3 entries): OK");
+    Ok(())
+}
+
+/// An SQE naming an opcode this kernel does not implement completes with
+/// `NoSuchSyscall` (-10), not `NotSupported` (-2).
+///
+/// The distinction is the whole point (design-decisions.md §656, and the
+/// io_uring half of it): `-2` is what a *registered* `exec_*` returns when it
+/// ran and refused, so a caller that gets `-2` must honour it, while a caller
+/// that gets `-10` should fall back to a synchronous route.  Asserting both
+/// halves — that the result is -10 **and** that it is not -2 — is deliberate:
+/// an assertion on the new value alone would still pass if someone later
+/// collapsed the two codes back together at the `KernelError` level.
+fn test_unknown_opcode_is_distinguishable_from_a_refusal() -> KernelResult<()> {
+    let (handle, base_virt, _frames) = setup(8, 16)?;
+
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
+    let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
+    #[allow(clippy::arithmetic_side_effects)]
+    let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
+    #[allow(clippy::arithmetic_side_effects)]
+    let cq_base = (base_virt
+        + core::mem::size_of::<IoRingHeader>() as u64
+        + 8 * core::mem::size_of::<SqEntry>() as u64) as *const CqEntry;
+
+    // The top of the u8 range, not `last + 1`: the highest assigned opcode is
+    // 17, and a test that picked 18 would start failing the day an eighteenth
+    // opcode is legitimately added — converting a real feature into a spurious
+    // self-test failure. 0xFF is the last number that will ever be assigned.
+    const UNASSIGNED_OPCODE: u8 = 0xFF;
+
+    let sqe = SqEntry {
+        opcode: UNASSIGNED_OPCODE,
+        flags: 0,
+        _pad0: [0; 2],
+        _pad1: 0,
+        user_data: 4242,
+        handle: 0,
+        addr: 0,
+        len: 0,
+        _pad2: 0,
+        arg1: 0,
+        arg2: 0,
+    };
+    // SAFETY: sq_base points to the valid SQ array and 0 < sq_entries.
+    unsafe {
+        *sq_base = sqe;
+    }
+    header.sq_tail.store(1, Ordering::Release);
+
+    // An unknown opcode is still a *completed* SQE: it consumes its slot and
+    // posts a CQE carrying the error.  A ring that silently dropped it would
+    // hang a caller waiting on the completion, which is a worse failure than
+    // the ambiguity this test exists to pin.
+    let processed = enter(handle, 0)?;
+    if processed != 1 {
+        serial_println!(
+            "[io_ring]   FAIL: processed {} SQEs, expected 1 (an unknown opcode must still complete)",
+            processed
+        );
+        destroy(handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    // SAFETY: cq_base points to the CQ array and 0 < cq_entries.
+    let cqe = unsafe { &*cq_base };
+    if cqe.user_data != 4242 {
+        serial_println!(
+            "[io_ring]   FAIL: CQE user_data={}, expected 4242",
+            cqe.user_data
+        );
+        destroy(handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    let want = KernelError::NoSuchSyscall.code() as i64;
+    let refusal = KernelError::NotSupported.code() as i64;
+    if cqe.result != want {
+        serial_println!(
+            "[io_ring]   FAIL: unknown opcode gave result={}, expected {} (NoSuchSyscall)",
+            cqe.result,
+            want
+        );
+        destroy(handle)?;
+        return Err(KernelError::InternalError);
+    }
+    if cqe.result == refusal {
+        serial_println!(
+            "[io_ring]   FAIL: unknown opcode is indistinguishable from a handler's refusal ({})",
+            refusal
+        );
+        destroy(handle)?;
+        return Err(KernelError::InternalError);
+    }
+
+    destroy(handle)?;
+    serial_println!(
+        "[io_ring]   Unknown opcode -> {} (NoSuchSyscall), not {} (a refusal): OK",
+        want,
+        refusal
+    );
     Ok(())
 }
 

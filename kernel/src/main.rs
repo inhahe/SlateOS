@@ -1756,6 +1756,19 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::sysfs::self_test() {
                 serial_println!("WARNING: SysFs self-test failed: {:?}", e);
             }
+            // Cross-backend FileMeta conformance. Runs *after* every per-backend
+            // self-test above, and asks a different question from all of them:
+            // each of those checks what one driver does, and a field whose
+            // meaning drifts *between* two drivers passes every one of them —
+            // which is how btrfs, zfs and f2fs came to report a nine-bit mode
+            // under a twelve-bit contract for months with their own tests green.
+            // Placed here rather than earlier so devfs and sysfs have already
+            // initialised and are reachable through the VFS. See
+            // fs::conformance's module docs and known-issues.md
+            // A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST.
+            if let Err(e) = fs::conformance::self_test() {
+                serial_println!("WARNING: FileMeta conformance self-test failed: {:?}", e);
+            }
             // Mount/unmount self-test (exercises the SYS_FS_MOUNT/SYS_FS_UMOUNT
             // backend dispatch on a scratch tmpfs mount — runs on any root).
             if let Err(e) = fs::vfs::mount_self_test() {
@@ -6671,6 +6684,20 @@ extern "C" fn kernel_main() -> ! {
     net::veth::init();
     if let Err(e) = net::veth::self_test() {
         serial_println!("[WARN] Veth self-test failed: {:?}", e);
+    }
+
+    // Step 22e⅞++++p8b′: Simulated 802.11 radios (hwsim) init + self-test.
+    // A shared virtual medium that several stations attach to: a frame
+    // transmitted on one radio is offered to every other radio on the same
+    // channel, address-filtered as a real one would filter it.  This is the
+    // device lane C's `net80211::supplicant` associates through — until it
+    // exists, none of the 802.11 join path can be run at all, only unit
+    // tested.  Modelled on Linux's mac80211_hwsim, which exists for exactly
+    // this reason and which Linux keeps permanently for regression testing.
+    // Heap only, no hardware, so it runs anywhere the kernel boots.
+    net::hwsim::init();
+    if let Err(e) = net::hwsim::self_test() {
+        serial_println!("[WARN] hwsim self-test failed: {:?}", e);
     }
 
     // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.

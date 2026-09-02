@@ -27,6 +27,23 @@
 # They are unrelated to each other on purpose. A single `ALLOW_EVERYTHING`
 # would be one variable away from turning the push boundary off entirely.
 #
+# EDITING THIS FILE? RUN `scripts/test-pre-push-*.py` BEFORE YOU COMMIT.
+# ---------------------------------------------------------------------
+# Three suites test this file, and one of them -- test-pre-push-identity-gate.py
+# -- installs it into a throwaway repository and drives real `git push` calls
+# through it end to end. That coupling is invisible from here, and on 2026-09-01
+# it cost two boot-test cycles: a change to how the file locates
+# `run-checker.sh` was correct for the trampoline install and left a *copied*
+# install refusing every push, which only the identity suite exercises. The
+# three together take about a minute.
+#
+# There is deliberately no twelfth gate running them at push time. The boot test
+# already runs every tooling suite and is required before any merge to `main`,
+# so a gate here would buy only earlier notice on a lane push -- at the cost of
+# more surface, and another bypass variable, on the boundary whose whole value
+# is that it is small and each piece is independent. The gap it would close is a
+# reader who does not know the suites exist, which is what this paragraph is for.
+#
 # Gate 1 — why this exists
 # ------------------------
 # The operator wants `todo2.txt` — their raw instruction queue for the agents —
@@ -138,6 +155,13 @@ note_gate private-file "$skip_private"
 
 # stdin gets one line per ref being pushed:
 #   <local ref> <local sha> <remote ref> <remote sha>
+#
+# SC2034 (appears unused) on `remote_sha` is correct and must stay unfixed: no
+# gate below reads it, but `read` assigns the *rest of the line* to its last
+# name, so dropping it would fold the fourth field into `remote_ref` and every
+# violation message would name a ref with a sha stuck on the end. The name is
+# how the fourth field gets discarded, and it documents git's protocol above.
+# shellcheck disable=SC2034
 while read -r local_ref local_sha remote_ref remote_sha; do
     # A branch deletion has no content to inspect.
     [ "$local_sha" = "$z40" ] && continue

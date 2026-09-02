@@ -219,13 +219,44 @@ def occupancy_ceiling(span_seconds):
     tolerance is either too tight for a short span or too loose for a long
     one, and the loose end is what let a systematically-biased ratio pass
     unnoticed for as long as the host stayed quiet.
+
+    The bound rests on one invariant the caller must uphold: **the span must
+    be the interval the numerator covers, not an interval around it.**  Then
+    tick quantisation is the only error left, and one grid step is genuinely
+    all of it -- the user and kernel counters share one 64 Hz sampler, so
+    their sum advances at most once per tick event, and a span of `S` seconds
+    contains at most `ceil(S/g)` such events.  With `n` spinners the worst
+    case is `n` steps over a denominator of `n x S`, i.e. the same `g / S`
+    regardless of `n`.
+
+    That invariant is easy to break by accident and its breach is invisible
+    here, because a numerator that outruns its denominator looks exactly like
+    a clock that rounded up.  It *was* broken, for as long as this function
+    had existed: the spinners published a bare CPU number and the controller
+    divided it by an interval it stamped itself, so the ratio's two halves
+    began at different instants -- the numerator wherever a parked spinner
+    had last published, the denominator at the controller's stamp.  A 64 Hz
+    sampler charges a whole 15.6 ms tick to whoever it catches, so a single
+    tick landing in that gap was enough to put a 0.2 s window over the bound.
+    It refused a boot test at 1.089 on a loaded host, and a 10-run probe then
+    caught it at 1.009 on an *idle* one -- both impossible for a
+    single-threaded process, which is what said the fault was in the ratio
+    rather than in the load.
+
+    The fix is in the publication, not here.  Widening this bound to cover a
+    mismeasured span would have retired the only check that noticed, which is
+    the same mistake as the hardcoded 2.0 that let 1.82 cores per spinner
+    through.  Two things were measured and neither is the cause, so neither
+    was patched around: the controller's snapshot reads take 0-20 us, and the
+    stamping order they were suspected of is now merely correct rather than
+    load-bearing.
     """
     if not span_seconds or span_seconds <= 0:
         return None
     return 1.0 + CPU_CLOCK_GRANULARITY_S / span_seconds
 
 
-def summarise_occupancy(before, after, window_seconds, span_seconds=None):
+def summarise_occupancy(before, after, window_seconds, barrier_wait=None):
     """How much CPU the spinners actually burned across the load window.
 
     This is the canary's real instrument, and it is a direct measurement
@@ -244,14 +275,16 @@ def summarise_occupancy(before, after, window_seconds, span_seconds=None):
 
     ## Two denominators, because there are two questions
 
-    `window_seconds` is the window the caller *asked for*; `span_seconds` is
-    the interval the CPU snapshots actually straddle.  They are deliberately
-    not the same, and the difference is not an error to be tuned away:
+    `window_seconds` is the window the caller *asked for*; `span_s` is the
+    interval each spinner's own clock says its CPU figure covers.  They are
+    deliberately not the same, and the difference is not an error to be tuned
+    away:
 
-    - The opening snapshot is taken *before* `go`, so no pre-window burn can
-      land in the window's opening balance.
-    - The closing one is taken *after* `stop`, because a spinner publishes on
-      its way out and truncating there would lose its final chunk.
+    - The opening snapshot is the pair a spinner publishes after it observes
+      `go` and before it burns a chunk, so no pre-window burn can land in the
+      window's opening balance.
+    - The closing one is the pair it publishes after observing `stop`, because
+      truncating earlier would lose its final chunk.
 
     So the numerator's interval strictly *contains* `[on_at, off_at]`, and
     `occupancy` is biased upward by however long the two ends take.  On a
@@ -261,6 +294,12 @@ def summarise_occupancy(before, after, window_seconds, span_seconds=None):
     On 2026-08-31 that produced `occupancy 2.036` and failed a boot test
     before it built anything -- the ratio was not wrong about the load, it was
     dividing by the wrong interval.
+
+    `span_s` comes from the spinner and not from the controller, and that is
+    the whole reason the ceiling means anything.  A controller-stamped span is
+    an interval *around* the numerator, not the numerator's own, and the two
+    diverge by however long the spinner had been parked since it last spoke --
+    silently, and always in the direction of a higher occupancy.
 
     Both are therefore reported, and they answer different questions:
 
@@ -275,21 +314,39 @@ def summarise_occupancy(before, after, window_seconds, span_seconds=None):
     """
     if not before or not after or len(before) != len(after):
         return None
-    burned = [max(0.0, b - a) for a, b in zip(before, after)]
+    burned = [max(0.0, b[0] - a[0]) for a, b in zip(before, after)]
+    # Each spinner's own elapsed time, from the clock reading it published
+    # *with* the CPU figure above.  This is the denominator that makes the
+    # ceiling a bound: it is the interval the numerator covers, not an
+    # interval the controller timed around it.
+    elapsed = [max(0.0, b[1] - a[1]) for a, b in zip(before, after)]
     total = sum(burned)
     # Wall time is the denominator per spinner, so the ideal total is
     # spinners x window.  A zero-length window would make the ratio
     # meaningless rather than infinite, so it is reported as unavailable.
     expected = len(burned) * window_seconds if window_seconds else None
-    measured = len(burned) * span_seconds if span_seconds else None
+    measured = sum(elapsed) or None
+    # Reported as the mean so `span_s` stays comparable with `window_s`, which
+    # is per-spinner; the ratio above uses the sum, which is the same thing.
+    span_seconds = (measured / len(elapsed)) if measured else None
     ceiling = occupancy_ceiling(span_seconds)
     return {
         "spinners": len(burned),
         "window_s": round(window_seconds, 4) if window_seconds else None,
-        # Absent, not equal to `window_s`, when the caller did not stamp its
-        # snapshots: a reader must be able to tell "this run measured the span"
-        # from "this run assumed it".
+        # Absent, not equal to `window_s`, when the spinners published no
+        # clock alongside their CPU: a reader must be able to tell "this run
+        # measured the span" from "this run assumed it".
         "span_s": round(span_seconds, 4) if span_seconds else None,
+        # Per spinner, so a single straggler is visible rather than averaged
+        # away.  A spread here that `window_s` does not show is the signature
+        # of one spinner being slow off the mark at an edge.
+        "span_each_s": [round(v, 4) for v in elapsed],
+        # How long each edge barrier waited, fire then release.  This is the
+        # only cost the barriers add, and it is time the window's left edge
+        # was delayed by, so it belongs in the record next to the window.
+        "barrier_wait_s": ([round(v, 5) if v is not None else None
+                            for v in barrier_wait]
+                           if barrier_wait else None),
         "cpu_seconds": [round(v, 4) for v in burned],
         "cpu_seconds_total": round(total, 4),
         "expected_cpu_seconds": round(expected, 4) if expected else None,
@@ -373,8 +430,18 @@ def summarise_probe(samples, fired_at, released_at):
 #: load.
 SPINNER_READY_TIMEOUT_S = 30.0
 
+#: How long the controller waits at each edge of the load window for every
+#: spinner to publish a fresh (CPU, clock) pair.  Short, because by this point
+#: every spinner is a running interpreter blocked on an event, so the wait is a
+#: scheduler wakeup and a chunk -- single-digit milliseconds even on a loaded
+#: host.  Generous against that, because overshooting costs a few milliseconds
+#: at the window's edge while undershooting costs the freshness the whole
+#: pairing exists to guarantee.
+SPINNER_EDGE_TIMEOUT_S = 2.0
 
-def _spin(go, stop, deadline, cpu_slot=None, ready_count=None):
+
+def _spin(go, stop, deadline, cpu_slot=None, ready_count=None,
+          fired_count=None, done_count=None):
     """One CPU burner: block until `go`, then loop until `stop`.
 
     A tight pure-Python loop with no I/O and no sleeping, which is what
@@ -389,6 +456,24 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None):
     six spinners leave the probe a free core, so its median moved by less
     than its own run-to-run noise, and inverted outright in 3 trials of 12.
 
+    The cell holds a *pair* -- CPU seconds and the `monotonic` reading taken
+    with them, written under the cell's lock -- and that pairing is what makes
+    the occupancy ratio meaningful rather than merely plausible.  A lone CPU
+    number has to be divided by an interval the *controller* timed, and the
+    controller cannot see when this process's clock was actually sampled; the
+    two intervals then differ by however long this spinner had been parked
+    since its last publication, and every bit of that difference is CPU in
+    the numerator that the denominator does not cover.  Publishing the pair
+    makes numerator and denominator the same interval by construction, which
+    is the only form in which "no process burns more CPU than the time it was
+    measured over" is a bound rather than an aspiration.  See
+    `occupancy_ceiling`.
+
+    `fired_count` and `done_count` are the barriers that keep those pairs
+    *fresh*: the controller may not take its opening snapshot until every
+    spinner has published one after seeing `go`, nor its closing one until
+    every spinner has published after seeing `stop`.
+
     The self-defence checks matter as much as the loop.  MSYS `kill` of a
     native Windows process is `TerminateProcess`: no signal handler runs, no
     `finally` executes, and this process's parent simply vanishes.  Polling
@@ -399,13 +484,31 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None):
     parent = multiprocessing.parent_process()
 
     def publish():
-        # Written on every chunk boundary and once more on the way out, so a
-        # reader that samples at an arbitrary moment is stale by at most one
-        # chunk (single-digit ms against a window of seconds).  `process_time`
-        # is this process's own CPU clock, so it counts only time the spinner
-        # was actually scheduled -- which is exactly the quantity in question.
+        # Written on every chunk boundary, on both sides of the wait, and once
+        # more on the way out.  `process_time` is this process's own CPU clock,
+        # so it counts only time the spinner was actually scheduled -- which is
+        # exactly the quantity in question -- and it is stored together with
+        # the `monotonic` reading taken alongside it, under the cell's lock, so
+        # a reader can never pair one publication's CPU with another's clock.
+        #
+        # The staleness of a publication no longer matters, and that is the
+        # point of the pairing.  A reader that samples at an arbitrary moment
+        # gets an older pair, not an inconsistent one, so the interval it
+        # derives is one the CPU figure genuinely covers.  Before the pairing,
+        # staleness was silently charged to the controller's window: the
+        # opening snapshot was whatever a *parked* spinner had last published,
+        # up to a second earlier, while the span was stamped at the read.  Any
+        # CPU the parked spinner was charged in between -- and a 64 Hz sampler
+        # charges a whole 15.6 ms tick to whoever it catches, however briefly
+        # they ran -- landed in the numerator with no denominator to match.
+        # That is how `occupancy_measured` reached 1.089 against a hard ceiling
+        # of 1.078 and refused a boot test, and how it read 1.009 on an idle
+        # host in a 10-run probe: not a clock that rounds, but a ratio whose
+        # two halves were measuring different intervals.
         if cpu_slot is not None:
-            cpu_slot.value = time.process_time()
+            with cpu_slot.get_lock():
+                cpu_slot[0] = time.process_time()
+                cpu_slot[1] = time.monotonic()
 
     def should_quit():
         if stop.is_set() or time.monotonic() > deadline:
@@ -445,11 +548,29 @@ def _spin(go, stop, deadline, cpu_slot=None, ready_count=None):
         go.wait(1.0)
         publish()
 
+    # The opening balance.  Published after `go` is set and before a single
+    # chunk is burned, so the pair the controller reads brackets the window
+    # from its true left edge rather than from wherever this process last
+    # happened to speak.  The barrier below is what lets the controller know
+    # it may read: without it the controller would race the publication it
+    # depends on, and would lose exactly when the host is loaded enough for a
+    # spinner to be slow off the mark -- which is when the measurement matters.
+    publish()
+    if fired_count is not None:
+        with fired_count.get_lock():
+            fired_count.value += 1
+
     while True:
         for _ in range(SPIN_CHUNK):
             pass
         publish()
         if should_quit():
+            # Symmetrically, the closing balance is published before this
+            # spinner announces it has stopped, so the controller's closing
+            # snapshot covers the final chunk instead of truncating it.
+            if done_count is not None:
+                with done_count.get_lock():
+                    done_count.value += 1
             return
 
 
@@ -534,25 +655,39 @@ def run(args):
     started = time.monotonic()
     deadline = started + args.timeout + args.grace
 
-    # One cell per spinner, into which it publishes its own CPU clock.
-    # Separate `Value`s rather than one `Array`: slicing a ctypes array yields
-    # a *copy*, so handing a spinner `arr[i:i+1]` would give it a private list
-    # to write into and the controller would read zeros forever -- a silent
-    # null result dressed up as a measurement, which is the exact failure this
-    # code exists to rule out.
+    # One two-element cell per spinner: (CPU seconds, the `monotonic` reading
+    # taken with it).  One cell *per spinner* rather than one shared array,
+    # because slicing a ctypes array yields a *copy*, so handing a spinner
+    # `arr[i:i+2]` would give it a private list to write into and the
+    # controller would read zeros forever -- a silent null result dressed up as
+    # a measurement, which is the exact failure this code exists to rule out.
     #
-    # `lock=False` because each cell has exactly one writer and one reader, a
-    # double is written atomically on every platform this runs on, and a stale
-    # read costs at worst one chunk of age -- whereas locking on every chunk
-    # would inject contention into the very measurement being taken.
-    cpu = [ctx.Value("d", 0.0, lock=False) for _ in range(args.spinners)]
+    # Locked, unlike the bare `Value` this replaces.  The lock is what makes
+    # the two halves of a publication inseparable, and an unpaired CPU figure
+    # is not a cheaper measurement but a different and wrong one: it forces the
+    # ratio's denominator to be an interval the controller timed, which is not
+    # the interval the numerator covers (see `_spin.publish`).  The cost is a
+    # semaphore per chunk against a chunk of several milliseconds -- far below
+    # the 15.6 ms tick that is the instrument's resolution, so it cannot
+    # perturb the quantity being measured.
+    cpu = [ctx.Array("d", 2) for _ in range(args.spinners)]
     # Counts spinners that have reached `_spin` and published an opening
     # balance.  This one *is* locked: it has as many writers as there are
     # spinners, it is incremented once each, and it is read as a barrier rather
     # than as a measurement, so contention on it is irrelevant.
     ready_count = ctx.Value("i", 0)
+    # The same, for the two edges of the load window: `fired_count` reaches
+    # `spinners` once every spinner has published a pair taken after `go` and
+    # before its first chunk; `done_count` once every spinner has published one
+    # after `stop`.  Without them the controller would read whatever pair
+    # happened to be in the cell, which on a loaded host is a pair from before
+    # the window opened.
+    fired_count = ctx.Value("i", 0)
+    done_count = ctx.Value("i", 0)
     workers = [
-        ctx.Process(target=_spin, args=(go, stop, deadline, slot, ready_count),
+        ctx.Process(target=_spin,
+                    args=(go, stop, deadline, slot, ready_count,
+                          fired_count, done_count),
                     daemon=True)
         for slot in cpu
     ]
@@ -645,28 +780,73 @@ def run(args):
     during = []
     cpu_at_fire = None
     cpu_at_release = None
-    cpu_fire_at = None
-    cpu_release_at = None
+    # How long each edge barrier waited, in wall seconds.  Recorded rather than
+    # assumed negligible, for the same reason `poll_seconds` is: it is the
+    # instrument's own resolution.  It is also the one cost the barriers add --
+    # the window's left edge is delayed by the slowest spinner's wakeup -- so a
+    # reader who wants to know whether the load really began where the record
+    # says it did can look instead of guessing.
+    barrier_wait = [None, None]
+
+    def snapshot():
+        """Read every spinner's (cpu, clock) pair, each under its own lock."""
+        pairs = []
+        for slot in cpu:
+            with slot.get_lock():
+                pairs.append((slot[0], slot[1]))
+        return pairs
+
+    def await_barrier(counter, index):
+        """Block until every spinner has published for this window edge.
+
+        Bounded, and a timeout is *not* an error here: a spinner that died --
+        the deadline, a vanished parent, `TerminateProcess` -- will never
+        bump its counter, and refusing to close the window over it would turn
+        a partial measurement into no measurement at all.  The pairs are
+        self-consistent either way, so a late or missing publication costs
+        accuracy at the edge and nothing else; `idle_spinners` is what reports
+        a spinner that contributed nothing.
+        """
+        began = time.monotonic()
+        limit = began + SPINNER_EDGE_TIMEOUT_S
+        while time.monotonic() < limit:
+            with counter.get_lock():
+                if counter.value >= len(cpu):
+                    break
+            time.sleep(0.0005)
+        barrier_wait[index] = time.monotonic() - began
 
     def fire():
-        nonlocal on_at, cpu_at_fire, cpu_fire_at
-        # Snapshot before `go`, so no spinner can have burned anything that
-        # lands inside the window's opening balance.
-        cpu_at_fire = [slot.value for slot in cpu]
-        # Stamped so the span the numerator covers is measured rather than
-        # assumed equal to the window.  See `summarise_occupancy`.
-        cpu_fire_at = time.monotonic()
+        nonlocal on_at, cpu_at_fire
         go.set()
         on_at = time.monotonic()
+        # Wait for every spinner to publish a pair taken after `go` and before
+        # its first chunk, then read those pairs.  There is no separate span
+        # stamp any more, and its absence is the fix: the span is now each
+        # spinner's own clock delta, carried alongside the CPU figure it
+        # belongs to, so the numerator and the denominator are the same
+        # interval by construction rather than by two processes' timings
+        # happening to agree.  The old arrangement -- controller reads a
+        # parked spinner's last publication, controller stamps the span --
+        # made the numerator start wherever that spinner last spoke while the
+        # denominator started at the stamp, and charged the difference to
+        # occupancy.  That is what put `occupancy_measured` at 1.089 against a
+        # hard ceiling of 1.078 and refused a boot test, and at 1.009 on an
+        # *idle* host in a 10-run probe -- an impossibility either way, since
+        # a single-threaded process cannot outrun its own elapsed time.  See
+        # known-issues.md, A-CANARY-OCCUPANCY-CEILING-IS-DERIVED-FROM-THE-
+        # WRONG-ERROR-MODEL.
+        await_barrier(fired_count, 0)
+        cpu_at_fire = snapshot()
 
     def release():
-        nonlocal off_at, cpu_at_release, cpu_release_at
+        nonlocal off_at, cpu_at_release
         stop.set()
         off_at = time.monotonic()
-        # Snapshot after `stop`: a spinner publishes on its way out, so this
-        # captures the final chunk rather than truncating the window early.
-        cpu_at_release = [slot.value for slot in cpu]
-        cpu_release_at = time.monotonic()
+        # Symmetric: wait for the closing publication so the final chunk is
+        # counted rather than truncated, then read.
+        await_barrier(done_count, 1)
+        cpu_at_release = snapshot()
 
     if args.at is None:
         # No trigger: the whole-window behaviour the P20 control used.
@@ -764,9 +944,7 @@ def run(args):
                 cpu_at_fire, cpu_at_release,
                 (off_at - on_at) if (on_at is not None
                                      and off_at is not None) else None,
-                (cpu_release_at - cpu_fire_at)
-                if (cpu_fire_at is not None
-                    and cpu_release_at is not None) else None),
+                barrier_wait),
         })
         # A `--until` that never matched is not a detail.  The window has no
         # right-hand edge, so the run answers a different question from the

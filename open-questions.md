@@ -438,6 +438,54 @@ build directory, or keep three and keep pruning.** C stays either way, and D is
 orthogonal too — it asks *where* the output lives, not *how many copies* there
 are, so it composes with A and B just as C does.
 
+### 2026-09-02 — option A's only stated cost has now been measured, and it is much smaller than the table implies
+
+Nothing about the disk-space side has changed (**93 GiB free of 1.9 TB, 95%
+used**, measured today — the margin the August updates left is holding). This
+update is about the *other* column. Option A's cost is stated as "Lanes
+serialise on the build lock. Wall-clock per lane goes up whenever two build at
+once." That sentence assumes the thing worth checking: that two lanes building
+at once today are actually getting two lanes' worth of work done.
+
+**They are not.** Measured today with lane A and lane B each running a boot
+test:
+
+| | uncontended | with a second lane building | ratio |
+|---|---|---|---|
+| read 6441 `.rs` files (`check-variant-lists.py`'s scan) | ~3 s | **368.5 s** | ~120× |
+| mean per file | <1 ms | 57 ms | — |
+| slowest single file | — | 0.86 s | — |
+
+There is no outlier and no pathological input: *every* read is uniformly two
+orders of magnitude slower. The disk is saturated, so the second lane is not
+running alongside the first so much as taking turns with it at a much worse
+exchange rate than a lock would give.
+
+**And it now destroys runs, not just measurements.** The August argument for A
+was that concurrency contaminates benchmark numbers. Today it killed a lane-A
+boot test outright: the run hit its 1800s budget having **never reached QEMU**,
+because the pre-build static gates alone consumed all of it. No fork failed, the
+commit-limit floor never tripped, and every gate that ran passed. Both lanes now
+have to budget 7200s for a job that takes ~8 minutes alone.
+
+*What changes if you pick A:* lanes queue explicitly and each build runs at full
+speed, instead of overlapping and each running at a fraction of it. The wall
+clock the table lists as A's cost is largely already being paid under B — just
+without the queue, the predictability, or the ~100 GiB.
+
+**This does not settle the question,** because it measures the *disk*, not the
+build lock: cargo's lock serialises at a coarser grain than the disk contention
+does, so A could still idle a lane that would otherwise be doing non-disk work.
+It does mean the table's cost column overstates what A gives up, and the
+recommendation above ("A's serialisation is arguably a bonus rather than a
+cost") now has a number behind it rather than only an argument.
+
+**If it is never answered:** B+C keeps running and stays safe on disk — C's
+floor is what makes that true and it is not going away. What continues to
+degrade is throughput and trust in timings: every boot test either takes 4-8×
+longer than it should or has to be re-run with a bigger budget, and no benchmark
+taken while another lane builds is worth recording.
+
 ## Q56 — [A] A program compiled for Linux is exempt from the file-permission checks our own programs must pass. Close the gap, or write it down as the price of running Linux software? — Status: OPEN
 
 **In short:** When a program asks this system a question about a file — "how big
@@ -1370,6 +1418,78 @@ point of the file: it is scanned for what still needs a decision, so an
 answered question left in the body is pure cost — and, being older, it sorts
 *first*, right where it is most in the way. (Why this is not append-only:
 `design-decisions.md` §437.)
+
+## A-Q2 — [A] Our C-test programs are built against a library nobody can identify, because the compiler that builds them cannot see the folder it is run from. The fix is in a different project. Who changes it? — Status: OPEN
+
+**In short:** part of our test suite compiles small C programs and runs them
+inside the OS. To build them, the compiler (**fastpy** — a separate project of
+yours, in `D:\visual studio projects\fastpy`) has to find our C library. It
+looks for a folder next to itself named exactly `os`. But we stopped working in
+a folder named `os` — each of the three parallel workers now has its own
+checkout named `os-lane-a`, `os-lane-b`, `os-lane-c` — so the compiler finds
+nothing, every time, for all three. The library it wants is sitting right there
+in the folder it was launched from; it just never looks there. The question is
+who is allowed to change fastpy to fix it, since that is not this project's code.
+
+### What this actually costs
+
+Nothing is broken or wrong — the OS builds and boots fine, and this has no
+effect on the kernel. What is lost is *attribution*: when one of those C
+programs passes or fails, we cannot say which version of our C library it was
+built against, so the result proves less than it appears to. Every boot test
+prints a warning saying so.
+
+I already fixed the half that was in our tree (commit `1367f04ac`): the warning
+used to claim the library could not be *found*, which sent the reader off to
+rebuild something that was never missing. It now names the real cause and gives
+a repair line that works. **So this is not urgent** — it is a known, clearly
+labelled gap rather than a silent one.
+
+### Why I did not just fix fastpy myself
+
+Two reasons, and the second is the one I want your call on.
+
+1. **It needs a judgement, not just an edit.** With four checkouts side by side
+   (`os`, `os-lane-a`, `os-lane-b`, `os-lane-c`), "find the OS folder" no longer
+   has one answer. The sensible rule is "walk up from wherever you were launched
+   and use the checkout you are inside of" — but that is a behaviour change for
+   anything else using fastpy, not a typo fix.
+2. **It is a different repository, and three of us share it.** All three lanes'
+   builds call fastpy. Our own rules say I file a request rather than edit
+   another owner's tree, and fastpy has no lane — so there is nobody to file it
+   with. It also has its own version-bump-and-release discipline that a drive-by
+   commit from the OS project would sit oddly inside.
+
+### The options
+
+**A — I fix fastpy directly** (walk up from the launch directory; keep the old
+`os` lookup as a fallback so nothing that works today stops working), bump its
+version per its own rules, and commit there but do not push.
+*What changes:* the warning stops appearing on all three lanes and the C-test
+results become attributable again. You get a commit in the fastpy repo from OS
+work.
+
+**B — Each lane sets the location explicitly when it builds the fixtures**, and
+fastpy is left alone.
+*What changes:* nothing visible until someone re-builds the C fixtures; the
+warning stays until then. Keeps fastpy untouched, but the same blind spot bites
+anything else that calls it.
+
+**C — Leave it. Keep the accurate warning and treat those C-test results as
+unattributed.**
+*What changes:* nothing. The warning keeps printing on every boot on every lane.
+
+**My recommendation: A.** The hard-coded folder name is a plain bug — it broke
+the moment the project adopted `git worktree`, which is now policy — and B fixes
+the symptom for one caller while leaving the cause. I am flagging it rather than
+doing it only because it is your other repository.
+
+### If this is never answered
+
+Nothing degrades and nothing is blocked. The warning keeps printing on every
+boot for all three lanes, and C-test results stay unattributable. The one real
+risk is the ordinary one for a permanent warning: people stop reading it, so the
+day it has something new to say, it looks like the noise it has been all along.
 
 The index is split by lane so three lanes adding a line at once land at three
 different offsets and the merge is automatic. Newest first within each lane.

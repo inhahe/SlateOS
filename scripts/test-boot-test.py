@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -386,6 +387,324 @@ def test_the_excluded_paths_are_the_files_the_recorders_actually_write():
                                    REPO_ROOT).replace(os.sep, "/")
         check(f"{label} writes {relative}, and the dirty check excludes it",
               f"':(exclude){relative}'" in fragment, True)
+
+
+def extract_clippy_crash_pattern(source=None):
+    """The regex `check_kernel_clippy` uses to tell a crash from a finding.
+
+    Lifted out of the script for the same reason `extract_dirty_check` is: a
+    pattern restated here would be a pattern this file tests and the script does
+    not use.
+    """
+    if source is None:
+        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    marker = 'if grep -qE "'
+    start = source.find(marker)
+    if start == -1:
+        raise RuntimeError(
+            "boot-test.sh no longer contains the `grep -qE` that separates a "
+            "crashed clippy-driver from a real lint finding. If the check moved, "
+            "update this extractor; do not delete the test -- without the check, "
+            "a linter that died of memory starvation is reported to the operator "
+            "as a tree full of clippy::all violations.")
+    rest = source[start + len(marker):]
+    return rest[:rest.index('"')]
+
+
+def test_a_crashed_linter_is_not_a_tree_full_of_lint_findings():
+    """A tool that died produced no verdict, and must not be read as a clean one.
+
+    This is exit 127 all over again, one gate along. `boot-history.py` used to
+    file a host `fork()` failure as a kernel TIMEOUT because both arrive as a
+    non-zero status; `check_kernel_clippy` had the same hole, and the log below
+    is the real one from 2026-09-02, when clippy-driver died with
+    STATUS_STACK_BUFFER_OVERRUN at 3.1 GiB of free commit while another lane
+    built. The gate would have told the operator the kernel had deny-level lint
+    violations and then listed none, because there were none to list.
+
+    The discriminating fact is not the status code -- both are 101 -- but whether
+    cargo reported a *judgement* or reported that its child never delivered one.
+    """
+    pattern = re.compile(extract_clippy_crash_pattern())
+
+    crashed = (
+        "error: could not compile `kernel` (bin \"kernel\"); 9911 warnings emitted\n"
+        "\n"
+        "Caused by:\n"
+        "  process didn't exit successfully: `clippy-driver.exe ...` "
+        "(exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)\n"
+    )
+    check("a clippy-driver that died on an NTSTATUS is recognised as a crash",
+          bool(pattern.search(crashed)), True)
+
+    # The POSIX shape of the same event. Matching cargo's wording rather than
+    # the Windows status code is what makes this hold on a Linux host too.
+    signalled = (
+        "error: could not compile `kernel` (bin \"kernel\")\n"
+        "\n"
+        "Caused by:\n"
+        "  process didn't exit successfully: `clippy-driver` (signal: 11, "
+        "SIGSEGV: invalid memory reference)\n"
+    )
+    check("a clippy-driver killed by a signal is recognised as a crash",
+          bool(pattern.search(signalled)), True)
+
+    check("a compiler ICE is recognised as a crash",
+          bool(pattern.search("error: internal compiler error: unexpected panic\n")),
+          True)
+
+    # The control, and the half that actually matters: a real finding must still
+    # reach the lint branch. A pattern that matched this too would convert every
+    # genuine clippy::all violation into "the host is busy, try later" -- which
+    # is a worse bug than the one being fixed, because it hides a defect in the
+    # tree rather than merely misnaming one.
+    real_finding = (
+        "error: this loop never actually loops\n"
+        "  --> kernel/src/fs/vfs.rs:412:5\n"
+        "error: could not compile `kernel` (bin \"kernel\") due to 3 previous errors\n"
+    )
+    check("a genuine deny-level lint failure is NOT mistaken for a crash",
+          bool(pattern.search(real_finding)), False)
+
+    # `warning:` lines are the pedantic backlog and are present on every clean
+    # run; nothing in them may trip the crash branch.
+    backlog = (
+        "warning: `panic` should not be present in production code\n"
+        "warning: `kernel` (build script) generated 5 warnings\n"
+    )
+    check("the pedantic warning backlog does not look like a crash",
+          bool(pattern.search(backlog)), False)
+
+
+def extract_shell_function(name, source=None):
+    """Lift one top-level function out of `boot-test.sh`, by name.
+
+    Relies on the file's one formatting invariant: a top-level function opens
+    with `name() {` in column 0 and closes with `}` in column 0. That is checked
+    rather than assumed -- a silently-truncated extraction would produce a stub
+    that passes every assertion made about it.
+    """
+    if source is None:
+        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+            source = handle.read()
+    lines = source.splitlines()
+    opener = f"{name}() {{"
+    try:
+        start = lines.index(opener)
+    except ValueError:
+        raise RuntimeError(
+            f"boot-test.sh no longer defines `{name}` as a top-level function "
+            f"opening with `{opener}` in column 0. If it was renamed or nested, "
+            f"update this extractor; do not delete the test that uses it.")
+    for end in range(start + 1, len(lines)):
+        if lines[end] == "}":
+            return "\n".join(lines[start:end + 1])
+    raise RuntimeError(f"`{name}` in boot-test.sh has no closing `}}` in column 0")
+
+
+def _run_clippy_gate(probe_body, commit_wait, timeout=60):
+    """Drive the real `check_kernel_clippy` against a `cargo` that always crashes.
+
+    Returns the `CompletedProcess`, or `None` if it had to be killed -- which is
+    itself the finding this harness exists to detect.
+
+    Everything is addressed *relatively*, from a cwd inside the fixture.
+    Absolute paths do not survive the boundary: the `bash` on this host is MSYS,
+    and MSYS only translates a Windows path when the caller is itself an MSYS
+    shell. Spawned from Python it is not, so `bash D:/a/b.sh` reports "No such
+    file or directory" -- exit 127, which reads as a failed assertion rather
+    than as a harness that never started. Relative paths need no translation and
+    are equally correct on POSIX.
+
+    The fixture lives under the repo's own gitignored `build/` rather than the
+    system temp directory for a second reason of the same kind: the sandbox this
+    bash runs in grants it the project tree and not `%TEMP%`.
+    """
+    crash_log = (
+        "error: could not compile `kernel` (bin \"kernel\"); 9911 warnings emitted\n"
+        "\n"
+        "Caused by:\n"
+        "  process didn't exit successfully: `clippy-driver.exe` "
+        "(exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)\n"
+    )
+
+    fixture_root = os.path.join(REPO_ROOT, "build")
+    os.makedirs(fixture_root, exist_ok=True)
+    tmp = tempfile.mkdtemp(dir=fixture_root)
+    try:
+        with open(os.path.join(tmp, "crash.txt"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(crash_log)
+
+        cargo = os.path.join(tmp, "fake-cargo.sh")
+        with open(cargo, "w", encoding="utf-8", newline="\n") as handle:
+            # Writes to stderr and fails, exactly as cargo does when its child
+            # dies. The gate redirects both streams into its log.
+            handle.write("#!/usr/bin/env bash\n"
+                         "cat ./crash.txt >&2\n"
+                         "exit 101\n")
+        os.chmod(cargo, 0o755)
+
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -u\n"
+                "PROJECT_ROOT=.\n"
+                "CARGO=./fake-cargo.sh\n"
+                "NO_BUILD=0\n"
+                "BENCH_PROFILE=debug\n"
+                "CARGO_PROFILE_ARGS=()\n"
+                # Above anything the stub probe reports as "low", so a crash
+                # looks memory-explained and takes the branch that retries.
+                "MIN_COMMIT_FREE_MB=12288\n"
+                f"COMMIT_WAIT={commit_wait}\n"
+                "SERIAL_FILE=\n"
+                "_COMMIT_PROBE_WARNED=0\n"
+                # The probe is stubbed rather than the host read, so nothing
+                # here depends on how much memory the machine running the suite
+                # happens to have.
+                + probe_body + "\n"
+                + extract_shell_function("check_commit_headroom") + "\n\n"
+                + extract_shell_function("check_kernel_clippy") + "\n\n"
+                "check_kernel_clippy\n"
+                # Only reached if the gate *returned* on a crash, which would
+                # mean the boot proceeds having never been linted at all.
+                "echo REACHED_END_AFTER_CRASH\n"
+            )
+
+        try:
+            return subprocess.run(
+                ["bash", "harness.sh"], cwd=tmp, timeout=timeout,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        except subprocess.TimeoutExpired:
+            return None
+    finally:
+        # `ignore_errors` because Windows can hold the directory briefly after
+        # the child exits; a leftover under gitignored `build/` is harmless,
+        # whereas a cleanup exception would fail a test that had already passed.
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# A probe that alternates below/above the floor on successive calls. This is the
+# one host behaviour that makes the retry loop unbounded: each crash reads low
+# enough to justify waiting, and each wait then reads high enough to authorise
+# another attempt. A probe that is merely *always* low does not exercise the
+# bound at all -- `check_commit_headroom` exits 5 before a second attempt is
+# ever reached -- which is why the first version of this test passed without
+# testing anything.
+_ALTERNATING_PROBE = """\
+measure_commit_free_mb() {
+    local n
+    n=$(( $(cat ./probe-count 2>/dev/null || echo 0) + 1 ))
+    echo "$n" > ./probe-count
+    if [ $(( n % 2 )) -eq 1 ]; then echo 1024; else echo 999999; fi
+}
+"""
+
+_ALWAYS_STARVED_PROBE = "measure_commit_free_mb() { echo 1024; }\n"
+
+
+def test_a_clippy_gate_that_keeps_crashing_still_terminates():
+    """The retry must be bounded, because a gate that never returns is worse.
+
+    `check_kernel_clippy` waits out commit starvation and re-runs rather than
+    discarding a dependency build the crash did not invalidate. That turns a
+    straight-line function into a loop, and the hazard a loop introduces is not
+    a wrong answer but *no* answer: an unbounded retry spins forever inside a
+    boot test the operator believes is building. Exit 6 -- "the gate produced no
+    judgement" -- is a bad outcome; never reporting at all is a worse one.
+
+    Driven with the alternating probe above, which is the input that would spin
+    forever if the `attempt` guard were dropped. Verified by mutation: removing
+    the guard from `boot-test.sh` makes this test hang until its timeout, and
+    the assertions below then report it as unbounded rather than as a wrong
+    status.
+    """
+    if not shutil.which("bash"):
+        check("a clippy gate that keeps crashing still terminates "
+              "[SKIPPED: no bash]", True, True)
+        return
+
+    done = _run_clippy_gate(_ALTERNATING_PROBE, commit_wait=0)
+    if done is None:
+        check("a clippy gate that keeps crashing still terminates",
+              "still running at the timeout -- the retry is unbounded",
+              "exit 6")
+        return
+
+    # Reported as the status rather than a bool: "got False, want True" names
+    # the assertion but not the evidence, and for a terminating-status test the
+    # evidence *is* which status arrived. Exit 127 in particular means the
+    # harness never started, which must not be read as a verdict.
+    tail = done.stderr.strip().splitlines()
+    check("a clippy gate that keeps crashing still terminates",
+          "exit 6" if done.returncode == 6
+          else f"exit {done.returncode}: {tail[-1] if tail else '(no stderr)'}",
+          "exit 6")
+
+    # The distinguishing message. Without it a reader is told to wait out a
+    # memory shortage that has already been waited out and did not explain the
+    # crash -- and, more to the point, its absence is how a silently-removed
+    # `attempt` guard shows up on a host where the loop happens to terminate
+    # anyway: the second crash would be blamed on headroom instead of reported
+    # as a repeat.
+    check("...and says it crashed twice rather than blaming host memory again",
+          "crashed TWICE" in done.stderr, True)
+
+    check("...and does not fall through into the boot having never linted",
+          "REACHED_END_AFTER_CRASH" in done.stdout, False)
+
+    # Exit 1 is "your tree has deny-level lint violations". A crash must never
+    # arrive there: that is the accusation this whole branch exists to prevent.
+    check("...and never reports a crash as a lint finding",
+          done.returncode == 1, False)
+
+
+def test_a_host_that_never_recovers_is_reported_as_host_load_not_as_a_crash():
+    """A shortage that outlasts the budget is exit 5, not exit 6.
+
+    The two statuses call for opposite responses -- 5 means "retry later, it
+    clears on its own", 6 means "stop retrying and look at the toolchain" -- so
+    the gate must not collapse the first into the second just because the
+    symptom it observed was a crash. With the probe pinned below the floor and
+    no waiting budget, `check_commit_headroom` gives up inside the retry and
+    that verdict is the one that must survive to the caller.
+    """
+    if not shutil.which("bash"):
+        check("a host that never recovers is reported as host load "
+              "[SKIPPED: no bash]", True, True)
+        return
+
+    done = _run_clippy_gate(_ALWAYS_STARVED_PROBE, commit_wait=0)
+    if done is None:
+        check("a host that never recovers is reported as host load",
+              "still running at the timeout", "exit 5")
+        return
+
+    tail = done.stderr.strip().splitlines()
+    check("a host that never recovers is reported as host load, not a crash",
+          "exit 5" if done.returncode == 5
+          else f"exit {done.returncode}: {tail[-1] if tail else '(no stderr)'}",
+          "exit 5")
+    check("...and the retry was attempted before giving up",
+          "so memory explains it" in done.stderr, True)
+
+
+def _sq(text):
+    """Single-quote for POSIX sh."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def _shpath(path):
+    """A filesystem path in the form the shell on this host will accept.
+
+    On Windows the `bash` in PATH is MSYS, which treats `\\` as an escape and so
+    cannot open `D:\\a\\b.sh` -- it reports "No such file or directory", which
+    surfaces as exit 127 and looks exactly like a test whose assertion failed.
+    Forward slashes work in both worlds, and this is a no-op on POSIX.
+    """
+    return path.replace(os.sep, "/")
 
 
 def main():

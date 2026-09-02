@@ -56499,7 +56499,43 @@ that other lanes consult is worse than no statement, because it is acted on.
 
 ---
 
-### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — OPEN (lane A tree; request filed)
+### A-KCMP-COMPARES-ANY-TWO-PROCESSES-WITH-NO-AUTHORITY-CHECK — 2026-08-21 — **Status: ✅ FIXED 2026-08-21** in `e62931fb7`; **this heading said `OPEN` for 12 days after the fix landed** (corrected 2026-09-02, lane A)
+
+> **Resolution — the fix took the first of the two proposed branches, and the
+> entry below describes the code as it was, not as it is.**
+>
+> `e62931fb7` ("kcmp: gate cross-process introspection on a DEBUG capability")
+> added `kcmp_may_access` / `kcmp_may_compare` (`kernel/src/syscall/linux.rs`
+> :34751, :34775) and calls the conjunction at :34637, refusing with `EPERM`
+> **between** the `ESRCH` liveness gate and the `type` range gate — exactly the
+> placement this entry argued for, so the errno discriminator still matches
+> Linux: `(pid=-1, type=99)` sees `ESRCH`, and an unauthorised probe with a bad
+> type sees `EPERM` rather than `EINVAL`. The predicate is a single
+> undifferentiated conjunction over both targets, so the gate does not itself
+> become an oracle for which of the two was refused. The `kernel_ctx` escape is
+> preserved, so the boot self-test still drives the comparator paths.
+>
+> Covered by a self-test at :50530 that runs `kcmp_may_compare` against real
+> PCBs and real capability tokens, and — the part that matters — asserts the
+> **negative** cases too: prober→victim without `DEBUG` is refused, victim→
+> bystander is refused in both argument orders, and an unresolvable owner
+> (`None`) is refused rather than defaulted. A gate tested only on its allow
+> path is a gate you have not tested.
+>
+> **What this entry is now worth reading for.** Not the defect — that is gone —
+> but the two findings that outlive it: the `KCMP_FILE` `EBADF` flip is an
+> fd-*presence* oracle and not merely an identity leak, and this comparator is
+> **not** a KASLR concern (it orders `handle_kind_ord` and a handle-table index,
+> never a kernel address), so Linux's `kptr_obfuscate()` cookie has no analogue
+> to add here. Both are now recorded in the handler's own comment so the next
+> reader does not re-derive them.
+>
+> **Why it sat stale.** The same failure `A-CREATE-MODE-SYSCALLS-SILENTLY-DROP-
+> SETUID-SETGID-STICKY` records about itself: the fix landed, the heading did
+> not move, and nothing in the tree compares a `Status:` line against the code
+> it describes. Found by re-reading the entry while picking a task, not by any
+> gate. A stale `OPEN` is not harmless — it spends a later session's time
+> re-deriving a fix that already exists, which is exactly what happened here.
 
 **In short.** A "syscall" is a request a program makes of the kernel. One of
 them, `kcmp`, asks the kernel to compare two *other* programs — "are these two

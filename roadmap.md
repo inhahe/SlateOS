@@ -1417,9 +1417,25 @@ Roadmap:
   Remaining: a real wireless driver, which is one more `impl` of the same
   trait rather than a second copy of the loop.
 
-  **What a green hwsim run will prove, stated exactly:** the frame exchange
+  **The run is green as of `138c38138`** — `Association self-test PASSED (9
+  checks)`. It is worth recording *how* it got there, because it is the whole
+  argument for the fixture existing: the **first execution failed**, on the
+  cryptographic assertion named above as the one that escapes the circularity.
+  The AP was verifying the EAPOL MIC over the message *body* while
+  `kdf::verify_mic` indexes with `MIC_OFFSET = HEADER_LEN + 77`, an offset
+  measured from the start of the **frame** — so every hashed range was shifted
+  by four octets. A fixture that only checked `net80211` against itself could
+  not have caught it; two independent derivations agreeing is what did.
+
+  Note also that a MIC failure is **diagnostically flat** — the MIC is keyed by
+  the KCK, which is part of what is being derived, so a wrong PMK, wrong
+  address ordering, wrong nonce ordering and a wrong byte range all surface as
+  the same one line. Anyone reading `message N MIC did not verify` in future
+  should not read it as "wrong passphrase".
+
+  **What the green hwsim run proves, stated exactly:** the frame exchange
   and the key schedule — both ends derived the same PTK, the handshake reached
-  `Complete`, and both keys were handed to the radio. It will **not** prove
+  `Complete`, and both keys were handed to the radio. It does **not** prove
   confidentiality: `hwsim` does not encrypt, deliberately (lane A's §677 — a
   simulated medium implementing CCMP would be checking `net80211`'s cipher
   against itself). `Association::is_established` is documented to make the

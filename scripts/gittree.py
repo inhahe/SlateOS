@@ -271,14 +271,56 @@ class GitTree:
 # the one query a checker is likeliest to make.
 _PRUNE = ("target", ".git")
 
+# Alternate cargo build dirs: `target-lint`, `target-test`, `target-hl2`,
+# `target-probe`, whatever the next one is called. `.gitignore` matches them as
+# `**/target-*/` and says why in a comment worth repeating here: "Neither the
+# count nor the names are principled -- they are however many concurrent cargo
+# invocations a lane happens to have, named for whatever they were doing -- so
+# match the shape instead of enumerating the instances."
+#
+# The seam needs the same rule for a reason `.gitignore` does not have. These
+# directories are gitignored, so a `RevTree` can never list one; they are on
+# the disk whenever a lane is mid-build, so a `WorkTree` lists all of it. That
+# is the seam answering differently on its two sides -- and worse than usual,
+# because whether it happens depends on whether *another lane* is running
+# clippy at that moment. A gate that judges a commit one way at 10:00 and the
+# other way at 10:05, with no commit in between, is a gate nobody can act on.
+#
+# Matched as a **directory** prefix only, never against a file's own name.
+# `.gitignore`'s trailing slash says the same, and it matters: a tracked file
+# called `target-arch.rs` is legal, is source, and would be hidden from every
+# listing on both sides by a rule that did not draw this line. There are none
+# today (measured over all 13846 tracked paths, 2026-09-02) -- which is the
+# argument for fixing it now, while the rule is cheap to get right, rather than
+# the argument for not bothering.
+_PRUNE_DIR_PREFIX = ("target-",)
+
+
+def _prune_dir(name: str, extra: Sequence[str] = ()) -> bool:
+    """True for a single *directory* component no listing should descend into.
+
+    The one place the skip rule is spelled, so that walking (which prunes by
+    directory name) and filtering (which prunes by path) cannot drift apart.
+    """
+    return (
+        name in _PRUNE
+        or name in extra
+        or any(name.startswith(p) for p in _PRUNE_DIR_PREFIX)
+    )
+
 
 def _pruned(rel: str, extra: Sequence[str] = ()) -> bool:
-    """True for a path inside a directory no listing should descend into.
+    """True for a *file* path inside, or named as, something to skip.
 
     A component-wise test, not `"target" in rel`: `posix/src/target_arch.rs`
     is source, and a substring test would hide it from every listing. The
     same rule spelled the same way for both implementations, because the one
     thing a seam must not do is answer differently on its two sides.
+
+    The last component is a file name, so the *prefix* family
+    (`_PRUNE_DIR_PREFIX`) does not apply to it -- see the note there. The
+    exact names still do, because in a linked worktree `.git` is a file rather
+    than a directory, and every lane works in such a worktree.
 
     `extra` is a caller's own skip list, added to `_PRUNE` rather than
     replacing it. Checkers have their own: `raced-globals.py` skips
@@ -288,9 +330,21 @@ def _pruned(rel: str, extra: Sequence[str] = ()) -> bool:
     on its two sides for exactly the directories a caller cared enough to name.
     """
     parts = rel.split("/")
-    return any(name in parts for name in _PRUNE) or any(
-        name in parts for name in extra
-    )
+    if any(_prune_dir(part, extra) for part in parts[:-1]):
+        return True
+    last = parts[-1]
+    return last in _PRUNE or last in extra
+
+
+def _pruned_prefix(rel: str, extra: Sequence[str] = ()) -> bool:
+    """True for a *directory* prefix that is itself skipped.
+
+    Separate from [`_pruned`] because every component of a prefix names a
+    directory, including the last -- `files_under("target-lint")` asks about a
+    build directory, where `files_under("posix/src/target-arch.rs")` asks
+    about a file that merely starts with the same letters.
+    """
+    return any(_prune_dir(part, extra) for part in rel.split("/"))
 
 
 class Tree:
@@ -408,17 +462,24 @@ class WorkTree(Tree):
         # descent of a directory that is tens of gigabytes on this tree, inside
         # a push gate. `case_a_build_dir_prefix_is_not_walked` is what stops it
         # being tidied away, because no assertion about results can see it.
-        if prefix and _pruned(prefix, prune):
-            return []
+        # A prefix that names a *file* is judged by file rules, and first,
+        # because the two rules disagree about exactly one thing and this is
+        # where it shows: `posix/src/target-arch.rs` is a tracked source file
+        # whose last component starts with `target-`. Judged as a directory
+        # prefix it would vanish from both trees; judged as a file it is
+        # returned, which is what a revision does with it too. The caller's own
+        # `prune` list still applies here -- a caller that skips `third_party`
+        # means the file of that name as well as the directory.
         if os.path.isfile(base):
-            return [prefix]
-        skip = (*_PRUNE, *prune)
+            return [] if _pruned(prefix, prune) else [prefix]
+        if prefix and _pruned_prefix(prefix, prune):
+            return []
         out: list[str] = []
         for dirpath, dirnames, filenames in os.walk(base):
             # Prune rather than filter: descending into `target/` to throw
             # the results away is minutes of stat() on this tree, and
             # descending into `.git` is the whole object store.
-            dirnames[:] = sorted(d for d in dirnames if d not in skip)
+            dirnames[:] = sorted(d for d in dirnames if not _prune_dir(d, prune))
             rel_dir = _norm(dirpath.replace("\\", "/")[len(self.root):])
             for name in filenames:
                 rel = f"{rel_dir}/{name}" if rel_dir else name
@@ -448,12 +509,20 @@ class WorkTree(Tree):
             names = os.listdir(base)
         except OSError:
             return []
+        if prefix and _pruned_prefix(prefix):
+            return []
         out = []
         for name in names:
             rel = f"{prefix}/{name}" if prefix else name
-            if _pruned(rel):
+            # Asked of the entry's own kind, because the two differ: a
+            # *directory* `target-lint` is build output that no revision can
+            # list, while a *file* `target-lint.rs` is source. `RevTree` needs
+            # no such test -- its index is already free of both build output
+            # and empty directories -- so this is where the two are reconciled.
+            is_dir = os.path.isdir(f"{base}/{name}")
+            if _prune_dir(name) if is_dir else name in _PRUNE:
                 continue
-            out.append((rel, os.path.isdir(f"{base}/{name}")))
+            out.append((rel, is_dir))
         return sorted(out)
 
     def is_file(self, rel: str) -> bool:
@@ -523,12 +592,13 @@ class RevTree(Tree):
         # built, so only the caller's own list is left to apply here. Applied
         # even when the prefix is empty and even to a single-file hit, because
         # the disk side answers `[]` for a pruned prefix and the two must agree.
-        if prefix and _pruned(prefix, prune):
+        # File rules first, for the reason spelled out in `WorkTree`'s copy.
+        if prefix in self._fileset:
+            return [] if _pruned(prefix, prune) else [prefix]
+        if prefix and _pruned_prefix(prefix, prune):
             return []
         if not prefix:
             files = self._files
-        elif prefix in self._fileset:
-            return [prefix]
         else:
             head = prefix + "/"
             files = [p for p in self._files if p.startswith(head)]

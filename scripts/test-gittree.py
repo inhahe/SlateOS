@@ -362,6 +362,17 @@ def build_tree_repo(tmp: str, name: str = "t") -> str:
         # written as `"target" in rel` hides this file, and hides it silently:
         # the checker reports no findings for a file it never opened.
         "src/target_arch.rs": b"pub const ARCH: &str = \"x86_64\";\n",
+        # The same trap one character further along. `target-` is the prefix
+        # the seam prunes to match `.gitignore`'s `**/target-*/`, and that
+        # pattern's trailing slash means directories only -- so this *file* is
+        # tracked source and must survive every listing. A prune rule that
+        # forgot the distinction would hide it from both sides at once, which
+        # is the failure mode that leaves a checker reporting a clean tree.
+        "posix/src/target-arch.rs": b"pub const A: u8 = 1;\n",
+        # And the trap one step out again: a tracked *directory* whose name
+        # merely *contains* `target-`. The rule is a prefix test; spelled as a
+        # substring it would swallow this whole subtree, on both sides at once.
+        "posix/src/cross-target-tests/keep.rs": b"pub fn keep() {}\n",
         "posix/src/a.rs": b"pub fn b() {}\n",
         "posix/src/deep/b.rs": b"pub fn c() {}\n",
         "docs/readme.md": b"# docs\n",
@@ -381,7 +392,14 @@ def build_tree_repo(tmp: str, name: str = "t") -> str:
     # what `target/` always is. Two of them, one nested, because the prune
     # must be a component test at any depth rather than a check of the first
     # path element.
-    for rel in ("target/debug/junk.rs", "posix/src/target/leftover.rs"):
+    # `target-lint/` and friends: alternate cargo build dirs, gitignored by
+    # `**/target-*/`. On disk whenever a lane is mid-build, never in any
+    # revision -- so an unpruned one makes the seam's answer depend on whether
+    # another lane is running clippy right now. One at the root and one nested,
+    # for the same reason `target/` has two.
+    for rel in ("target/debug/junk.rs", "posix/src/target/leftover.rs",
+                "target-lint/debug/junk.rs",
+                "posix/src/target-hl2/leftover.rs"):
         path = os.path.join(work, *rel.split("/"))
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "wb") as fh:
@@ -411,7 +429,7 @@ def case_tree_agrees(work: str) -> None:
                   disk.entries(prefix), rev.entries(prefix))
 
         every = rev.files_under("")
-        check("the fixture is the six committed files", len(every), 6)
+        check("the fixture is the eight committed files", len(every), 8)
         check("every file's bytes agree",
               [p for p in every if disk.read_bytes(p) != rev.read_bytes(p)], [])
         check("every file is a file on both",
@@ -518,6 +536,76 @@ def case_prune_is_by_component(work: str) -> None:
         check("...on both sides", rev.files_under("target"), [])
 
 
+def case_alternate_build_dirs_are_pruned_by_shape(work: str) -> None:
+    """`target-lint/` is build output; `target-arch.rs` is source.
+
+    `.gitignore` matches the first family as `**/target-*/` and says why the
+    shape rather than the names: they are however many concurrent cargo
+    invocations a lane happens to have, named for whatever they were doing.
+    The seam needs the same rule for a reason `.gitignore` does not have --
+    these directories are gitignored, so `RevTree` can never list one, and
+    they are on the disk whenever a lane is mid-build, so `WorkTree` lists all
+    of it. Unpruned, the seam's answer depends on whether *another lane* is
+    running clippy at that moment, which is the least actionable kind of
+    disagreement a gate can have.
+
+    The trailing slash in the `.gitignore` pattern is load-bearing and is the
+    other half of this case: it matches directories only. A rule that pruned
+    the prefix wherever it appeared would also hide the tracked file
+    `posix/src/target-arch.rs` -- from *both* sides, so `case_tree_agrees`
+    would stay green while a source file silently stopped being scanned.
+
+    **One deliberate gap, recorded rather than papered over.** Mutating
+    `RevTree.files_under`'s guard from `_pruned_prefix` back to `_pruned`
+    survives this suite, and no assertion can catch it, because the two are
+    genuinely indistinguishable there. They differ only when a prefix's *last*
+    component starts with `target-`, and on a revision that case is already
+    decided before the guard runs: either the prefix names a tracked file, and
+    the `_fileset` branch answers first, or it names a directory, and
+    `RevTree.__init__` has already dropped every path under it from the index,
+    so the `startswith` filter returns the empty list the guard would have
+    returned. The guard is kept anyway -- it is the correct call if the index
+    filter ever changes, and the seam's rule is that both implementations
+    spell the same thing the same way. That equivalence rests entirely on the
+    index being pre-filtered, which is itself asserted ("disk and revision
+    still list the same files", and the `target-hl2` checks above), so the day
+    it stops holding this suite goes red rather than quietly losing the guard.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            files = tree.files_under("")
+            check(f"{label}: an alternate build dir is skipped at the top",
+                  [p for p in files if p.startswith("target-lint/")], [])
+            check(f"{label}: ...and nested, at any depth",
+                  [p for p in files if "target-hl2" in p.split("/")], [])
+            check(f"{label}: a tracked file named target-something is kept",
+                  "posix/src/target-arch.rs" in files, True)
+            # `startswith`, not `in`. A substring spelling passes every other
+            # assertion here and silently drops this subtree from both trees.
+            check(f"{label}: a directory merely containing 'target-' is kept",
+                  "posix/src/cross-target-tests/keep.rs" in files, True)
+            # The discriminating query: asked for by its own name, a file is a
+            # file even though its name starts with a pruned directory prefix.
+            check(f"{label}: ...and is still returned when asked for by name",
+                  tree.files_under("posix/src/target-arch.rs"),
+                  ["posix/src/target-arch.rs"])
+            check(f"{label}: an alternate build dir asked for by name is empty",
+                  tree.files_under("target-lint"), [])
+            check(f"{label}: nor is it offered as an entry",
+                  [e for e, _ in tree.entries("")
+                   if e.startswith("target-")], [])
+
+        # As above: the empty results are the rule working, not an empty tree.
+        check("the alternate build output is genuinely on disk",
+              os.path.isfile(os.path.join(work, "target-lint", "debug",
+                                          "junk.rs")),
+              True)
+        # And the two sides still agree exactly, which is the property all of
+        # this exists to protect.
+        check("disk and revision still list the same files",
+              disk.files_under(""), rev.files_under(""))
+
+
 def case_a_build_dir_prefix_is_not_walked(work: str) -> None:
     """The guard that looks redundant, and the reason it is not.
 
@@ -556,6 +644,72 @@ def case_a_build_dir_prefix_is_not_walked(work: str) -> None:
                   bool(disk.files_under("posix")), True)
             check("...so the probe would have noticed a walk",
                   len(seen), 1)
+            # The same property for the `target-*` family, which reaches the
+            # guard through `_pruned_prefix` rather than through `_PRUNE`. It
+            # needs its own assertion for the same reason the case exists: a
+            # guard that used file rules here would let the walk descend and
+            # still answer `[]`, so no assertion about results can see it.
+            seen.clear()
+            check("an alternate build-dir prefix also answers nothing",
+                  disk.files_under("target-lint"), [])
+            check("...and is likewise never walked", seen, [])
+    finally:
+        os.walk = real_walk
+
+
+def case_the_walk_never_descends_into_build_output(work: str) -> None:
+    """Pruning `dirnames`, not filtering results -- asserted about the walk.
+
+    `files_under("")` answers the same list whether or not the walk descends
+    into a build directory, because the per-file prune drops everything it
+    would find there. The difference is the work, and on this repository a
+    `target/` is tens of gigabytes: the answer arrives either way, minutes
+    apart, inside a push gate.
+
+    So this records every directory `os.walk` actually yields, rather than
+    counting calls -- `os.walk` is invoked once per `files_under` however deep
+    it goes, so a call count cannot see a descent at all.
+    """
+    visited: list[str] = []
+    real_walk = os.walk
+
+    def recording_walk(top, *a, **kw):
+        # Re-yields the very list object `real_walk` handed over, because
+        # `gittree` prunes it in place and `os.walk` reads that mutation back
+        # to decide where to go next. Copying it would break the pruning this
+        # case exists to observe.
+        for dirpath, dirnames, filenames in real_walk(top, *a, **kw):
+            visited.append(dirpath.replace("\\", "/"))
+            yield dirpath, dirnames, filenames
+
+    os.walk = recording_walk
+    try:
+        with gittree.WorkTree(work) as disk:
+            files = disk.files_under("")
+            # Directory components only -- the last component is the file's own
+            # name, and `posix/src/target-arch.rs` is tracked source that must
+            # stay in this list. Written the other way round, this assertion
+            # demanded the seam hide it.
+            check("the listing itself is clean of build output",
+                  [p for p in files
+                   if any(c == "target" or c.startswith("target-")
+                          for c in p.split("/")[:-1])],
+                  [])
+            check("...and the walk never entered a plain target directory",
+                  [d for d in visited if "target" in d.split("/")], [])
+            check("...nor an alternate one",
+                  [d for d in visited
+                   if any(c.startswith("target-") for c in d.split("/"))],
+                  [])
+            # The control: without it, a probe that quietly stopped recording
+            # would look exactly like the property holding.
+            check("the probe was in fact recording directories",
+                  any(d.endswith("/posix/src") for d in visited), True)
+            # And the walk did reach real source, so the empty lists above are
+            # the prune working rather than a walk that never started.
+            check("...including one that merely contains 'target-'",
+                  any(d.endswith("/cross-target-tests") for d in visited),
+                  True)
     finally:
         os.walk = real_walk
 
@@ -689,7 +843,15 @@ def case_missing_is_an_answer(work: str) -> None:
 
 def case_entries_flags_directories(work: str) -> None:
     with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
-        want = [("posix/src/a.rs", False), ("posix/src/deep", True)]
+        # `posix/src` also holds `target/` and `target-hl2/` on disk, both
+        # build output and neither in the commit, so this list doubles as the
+        # entry-level statement of the prune rule: the two *directories* are
+        # absent from both sides, while `target-arch.rs` -- a file whose name
+        # merely starts the same way -- is present on both.
+        want = [("posix/src/a.rs", False),
+                ("posix/src/cross-target-tests", True),
+                ("posix/src/deep", True),
+                ("posix/src/target-arch.rs", False)]
         check("the disk marks which children are directories",
               disk.entries("posix/src"), want)
         check("and the revision infers the same from its path list",
@@ -763,7 +925,9 @@ def main() -> int:
                                    case_read_text_survives_bad_bytes,
                                    case_files_under_a_file,
                                    case_open_tree_chooses,
+                                   case_alternate_build_dirs_are_pruned_by_shape,
                                    case_a_build_dir_prefix_is_not_walked,
+                                   case_the_walk_never_descends_into_build_output,
                                    case_a_callers_own_prune_list_reaches_both_sides,
                                    case_tree_agrees_in_a_linked_worktree,
                                    case_tree_reads_the_commit_not_the_disk)):

@@ -658,11 +658,34 @@ check_sysroot_identity() {
     fi
 
     if [ -z "$resolved" ]; then
-        echo "=== WARNING: fastpy would not resolve any SlateOS sysroot ==="
-        echo "    Neither \$FASTPY_SLATEOS_SYSROOT nor the sibling 'os' checkout"
-        echo "    holds a libc.a.  The fixtures in the image were linked against"
-        echo "    something this host can no longer name, so their Path-Z rungs"
-        echo "    cannot be attributed to any posix/ revision."
+        # Say which of the two possible causes this is.  The message used to
+        # read "something this host can no longer name", which describes a
+        # missing or unidentifiable libc -- and that is not what happened.  Ours
+        # is present and named on the next line (the early return above proves
+        # it exists).  What failed is fastpy's *search*: its last candidate is a
+        # sibling checkout literally named `os`, so from `os-lane-{a,b,c}` it
+        # looks only at the integration worktree and never at the tree being
+        # tested.  Misnaming a search defect as a missing file sends the reader
+        # to rebuild a sysroot that is already there.
+        echo "=== WARNING: fastpy cannot see this worktree's sysroot ==="
+        echo "    ours (present, never searched): $ours"
+        echo "    fastpy's last candidate is a *sibling checkout named 'os'*,"
+        echo "    which in the three-worktree layout is the integration tree and"
+        echo "    holds no sysroot.  \$FASTPY_SLATEOS_SYSROOT is unset, so no"
+        echo "    candidate resolves and the fixtures in the image were linked"
+        echo "    without one -- their Path-Z rungs cannot be attributed to any"
+        echo "    posix/ revision.  The kernel result below is unaffected."
+        echo "    To repair, set the variable when the fixtures are BUILT:"
+        # Quoted: every checkout of this project lives under a path with a
+        # space in it ("visual studio projects"), so an unquoted assignment
+        # here is a repair line that fails when pasted.
+        echo "        FASTPY_SLATEOS_SYSROOT=\"$PROJECT_ROOT/toolchain/sysroot\" \\"
+        echo "            python scripts/ctest-fixtures.py build"
+        echo "        wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
+        echo "    Setting it only for this check would make the comparison below"
+        echo "    read our own libc.a against itself and pass in silence, which"
+        echo "    is why this script does not do that (known-issues.md"
+        echo "    A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE)."
         return 0
     fi
 

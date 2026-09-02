@@ -229,6 +229,11 @@ fn run_bzip2recover(args: &[String]) -> i32 {
 // ── Entry point ───────────────────────────────────────────────────────
 
 fn main() {
+    // This command is not implemented: every path below reports a result
+    // it did not measure and a write it did not perform. The guard makes
+    // it fail instead of reporting success, so a caller cannot proceed on
+    // the strength of it. Delete this line when bzip2 really compresses.
+    notimpl::guard(env!("CARGO_PKG_NAME"));
     let args: Vec<String> = env::args().collect();
 
     let prog_name = {

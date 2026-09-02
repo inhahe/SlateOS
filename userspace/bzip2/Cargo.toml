@@ -7,3 +7,4 @@ edition = "2024"
 # this is the one message that tells a user their file is gone, so it must
 # be unambiguous.
 quoting = { path = "../quoting" }
+notimpl = { path = "../notimpl" }

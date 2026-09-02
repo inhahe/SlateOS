@@ -1,0 +1,30 @@
+[package]
+name = "notimpl"
+version = "0.1.0"
+edition = "2024"
+description = "One place for 'this command is not implemented', so no stub can report success"
+
+# Why a crate and not a line of code per stub.
+#
+# `scripts/audit-cli-fabrication.py` found that 2288 of the 2756 crates under
+# `userspace/` print a statement of fact -- a duration, a device name, a byte
+# count, a PASS -- while containing no call that could have observed one, and
+# then exit 0. Lane C filed it as a bug rather than as incomplete work, and
+# the distinction is exactly right: a stub that says "not implemented" and
+# fails is harmless, because every caller in the world already knows what to
+# do with a non-zero exit. A stub that prints a plausible measurement and
+# exits 0 is indistinguishable from the real tool to a shell script, which is
+# how `ffmpeg -i in.mov out.mp4 && rm in.mov` deletes the only copy.
+#
+# Repairing that one crate at a time means 2288 judgements about which
+# `println!` is a fabrication and which is honest. Judgement at that scale is
+# how a sweep introduces bugs. This crate exists so the repair is instead one
+# line, byte-identical in every crate, that requires no understanding of the
+# crate it is added to:
+#
+#     notimpl::guard(env!("CARGO_PKG_NAME"));
+#
+# as the first statement of `main`. The fabricated code below it becomes
+# unreachable rather than deleted, which is deliberate -- see the module docs.
+
+[dependencies]

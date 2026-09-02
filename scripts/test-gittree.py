@@ -335,6 +335,324 @@ def case_cli_reports_crlf_input(work: str) -> None:
               os.path.exists(os.path.join(dest, "src", "main.rs")), True)
 
 
+# --------------------------------------------------------------------------
+# Tree cases
+# --------------------------------------------------------------------------
+
+
+def build_tree_repo(tmp: str, name: str = "t") -> str:
+    """A repo whose disk and whose HEAD are deliberately the same.
+
+    Same content both sides, so that `case_tree_agrees` can assert exact
+    equality and mean it. The only things on disk that are not in the commit
+    are build directories, which is the arrangement every real checkout is in
+    and exactly what the prune rule exists to paper over.
+    """
+    work = os.path.join(tmp, name)
+    os.makedirs(work, exist_ok=True)
+    git(work, "init", "--quiet", "-b", "main", ".")
+    git(work, "config", "user.name", "Real Person")
+    git(work, "config", "user.email", "real@example.org.uk")
+    git(work, "config", "commit.gpgsign", "false")
+    git(work, "config", "core.autocrlf", "false")
+
+    files: dict[str, bytes] = {
+        "src/lib.rs": b"//! Root.\npub fn a() {}\n",
+        # `target` as a *substring* of a real source file name. A prune rule
+        # written as `"target" in rel` hides this file, and hides it silently:
+        # the checker reports no findings for a file it never opened.
+        "src/target_arch.rs": b"pub const ARCH: &str = \"x86_64\";\n",
+        "posix/src/a.rs": b"pub fn b() {}\n",
+        "posix/src/deep/b.rs": b"pub fn c() {}\n",
+        "docs/readme.md": b"# docs\n",
+        # Not valid UTF-8 anywhere: `read_text` must replace rather than raise,
+        # and `read_bytes` must hand back these bytes untouched.
+        "bin.dat": b"\xff\xfe\x00\x01ok\x80\x81",
+    }
+    for rel, body in files.items():
+        path = os.path.join(work, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(body)
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "content")
+
+    # Build output, written *after* the commit and never added -- which is
+    # what `target/` always is. Two of them, one nested, because the prune
+    # must be a component test at any depth rather than a check of the first
+    # path element.
+    for rel in ("target/debug/junk.rs", "posix/src/target/leftover.rs"):
+        path = os.path.join(work, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"// build output\n")
+    return work
+
+
+def case_tree_agrees(work: str) -> None:
+    """The seam's whole promise: a checker cannot tell the two apart.
+
+    Asserted as exact equality over a checkout whose disk matches its HEAD,
+    because "close enough" is not a property a checker can rely on -- gate 11
+    resolves a link in one file against a definition in another, so a single
+    path present on one side and absent on the other turns a real finding
+    into a false one, or hides it.
+
+    Content is compared too, not just the path lists. Two trees can enumerate
+    identically and still disagree about every byte, which is precisely the
+    failure mode of a checker that lists from git and then reads the disk --
+    the bug this seam exists to make impossible.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for prefix in ("", "src", "posix", "posix/src", "docs"):
+            check(f"files_under({prefix!r}) agrees",
+                  disk.files_under(prefix), rev.files_under(prefix))
+            check(f"entries({prefix!r}) agrees",
+                  disk.entries(prefix), rev.entries(prefix))
+
+        every = rev.files_under("")
+        check("the fixture is the six committed files", len(every), 6)
+        check("every file's bytes agree",
+              [p for p in every if disk.read_bytes(p) != rev.read_bytes(p)], [])
+        check("every file is a file on both",
+              [p for p in every if not (disk.is_file(p) and rev.is_file(p))], [])
+        for d in ("src", "posix", "posix/src", "posix/src/deep"):
+            check(f"is_dir({d!r}) agrees", disk.is_dir(d), rev.is_dir(d))
+
+
+def case_tree_reads_the_commit_not_the_disk(work: str) -> None:
+    """The bug being fixed, stated directly.
+
+    Seven gates enumerate from the pushed commits and then read the disk, so
+    a commit that introduces a fault passes whenever the disk has since been
+    fixed, and a clean commit fails whenever the disk is dirty. `RevTree` must
+    therefore be blind to the working tree in all three directions -- edited,
+    added, and removed -- and `WorkTree` must still see all three, because the
+    same checkers are run by hand and by the boot test where the disk is the
+    right answer.
+
+    A dedicated fixture rather than mutating a shared one: a suite whose cases
+    must run in a particular order is a trap for whoever adds the next case.
+    """
+    edited = os.path.join(work, "src", "lib.rs")
+    with open(edited, "wb") as fh:
+        fh.write(b"//! Edited on disk, never committed.\n")
+    with open(os.path.join(work, "src", "added.rs"), "wb") as fh:
+        fh.write(b"pub fn added() {}\n")
+    os.remove(os.path.join(work, "docs", "readme.md"))
+
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        check("the disk shows the edit",
+              disk.read_text("src/lib.rs").startswith("//! Edited"), True)
+        check("the revision does not",
+              rev.read_text("src/lib.rs").startswith("//! Root."), True)
+
+        check("the disk shows a file added since the commit",
+              disk.is_file("src/added.rs"), True)
+        check("the revision does not", rev.is_file("src/added.rs"), False)
+        check("and the revision does not list it",
+              "src/added.rs" in rev.files_under("src"), False)
+
+        check("the disk shows a file deleted since the commit as gone",
+              disk.is_file("docs/readme.md"), False)
+        check("the revision still has it", rev.is_file("docs/readme.md"), True)
+        check("...and can still read it",
+              rev.read_text("docs/readme.md"), "# docs\n")
+
+
+def case_tree_agrees_in_a_linked_worktree(work: str) -> None:
+    """The shape the gates actually run in, where `.git` is a file.
+
+    Every lane works in a `git worktree`, and in one of those `.git` is not a
+    directory but a one-line file pointing at the real object store. A prune
+    that filters only `os.walk`'s `dirnames` therefore misses it *everywhere
+    the hook is ever used*, while passing a fixture built with `git init`,
+    where `.git` is a directory and the filter does apply.
+
+    So this case does not build its fixture the convenient way. A suite whose
+    fixture differs from the deployment in exactly the respect under test is
+    the reason the defect it is meant to catch survives.
+    """
+    linked = os.path.join(os.path.dirname(work), "linked-" + os.path.basename(work))
+    git(work, "worktree", "add", "--detach", "--quiet", linked, "HEAD")
+    dot = os.path.join(linked, ".git")
+    check("the fixture reproduces the real layout: .git is a file",
+          os.path.isfile(dot), True)
+
+    with gittree.WorkTree(linked) as disk, gittree.RevTree("HEAD", linked) as rev:
+        check("the disk does not offer .git as a file",
+              [p for p in disk.files_under("") if p == ".git"], [])
+        check("files_under('') still agrees with the revision",
+              disk.files_under(""), rev.files_under(""))
+        check("entries('') still agrees with the revision",
+              disk.entries(""), rev.entries(""))
+
+
+def case_prune_is_by_component(work: str) -> None:
+    """`target` the directory is skipped; `target_arch.rs` is not.
+
+    A substring rule passes every other test in this file and fails only
+    here, silently, by never opening a source file -- so the discriminating
+    case is the one worth spending a fixture on.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            files = tree.files_under("")
+            check(f"{label}: a file merely named target-something is kept",
+                  "src/target_arch.rs" in files, True)
+            check(f"{label}: nothing under a build directory is listed",
+                  [p for p in files if "target" in p.split("/")], [])
+            check(f"{label}: nor anything from .git",
+                  [p for p in files if ".git" in p.split("/")], [])
+            check(f"{label}: build dirs are not offered as entries",
+                  [e for e, _ in tree.entries("posix/src")
+                   if e.endswith("/target")], [])
+
+        # The disk really does hold what the listing declines to show, so the
+        # empty results above are the rule working rather than an empty tree.
+        check("the build output is genuinely on disk",
+              os.path.isfile(os.path.join(work, "target", "debug", "junk.rs")),
+              True)
+        check("asking for a build directory by name yields nothing anyway",
+              disk.files_under("target"), [])
+        check("...on both sides", rev.files_under("target"), [])
+
+
+def case_a_build_dir_prefix_is_not_walked(work: str) -> None:
+    """The guard that looks redundant, and the reason it is not.
+
+    `files_under("target")` answers `[]` with or without `WorkTree`'s prefix
+    check, because the per-file prune drops everything the walk turns up. The
+    difference is not the answer, it is the work: without the guard the walk
+    descends the entire build directory in order to discard every result, and
+    on this repository that is minutes of `stat()` happening inside a push
+    gate.
+
+    A mutation that deletes the guard is therefore invisible to every
+    assertion about return values -- it survived the first clean mutation run
+    for exactly that reason -- so this case asserts about the walk itself.
+    Without it, the next reader deletes a line that provably changes nothing.
+    """
+    seen: list[str] = []
+    real_walk = os.walk
+
+    def counting_walk(top, *a, **kw):
+        seen.append(top)
+        return real_walk(top, *a, **kw)
+
+    # Patched on the `os` module itself because `gittree` says `import os` and
+    # resolves `os.walk` per call. Restored in `finally`; this suite is
+    # single-threaded, so nothing else can observe the swap.
+    os.walk = counting_walk
+    try:
+        with gittree.WorkTree(work) as disk:
+            check("a build-dir prefix still answers nothing",
+                  disk.files_under("target"), [])
+            check("...and does so without walking it at all", seen, [])
+            # The control. Without this, a probe that silently stopped
+            # working would look identical to the property holding.
+            seen.clear()
+            check("a real prefix does return files",
+                  bool(disk.files_under("posix")), True)
+            check("...so the probe would have noticed a walk",
+                  len(seen), 1)
+    finally:
+        os.walk = real_walk
+
+
+def case_missing_is_an_answer(work: str) -> None:
+    """Absent is not an error, at any of the six entry points.
+
+    Every checker converted to this seam walks a path list from git and reads
+    each one; a push that adds a file and later deletes it puts a path in that
+    list which is not there. If that raised, the gate would abort rather than
+    judge -- and an aborted gate is exit 126, which the hook refuses to treat
+    as a verdict. Absence has to be a value.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            probes = (
+                ("read_bytes", lambda t: t.read_bytes("no/pe.rs"), None),
+                ("read_text", lambda t: t.read_text("no/pe.rs"), None),
+                ("is_file", lambda t: t.is_file("no/pe.rs"), False),
+                ("is_dir", lambda t: t.is_dir("no/pe"), False),
+                ("files_under", lambda t: t.files_under("no/pe"), []),
+                ("entries", lambda t: t.entries("no/pe"), []),
+            )
+            for name, probe, want in probes:
+                # The raise is caught here rather than left to propagate so it
+                # is reported as *this* assertion failing. An escaping
+                # exception is red too, but it aborts the run at the first
+                # method and names none of them -- and "absence must not
+                # raise" is the whole point of the case.
+                try:
+                    got: object = probe(tree)
+                except Exception as exc:  # noqa: BLE001 - any raise is the bug
+                    got = f"raised {type(exc).__name__}"
+                check(f"{label}: {name} of a missing path", got, want)
+
+
+def case_entries_flags_directories(work: str) -> None:
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        want = [("posix/src/a.rs", False), ("posix/src/deep", True)]
+        check("the disk marks which children are directories",
+              disk.entries("posix/src"), want)
+        check("and the revision infers the same from its path list",
+              rev.entries("posix/src"), want)
+
+
+def case_read_text_survives_bad_bytes(work: str) -> None:
+    """Scan the file, do not skip it.
+
+    The checkers look for patterns in source, and a file with one bad byte is
+    still a file whose other 40 KB may contain a finding. `read_bytes` stays
+    exact for the callers that need it.
+    """
+    raw = b"\xff\xfe\x00\x01ok\x80\x81"
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            check(f"{label}: bytes come back untouched", tree.read_bytes("bin.dat"), raw)
+            text = tree.read_text("bin.dat")
+            check(f"{label}: text is decoded, not refused", isinstance(text, str), True)
+            check(f"{label}: the readable part is still readable", "ok" in text, True)
+            check(f"{label}: strict decoding is available and does raise",
+                  _raises(lambda: tree.read_text("bin.dat", errors="strict")), True)
+
+
+def case_files_under_a_file(work: str) -> None:
+    """A prefix that names a file is that one file, not nothing.
+
+    The checkers' path lists mix directories and files freely -- gate 11 is
+    handed crate directories, gate 8 individual sources -- so the two have to
+    behave the same way through one call.
+    """
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        check("the disk answers with the file itself",
+              disk.files_under("src/lib.rs"), ["src/lib.rs"])
+        check("and so does the revision",
+              rev.files_under("src/lib.rs"), ["src/lib.rs"])
+
+
+def case_open_tree_chooses(work: str) -> None:
+    """`--head` becomes a choice in exactly one place."""
+    with gittree.open_tree(work) as absent:
+        check("no head means the working tree",
+              type(absent).__name__, "WorkTree")
+    with gittree.open_tree(work, "HEAD") as present:
+        check("a head means that revision",
+              type(present).__name__, "RevTree")
+        check("...and it is the revision that was asked for",
+              present.rev, "HEAD")
+
+
+def _raises(fn: object) -> bool:
+    try:
+        fn()
+    except Exception:
+        return True
+    return False
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         work = build_repo(tmp)
@@ -344,6 +662,16 @@ def main() -> int:
                      case_stub_rules, case_cli_emits_lf,
                      case_cli_reports_crlf_input):
             case(work)
+        for i, tcase in enumerate((case_tree_agrees, case_prune_is_by_component,
+                                   case_missing_is_an_answer,
+                                   case_entries_flags_directories,
+                                   case_read_text_survives_bad_bytes,
+                                   case_files_under_a_file,
+                                   case_open_tree_chooses,
+                                   case_a_build_dir_prefix_is_not_walked,
+                                   case_tree_agrees_in_a_linked_worktree,
+                                   case_tree_reads_the_commit_not_the_disk)):
+            tcase(build_tree_repo(tmp, f"t{i}"))
 
     if failures:
         print(f"\n{len(failures)} gittree test(s) failed:", file=sys.stderr)

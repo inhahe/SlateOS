@@ -225,6 +225,328 @@ class GitTree:
 
 
 # --------------------------------------------------------------------------
+# Tree: the seam the checkers read through
+# --------------------------------------------------------------------------
+#
+# `GitTree` above is a transport. This is the thing a checker is written
+# against: "give me the files under `posix/src`" and "give me the text of
+# this one", answered either by the working tree or by a revision, with the
+# checker unable to tell which.
+#
+# It exists because seven push gates enumerate their files from the pushed
+# commit range and then read the contents off the disk -- see
+# `known-issues.md` ->
+# TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH. Each of
+# those checkers is also run by hand and by the boot test, where the working
+# tree is exactly the right thing to read, so the fix cannot be "read git
+# instead". It has to be "read whichever the caller asked for", and that is a
+# seam, not a flag.
+#
+# The API is deliberately four methods and no filtering. `rglob("*.rs")` is
+# not offered, because the checkers do not all mean the same thing by it --
+# one excludes `target/`, one excludes `src/bin`, one wants `Cargo.toml` by
+# name -- and a shared glob would have to grow an option for each. They get
+# a list of paths and apply their own predicate, which keeps every one of
+# those judgements visible in the checker that makes it.
+#
+# Paths in and out are always **repo-relative with forward slashes**, because
+# that is what git speaks, what the checkers already print in their findings,
+# and what their baseline files already record. A `Path` would be the natural
+# Python type and is the wrong one here: it would make the working-tree
+# implementation trivially correct and the git one a translation layer, and
+# on Windows it would spell half the separators the other way round.
+
+
+# Directory names that are never any checker's subject matter, skipped by
+# every listing on both sides of the seam.
+#
+# `target` is Rust build output: tens of gigabytes, and every checker being
+# converted already drops it by hand.
+#
+# `.git` is here because without it the seam breaks its own promise at the
+# most obvious call site. `files_under("")` on the disk walks the repository
+# root, and the repository root contains `.git` -- thousands of loose objects
+# and packs that no revision can ever list, because git will not track its own
+# directory. The two sides would then disagree by the entire object store on
+# the one query a checker is likeliest to make.
+_PRUNE = ("target", ".git")
+
+
+def _pruned(rel: str) -> bool:
+    """True for a path inside a directory no listing should descend into.
+
+    A component-wise test, not `"target" in rel`: `posix/src/target_arch.rs`
+    is source, and a substring test would hide it from every listing. The
+    same rule spelled the same way for both implementations, because the one
+    thing a seam must not do is answer differently on its two sides.
+    """
+    parts = rel.split("/")
+    return any(name in parts for name in _PRUNE)
+
+
+class Tree:
+    """Read-only access to a set of files, by repo-relative path.
+
+    Two implementations: [`WorkTree`], which is the disk, and [`RevTree`],
+    which is a git revision. A checker written against this interface asks
+    the same questions of either.
+
+    Every method takes and returns repo-relative paths with `/` separators,
+    and no method raises for a path that is simply not there -- `read_text`
+    answers `None`, the predicates answer `False`, and the listings answer
+    an empty list. A checker's job is to judge the files that exist, and a
+    missing file is an answer rather than an error at every one of these
+    call sites.
+
+    **Where the two implementations legitimately disagree.** The disk holds
+    build output; a commit does not, because `target/` is gitignored. That
+    is not a defect in the seam, it is the difference the seam exists to
+    expose, and it cannot be papered over -- `WorkTree.is_file` telling you
+    a `target/` file is absent when it is right there on disk would be a
+    lie, not a normalisation. What *is* normalised is enumeration: both
+    `files_under` and `entries` skip `target/` and `.git` on both sides (see
+    `_PRUNE`), so a checker that walks a subtree sees the same set from
+    either unless the difference is real source. The
+    predicates and the readers answer for the exact path they were handed,
+    truthfully, on whichever tree they are.
+    """
+
+    def files_under(self, prefix: str) -> list[str]:
+        """Every file at or below `prefix`, sorted, `/`-separated.
+
+        `target/` and `.git` are skipped (see `_PRUNE`). A `prefix` that is
+        itself inside one yields nothing, on both implementations, rather
+        than the disk saying yes and git saying no.
+        """
+        raise NotImplementedError
+
+    def entries(self, prefix: str) -> list[tuple[str, bool]]:
+        """The immediate children of `prefix` as `(path, is_dir)`, sorted.
+
+        Skips build directories for the same reason and by the same rule as
+        `files_under`; see the class docstring for why the predicates below
+        deliberately do not.
+        """
+        raise NotImplementedError
+
+    def is_file(self, rel: str) -> bool:
+        raise NotImplementedError
+
+    def is_dir(self, rel: str) -> bool:
+        raise NotImplementedError
+
+    def read_bytes(self, rel: str) -> Optional[bytes]:
+        raise NotImplementedError
+
+    def read_text(self, rel: str, errors: str = "replace") -> Optional[str]:
+        """The file decoded as UTF-8, or `None` if it is not there.
+
+        `errors="replace"` by default because that is what every checker
+        being converted already passes: they scan source for patterns, and a
+        file with a bad byte in it should be scanned, not skipped. Callers
+        that need the bytes intact use `read_bytes`.
+        """
+        data = self.read_bytes(rel)
+        if data is None:
+            return None
+        return data.decode("utf-8", errors)
+
+    # -- context manager, so callers can use either one the same way --------
+
+    def __enter__(self) -> "Tree":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Release anything held. Idempotent; the disk holds nothing."""
+
+
+def _norm(rel: str) -> str:
+    """A repo-relative path in the one spelling everything here uses."""
+    return rel.replace("\\", "/").strip("/")
+
+
+class WorkTree(Tree):
+    """The files on disk, under `root`.
+
+    This is what every checker does today, moved behind the interface
+    unchanged, so that a checker run by hand or by the boot test keeps
+    reading exactly what it read before the conversion.
+    """
+
+    def __init__(self, root: str) -> None:
+        self.root = root.replace("\\", "/").rstrip("/")
+
+    def _abs(self, rel: str) -> str:
+        rel = _norm(rel)
+        return f"{self.root}/{rel}" if rel else self.root
+
+    def files_under(self, prefix: str) -> list[str]:
+        base = self._abs(prefix)
+        prefix = _norm(prefix)
+        # Looks redundant and is not. The per-file prune below already drops
+        # everything a walk of a build directory could find, so deleting this
+        # changes no *answer* -- it changes the *work*, from nothing to a full
+        # descent of a directory that is tens of gigabytes on this tree, inside
+        # a push gate. `case_a_build_dir_prefix_is_not_walked` is what stops it
+        # being tidied away, because no assertion about results can see it.
+        if prefix and _pruned(prefix):
+            return []
+        if os.path.isfile(base):
+            return [prefix]
+        out: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(base):
+            # Prune rather than filter: descending into `target/` to throw
+            # the results away is minutes of stat() on this tree, and
+            # descending into `.git` is the whole object store.
+            dirnames[:] = sorted(d for d in dirnames if d not in _PRUNE)
+            rel_dir = _norm(dirpath.replace("\\", "/")[len(self.root):])
+            for name in filenames:
+                rel = f"{rel_dir}/{name}" if rel_dir else name
+                # The filenames are filtered too, not just the directories,
+                # because in a linked worktree `.git` is a *file* -- it holds
+                # the line `gitdir: …/worktrees/os-lane-b` -- and pruning only
+                # `dirnames` would miss it. Every lane works in such a
+                # worktree, so that is not the exotic case here, it is the
+                # only case: the seam would have listed `.git` from the disk
+                # and never from a revision, breaking its own equality
+                # promise everywhere it actually runs while passing a fixture
+                # built by `git init`, where `.git` is a directory.
+                if _pruned(rel):
+                    continue
+                out.append(rel)
+        return sorted(out)
+
+    def entries(self, prefix: str) -> list[tuple[str, bool]]:
+        base = self._abs(prefix)
+        prefix = _norm(prefix)
+        # No prefix guard here, deliberately, unlike `files_under`: one
+        # `listdir` of a build directory costs a single syscall, and the
+        # per-entry prune below already gives the right answer. The guard
+        # there buys a whole avoided tree walk; here it would buy nothing and
+        # would be a second copy of a rule with no reason of its own.
+        try:
+            names = os.listdir(base)
+        except OSError:
+            return []
+        out = []
+        for name in names:
+            rel = f"{prefix}/{name}" if prefix else name
+            if _pruned(rel):
+                continue
+            out.append((rel, os.path.isdir(f"{base}/{name}")))
+        return sorted(out)
+
+    def is_file(self, rel: str) -> bool:
+        return os.path.isfile(self._abs(rel))
+
+    def is_dir(self, rel: str) -> bool:
+        return os.path.isdir(self._abs(rel))
+
+    def read_bytes(self, rel: str) -> Optional[bytes]:
+        try:
+            with open(self._abs(rel), "rb") as handle:
+                return handle.read()
+        except OSError:
+            return None
+
+
+class RevTree(Tree):
+    """The files as they are at a git revision.
+
+    The path index is built once, from a single `git ls-tree -r -z <rev>` of
+    the whole tree -- 13,821 paths in 3.8 s on this machine, measured while a
+    push was competing for the disk -- and every listing and predicate is
+    then answered from memory. It indexes the whole tree rather than the
+    caller's prefix because a checker asks about several prefixes and the
+    per-call cost of `ls-tree` (1.5-4 s) is the whole cost; asking once for
+    everything is cheaper than asking three times for a third of it.
+
+    Only `read_bytes` talks to git again, over the shared
+    `git cat-file --batch`, and that is what makes reading a whole crate
+    affordable: 2,305 blobs of `posix/src` in 46 s, against the ~27 minutes
+    `known-issues.md` records for one `git cat-file` process per file. That
+    measurement is the reason gate 11 -- which must see a whole crate,
+    because a link in one file is satisfied by a definition in another --
+    can be fixed at all.
+
+    Directories are inferred from the path list, because git has no
+    directory entries in a `-r` listing -- a directory here is exactly "a
+    prefix that some file has", which is also what git itself means by one.
+    """
+
+    def __init__(self, rev: str, repo: Optional[str] = None) -> None:
+        self.rev = rev
+        self._git = GitTree(repo)
+        try:
+            paths = self._git.list_paths(rev)
+        except GitTreeError:
+            self._git.close()
+            raise
+        # `target/` is gitignored, so it should never appear -- but a tree
+        # that once committed one would otherwise make the two Tree
+        # implementations disagree about a listing, which is the one thing
+        # the seam promises they do not.
+        self._files = sorted(p for p in paths if not _pruned(p))
+        self._fileset = set(self._files)
+        self._dirs: set[str] = set()
+        for path in self._files:
+            parts = path.split("/")
+            for i in range(1, len(parts)):
+                self._dirs.add("/".join(parts[:i]))
+
+    def close(self) -> None:
+        self._git.close()
+
+    def files_under(self, prefix: str) -> list[str]:
+        prefix = _norm(prefix)
+        if not prefix:
+            return list(self._files)
+        if prefix in self._fileset:
+            return [prefix]
+        head = prefix + "/"
+        return [p for p in self._files if p.startswith(head)]
+
+    def entries(self, prefix: str) -> list[tuple[str, bool]]:
+        prefix = _norm(prefix)
+        head = prefix + "/" if prefix else ""
+        seen: dict[str, bool] = {}
+        for path in self._files:
+            if not path.startswith(head):
+                continue
+            rest = path[len(head):]
+            if not rest:
+                continue
+            name, sep, _ = rest.partition("/")
+            seen[head + name] = bool(sep)
+        return sorted(seen.items())
+
+    def is_file(self, rel: str) -> bool:
+        return _norm(rel) in self._fileset
+
+    def is_dir(self, rel: str) -> bool:
+        rel = _norm(rel)
+        return rel == "" or rel in self._dirs
+
+    def read_bytes(self, rel: str) -> Optional[bytes]:
+        return self._git.read(self.rev, _norm(rel))
+
+
+def open_tree(root: str, head: Optional[str] = None) -> Tree:
+    """The tree a checker should read: `head`'s revision, or the disk.
+
+    The one place the `--head` flag turns into a choice, so that no checker
+    has to spell the fallback rule out again -- and so that "absent means the
+    working tree" is stated once rather than seven times, each free to drift.
+    """
+    if head is None:
+        return WorkTree(root)
+    return RevTree(head, root)
+
+
+# --------------------------------------------------------------------------
 # materialise: the CLI the shell hook uses
 # --------------------------------------------------------------------------
 

@@ -23,6 +23,7 @@
 //! | [`dispatch`] | The layout of a *dispatchable handle* — the first word of every `VkInstance`, `VkDevice`, `VkQueue` and `VkCommandBuffer` — and the check that must precede writing to it. |
 //! | [`registry`] | The drivers this loader knows about: the handshake with each, the version it settled on, and — kept rather than discarded — the ones that were rejected and why. |
 //! | [`instance`] | What one `vkCreateInstance` means across several drivers: which failure the application is told about, and the loader's own dispatchable instance and physical-device objects. |
+//! | [`device`] | What one `vkCreateDevice` means when exactly one driver is behind it: the record a device's dispatch word points at, and which of the two device-level commands the loader must answer itself. |
 //! | [`entry`] | The exported symbols, the process-wide driver registry, and the dispatch table their addresses come from. |
 //! | [`vk`] | The few Vulkan C types the loader's own signatures cannot avoid naming. Not a binding, and not becoming one. |
 //!
@@ -73,14 +74,28 @@
 //! success for work it never did. A link error names the missing thing; an
 //! empty extension list produces a bug report about the driver.
 //!
-//! Device-level Vulkan — `vkCreateDevice` and everything a `VkDevice`
-//! dispatches — is the next layer, and needs a device dispatch table per driver
-//! rather than the one instance-level table [`entry`] has today.
+//! Device-level Vulkan is the layer [`device`] adds, and building it corrected
+//! a guess this paragraph used to state as fact. It said a device dispatch
+//! table was needed *per driver*, on the reasoning that the driver's
+//! `vkGetDeviceProcAddr` is a per-driver fact and two devices from one driver
+//! could share a record. They cannot: `vkGetDeviceProcAddr` returns a pointer
+//! specific to the device it was asked about, which is the whole point of
+//! device-level dispatch, so the record is **per device**. It is recorded here
+//! rather than quietly deleted because the wrong version is the one that sounds
+//! right.
+//!
+//! What is exported at that level is `vkCreateDevice`, `vkGetDeviceProcAddr`
+//! and `vkDestroyDevice` — and no device commands at all. A `VkDevice` this
+//! loader returns *is* the driver's, so `vkCmdDraw` and its several hundred
+//! siblings are reached through the driver's own `vkGetDeviceProcAddr` with the
+//! loader nowhere in the call path, which is the arrangement Vulkan separates
+//! device-level dispatch in order to allow.
 
 #![no_std]
 
 extern crate alloc;
 
+pub mod device;
 pub mod dispatch;
 pub mod entry;
 pub mod icd;

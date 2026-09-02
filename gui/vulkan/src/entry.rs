@@ -13,6 +13,10 @@
 //! | `vkCreateInstance` | Exported. Fans out to every registered driver; see [`crate::instance`] for which failure the application is told about. |
 //! | `vkDestroyInstance` | Exported. Fans back out and frees the loader's object. |
 //! | `vkEnumeratePhysicalDevices` | Exported. Aggregates every driver's devices behind loader-owned handles. |
+//! | `vkCreateDevice` | Exported. Creates the device on the one driver behind the physical device, and adopts the handle. |
+//! | `vkGetDeviceProcAddr` | Exported. Answers for itself and `vkDestroyDevice`; forwards everything else to the driver. |
+//! | `vkDestroyDevice` | Exported. Destroys the driver's device and frees the loader's record for it. |
+//! | *every other device command* | **Not exported, and not a gap.** A `VkDevice` this loader returns is the driver's own, so `vkCmdDraw` and its several hundred siblings are found through the driver's `vkGetDeviceProcAddr` and called with the loader nowhere in the path. |
 //! | `vkEnumerateInstanceExtensionProperties` | **Not exported.** Needs the union of every driver's extension list, de-duplicated. |
 //! | `vkEnumerateInstanceLayerProperties` | **Not exported.** There are no layers, because loading one needs `dlopen`. |
 //! | `vkEnumerateInstanceVersion` | **Not exported.** Its answer depends on the two above. |
@@ -59,11 +63,14 @@ use core::ops::{Deref, DerefMut};
 use core::ptr;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::device::{self, Device, LoaderCommand, Lookup};
+use crate::dispatch;
 use crate::icd::CURRENT;
 use crate::instance::{DriverInstance, Instance, PhysicalDevice, adopt_all, array_query, outcome};
 use crate::registry::{Admission, Driver, Entry, Registry};
 use crate::vk::{
-    CreateInstanceFn, DestroyInstanceFn, EnumeratePhysicalDevicesFn, GetInstanceProcAddrFn,
+    CreateDeviceFn, CreateInstanceFn, DestroyDeviceFn, DestroyInstanceFn,
+    EnumeratePhysicalDevicesFn, GetDeviceProcAddrFn, GetInstanceProcAddrFn,
     GetPhysicalDeviceProcAddrFn, Handle, NegotiateFn, VK_ERROR_INCOMPATIBLE_DRIVER,
     VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS, VkResult, VoidFn,
 };
@@ -156,11 +163,20 @@ static DRIVERS: SpinLock<Registry> = SpinLock::new(Registry::new(CURRENT));
 ///
 /// A `VkPhysicalDevice` shares it: in Vulkan a physical device dispatches
 /// through its instance's table rather than owning one.
+///
+/// The rule for what belongs here is *what the handle dispatches through*, not
+/// what level the command is named for. `vkCreateDevice` is in the table because
+/// it is called on a `VkPhysicalDevice`, which points at this table.
+/// `vkGetDeviceProcAddr` and `vkDestroyDevice` are not, because they are called
+/// on a `VkDevice`, which points at a [`crate::device::Device`] record instead —
+/// they are handed out directly by [`get_instance_proc_addr`], for the same
+/// reason `vkCreateInstance` is.
 #[repr(C)]
 struct Table {
     get_instance_proc_addr: GetInstanceProcAddrFn,
     destroy_instance: DestroyInstanceFn,
     enumerate_physical_devices: EnumeratePhysicalDevicesFn,
+    create_device: CreateDeviceFn,
 }
 
 /// The one table, for the lifetime of the process.
@@ -172,6 +188,7 @@ static TABLE: Table = Table {
     get_instance_proc_addr,
     destroy_instance,
     enumerate_physical_devices,
+    create_device,
 };
 
 /// [`TABLE`]'s address, in the form the dispatch machinery takes.
@@ -315,6 +332,14 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
             b"vkEnumeratePhysicalDevices" => {
                 Some(erase(TABLE.enumerate_physical_devices as *const ()))
             }
+            b"vkCreateDevice" => Some(erase(TABLE.create_device as *const ())),
+            // Not reached through the table: these two are called on a
+            // `VkDevice`, which dispatches through a `Device` record rather than
+            // through `TABLE`. An application is still entitled to find them
+            // here — `vkGetInstanceProcAddr` answers for device-level commands
+            // as well, which is how a `VkDevice`'s first command is ever found.
+            b"vkGetDeviceProcAddr" => Some(erase(get_device_proc_addr as *const ())),
+            b"vkDestroyDevice" => Some(erase(destroy_device as *const ())),
             _ => None,
         }
     }
@@ -610,7 +635,7 @@ unsafe fn enumerate_across(
         };
         // SAFETY: forwarded from this function's contract.
         for handle in unsafe { devices_of(driver, instance.handle) } {
-            let mut wrapper = PhysicalDevice::new(instance.driver, handle);
+            let mut wrapper = PhysicalDevice::new(instance.driver, instance.handle, handle);
             // SAFETY: `TABLE` is a `static`, so it outlives every use.
             if unsafe { wrapper.install_table(table()) }.is_err() {
                 // Unreachable: `PhysicalDevice::new` stamps what this checks.
@@ -695,6 +720,246 @@ fn clamp_count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+/// Ask one driver for an entry point by name, through its instance.
+///
+/// # Safety
+///
+/// `driver`'s entry points must be live, and `instance` must be an instance that
+/// driver created and has not destroyed.
+unsafe fn instance_level(driver: &Driver, instance: Handle, name: &CStr) -> VoidFn {
+    let lookup = driver.instance_proc_addr();
+    // SAFETY: the caller guarantees `lookup` is live and `instance` is the
+    // driver's own; `name` is a literal that outlives the call.
+    unsafe { lookup(instance, name.as_ptr()) }
+}
+
+/// Tell a driver to destroy a device it created.
+///
+/// The lookup goes through the device's own `vkGetDeviceProcAddr` rather than
+/// its instance's. That is where a device-level command belongs, and it is also
+/// the only lookup the loader is certain to still have: the record kept for a
+/// device holds this function and not the instance it came from.
+///
+/// # Safety
+///
+/// `device_proc_addr` must be the driver's lookup for `device`, `device` must be
+/// a device that driver created and has not destroyed, and `allocator` must be
+/// the one creation was given.
+unsafe fn driver_destroy_device(
+    device_proc_addr: GetDeviceProcAddrFn,
+    device: Handle,
+    allocator: *const c_void,
+) {
+    // SAFETY: forwarded from this function's contract.
+    let found = unsafe { device_proc_addr(device, c"vkDestroyDevice".as_ptr()) };
+    let Some(found) = found else {
+        // A driver that can create a device and not destroy one leaks it. There
+        // is nowhere to report that from — `vkDestroyDevice` returns void — so
+        // the leak is the driver's, and this is the note saying it was noticed.
+        // The same case, for the same reason, as in `destroy_one`.
+        return;
+    };
+    // SAFETY: the driver returned this pointer for the name `vkDestroyDevice`,
+    // which is the contract that fixes its signature.
+    let destroy = unsafe { core::mem::transmute::<unsafe extern "C" fn(), DestroyDeviceFn>(found) };
+    // SAFETY: forwarded from this function's contract.
+    unsafe { destroy(device, allocator) };
+}
+
+/// The [`Device`] record a loader-created `VkDevice`'s dispatch word points at.
+///
+/// # Safety
+///
+/// `device` must be a `VkDevice` this loader's [`create_device`] returned and
+/// that [`destroy_device`] has not since reclaimed.
+unsafe fn record_of<'a>(device: Handle) -> &'a Device {
+    // SAFETY: forwarded from this function's contract — a device this loader
+    // returned is a dispatchable object whose first word it wrote itself.
+    let word = unsafe { dispatch::loader_data(device) };
+    // SAFETY: `create_device` wrote the address of a leaked `Box<Device>` into
+    // that word, and only `destroy_device` reclaims it, so it is live here.
+    unsafe { &*(word as *const Device) }
+}
+
+/// `vkCreateDevice`.
+///
+/// The device handed back is the **driver's own**, not a wrapper: the loader
+/// adopts it by replacing its dispatch word. That is what lets a device command
+/// the loader does not export reach the driver with nothing in between, and it
+/// is argued for in [`crate::device`].
+///
+/// # Safety
+///
+/// `physical_device` must be a `VkPhysicalDevice` this loader handed out from
+/// `vkEnumeratePhysicalDevices` whose instance is still alive, `create_info` a
+/// valid `VkDeviceCreateInfo*`, `allocator` a valid `VkAllocationCallbacks*` or
+/// null, and `out` a writable `VkDevice` slot.
+#[unsafe(export_name = "vkCreateDevice")]
+pub unsafe extern "C" fn create_device(
+    physical_device: Handle,
+    create_info: *const c_void,
+    allocator: *const c_void,
+    out: *mut Handle,
+) -> VkResult {
+    if physical_device.is_null() || out.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    // SAFETY: the caller guarantees this handle is one this loader handed out,
+    // so it points at a live `PhysicalDevice` owned by an instance that has not
+    // been destroyed.
+    let physical: &PhysicalDevice = unsafe { &*physical_device.cast::<PhysicalDevice>() };
+
+    let registry = DRIVERS.lock();
+    let Some(driver) = registry.drivers().get(physical.driver()) else {
+        // The device names a driver the registry no longer has. Unreachable
+        // while drivers are only ever added, and reported rather than assumed
+        // away because the alternative is an index into the wrong driver.
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+
+    // Resolved *before* the device is created, not after. A driver with no
+    // `vkGetDeviceProcAddr` cannot serve a device at all, and finding that out
+    // first means the refusal has nothing to unwind — whereas discovering it
+    // afterwards would leave a live device to destroy through the very lookup
+    // function that turned out to be missing.
+    // SAFETY: the driver's entry points are live for the process, and
+    // `physical.instance()` is the instance this device was enumerated from,
+    // which is what an instance-level lookup has to be asked with.
+    let found = unsafe { instance_level(driver, physical.instance(), c"vkGetDeviceProcAddr") };
+    let Some(found) = found else {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    // SAFETY: the driver returned this pointer for the name
+    // `vkGetDeviceProcAddr`, which is the contract that fixes its signature.
+    let device_proc_addr =
+        unsafe { core::mem::transmute::<unsafe extern "C" fn(), GetDeviceProcAddrFn>(found) };
+
+    // SAFETY: as above.
+    let found = unsafe { instance_level(driver, physical.instance(), c"vkCreateDevice") };
+    let Some(found) = found else {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    };
+    // SAFETY: the driver returned this pointer for the name `vkCreateDevice`,
+    // which is the contract that fixes its signature.
+    let create = unsafe { core::mem::transmute::<unsafe extern "C" fn(), CreateDeviceFn>(found) };
+
+    let mut handle: Handle = ptr::null_mut();
+    // SAFETY: `physical.handle()` is the driver's own physical device, the two
+    // structure pointers are the application's passed through unread, and
+    // `handle` is a writable slot that outlives the call.
+    let result = unsafe { create(physical.handle(), create_info, allocator, &raw mut handle) };
+    if result < VK_SUCCESS {
+        return result;
+    }
+    if handle.is_null() {
+        // Success with no handle, treated exactly as `create_one` treats it:
+        // believing the code over the handle would hand the application a null
+        // `VkDevice` that crashes on its first use.
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    let mut record = Device::new(physical.driver(), device_proc_addr);
+    // SAFETY: `handle` is a dispatchable object the driver just returned, so it
+    // is live, aligned, and — if the driver follows the interface — stamped. The
+    // record outlives every use of the handle: it is leaked below and reclaimed
+    // only by `destroy_device`.
+    if unsafe { dispatch::adopt(handle, record.as_dispatch_target()) }.is_err() {
+        // The driver returned a device without the loader magic, so the
+        // interface contract it was admitted under does not hold. Destroyed
+        // rather than handed back: a handle the loader could not dispatch
+        // through is one the application cannot use, and leaving it alive would
+        // leak a device on a path that reports failure.
+        // SAFETY: `handle` is the device this call just created, and
+        // `device_proc_addr` is that driver's own lookup for it.
+        unsafe { driver_destroy_device(device_proc_addr, handle, allocator) };
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+
+    // SAFETY: `out` was checked non-null and the caller guarantees it is
+    // writable. The application's `VkDevice` is the driver's own handle, which
+    // is the whole point of adopting rather than wrapping.
+    unsafe { *out = handle };
+    // Leaked on purpose: the device's dispatch word now points at this record,
+    // so it must outlive the handle, and `destroy_device` is what reclaims it.
+    core::mem::forget(record);
+    VK_SUCCESS
+}
+
+/// `vkGetDeviceProcAddr`.
+///
+/// Two commands are answered by the loader and everything else by the driver;
+/// which, and why those two, is [`crate::device::lookup`].
+///
+/// # Safety
+///
+/// `device` must be null or a `VkDevice` this loader created and has not
+/// destroyed, and `name` must be null or a NUL-terminated string valid for this
+/// call.
+#[unsafe(export_name = "vkGetDeviceProcAddr")]
+pub unsafe extern "C" fn get_device_proc_addr(device: Handle, name: *const c_char) -> VoidFn {
+    if device.is_null() || name.is_null() {
+        return None;
+    }
+    // SAFETY: the caller guarantees a NUL-terminated string valid for the call,
+    // and the borrow does not outlive this function.
+    let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+
+    match device::lookup(bytes) {
+        // SAFETY: a function pointer cast in place, which is `erase`'s contract.
+        Lookup::Loader(LoaderCommand::GetDeviceProcAddr) => {
+            Some(unsafe { erase(get_device_proc_addr as *const ()) })
+        }
+        // SAFETY: as above.
+        Lookup::Loader(LoaderCommand::DestroyDevice) => {
+            Some(unsafe { erase(destroy_device as *const ()) })
+        }
+        Lookup::Driver => {
+            // SAFETY: the caller guarantees `device` came from this loader's
+            // `vkCreateDevice`, which is `record_of`'s contract.
+            let record = unsafe { record_of(device) };
+            // SAFETY: the record holds this driver's own lookup for this very
+            // device, and `name` is the caller's string, still valid.
+            unsafe { (record.driver_get_device_proc_addr())(device, name) }
+        }
+    }
+}
+
+/// `vkDestroyDevice`.
+///
+/// # Safety
+///
+/// `device` must be null or a `VkDevice` this loader created and has not already
+/// destroyed, and `allocator` must match the one creation was given.
+#[unsafe(export_name = "vkDestroyDevice")]
+pub unsafe extern "C" fn destroy_device(device: Handle, allocator: *const c_void) {
+    if device.is_null() {
+        // Vulkan defines destroying a null handle as doing nothing, so that
+        // teardown paths need not branch on how far setup got.
+        return;
+    }
+    // The dispatch word lives inside the driver's own object, so it has to be
+    // read while that object is still alive — which is why the record is taken
+    // back here and the driver is told afterwards, rather than the other way
+    // round.
+    // SAFETY: the caller guarantees this device came from this loader's
+    // `vkCreateDevice`, so its first word holds the address that call leaked
+    // from a `Box`. Reclaiming it here frees it exactly once.
+    let word = unsafe { dispatch::loader_data(device) };
+    // SAFETY: as above.
+    let record: Box<Device> = unsafe { Box::from_raw(word as *mut Device) };
+
+    // SAFETY: the record's lookup is this driver's own for this device, and the
+    // caller guarantees the device is live and the allocator matches.
+    unsafe { driver_destroy_device(record.driver_get_device_proc_addr(), device, allocator) };
+    // Freed only now: the driver's `vkDestroyDevice` runs first, and until it
+    // returns the device's dispatch word still points here.
+    drop(record);
+}
+
 // The five defensive lints the workspace turns on are for production code: a
 // test that indexes a fixed-size fixture, or unwraps a value it just
 // constructed, is *asserting*, and an assertion that fails by panicking is a
@@ -709,9 +974,11 @@ fn clamp_count(n: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::{
-        SpinLock, create_across, destroy_across, enumerate_across, get_instance_proc_addr, table,
+        SpinLock, create_across, create_device, create_instance, destroy_across, destroy_device,
+        destroy_instance, enumerate_across, enumerate_physical_devices, get_device_proc_addr,
+        get_instance_proc_addr, register_driver, table,
     };
-    use crate::dispatch::{ICD_LOADER_MAGIC, is_loader_magic};
+    use crate::dispatch::{ICD_LOADER_MAGIC, is_loader_magic, loader_data};
     use crate::icd::{CURRENT, DriverReply};
     use crate::registry::{Entry, Registry};
     use crate::vk::{
@@ -719,6 +986,7 @@ mod tests {
         VK_SUCCESS, VkResult, VoidFn,
     };
     use alloc::boxed::Box;
+    use alloc::vec;
     use alloc::vec::Vec;
     use core::ffi::{CStr, c_char, c_void};
     use core::ptr;
@@ -892,6 +1160,67 @@ mod tests {
     /// A driver that exports nothing at all.
     unsafe extern "C" fn gipa_empty(_instance: Handle, _name: *const c_char) -> VoidFn {
         None
+    }
+
+    // -----------------------------------------------------------------------
+    // A stub driver that can make devices, not just instances
+    // -----------------------------------------------------------------------
+
+    /// Devices created and not yet destroyed, across all stub drivers.
+    static DEVICES_LIVE: AtomicUsize = AtomicUsize::new(0);
+
+    /// A stub driver's `VkDevice`. Dispatchable, so the loader may adopt it.
+    #[repr(C)]
+    struct FakeGpu {
+        loader_data: usize,
+    }
+
+    unsafe extern "C" fn create_gpu(
+        _physical: Handle,
+        _create_info: *const c_void,
+        _allocator: *const c_void,
+        out: *mut Handle,
+    ) -> VkResult {
+        let gpu = Box::new(FakeGpu {
+            loader_data: ICD_LOADER_MAGIC as usize,
+        });
+        DEVICES_LIVE.fetch_add(1, Ordering::SeqCst);
+        unsafe { *out = Box::into_raw(gpu).cast::<c_void>() };
+        VK_SUCCESS
+    }
+
+    unsafe extern "C" fn destroy_gpu(device: Handle, _allocator: *const c_void) {
+        drop(unsafe { Box::from_raw(device.cast::<FakeGpu>()) });
+        DEVICES_LIVE.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    /// Stands in for a device command this loader has never heard of. Never
+    /// called — the test proves it can be *found*, which is the property the
+    /// loader is responsible for.
+    unsafe extern "C" fn an_extension_command() {}
+
+    /// The stub driver's `vkGetDeviceProcAddr`.
+    unsafe extern "C" fn gdpa(_device: Handle, name: *const c_char) -> VoidFn {
+        let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+        let f: *const () = match name {
+            b"vkDestroyDevice" => destroy_gpu as *const (),
+            b"vkCmdDrawInventedNextYear" => an_extension_command as *const (),
+            _ => return None,
+        };
+        Some(unsafe { core::mem::transmute::<*const (), unsafe extern "C" fn()>(f) })
+    }
+
+    /// A driver that makes devices as well as instances.
+    unsafe extern "C" fn gipa_with_devices(_instance: Handle, name: *const c_char) -> VoidFn {
+        let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+        let f: *const () = match bytes {
+            b"vkCreateDevice" => create_gpu as *const (),
+            b"vkGetDeviceProcAddr" => gdpa as *const (),
+            // Everything else is the shared stub's answer, which is what gives
+            // this driver an instance and a physical device to start from.
+            _ => return unsafe { answer(name, create_with_one_device as *const ()) },
+        };
+        Some(unsafe { core::mem::transmute::<*const (), unsafe extern "C" fn()>(f) })
     }
 
     /// A registry holding the named stub drivers, all settled at [`CURRENT`].
@@ -1077,6 +1406,144 @@ mod tests {
         ptr::without_provenance_mut::<c_void>(0x1234_5678)
     }
 
+    /// The device lifetime, driven entirely through the symbols an application
+    /// links against rather than through the inner functions the tests above
+    /// use. Nothing else in this file exercises the global registry, so this is
+    /// also the only test of `vk_slateosRegisterDriver` reaching it.
+    ///
+    /// Both drivers are registered in one test on purpose. They go into
+    /// process-wide state that no test tears down, so two tests each registering
+    /// their own would see each other's devices in a `vkEnumeratePhysicalDevices`
+    /// whose order across tests nothing fixes.
+    #[test]
+    fn a_device_lives_and_dies_through_the_exported_symbols() {
+        let _order = ORDER.lock();
+        let instances_before = LIVE.load(Ordering::SeqCst);
+        let devices_before = DEVICES_LIVE.load(Ordering::SeqCst);
+
+        // SAFETY: both names are string literals, so `'static`, and every
+        // function pointer is an item in this module and lives for the process.
+        unsafe {
+            assert_eq!(
+                register_driver(
+                    c"stub-with-devices".as_ptr(),
+                    Some(gipa_with_devices),
+                    None,
+                    None,
+                    None
+                ),
+                VK_SUCCESS
+            );
+            // Registered second, and used below for the opposite case: it has an
+            // instance and a physical device but no `vkGetDeviceProcAddr`, so no
+            // device can be made from it.
+            assert_eq!(
+                register_driver(
+                    c"stub-without-devices".as_ptr(),
+                    Some(gipa_one_device),
+                    None,
+                    None,
+                    None
+                ),
+                VK_SUCCESS
+            );
+        }
+
+        let mut instance: Handle = ptr::null_mut();
+        // SAFETY: `instance` is a writable slot, and this loader reads neither
+        // structure pointer.
+        assert_eq!(
+            unsafe { create_instance(ptr::null(), ptr::null(), &raw mut instance) },
+            VK_SUCCESS
+        );
+        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before + 2);
+
+        let mut count: u32 = 0;
+        // SAFETY: the instance is this loader's own and `count` is writable; a
+        // null array is how the C API asks for the count alone.
+        assert_eq!(
+            unsafe { enumerate_physical_devices(instance, &raw mut count, ptr::null_mut()) },
+            VK_SUCCESS
+        );
+        assert_eq!(count, 2, "one physical device per registered stub driver");
+
+        let mut handles: Vec<Handle> = vec![ptr::null_mut(); count as usize];
+        // SAFETY: `handles` has room for `count` entries, which is what `count`
+        // says.
+        assert_eq!(
+            unsafe { enumerate_physical_devices(instance, &raw mut count, handles.as_mut_ptr()) },
+            VK_SUCCESS
+        );
+
+        let mut device: Handle = ptr::null_mut();
+        // SAFETY: `handles[0]` is a physical device this loader just handed out,
+        // its instance is alive, and `device` is a writable slot.
+        assert_eq!(
+            unsafe { create_device(handles[0], ptr::null(), ptr::null(), &raw mut device) },
+            VK_SUCCESS
+        );
+        assert_eq!(DEVICES_LIVE.load(Ordering::SeqCst), devices_before + 1);
+        assert!(!device.is_null());
+
+        // Adopted rather than wrapped: the handle the application holds is the
+        // driver's own, with the loader's record in its dispatch word where the
+        // driver left the magic.
+        // SAFETY: the device is live and this crate wrote that word itself.
+        assert!(
+            !is_loader_magic(unsafe { loader_data(device) }),
+            "the loader never claimed the device's dispatch word"
+        );
+
+        // SAFETY: `device` came from this loader and every name is a literal.
+        unsafe {
+            assert!(
+                get_device_proc_addr(device, c"vkGetDeviceProcAddr".as_ptr()).is_some(),
+                "the loader failed to answer for its own lookup"
+            );
+            assert!(
+                get_device_proc_addr(device, c"vkDestroyDevice".as_ptr()).is_some(),
+                "the loader failed to answer for the command that frees its record"
+            );
+            // The property the whole design is for: a command written after this
+            // loader was still reaches the driver.
+            assert!(
+                get_device_proc_addr(device, c"vkCmdDrawInventedNextYear".as_ptr()).is_some(),
+                "an extension command was refused instead of forwarded"
+            );
+            // And the driver's null is the answer, not a guess of the loader's.
+            assert!(get_device_proc_addr(device, c"vkCmdDraw".as_ptr()).is_none());
+        }
+
+        // The second driver has a physical device but no way to make a device
+        // from it. Refused before anything is created, so there is nothing left
+        // behind to count.
+        let mut refused: Handle = ptr::null_mut();
+        // SAFETY: as for `handles[0]`.
+        assert_eq!(
+            unsafe { create_device(handles[1], ptr::null(), ptr::null(), &raw mut refused) },
+            VK_ERROR_INITIALIZATION_FAILED
+        );
+        assert!(refused.is_null());
+        assert_eq!(
+            DEVICES_LIVE.load(Ordering::SeqCst),
+            devices_before + 1,
+            "the refused call created a device anyway"
+        );
+
+        // SAFETY: the device is this loader's, has not been destroyed, and was
+        // created with the same (null) allocator.
+        unsafe { destroy_device(device, ptr::null()) };
+        assert_eq!(
+            DEVICES_LIVE.load(Ordering::SeqCst),
+            devices_before,
+            "the driver was not told to destroy its device"
+        );
+
+        // SAFETY: as above, for the instance.
+        unsafe { destroy_instance(instance, ptr::null()) };
+        assert_eq!(LIVE.load(Ordering::SeqCst), instances_before);
+    }
+
     #[test]
     fn get_proc_addr_answers_for_itself_with_or_without_an_instance() {
         // The bootstrap: this is the only symbol an application can be required
@@ -1105,11 +1572,31 @@ mod tests {
     }
 
     #[test]
+    fn the_device_level_commands_are_findable_through_an_instance() {
+        // An application has to reach a `VkDevice`'s first command somehow, and
+        // `vkGetInstanceProcAddr` is the only lookup it has before it owns one.
+        // A loader that answered null here would leave `vkCreateDevice`
+        // unreachable and every device it could have made unbuildable.
+        assert!(lookup(an_instance(), c"vkCreateDevice").is_some());
+        assert!(lookup(an_instance(), c"vkGetDeviceProcAddr").is_some());
+        assert!(lookup(an_instance(), c"vkDestroyDevice").is_some());
+        assert!(
+            lookup(ptr::null_mut(), c"vkCreateDevice").is_none(),
+            "a command needing a physical device was answered with no instance"
+        );
+    }
+
+    #[test]
     fn an_unimplemented_command_is_null_rather_than_a_wrong_pointer() {
         // Null is the C API's own answer for "no such entry point". Returning
         // anything else here is how a loader ships a jump to the wrong function.
-        assert!(lookup(an_instance(), c"vkCreateDevice").is_none());
+        // The three instance-enumeration commands are the loader's real
+        // omissions; `vkCmdDraw` is here for a different reason — it is a device
+        // command, and device commands are the driver's to answer through
+        // `vkGetDeviceProcAddr`, not this loader's.
         assert!(lookup(ptr::null_mut(), c"vkEnumerateInstanceVersion").is_none());
+        assert!(lookup(an_instance(), c"vkEnumerateInstanceLayerProperties").is_none());
+        assert!(lookup(an_instance(), c"vkCmdDraw").is_none());
         assert!(lookup(an_instance(), c"").is_none());
     }
 

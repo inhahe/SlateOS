@@ -133,6 +133,46 @@ pub type DestroyInstanceFn = unsafe extern "C" fn(instance: Handle, allocator: *
 pub type EnumeratePhysicalDevicesFn =
     unsafe extern "C" fn(instance: Handle, count: *mut u32, out: *mut Handle) -> VkResult;
 
+/// `PFN_vkGetDeviceProcAddr`.
+///
+/// The same shape as [`GetInstanceProcAddrFn`], and deliberately a separate
+/// name rather than an alias. The two are not interchangeable: what may be
+/// asked of each differs, and — the part that matters here — the pointer this
+/// one returns is specific to the `device` it was asked with, whereas an
+/// instance-level pointer serves every device that instance has. A single type
+/// would make passing one where the other belongs a silent success.
+///
+/// # Safety
+///
+/// `device` must be null or a `VkDevice` the callee created, and `name` must
+/// point to a NUL-terminated string that stays valid for the call.
+pub type GetDeviceProcAddrFn = unsafe extern "C" fn(device: Handle, name: *const c_char) -> VoidFn;
+
+/// `PFN_vkCreateDevice`.
+///
+/// `create_info` is a `VkDeviceCreateInfo*` and is passed through unread, for
+/// the reason given on [`CreateInstanceFn`].
+///
+/// # Safety
+///
+/// `physical_device` must be a `VkPhysicalDevice` the callee reported,
+/// `create_info` a valid `VkDeviceCreateInfo*`, `allocator` a valid
+/// `VkAllocationCallbacks*` or null, and `out` a writable handle slot.
+pub type CreateDeviceFn = unsafe extern "C" fn(
+    physical_device: Handle,
+    create_info: *const c_void,
+    allocator: *const c_void,
+    out: *mut Handle,
+) -> VkResult;
+
+/// `PFN_vkDestroyDevice`.
+///
+/// # Safety
+///
+/// `device` must be null or a handle the callee created and has not already
+/// destroyed; `allocator` must match the one creation was given.
+pub type DestroyDeviceFn = unsafe extern "C" fn(device: Handle, allocator: *const c_void);
+
 /// `PFN_vk_icdNegotiateLoaderICDInterfaceVersion`.
 ///
 /// The loader writes the version it proposes into the `u32`, calls, and reads

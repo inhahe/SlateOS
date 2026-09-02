@@ -4,7 +4,7 @@
 # public items which no other file in the repository names.  57 of them, 113k
 # lines, were found the day this file was created; the list is a debt ledger,
 # not an allow-list, and the only edit it should ever receive is a deletion.
-# 47 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
+# 48 remain.  Paid off so far: apps/explorer's columns.rs, thumbs.rs and
 # dropzone.rs — 5,611 lines between them — wired into the app that declared
 # them; and then the desktop shell's focus_assist.rs, hotkeys.rs, osd.rs,
 # run_dialog.rs and window_rules.rs together with gui/toolkit's modal.rs.
@@ -22,6 +22,16 @@
 # wired up or it does not land.  When you connect one, delete its line
 # (`--pin` rewrites the file, but read the diff -- a --pin that ADDS a line is
 # the failure this gate exists to prevent, committed by hand).
+#
+# One line has been ADDED since, which the header above says should never
+# happen, so it is spelled out here.  net80211/src/supplicant.rs is the
+# station-side WPA2/WPA3 state machine.  Its two callers are a wireless
+# driver (lane A) and the supplicant binary (lane B); neither exists, and
+# neither is lane C's to write.  It is the first of the four benign cases in
+# the scanner's own docstring — "the consumer is outside this tree" — rather
+# than the dead code the ratchet is aimed at, and it is covered by 32 tests
+# that drive a full four-way handshake end to end.  Delete the line when lane
+# A's driver lands.
 #
 # Being on this list is not absolution.  See known-issues.md ->
 # TD-C-THE-SHELL-DRAWS-FOUR-OF-ITS-FIFTY-SEVEN-MODULES, and note that the
@@ -71,6 +81,7 @@ gui/toolkit/src/menubar.rs
 gui/toolkit/src/pathbar.rs
 gui/toolkit/src/signal.rs
 gui/toolkit/src/svg.rs
+net80211/src/supplicant.rs
 netproto/src/arp.rs
 netproto/src/dhcp.rs
 netproto/src/icmp.rs

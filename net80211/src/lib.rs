@@ -9,6 +9,12 @@
 //! plus, in [`kdf`], the clause-12 key derivation that turns a PMK and two
 //! nonces into the keys those frames are protected with.
 //!
+//! One module is not wire format: [`supplicant`] is the station-side state
+//! machine that drives the 4-way handshake over those frames. It lives here
+//! rather than in the supplicant binary because it is the only consumer that
+//! ties the other modules together, and because a state machine with no I/O
+//! in it is testable in a way that one wrapped around a socket is not.
+//!
 //! Three consumers need exactly this code and must not each grow their own
 //! copy of it:
 //!
@@ -61,6 +67,7 @@ pub mod kdf;
 pub mod llc;
 pub mod mgmt;
 pub mod rsn;
+pub mod supplicant;
 
 /// A 6-byte 802.11 MAC address. Identical in layout to [`netproto::MacAddr`],
 /// but this crate must not depend on `netproto` — a wireless driver needs the

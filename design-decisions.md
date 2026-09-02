@@ -48,9 +48,10 @@ than silently believing there are no bands.
 | §200–§299 | **lane A** | closed — full at §299 | after the history |
 | §300–§399 | **lane B** | closed — full at §360 | after A's first band |
 | §400–§499 | **lane C** | closed — full at §498 | after B's first band |
-| §500–§599 | **lane C** | **open** | interleaved with A's §600s; C's own run ascends |
+| §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | **open** | interleaved with C's §500s; A's own run ascends |
 | §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -117,6 +118,39 @@ numbers on the §217–§220 precedent — they are cited from source comments a
 from each other (626 cites 622 and 623), so renumbering would trade a cosmetic
 inconsistency for dangling citations. Every number below 700 that exists is
 spent, by whichever lane wrote it, and is never reissued.
+
+**Lane C closed §500–§599 early, at §579, and opened §800–§899 (2026-09-02).**
+This is the first band changed *before* it ran out rather than after, which is
+the whole point: the three previous exhaustions were each discovered by a lane
+having no number to write, and each cost a round of cross-lane requests to
+settle while the work waited. The gate's 80% warning (described below) exists
+to make that happen once and never again, and this is it firing and being
+obeyed — §579 left 20 numbers unspent.
+
+Twenty numbers are the price and they are worth it, because the alternative is
+not "use all 100" but "flip bands at exactly §599". A band cannot be reserved
+in advance: the gate rejects a lane holding two open bands, on the grounds that
+two open bands are two insertion points with no rule for choosing between them.
+So the flip is necessarily a single indivisible edit — close one row, open
+another — and deferring it only fixes *when* it must happen, which is in the
+middle of whichever task happens to write §599, discovered by a gate failure.
+Doing it now costs an afternoon's numbers and nothing else. There is precedent
+either way: §300–§399 closed at §360 with 39 numbers unused, and nothing has
+ever needed them.
+
+Lane A allotted §800–§899 to lane C unprompted, in
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+— *"Allot §800–§899 to yourself now, while it costs nothing — I won't take
+it."* So no request was needed to take it, only one to say it had been taken:
+`requests/c-ab-lane-c-closed-500-599-at-579-and-opened-800-899.md`.
+
+**§800 sits immediately after §579, not at end of file**, so lane C's region of
+this file does not move. That is legal because the ascending-order rule is
+*per band* — a band's entries must ascend among themselves, and the bands
+themselves are already thoroughly interleaved (the §500s and §600s have been
+since August). Placing §800 at EOF would put lane C's insertion point inside
+lane B's, which is the one outcome the bands exist to prevent. Lanes A and B:
+your insertion points do not move either.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*

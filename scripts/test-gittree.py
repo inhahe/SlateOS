@@ -560,6 +560,101 @@ def case_a_build_dir_prefix_is_not_walked(work: str) -> None:
         os.walk = real_walk
 
 
+def case_a_callers_own_prune_list_reaches_both_sides(work: str) -> None:
+    """`files_under(..., prune=(...))`: the caller's skip list, on both trees.
+
+    `_PRUNE` is the seam's own list and is not negotiable. Checkers have their
+    own on top of it -- `raced-globals.py` skips `node_modules`, `vendor` and
+    `third_party`, because a data race in vendored source is not this project's
+    to report and never was. Before this parameter existed the only way to
+    honour such a list was to filter the results, which gives the same answer
+    and does the work anyway: a full descent of a vendored tree, inside a push
+    gate, to throw every result away.
+
+    Three things have to hold at once, and each is a way to get this wrong:
+    the two implementations must agree (or the conversion changes findings);
+    the rule must be component-wise, like `_PRUNE`'s (or `vendor_shim.rs`
+    silently stops being scanned); and the default must be unchanged (or every
+    existing caller quietly acquires a skip list it never asked for).
+    """
+    for rel in ("vendor/dep/x.rs", "posix/src/vendor/deep/y.rs",
+                "posix/src/vendor_shim.rs",
+                # A tracked *file* whose whole path is a name a caller prunes.
+                # `files_under` has an early return for a prefix that names a
+                # file, and that return is before the results filter -- so this
+                # is the one shape where the prefix guard is the only thing
+                # answering, on either implementation.
+                "third_party"):
+        path = os.path.join(work, *rel.split("/"))
+        os.makedirs(os.path.dirname(path) or work, exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(b"pub fn v() {}\n")
+    git(work, "add", "--all")
+    git(work, "commit", "--quiet", "-m", "vendored source, tracked")
+
+    with gittree.WorkTree(work) as disk, gittree.RevTree("HEAD", work) as rev:
+        for label, tree in (("disk", disk), ("rev", rev)):
+            plain = tree.files_under("")
+            check(f"{label}: without a prune list, vendored files are listed",
+                  "vendor/dep/x.rs" in plain, True)
+
+            pruned = tree.files_under("", prune=("vendor",))
+            check(f"{label}: a named directory is skipped at the top level",
+                  "vendor/dep/x.rs" in pruned, False)
+            check(f"{label}: ...and at any depth",
+                  "posix/src/vendor/deep/y.rs" in pruned, False)
+            # The same trap `_PRUNE` has: a substring rule passes both
+            # assertions above and stops the checker ever opening this file.
+            check(f"{label}: ...but a file merely named vendor-something is kept",
+                  "posix/src/vendor_shim.rs" in pruned, True)
+            check(f"{label}: nothing else is dropped",
+                  sorted(set(plain) - set(pruned)),
+                  ["posix/src/vendor/deep/y.rs", "vendor/dep/x.rs"])
+            check(f"{label}: a plain file the caller did not name is kept",
+                  "third_party" in pruned, True)
+            check(f"{label}: asking for the pruned directory by name yields nothing",
+                  tree.files_under("vendor", prune=("vendor",)), [])
+            # The early return for a prefix that *is* a file happens before the
+            # results are filtered, so only the prefix guard can answer here.
+            # Without it one side hands back the file and the other does not.
+            check(f"{label}: nor does asking for a pruned path that is a file",
+                  tree.files_under("third_party", prune=("third_party",)), [])
+            check(f"{label}: ...which is a real file when nobody prunes it",
+                  tree.files_under("third_party"), ["third_party"])
+            check(f"{label}: ...and the seam's own list still applies",
+                  [p for p in pruned if "target" in p.split("/")], [])
+            # A caller's list is *added* to `_PRUNE`, never substituted for it.
+            # Substituting passes every assertion above, because the seam's own
+            # names are pruned a second time while walking and while indexing --
+            # it shows up only where `_PRUNE` alone decides, which is here.
+            check(f"{label}: a build directory is still refused by name",
+                  tree.files_under("target", prune=("vendor",)), [])
+
+    # And it must prune *while walking*, not filter afterwards -- which is the
+    # entire reason the parameter exists rather than the caller using a list
+    # comprehension. No assertion about results can tell the two apart, so this
+    # one is about the syscalls, as `case_a_build_dir_prefix_is_not_walked` is.
+    scanned: list[str] = []
+    real_scandir = os.scandir
+
+    def counting_scandir(path=".", *a, **kw):
+        scanned.append(str(path).replace("\\", "/"))
+        return real_scandir(path, *a, **kw)
+
+    os.scandir = counting_scandir
+    try:
+        with gittree.WorkTree(work) as disk:
+            disk.files_under("", prune=("vendor",))
+            check("the vendored directory is never even scanned",
+                  [p for p in scanned if "vendor" in p.split("/")], [])
+            # The control: without it, a probe that had stopped observing
+            # anything would look exactly like the property holding.
+            check("...and the probe was in fact observing scans",
+                  len(scanned) > 1, True)
+    finally:
+        os.scandir = real_scandir
+
+
 def case_missing_is_an_answer(work: str) -> None:
     """Absent is not an error, at any of the six entry points.
 
@@ -669,6 +764,7 @@ def main() -> int:
                                    case_files_under_a_file,
                                    case_open_tree_chooses,
                                    case_a_build_dir_prefix_is_not_walked,
+                                   case_a_callers_own_prune_list_reaches_both_sides,
                                    case_tree_agrees_in_a_linked_worktree,
                                    case_tree_reads_the_commit_not_the_disk)):
             tcase(build_tree_repo(tmp, f"t{i}"))

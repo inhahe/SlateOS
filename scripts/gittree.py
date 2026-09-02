@@ -61,7 +61,7 @@ import os
 import re
 import subprocess
 import sys
-from typing import Iterable, Iterator, Optional
+from typing import Iterable, Iterator, Optional, Sequence
 
 # `mod name;` and `pub mod name;`, and nothing cleverer.
 #
@@ -272,16 +272,25 @@ class GitTree:
 _PRUNE = ("target", ".git")
 
 
-def _pruned(rel: str) -> bool:
+def _pruned(rel: str, extra: Sequence[str] = ()) -> bool:
     """True for a path inside a directory no listing should descend into.
 
     A component-wise test, not `"target" in rel`: `posix/src/target_arch.rs`
     is source, and a substring test would hide it from every listing. The
     same rule spelled the same way for both implementations, because the one
     thing a seam must not do is answer differently on its two sides.
+
+    `extra` is a caller's own skip list, added to `_PRUNE` rather than
+    replacing it. Checkers have their own: `raced-globals.py` skips
+    `node_modules`, `vendor` and `third_party` as well, because a race in
+    somebody else's source is not this project's to report. That list has to
+    reach *both* implementations through here, or the seam answers differently
+    on its two sides for exactly the directories a caller cared enough to name.
     """
     parts = rel.split("/")
-    return any(name in parts for name in _PRUNE)
+    return any(name in parts for name in _PRUNE) or any(
+        name in parts for name in extra
+    )
 
 
 class Tree:
@@ -311,12 +320,19 @@ class Tree:
     truthfully, on whichever tree they are.
     """
 
-    def files_under(self, prefix: str) -> list[str]:
+    def files_under(self, prefix: str, prune: Sequence[str] = ()) -> list[str]:
         """Every file at or below `prefix`, sorted, `/`-separated.
 
-        `target/` and `.git` are skipped (see `_PRUNE`). A `prefix` that is
-        itself inside one yields nothing, on both implementations, rather
-        than the disk saying yes and git saying no.
+        `target/` and `.git` are skipped (see `_PRUNE`), plus any directory
+        names in `prune`. A `prefix` that is itself inside one yields nothing,
+        on both implementations, rather than the disk saying yes and git
+        saying no.
+
+        `prune` exists so a caller's own skip list is honoured *while walking*
+        on the disk side rather than filtered out of the results afterwards.
+        The two give the same answer and cost wildly different amounts: this
+        method is called from a push gate, and descending a vendored tree to
+        discard everything in it is time nobody pushing has agreed to spend.
         """
         raise NotImplementedError
 
@@ -383,7 +399,7 @@ class WorkTree(Tree):
         rel = _norm(rel)
         return f"{self.root}/{rel}" if rel else self.root
 
-    def files_under(self, prefix: str) -> list[str]:
+    def files_under(self, prefix: str, prune: Sequence[str] = ()) -> list[str]:
         base = self._abs(prefix)
         prefix = _norm(prefix)
         # Looks redundant and is not. The per-file prune below already drops
@@ -392,16 +408,17 @@ class WorkTree(Tree):
         # descent of a directory that is tens of gigabytes on this tree, inside
         # a push gate. `case_a_build_dir_prefix_is_not_walked` is what stops it
         # being tidied away, because no assertion about results can see it.
-        if prefix and _pruned(prefix):
+        if prefix and _pruned(prefix, prune):
             return []
         if os.path.isfile(base):
             return [prefix]
+        skip = (*_PRUNE, *prune)
         out: list[str] = []
         for dirpath, dirnames, filenames in os.walk(base):
             # Prune rather than filter: descending into `target/` to throw
             # the results away is minutes of stat() on this tree, and
             # descending into `.git` is the whole object store.
-            dirnames[:] = sorted(d for d in dirnames if d not in _PRUNE)
+            dirnames[:] = sorted(d for d in dirnames if d not in skip)
             rel_dir = _norm(dirpath.replace("\\", "/")[len(self.root):])
             for name in filenames:
                 rel = f"{rel_dir}/{name}" if rel_dir else name
@@ -414,7 +431,7 @@ class WorkTree(Tree):
                 # and never from a revision, breaking its own equality
                 # promise everywhere it actually runs while passing a fixture
                 # built by `git init`, where `.git` is a directory.
-                if _pruned(rel):
+                if _pruned(rel, prune):
                     continue
                 out.append(rel)
         return sorted(out)
@@ -500,14 +517,24 @@ class RevTree(Tree):
     def close(self) -> None:
         self._git.close()
 
-    def files_under(self, prefix: str) -> list[str]:
+    def files_under(self, prefix: str, prune: Sequence[str] = ()) -> list[str]:
         prefix = _norm(prefix)
+        # `self._files` is already free of `_PRUNE`, filtered when the index was
+        # built, so only the caller's own list is left to apply here. Applied
+        # even when the prefix is empty and even to a single-file hit, because
+        # the disk side answers `[]` for a pruned prefix and the two must agree.
+        if prefix and _pruned(prefix, prune):
+            return []
         if not prefix:
-            return list(self._files)
-        if prefix in self._fileset:
+            files = self._files
+        elif prefix in self._fileset:
             return [prefix]
-        head = prefix + "/"
-        return [p for p in self._files if p.startswith(head)]
+        else:
+            head = prefix + "/"
+            files = [p for p in self._files if p.startswith(head)]
+        if not prune:
+            return list(files)
+        return [p for p in files if not _pruned(p, prune)]
 
     def entries(self, prefix: str) -> list[tuple[str, bool]]:
         prefix = _norm(prefix)

@@ -589,6 +589,66 @@ def test_the_insertion_point_reported_is_the_bands_own_tail(mod):
                f"insert after line {last_500}" in c_row[0])
 
 
+def test_an_empty_band_is_anchored_to_the_lanes_previous_band(mod):
+    """The band that most needs an anchor was the one band without one.
+
+    Reported by lane C on 2026-09-02, having just opened an empty 800-899 and
+    found the gate would tell it the number but not the line -- so the position
+    had to be recovered from prose in the header. The anchor that keeps a
+    lane's region of the file contiguous is the tail of its *previous* band.
+    """
+    table = "\n".join([
+        "## Numbering and file order",
+        "",
+        "| Band | Owner | Status | Region |",
+        "|---|---|---|---|",
+        f"| {SECT}500{ENDASH}{SECT}599 | **lane C** | closed {EMDASH} at 579 | mid |",
+        f"| {SECT}600{ENDASH}{SECT}699 | **lane A** | **open** | interleaved |",
+        f"| {SECT}800{ENDASH}{SECT}899 | **lane C** | **open** | after C's 500s |",
+        "",
+    ])
+    lines = doc(section(579, "C"), section(601, "A"), table=table)
+    _, _, info = run(mod, lines, {579: 1, 601: 1})
+    row = [r for r in info if r.startswith("800-899")]
+    check_true("the empty band is reported", len(row) == 1)
+    check_true("it still says which number comes first",
+               "first entry is 800" in row[0])
+    last_579 = next(i for i, l in enumerate(lines, 1)
+                    if l.startswith(f"## {SECT}579") or l.startswith("## 579"))
+    check_true("and it now carries a line to insert after",
+               f"insert after line {last_579}" in row[0])
+    check_true("named, so the reader can confirm it by eye",
+               "section 579" in row[0])
+    check_true("the anchor is not lane A's entry",
+               "section 601" not in row[0])
+
+
+def test_a_first_ever_band_says_the_position_is_the_writers(mod):
+    """With no previous band there is nothing to be contiguous with.
+
+    Inventing an anchor there would be worse than admitting there isn't one:
+    it would point at some other lane's region, which is the single outcome
+    the bands exist to prevent.
+    """
+    table = "\n".join([
+        "## Numbering and file order",
+        "",
+        "| Band | Owner | Status | Region |",
+        "|---|---|---|---|",
+        f"| {SECT}600{ENDASH}{SECT}699 | **lane A** | **open** | interleaved |",
+        f"| {SECT}800{ENDASH}{SECT}899 | **lane C** | **open** | somewhere |",
+        "",
+    ])
+    lines = doc(section(601, "A"), table=table)
+    _, _, info = run(mod, lines, {601: 1})
+    row = [r for r in info if r.startswith("800-899")]
+    check_true("the empty band is still reported", len(row) == 1)
+    check_true("it does not invent an anchor",
+               "insert after line" not in row[0])
+    check_true("it says the position is the writer's",
+               "yours" in row[0])
+
+
 # --------------------------------------------------------------------------
 # Occupancy
 # --------------------------------------------------------------------------

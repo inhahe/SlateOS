@@ -492,8 +492,40 @@ def check(lines, baseline):
         seq = [h for h in headings if band.contains(h.number)]
         owner = f"lane {band.lane}"
         if not seq:
-            info.append(f"{band.label:<10} {owner}  empty; first entry is "
-                        f"{band.lo}")
+            # An empty band is the one band with no last entry to anchor on --
+            # and so, until now, the one band that got a number but no line,
+            # which is precisely backwards: a fresh band is where the writer is
+            # least likely to already know where their region of the file is.
+            # Lane C hit this on 2026-09-02 with the empty 800-899 and had to
+            # fall back on the prose in the header (requests/
+            # c-ab-lane-c-closed-500-599-at-579-and-opened-800-899.md).
+            #
+            # The anchor is the last entry of the same lane's *previous* band,
+            # because that is what the new band was opened to continue from:
+            # it keeps the lane's region of the file contiguous, which is the
+            # whole reason the bands are interleaved rather than appended. If
+            # the lane has no earlier entry at all there is nothing to be
+            # contiguous with, and the position is genuinely the writer's to
+            # choose -- so say that, rather than invent an anchor.
+            prior = [h for h in headings
+                     if h.number < band.lo
+                     and any(b.lane == band.lane and b.contains(h.number)
+                             for b in bands)]
+            if prior:
+                anchor = max(prior, key=lambda h: h.lineno)
+                info.append(
+                    f"{band.label:<10} {owner}  empty; first entry is "
+                    f"{band.lo}, insert after line {anchor.lineno} "
+                    f"(section {anchor.number}, the last of this lane's "
+                    f"previous band)"
+                )
+            else:
+                info.append(
+                    f"{band.label:<10} {owner}  empty; first entry is "
+                    f"{band.lo}. This lane has no earlier entry to sit after, "
+                    f"so the position is yours -- record it in the header "
+                    f"when you take it."
+                )
             continue
         last = seq[-1]
         spent = last.number - band.lo + 1

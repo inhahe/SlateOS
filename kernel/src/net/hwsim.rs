@@ -574,6 +574,61 @@ pub fn receive(id: RadioId) -> Option<Vec<u8>> {
     })
 }
 
+/// What [`receive_into`] found on the queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecvOutcome {
+    /// Nothing was waiting.  The normal answer while polling.
+    Empty,
+    /// A frame was copied into the caller's buffer; this is its length.
+    Received(usize),
+    /// The next frame is this long and did not fit the buffer offered.
+    ///
+    /// **The frame is left on the queue**, so a caller that grows its buffer
+    /// and retries still gets it.  `net80211::assoc::Transceiver::receive`
+    /// permits either leaving or dropping, but forbids half-delivering; of the
+    /// two permitted answers, leaving it is the one that loses no data.
+    Oversized(usize),
+}
+
+/// Copy the next frame into `buf` without popping one that does not fit.
+///
+/// This exists rather than leaving callers to pair [`rx_pending`]/[`receive`]
+/// with a length check because the check and the pop have to be **one**
+/// operation.  Split across two acquisitions of the medium lock, another
+/// thread can pop or push between them, so the length that was tested is not
+/// necessarily the length that is taken — and the failure that produces is a
+/// truncated frame, which is exactly what the `Oversized` contract exists to
+/// forbid.  Here both happen under a single `with_table`.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchDevice`] if `id` is not an active radio.
+pub fn receive_into(id: RadioId, buf: &mut [u8]) -> KernelResult<RecvOutcome> {
+    with_table(|table| {
+        let radio = table
+            .radios
+            .get_mut(id)
+            .filter(|r| r.active)
+            .ok_or(KernelError::NoSuchDevice)?;
+
+        let Some(next_len) = radio.rx_queue.front().map(Vec::len) else {
+            return Ok(RecvOutcome::Empty);
+        };
+        if next_len > buf.len() {
+            // Deliberately do not pop: see `RecvOutcome::Oversized`.
+            return Ok(RecvOutcome::Oversized(next_len));
+        }
+        let frame = radio
+            .rx_queue
+            .pop_front()
+            .ok_or(KernelError::NoSuchDevice)?;
+        buf.get_mut(..frame.len())
+            .ok_or(KernelError::InvalidArgument)?
+            .copy_from_slice(&frame);
+        Ok(RecvOutcome::Received(frame.len()))
+    })
+}
+
 /// How many frames are waiting on a radio's RX queue.
 #[must_use]
 pub fn rx_pending(id: RadioId) -> usize {
@@ -727,6 +782,101 @@ pub fn list_all() -> Vec<RadioStats> {
 #[must_use]
 pub fn active_count() -> usize {
     with_table(|table| table.radios.iter().filter(|r| r.active).count())
+}
+
+// ---------------------------------------------------------------------------
+// Transceiver handle: the seam `net80211::assoc` drives
+// ---------------------------------------------------------------------------
+
+/// Why an operation on a [`HwsimRadio`] failed.
+///
+/// A distinct type rather than a bare [`KernelError`] because the trait
+/// requires `From<Oversized>`, and implementing that for `KernelError` would
+/// put an 802.11-specific conversion on the kernel's universal error enum —
+/// visible to every subsystem that never touches a radio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HwsimError {
+    /// The medium or the radio rejected the operation.
+    Kernel(KernelError),
+    /// A received frame was longer than the buffer offered for it.
+    ///
+    /// Carries the frame's true length so a caller can size a retry.
+    FrameTooLong(usize),
+}
+
+impl From<KernelError> for HwsimError {
+    fn from(e: KernelError) -> Self {
+        Self::Kernel(e)
+    }
+}
+
+impl From<net80211::assoc::Oversized> for HwsimError {
+    fn from(o: net80211::assoc::Oversized) -> Self {
+        Self::FrameTooLong(o.len)
+    }
+}
+
+/// An owned handle to one simulated radio, usable as a
+/// [`net80211::assoc::Transceiver`].
+///
+/// The trait takes `&mut self`, so the association driver needs *something* to
+/// hold; this is the smallest thing that can be held.  It deliberately does not
+/// own the radio's lifetime — [`destroy_radio`] is still the way a radio goes
+/// away — because a handle that destroyed its radio on drop would make the
+/// borrow checker, rather than the caller, decide when a station disappears
+/// from the medium.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HwsimRadio {
+    id: RadioId,
+}
+
+impl HwsimRadio {
+    /// Wrap an existing radio id.
+    #[must_use]
+    pub const fn new(id: RadioId) -> Self {
+        Self { id }
+    }
+
+    /// The underlying radio id, for the id-based calls in this module.
+    #[must_use]
+    pub const fn id(&self) -> RadioId {
+        self.id
+    }
+}
+
+impl net80211::assoc::Transceiver for HwsimRadio {
+    type Error = HwsimError;
+
+    fn transmit(&mut self, frame: &[u8]) -> Result<(), Self::Error> {
+        // The delivered count is deliberately discarded: zero listeners is
+        // not a transmit failure.  A station whose AP is on another channel
+        // has still transmitted; the association's own retry budget is what
+        // notices that nobody answered.
+        transmit(self.id, frame)?;
+        Ok(())
+    }
+
+    fn receive(&mut self, buf: &mut [u8]) -> Result<Option<usize>, Self::Error> {
+        match receive_into(self.id, buf)? {
+            RecvOutcome::Empty => Ok(None),
+            RecvOutcome::Received(n) => Ok(Some(n)),
+            RecvOutcome::Oversized(len) => Err(net80211::assoc::Oversized { len }.into()),
+        }
+    }
+
+    fn install_pairwise_key(&mut self, key: &[u8]) -> Result<(), Self::Error> {
+        install_pairwise_key(self.id, key)?;
+        Ok(())
+    }
+
+    fn install_group_key(&mut self, key_id: u8, key: &[u8]) -> Result<(), Self::Error> {
+        install_group_key(self.id, key_id, key)?;
+        Ok(())
+    }
+
+    fn set_channel(&mut self, channel: u8) -> Result<u8, Self::Error> {
+        Ok(set_channel(self.id, channel)?)
+    }
 }
 
 // ---------------------------------------------------------------------------

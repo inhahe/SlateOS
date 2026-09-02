@@ -15751,6 +15751,52 @@ candidates; the `\xNN` escape (still must be built); the editor buffer
 (`line_buf`, `History.entries`) and the 3580 input guard, with the 3583
 `ch as char` landmine still live.
 
+**[A] Correction 5 (2026-09-02) — the "still remaining" list directly above
+names work that the chosen option does not want done. Read this before picking
+the task up.**
+
+That list predates nothing — it was written after §261 was decided — but it
+still carries two items from the *rejected* option A, and one of them is the
+scariest-sounding thing in the whole entry, so it has been deterring the wrong
+reader. `design-decisions.md` §261 says, in the operator's own decision:
+
+> A raw byte still cannot be *typed* literally — you write `$'\xff'`, exactly
+> as in bash […] Completion emits the `$'\xff'` spelling for candidates that
+> are not valid UTF-8.
+
+**So under the option that was actually chosen, `line_buf` and
+`History.entries` stay `String`, and the 3580 input guard is never widened.**
+Every byte the user needs to reach is spelled in ASCII on the command line and
+becomes a raw byte during *expansion*. That is the whole content of the
+"data-flow split, not a layer split" argument §261 is built on.
+
+Two consequences, and both make the job smaller than this entry reads:
+
+- **The 3583 `ch as char` landmine is not on the path.** It is armed only by
+  widening the 3580 guard, which option B never does. It remains a real trap
+  and the warning above should stay — but it is a warning to anyone who
+  wanders back toward option A, not a task.
+- **The editor is not touched at all.** Which means the "must land as one
+  coherent change over the editor **and** the statement executors" sequencing
+  constraint, quoted from Correction 3, does not bind here either — there is
+  no editor half to keep in step.
+
+**What is genuinely left, measured 2026-09-02 against the file:**
+
+| piece | where | state |
+|---|---|---|
+| `$'…'` ANSI-C quoting with `\xNN` | word expansion | **must be built** — Correction 2 is the right one; kshell has no `$'…'` parser (Correction 4's "already parses, 7 sites" counted `b'$'` Rust literals) |
+| the byte accumulator it feeds | `expand_vars_bytes`, `kshell.rs:881` | **already exists**, and already copies uninterpreted bytes through verbatim |
+| the narrowing seam to delete | `expand_vars`, `kshell.rs:1117` | **8 production callers** (1569, 2396, 2769, 2994, 3152, 3233, 3300, 6051); the ~30 other matches are `self_test` assertions. The "24 callers" figure above is stale, and the wrapper's own doc comment already nominates itself as the seam |
+| completion stops dropping candidates | `tab_complete`, `kshell.rs:5922`; the drop is the `.filter_map(\|e\| e.name.to_str()…)` at 5982 | re-spell as `$'\xff'` rather than skip. Note the inserted text stays ASCII, which is exactly why the editor needs no change |
+| `resolve_path`, `CWD`, path-consuming commands | — | **already byte-clean** since `961a160a3` |
+
+The one ordering constraint that *does* still bind: the escape parser and the
+completion re-spelling must agree on the spelling, since completion's output is
+fed back through the parser on the next keystroke. A round-trip assertion over
+a 0xFF name (complete → re-expand → compare bytes) is the test that pins it,
+and it is the one case a self-test in this area must have.
+
 **[A] 2026-08-24 — the follow-up landed too: the line-oriented commands are
 byte-clean end to end** (`b3c828edb`, `eb8f4109d`). The sink could carry bytes
 that no *command* could produce; that gap is closed for the commands where
@@ -107622,6 +107668,64 @@ should not be "optimised" in response to this.
    before forming a theory about the gate's *logic*. The first theory was
    wrong in a way that would have produced a real change to a correct file.
 
+#### Addendum 2026-09-02 (lane A), second measurement: it is not "another lane *building*" — three lanes running their own gate suites is enough, and 3000s is also not a large enough budget
+
+A lane-A boot test was killed at **3000s having never reached QEMU**, the same
+shape as the run above. The interesting part is what the machine looked like
+while it happened, because it rules out the explanation the addendum above
+gives:
+
+| | value |
+|---|---|
+| commit charge | **65.3%** (167.2 GB of 255.9 GB) — nowhere near the 96-97% ceiling |
+| `cargo` / `rustc` processes, any lane | **0** |
+| `qemu-system-x86_64` processes | **0** |
+| other lanes active | yes — lane C running `check-doc-links.py`, lane B with live sessions |
+
+So there was no compile anywhere on the machine, and memory pressure was not a
+factor. What *was* running was three lanes' worth of pre-build gates at once —
+and those gates are themselves whole-tree file walks. Lane A's own suite at
+that moment was a `grep -rh --include=*.rs include_bytes!` across the
+workspace, with `bootstrap-worktree.sh --check` beside it.
+
+**The refinement: the contended resource is the file walk, not the compiler.**
+Every lane's pre-build phase reads all ~6441 `.rs` files, repeatedly, once per
+gate. Three lanes doing that concurrently saturates the disk just as
+effectively as a `cargo build` does — which means the trigger condition for the
+slow-gate regime is *any other lane being awake*, not "another lane is
+building". That is a much easier condition to meet, and it is invisible from
+the two things one would naturally check (free RAM and commit charge), both of
+which looked healthy here.
+
+Per-gate costs measured from this run, by pairing each `=== Checking` header
+against the nearest `run-timeout` heartbeat:
+
+| gate | duration |
+|---|---|
+| `scan-orphan-modules.py` | ~420s |
+| `check-variant-lists.py` | ~300s |
+| `scripts/test-*.py` suite | ~730s |
+| VFS permission gate → usage-message gate | ~180s |
+| the other 26 gates | 0-120s each |
+| **total before the first line of kernel is compiled** | **>3000s** |
+
+**Consequences, both of which sharpen advice already given above.**
+
+1. **7200s is a floor, not a target.** Point 1 above says "budget 7200s when
+   another lane is building". Read it as "when another lane is *running*", and
+   note that 3000s has now failed for this reason twice on the same day
+   (1800s once, 3000s once). The relaunch here used 9000s.
+2. **Do not "fix" this by caching the gates on a source digest.** That was the
+   first idea this measurement suggested, and the addendum above already
+   forecloses it: the gates are innocent, and their inputs *had* changed on
+   both of these runs anyway, so a digest cache would have skipped nothing. The
+   cost is contention, and the honest levers are budget and scheduling.
+
+One thing that *is* cheap and was not obvious: the clippy gate inside the same
+run reported `Clippy OK (debug profile, 38s, ...)`. The build cache was warm
+throughout. The 50 minutes were entirely pre-build static analysis — so a run
+lost this way has not lost any compilation work, only wall clock.
+
 ---
 
 ### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
@@ -108191,6 +108295,116 @@ have. Fixed by `scripts/hooks/pre-push`'s `run_checker` helper, tested by
 tooling failure is the correct behaviour — it is what surfaced this at all,
 rather than letting a run produce numbers from a harness that had just failed
 its own test.
+
+---
+
+### A-CANARY-CONTROLLER-DISCARDS-THE-SERIAL-LINES-ALREADY-ON-DISK-WHEN-IT-IS-STOPPED. A `--until` on the last benchmark of a suite voids the whole run as `until-never-matched` — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A)
+
+**In short:** the load controller tails the boot's serial log and turns the
+load off when a named benchmark finishes. When it is told to stop, it stopped
+*without reading the log one last time* — throwing away lines that were
+already written to the file. If the benchmark that closes the window was in
+that unread remainder, the controller reported that it had never seen it and
+the run's data was discarded.
+
+**Found the expensive way.** A `--bench` boot test was refused after **2517 s**
+of pre-build gates, before QEMU ever started, with:
+
+```
+ERROR: refusing to build.  1 tooling test suite(s) failed:
+    test-canary-load.py
+```
+
+and inside it:
+
+```
+spinner occupancy (live)
+  FAIL a loaded run measures spinner occupancy: record problem='until-never-matched'
+  FAIL a correctly-loaded run is not flagged as unapplied: until-never-matched
+```
+
+The suite then passed **twice in a row** on a quiet host. That pattern — fails
+under three-lane load, passes when idle — reads as a flake, and the standing
+advice in the entry above was to retry and move on. It was not a flake.
+
+**Cause.** `canary-load.py`'s poll loop checked the stop-file *before* reading
+the tail, and `break`ed on it:
+
+```python
+if args.stop_file and os.path.exists(args.stop_file):
+    record["outcome"] = "stopped"
+    break                      # <-- tail.lines() never called again
+if tail.opened():
+    seen = watcher.feed(tail.lines(), now)
+```
+
+So every line written since the previous poll was dropped unread. Not lines
+that had yet to arrive — lines **already on disk**. The other replay tests all
+hand the controller 0.3 s of quiet before stopping it, which is three poll
+intervals, so they pass whether or not the final read happens; the live
+occupancy test uses a 0.6 s window and two real CPU spinners, and under
+concurrent builds the controller's own 0.1 s poll can slip past the gap.
+
+**Why it is a production bug and not a test artefact.** `canary-load-test.sh`
+writes the stop-file immediately after `wait "$BOOT_PID"` returns — QEMU has
+exited and the serial log is complete and closed. So the *last* benchmark of a
+suite is separated from the stop by microseconds, and `--load-until` naming it
+loses every time the poll lands wrong. The whole boot's canary data is then
+voided over a line sitting in the file. This is the failure mode
+`canary-load.py`'s own module docstring says lost the second attempt.
+
+**Fix.** The poll body is factored into `consume(now, final=False)`, and the
+stop-file path calls it once more before breaking. The stop-file is what makes
+that read correct rather than racy: it is written only after the producer has
+exited, so the read cannot miss a line and cannot see a partial one. A
+`timeout` exit deliberately does **not** drain — a timeout carries no promise
+that the producer has finished, so stamping a release at the instant the
+controller gave up would date the window's right edge up to `--timeout`
+seconds late. A void run reported as void beats a void run reported with a
+plausible-looking window.
+
+**`release()` is allowed in the final drain; `fire()` is not,** and the
+asymmetry is the point. Releasing is a true statement — the load was on
+continuously from `on_at` until now, so every drained benchmark really did run
+under it, and the only error is a right edge late by the length of the stall
+(`occupancy_measured` divides by the span actually measured, so it stays
+physically bounded regardless). Firing would be a false one: the producer has
+already stopped, so a load applied at drain time covered nothing at all, and a
+record claiming `fired` over a zero-length window is worse than the honest
+`at-never-matched`.
+
+**`record["drained_after_stop"]`** counts what the final read picked up, and is
+initialised to 0 on every path so a reader can never mistake "this build
+predates the drain" for "the drain found nothing". A large value means the
+controller was starved near the end of the run, and those completions are
+stamped at drain time rather than at their own — the record now says so instead
+of hiding it.
+
+**Measured, both controllers on the same scenario** (trigger through a normal
+poll, then all 34 remaining lines in one burst, then stop with no grace):
+
+| controller | `completions_seen` | `released` | `problem` | `drained_after_stop` |
+|---|---|---|---|---|
+| at `HEAD` (no final drain) | **6** of 40 | `False` | `until-never-matched` | — |
+| with the drain | **40** of 40 | `True` | `None` | 34 |
+
+Six. The other thirty-four were on disk, in a closed file, and were never read.
+That is the whole defect, and it reproduces every time once the grace period is
+removed — the "flake" was only ever the grace period sometimes being enough.
+
+**Pinning test:** `test-canary-load.py`, "a line written just before the
+stop-file is still read". It lets the trigger land through a normal poll, then
+dumps the rest of the suite in one burst and stops with **no** grace period,
+which is what a starved controller effectively sees. The assertion to believe
+is `completions_seen == 40` — 40 only if nothing was discarded, and true under
+every interleaving. `drained_after_stop` is deliberately *not* asserted
+non-zero: a poll can legitimately land inside the burst, and pinning a number
+that depends on that would make the test the very kind of race it closes.
+
+**Amends the entry above.** "Not blocking — both retried green" was right about
+the immediate consequence and wrong about the diagnosis: at least one of those
+under-load tooling failures was a real defect that a retry hid. A suite that
+fails only under load is not thereby a suite that is wrong.
 
 ---
 

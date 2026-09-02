@@ -6699,6 +6699,19 @@ extern "C" fn kernel_main() -> ! {
     if let Err(e) = net::hwsim::self_test() {
         serial_println!("[WARN] hwsim self-test failed: {:?}", e);
     }
+    // The other end of that medium: a simulated WPA2-PSK access point, so that
+    // lane C's `net80211::assoc::Association` -- the station half of a join --
+    // can be *run* rather than only unit-tested.  Without an AP it sits in
+    // `Phase::Handshaking` forever, because the AP is the side that sends
+    // EAPOL message 1.  This exercises the whole join end to end: beacon,
+    // scan, Open System authentication, association, the 4-way handshake, data
+    // in both directions, and a group rekey.  It proves the frame exchange and
+    // the key schedule; it does NOT prove confidentiality, because hwsim does
+    // not encrypt.  See net::hwsim_ap's module docs and design-decisions.md
+    // section 677.
+    if let Err(e) = net::hwsim_ap::self_test() {
+        serial_println!("[WARN] hwsim association self-test failed: {:?}", e);
+    }
 
     // Step 22e⅞++++p8c: Per-namespace ARP cache self-test.
     // Isolated MAC resolution per namespace — requires netns::init().

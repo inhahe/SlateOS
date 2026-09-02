@@ -739,6 +739,14 @@ def run(args):
         "fired": False,
         "released": False,
         "outcome": "pending",
+        # How many completions the post-stop drain picked up.  Always present,
+        # including on the paths that never drain, so a reader can never
+        # mistake "the key is missing because this build predates the drain"
+        # for "the drain found nothing".  A large number here means the
+        # controller was starved near the end of the run: those completions
+        # are all stamped at drain time rather than at their own, so the
+        # window's right edge is that much less precise.
+        "drained_after_stop": 0,
     }
 
     # The host canary starts before the load and stops after it, so it always
@@ -854,40 +862,95 @@ def run(args):
         record["fired"] = True
         print("=== load applied (whole window) ===", flush=True)
 
+    def consume(now, final=False):
+        """Read whatever the tail has and act on it. True => stop looping.
+
+        `final` marks the one call made *after* the stop-file appeared, where
+        the producer is known to have finished.  It differs in exactly one
+        way: it will not `fire()`.  See `drain_after_stop` below.
+        """
+        nonlocal lines_before_on, first_seen_at
+        if not tail.opened():
+            return False
+        seen = watcher.feed(tail.lines(), now)
+        if seen and first_seen_at is None:
+            first_seen_at = watcher.completions[0][1]
+        for name in seen:
+            if on_at is None:
+                lines_before_on += 1
+                if name == args.at and not final:
+                    fire()
+                    record["fired"] = True
+                    print(f"=== '{name}' finished: load on ===", flush=True)
+            else:
+                if off_at is None:
+                    during.append(name)
+                if args.until is not None and off_at is None \
+                        and name == args.until:
+                    release()
+                    record["released"] = True
+                    print(f"=== '{name}' finished: load off ===", flush=True)
+        if final:
+            record["drained_after_stop"] = len(seen)
+        return off_at is not None and not args.hold
+
     try:
         while True:
             now = time.monotonic()
             if now > started + args.timeout:
                 record["outcome"] = "timeout"
+                # No final drain here, deliberately -- see `drain_after_stop`.
+                # A timeout carries no promise that the producer has finished,
+                # so the file may still be growing; stamping a release at the
+                # instant the controller gave up would date the window's right
+                # edge up to `--timeout` seconds after the benchmark that
+                # closed it.  A void run reported as void beats a void run
+                # reported with a plausible-looking window.
                 break
             if args.stop_file and os.path.exists(args.stop_file):
                 record["outcome"] = "stopped"
+                # THE FINAL DRAIN (`drain_after_stop`).  Until 2026-09-02 this
+                # broke immediately, discarding every line written since the
+                # last poll -- lines that were *already on disk*, not lines
+                # that had yet to arrive.  That is not a resolution limit, it
+                # is throwing away the evidence the run exists to collect.
+                #
+                # The stop-file is what makes reading again correct rather
+                # than racy.  `canary-load-test.sh` writes it only after
+                # `wait "$BOOT_PID"` returns, so QEMU has exited and the
+                # serial log is complete and closed: this read cannot miss a
+                # line, and cannot see a partial one.
+                #
+                # It is a production bug, not a test artefact.  `--until` on
+                # the *last* benchmark of a suite is the case that loses every
+                # time the poll happens to land before that line: QEMU writes
+                # the result, exits, the wrapper stops the controller, and the
+                # window is reported `until-never-matched` -- the whole boot's
+                # canary data voided over a line sitting in the file.  It is
+                # how the second attempt in the module docstring was lost.
+                # It surfaced as a *gate* failure on 2026-09-02, refusing a
+                # `--bench` boot after 2517 s because the suite's own
+                # `spinner occupancy (live)` case hit the same race under
+                # three-lane host load; the same suite passed twice on a quiet
+                # host, which is exactly what a discarded-read race looks like.
+                #
+                # `fire()` is suppressed in this pass while `release()` is not,
+                # and the asymmetry is the point.  Releasing here is a true
+                # statement: the load was on continuously from `on_at` until
+                # now, so every drained benchmark did run under it, and the
+                # only error is a right edge late by the length of the stall
+                # (`occupancy_measured`, which divides by the span actually
+                # measured, stays physically bounded regardless).  Firing here
+                # would be a false one: the producer has already stopped, so a
+                # load applied now covered nothing at all, and a record saying
+                # `fired` with a zero-length window is worse than the honest
+                # `at-never-matched`.
+                consume(time.monotonic(), final=True)
                 break
 
-            if tail.opened():
-                seen = watcher.feed(tail.lines(), now)
-                if seen and first_seen_at is None:
-                    first_seen_at = watcher.completions[0][1]
-                for name in seen:
-                    if on_at is None:
-                        lines_before_on += 1
-                        if name == args.at:
-                            fire()
-                            record["fired"] = True
-                            print(f"=== '{name}' finished: load on ===",
-                                  flush=True)
-                    else:
-                        if off_at is None:
-                            during.append(name)
-                        if args.until is not None and off_at is None \
-                                and name == args.until:
-                            release()
-                            record["released"] = True
-                            print(f"=== '{name}' finished: load off ===",
-                                  flush=True)
-                if off_at is not None and not args.hold:
-                    record["outcome"] = "complete"
-                    break
+            if consume(now):
+                record["outcome"] = "complete"
+                break
 
             time.sleep(POLL_SECONDS)
     finally:

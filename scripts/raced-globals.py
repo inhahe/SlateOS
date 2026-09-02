@@ -116,19 +116,52 @@ Usage:
                                                  #   to check the detector sees them
     python scripts/raced-globals.py --write-baseline
     python scripts/raced-globals.py --check      # exit 1 on a NEW raced global
+    python scripts/raced-globals.py --check --head <rev>   # judge that revision
+
+## Which tree it reads, and why that is a flag
+
+Without `--head` this reads the working tree, which is what a run by hand and
+the boot test both want. With it, every file, every `Cargo.toml` and the
+baseline itself come out of that revision instead -- see `scripts/gittree.py`.
+
+The push hook passes `--head <sha>` because the two are not the same question.
+A gate that enumerates the commits being pushed and then reads the *disk* will
+approve a race you committed and have since tidied out of your worktree, and
+will refuse a clean commit because of an edit you have not committed. Gate 7
+did exactly the first of those and published two unformatted commits before
+anyone noticed; `known-issues.md` ->
+`TD-B-PRE-PUSH-GATES-2-6-8-11-JUDGE-THE-WORKING-TREE-NOT-THE-PUSH` has the
+history. `scripts/test-checkers-honour-head.py` is what keeps the flag honest.
 """
 
 from __future__ import annotations
 
+import argparse
+import os
+import posixpath
 import re
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-BASELINE = Path(__file__).resolve().parent / "raced-globals-baseline.txt"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import gittree  # noqa: E402
 
-# Directories that are not our source.
-SKIP_DIRS = {"target", ".git", "node_modules", "vendor", "third_party"}
+ROOT = Path(__file__).resolve().parent.parent
+# Written to the real disk; `--write-baseline` updates a file rather than
+# judging one, so it has no business reading it out of a commit.
+BASELINE = Path(__file__).resolve().parent / "raced-globals-baseline.txt"
+# Read through whichever tree is under judgement. A baseline forgives a race
+# *and is itself part of the push*, so reading the disk's copy while judging a
+# commit lets a line added to the worktree excuse a race in the commit -- the
+# ratchet loosened by something that is not being sent anywhere.
+BASELINE_REL = "scripts/raced-globals-baseline.txt"
+
+# Directories that are not our source. `target` and `.git` are the seam's own
+# (`gittree._PRUNE`) and are skipped whether or not they are named here; these
+# three are this checker's, and are handed to `files_under(prune=...)` so the
+# disk side prunes them while walking rather than descending a vendored tree in
+# order to discard it.
+SKIP_DIRS = ("node_modules", "vendor", "third_party")
 
 # `static mut NAME: ...` or `static NAME: AtomicUsize = ...`.
 #
@@ -216,11 +249,10 @@ IGNORE: dict[str, str] = {
 def _relpath(p: Path) -> str:
     """Repo-relative POSIX path, or the bare path if it is outside the repo.
 
-    Everything the checker scans in anger lives under `ROOT`, so the fallback
-    exists for one caller: `--selftest`, which analyses synthetic files in a
-    temp directory. A `relative_to` that raises there would mean the self-test
-    could not exercise `analyse()` at all -- which is precisely the function
-    the self-test exists to pin down.
+    Only `--write-baseline`'s report line still needs this: every path the
+    checker *scans* is now a repo-relative string from the `Tree` seam, which
+    is the same spelling on the disk and in a revision. This converts the one
+    `Path` that remains, the baseline it writes.
     """
     try:
         return p.relative_to(ROOT).as_posix()
@@ -228,25 +260,30 @@ def _relpath(p: Path) -> str:
         return p.as_posix()
 
 
-def crate_dir(path: Path) -> Path | None:
+def crate_dir(tree: gittree.Tree, rel: str) -> str | None:
     """Directory of the nearest ancestor holding a `Cargo.toml`, or `None`.
 
-    Stops at `ROOT` so a synthetic file in a temp directory (the self-test)
-    does not walk out to the filesystem root looking for one.
+    `rel` is repo-relative, so the walk stops at the repo root by running out
+    of components. There is no filesystem above it to escape into -- which used
+    to need an explicit `ROOT` guard, and no longer can go wrong.
+
+    The repo root itself is a candidate: `""` names it, and a workspace root
+    with a `Cargo.toml` is an ordinary arrangement.
     """
-    d = path.parent
+    parts = rel.split("/")[:-1]
     while True:
-        if (d / "Cargo.toml").is_file():
+        d = "/".join(parts)
+        if tree.is_file(f"{d}/Cargo.toml" if d else "Cargo.toml"):
             return d
-        if d == ROOT or d.parent == d:
+        if not parts:
             return None
-        d = d.parent
+        parts.pop()
 
 
-_TEST_TARGET_CACHE: dict[Path, bool] = {}
+_TEST_TARGET_CACHE: dict[str, bool] = {}
 
 
-def crate_has_test_target(d: Path) -> bool:
+def crate_has_test_target(tree: gittree.Tree, d: str) -> bool:
     """Can `cargo test` build *anything* out of this crate?
 
     A `#[test]` needs a target for the harness to attach to. `kernel` has no
@@ -269,17 +306,40 @@ def crate_has_test_target(d: Path) -> bool:
     """
     if d in _TEST_TARGET_CACHE:
         return _TEST_TARGET_CACHE[d]
-    result = _crate_has_test_target_uncached(d)
+    result = _crate_has_test_target_uncached(tree, d)
     _TEST_TARGET_CACHE[d] = result
     return result
 
 
-def _crate_has_test_target_uncached(d: Path) -> bool:
+def _under(d: str, rel: str) -> str:
+    """`rel` beneath crate directory `d`, in the seam's one path spelling."""
+    return f"{d}/{rel}" if d else rel
+
+
+def _has_rs(tree: gittree.Tree, d: str) -> bool:
+    """Does directory `d` hold anything whose name ends `.rs`?
+
+    Matches `Path.suffix == ".rs"` rather than `endswith`, which differ for a
+    file called exactly `.rs` -- and it does not filter out directories, again
+    because the code this replaces did not. Neither shape exists in this tree;
+    they are matched anyway, because "no behaviour changed" is the claim this
+    conversion has to be able to make without qualification.
+    """
+    return any(
+        os.path.splitext(rel.rsplit("/", 1)[-1])[1] == ".rs"
+        for rel, _is_dir in tree.entries(d)
+    )
+
+
+def _crate_has_test_target_uncached(tree: gittree.Tree, d: str) -> bool:
     try:
         import tomllib
 
-        data = tomllib.loads((d / "Cargo.toml").read_text(encoding="utf-8"))
-    except (OSError, ValueError, ImportError):
+        manifest = tree.read_text(_under(d, "Cargo.toml"), errors="strict")
+        if manifest is None:
+            raise OSError("no manifest")
+        data = tomllib.loads(manifest)
+    except (OSError, ValueError, ImportError, UnicodeDecodeError):
         return True
 
     # A library target is testable unless it says otherwise. `[lib]` may be
@@ -288,13 +348,13 @@ def _crate_has_test_target_uncached(d: Path) -> bool:
     if isinstance(lib, dict):
         if lib.get("test", True):
             return True
-    elif (d / "src" / "lib.rs").is_file():
+    elif tree.is_file(_under(d, "src/lib.rs")):
         return True
 
     # Anything under `tests/` is its own target and is unaffected by what the
     # binaries say, so its mere existence keeps the crate testable.
-    tests_dir = d / "tests"
-    if tests_dir.is_dir() and any(p.suffix == ".rs" for p in tests_dir.iterdir()):
+    tests_dir = _under(d, "tests")
+    if tree.is_dir(tests_dir) and _has_rs(tree, tests_dir):
         return True
 
     bins = data.get("bin")
@@ -307,43 +367,37 @@ def _crate_has_test_target_uncached(d: Path) -> bool:
 
     # Every declared binary is `test = false`. Autodiscovery could still have
     # added one the manifest never mentions, so account for those explicitly
-    # rather than assuming the list is complete.
+    # rather than assuming the list is complete. Normalised with `normpath`
+    # rather than `Path.resolve`, which is the only sound spelling here: a
+    # revision has no filesystem to resolve `..` or a symlink against, and
+    # `resolve()` on the disk would silently answer a different question on the
+    # two sides of the seam.
     claimed = {
-        (d / b["path"]).resolve()
+        posixpath.normpath(_under(d, b["path"].replace("\\", "/")))
         for b in bins
         if isinstance(b, dict) and isinstance(b.get("path"), str)
     }
-    main_rs = d / "src" / "main.rs"
-    if main_rs.is_file() and main_rs.resolve() not in claimed:
+    main_rs = _under(d, "src/main.rs")
+    if tree.is_file(main_rs) and posixpath.normpath(main_rs) not in claimed:
         return True
-    bin_dir = d / "src" / "bin"
-    if bin_dir.is_dir() and any(p.suffix == ".rs" for p in bin_dir.iterdir()):
+    bin_dir = _under(d, "src/bin")
+    if tree.is_dir(bin_dir) and _has_rs(tree, bin_dir):
         return True
     return False
 
 
-def rust_files() -> list[Path]:
-    """Every `.rs` we wrote.
+def rust_files(tree: gittree.Tree) -> list[str]:
+    """Every `.rs` we wrote, repo-relative and sorted.
 
-    Prunes `SKIP_DIRS` *while walking* rather than filtering afterwards:
-    `target/` holds tens of gigabytes of build output, and descending into it
-    just to discard the results takes minutes.
+    `SKIP_DIRS` goes to the seam rather than being applied to the results, so
+    the disk side still prunes *while walking* -- descending a vendored tree
+    just to discard it is time a push gate does not have. `target/` and `.git`
+    are the seam's own and are skipped either way.
     """
-    out: list[Path] = []
-    stack = [ROOT]
-    while stack:
-        d = stack.pop()
-        try:
-            entries = list(d.iterdir())
-        except OSError:
-            continue
-        for e in entries:
-            if e.is_dir():
-                if e.name not in SKIP_DIRS:
-                    stack.append(e)
-            elif e.suffix == ".rs":
-                out.append(e)
-    return sorted(out)
+    return [
+        rel for rel in tree.files_under("", prune=SKIP_DIRS)
+        if os.path.splitext(rel.rsplit("/", 1)[-1])[1] == ".rs"
+    ]
 
 
 def _block_end(lines: list[str], start: int) -> int:
@@ -604,12 +658,22 @@ def strip_comments_and_strings(src: str) -> str:
     return "".join(out)
 
 
-def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
-    """Return (name, decl_site, unserialised_tests, serialised_tests) per global."""
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+def analyse(tree: gittree.Tree, rel: str) -> list[tuple[str, str, list[str], list[str]]]:
+    """`analyse_text` for a file in `tree`; nothing there analyses as nothing."""
+    raw = tree.read_text(rel)
+    if raw is None:
         return []
+    return analyse_text(rel, raw)
+
+
+def analyse_text(rel: str, raw: str) -> list[tuple[str, str, list[str], list[str]]]:
+    """Return (name, decl_site, unserialised_tests, serialised_tests) per global.
+
+    Takes the source rather than a path so the self-test can drive it with a
+    literal. That used to need a temp directory per case purely to have
+    something to open, which made the rules that decide this checker's answers
+    depend on a filesystem they have nothing to do with.
+    """
     lines = raw.splitlines()
     # Structural matching (`#[cfg]`, `///`, `#[test]`, `fn`) needs the real
     # text; word matching inside bodies must not see prose. Same line count, so
@@ -632,7 +696,7 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
             continue
         m = _STATIC_MUT.match(line) or _STATIC_ATOMIC.match(line)
         if m and not _IS_LOCK_NAME.search(m.group(1)):
-            globals_.append((m.group(1), f"{_relpath(path)}:{i + 1}", i))
+            globals_.append((m.group(1), f"{rel}:{i + 1}", i))
     if not globals_:
         return []
 
@@ -726,11 +790,19 @@ def analyse(path: Path) -> list[tuple[str, str, list[str], list[str]]]:
     return results
 
 
-def load_baseline() -> set[str]:
-    if not BASELINE.is_file():
+def load_baseline(tree: gittree.Tree) -> set[str]:
+    """The forgiven set, read from whichever tree is under judgement.
+
+    Deliberately not from the disk: the baseline is itself pushed, so reading
+    the disk's copy while judging a commit would let a line you added to your
+    worktree excuse a race in the commit -- a ratchet loosened by something
+    that is not being sent anywhere.
+    """
+    text = tree.read_text(BASELINE_REL, errors="strict")
+    if text is None:
         return set()
     out = set()
-    for line in BASELINE.read_text(encoding="utf-8").splitlines():
+    for line in text.splitlines():
         line = line.strip()
         if line and not line.startswith("#"):
             out.add(line)
@@ -753,10 +825,10 @@ def selftest() -> int:
     import tempfile
 
     def classify_all(src: str) -> list[tuple[str, list[str], list[str]]]:
-        with tempfile.TemporaryDirectory() as d:
-            p = Path(d) / "x.rs"
-            p.write_text(src, encoding="utf-8")
-            return [(n, u, s) for n, _site, u, s in analyse(p)]
+        # No temp file: the rules under test are about *source text*, and
+        # routing them through a filesystem only added a way for the self-test
+        # to fail for reasons that have nothing to do with the rules.
+        return [(n, u, s) for n, _site, u, s in analyse_text("x.rs", src)]
 
     def classify(src: str) -> dict[str, tuple[list[str], list[str]]]:
         # Convenience view for the cases that declare each name once. Rules
@@ -935,6 +1007,10 @@ fn d() { helper2(); }
     rule("no-test-target")
 
     def manifest_says_no_tests(manifest: str, files: dict[str, str] | None = None) -> bool:
+        # A real directory and a real `WorkTree`, unlike `classify_all` above:
+        # this rule is *about* which files exist beside a manifest, so a fake
+        # tree here would be testing the fake. It goes through the same seam
+        # the checker uses, with the crate at the tree's own root (`""`).
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
             (root / "Cargo.toml").write_text(manifest, encoding="utf-8")
@@ -943,8 +1019,9 @@ fn d() { helper2(); }
                 p = root / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content, encoding="utf-8")
-            _TEST_TARGET_CACHE.pop(root, None)
-            return not crate_has_test_target(root)
+            _TEST_TARGET_CACHE.pop("", None)
+            with gittree.WorkTree(str(root)) as tree:
+                return not crate_has_test_target(tree, "")
 
     kernel_shaped = """
 [package]
@@ -1058,42 +1135,76 @@ fn b() { record([0; 3]); }
     return 1 if failures else 0
 
 
-def main() -> int:
-    if "--selftest" in sys.argv[1:]:
-        return selftest()
-    check = "--check" in sys.argv[1:]
-    write = "--write-baseline" in sys.argv[1:]
-    show_all = "--all" in sys.argv[1:]
-
+def survey(
+    tree: gittree.Tree,
+) -> tuple[
+    list[tuple[str, str, list[str], list[str]]],
+    list[tuple[str, str, list[str], list[str]]],
+    dict[str, list[tuple[str, int]]],
+]:
+    """(raced, guarded, dead) for every `.rs` in `tree`."""
     raced: list[tuple[str, str, list[str], list[str]]] = []
     guarded: list[tuple[str, str, list[str], list[str]]] = []
     # Crate dir -> [(file, how many `#[test]` fns it declares)], for crates that
     # have no target for a harness to attach to.
-    dead: dict[Path, list[tuple[str, int]]] = {}
+    dead: dict[str, list[tuple[str, int]]] = {}
 
-    for path in rust_files():
-        d = crate_dir(path)
-        if d is not None and not crate_has_test_target(d):
+    for rel in rust_files(tree):
+        d = crate_dir(tree, rel)
+        if d is not None and not crate_has_test_target(tree, d):
             # These `#[test]`s never execute, so nothing in this file can race
             # by way of them. Counted and reported separately rather than
             # dropped: a crate falling silent is precisely the thing that must
             # not happen quietly, and the count is a finding in its own right.
             n = sum(
-                1 for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                1 for line in (tree.read_text(rel) or "").splitlines()
                 if _TEST_ATTR.match(line)
             )
             if n:
-                dead.setdefault(d, []).append((_relpath(path), n))
+                dead.setdefault(d, []).append((rel, n))
             continue
-        for name, site, unser, ser in analyse(path):
+        for name, site, unser, ser in analyse(tree, rel):
             if len(unser) >= 2:
                 raced.append((name, site, unser, ser))
             elif ser:
                 guarded.append((name, site, unser, ser))
+    return raced, guarded, dead
+
+
+def main() -> int:
+    if "--selftest" in sys.argv[1:]:
+        return selftest()
+    ap = argparse.ArgumentParser(add_help=True, description=__doc__.split("\n")[0])
+    ap.add_argument("--check", action="store_true")
+    ap.add_argument("--write-baseline", action="store_true", dest="write")
+    ap.add_argument("--all", action="store_true", dest="show_all")
+    ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--head", metavar="REV",
+                    help="judge this revision instead of the working tree")
+    args = ap.parse_args()
+    check, write, show_all = args.check, args.write, args.show_all
+
+    try:
+        tree = gittree.open_tree(str(ROOT), args.head)
+    except gittree.GitTreeError as exc:
+        # Exit 2, not 1. `scripts/run-checker.sh` reads 1 as "the checker found
+        # something" and prints the gate's refusal over it -- text that tells
+        # the author their code is wrong and offers the bypass. A revision that
+        # cannot be read is not a statement about anybody's code.
+        print(f"raced-globals: cannot read {args.head!r}: {exc}", file=sys.stderr)
+        return 2
+
+    # The cache is keyed by crate directory alone, which is right for one tree
+    # and wrong across two. Cleared here rather than keyed by tree so that the
+    # key stays the thing a reader expects it to be.
+    _TEST_TARGET_CACHE.clear()
+    with tree:
+        raced, guarded, dead = survey(tree)
+        known = load_baseline(tree)
 
     if dead:
         total = sum(n for files in dead.values() for _f, n in files)
-        names = ", ".join(sorted(_relpath(d) for d in dead))
+        names = ", ".join(sorted(dead))
         print(
             f"--- {total} `#[test]` fn(s) in {len(dead)} crate(s) with no test "
             f"target: {names} ---"
@@ -1105,7 +1216,7 @@ def main() -> int:
             "interleave."
         )
         if not check:
-            for d in sorted(dead, key=_relpath):
+            for d in sorted(dead):
                 for f, n in sorted(dead[d]):
                     print(f"      {f}  {n}")
         print()
@@ -1139,7 +1250,6 @@ def main() -> int:
         print(f"wrote {_relpath(BASELINE)} with {len(keys)} entries")
         return 0
 
-    known = load_baseline()
     new = sorted(keys - known)
 
     # Under --check this runs in a push hook, where the baselined backlog is not

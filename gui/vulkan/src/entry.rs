@@ -17,15 +17,17 @@
 //! | `vkGetDeviceProcAddr` | Exported. Answers for itself and `vkDestroyDevice`; forwards everything else to the driver. |
 //! | `vkDestroyDevice` | Exported. Destroys the driver's device and frees the loader's record for it. |
 //! | *every other device command* | **Not exported, and not a gap.** A `VkDevice` this loader returns is the driver's own, so `vkCmdDraw` and its several hundred siblings are found through the driver's `vkGetDeviceProcAddr` and called with the loader nowhere in the path. |
-//! | `vkEnumerateInstanceExtensionProperties` | **Not exported.** Needs the union of every driver's extension list, de-duplicated. |
-//! | `vkEnumerateInstanceLayerProperties` | **Not exported.** There are no layers, because loading one needs `dlopen`. |
-//! | `vkEnumerateInstanceVersion` | **Not exported.** Its answer depends on the two above. |
+//! | `vkEnumerateInstanceExtensionProperties` | Exported. The de-duplicated union of every registered driver's list; see [`crate::global`] for the merging policy. |
+//! | `vkEnumerateInstanceLayerProperties` | Exported. Reports none, because loading a layer needs `dlopen` and there is therefore no way for one to exist. |
+//! | `vkEnumerateInstanceVersion` | Exported. Vulkan 1.0, which is what this loader implements. |
 //!
-//! The three that are missing are missing *loudly*: an application that needs
-//! them fails to link, which is a build error naming the symbol. The
-//! alternative — exporting them and returning an empty list — is a program that
-//! reports success for work it never did, and produces a bug report about the
-//! driver rather than about the loader.
+//! The last three were for a while *not* exported, and loudly so: an application
+//! needing one failed to link, naming the symbol. That was the right shape while
+//! the loader had no honest answer, because exporting them to return an empty
+//! list is a program reporting success for work it never did — and it produces a
+//! bug report about the driver rather than about the loader. The argument
+//! expired when the answers arrived; [`crate::global`] is where each one comes
+//! from, and why an empty layer list is now a finding rather than a shrug.
 //!
 //! `vkGetInstanceProcAddr` returning null for a command it does not implement
 //! is not that: null is the answer the C API defines for "no such entry point",
@@ -65,6 +67,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::device::{self, Device, LoaderCommand, Lookup};
 use crate::dispatch;
+use crate::global::{self, Extension};
 use crate::icd::CURRENT;
 use crate::instance::{DriverInstance, Instance, PhysicalDevice, adopt_all, array_query, outcome};
 use crate::physical::{self, Ask, Command};
@@ -72,13 +75,14 @@ use crate::registry::{Admission, Driver, Entry, Registry};
 use crate::vk::{
     CreateDeviceFn, CreateInstanceFn, DestroyDeviceFn, DestroyInstanceFn,
     EnumerateDeviceExtensionPropertiesFn, EnumerateDeviceLayerPropertiesFn,
-    EnumeratePhysicalDevicesFn, GetDeviceProcAddrFn, GetInstanceProcAddrFn,
-    GetPhysicalDeviceFeaturesFn, GetPhysicalDeviceFormatPropertiesFn,
-    GetPhysicalDeviceImageFormatPropertiesFn, GetPhysicalDeviceMemoryPropertiesFn,
-    GetPhysicalDeviceProcAddrFn, GetPhysicalDevicePropertiesFn,
-    GetPhysicalDeviceQueueFamilyPropertiesFn, GetPhysicalDeviceSparseImageFormatPropertiesFn,
-    Handle, NegotiateFn, VK_ERROR_INCOMPATIBLE_DRIVER, VK_ERROR_INITIALIZATION_FAILED, VK_SUCCESS,
-    VkEnum, VkFlags, VkResult, VoidFn,
+    EnumerateInstanceExtensionPropertiesFn, EnumeratePhysicalDevicesFn, ExtensionProperties,
+    GetDeviceProcAddrFn, GetInstanceProcAddrFn, GetPhysicalDeviceFeaturesFn,
+    GetPhysicalDeviceFormatPropertiesFn, GetPhysicalDeviceImageFormatPropertiesFn,
+    GetPhysicalDeviceMemoryPropertiesFn, GetPhysicalDeviceProcAddrFn,
+    GetPhysicalDevicePropertiesFn, GetPhysicalDeviceQueueFamilyPropertiesFn,
+    GetPhysicalDeviceSparseImageFormatPropertiesFn, Handle, MAX_EXTENSION_NAME_SIZE, NegotiateFn,
+    VK_ERROR_INCOMPATIBLE_DRIVER, VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_LAYER_NOT_PRESENT,
+    VK_SUCCESS, VkEnum, VkFlags, VkResult, VoidFn,
 };
 
 // ---------------------------------------------------------------------------
@@ -352,13 +356,22 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
         }
 
         if instance.is_null() {
-            return if name == b"vkCreateInstance" {
-                // Not reached through the table: with no instance there is
-                // nothing to dispatch through, which is the whole reason this
-                // command is looked up with a null handle.
-                Some(erase(create_instance as *const ()))
-            } else {
-                None
+            // None of these is reached through the table: with no instance there
+            // is nothing to dispatch *through*, which is the whole reason they
+            // are looked up with a null handle. `Table` is what a handle points
+            // at, so a command taking no handle has no business in it.
+            return match name {
+                b"vkCreateInstance" => Some(erase(create_instance as *const ())),
+                b"vkEnumerateInstanceVersion" => {
+                    Some(erase(enumerate_instance_version as *const ()))
+                }
+                b"vkEnumerateInstanceLayerProperties" => {
+                    Some(erase(enumerate_instance_layer_properties as *const ()))
+                }
+                b"vkEnumerateInstanceExtensionProperties" => {
+                    Some(erase(enumerate_instance_extension_properties as *const ()))
+                }
+                _ => None,
             };
         }
 
@@ -381,6 +394,202 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
             _ => physical::lookup(name).map(physical_trampoline),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Global commands
+// ---------------------------------------------------------------------------
+
+/// Ask one driver which instance extensions it supports.
+///
+/// A driver that cannot answer contributes an empty list rather than sinking
+/// the whole call. That is the same policy the physical-device commands take
+/// towards a missing entry point, and here it is the only defensible one: the
+/// answer is a union across drivers, so one driver's silence is a driver with
+/// nothing to add, not a reason to tell the application that extension
+/// discovery failed.
+///
+/// # Safety
+///
+/// `driver`'s entry points must be live.
+unsafe fn driver_extensions(driver: &Driver) -> Vec<Extension> {
+    let lookup = driver.instance_proc_addr();
+    // SAFETY: the caller guarantees `lookup` is live, and a null instance is
+    // the correct — indeed the only — handle for looking up a global command.
+    let found = unsafe {
+        lookup(
+            ptr::null_mut(),
+            c"vkEnumerateInstanceExtensionProperties".as_ptr(),
+        )
+    };
+    let Some(found) = found else {
+        return Vec::new();
+    };
+    // SAFETY: the driver returned this pointer for the name
+    // `vkEnumerateInstanceExtensionProperties`, which is the contract that
+    // fixes its signature.
+    let enumerate = unsafe {
+        core::mem::transmute::<unsafe extern "C" fn(), EnumerateInstanceExtensionPropertiesFn>(
+            found,
+        )
+    };
+
+    let mut count: u32 = 0;
+    // SAFETY: a null layer name asks for the implementation's own extensions
+    // rather than a layer's, `count` is a writable `u32` that outlives the
+    // call, and a null array is how the C API asks for the count alone.
+    if unsafe { enumerate(ptr::null(), &raw mut count, ptr::null_mut()) } < VK_SUCCESS {
+        return Vec::new();
+    }
+
+    let mut records: Vec<ExtensionProperties> = vec![
+        ExtensionProperties {
+            extension_name: [0; MAX_EXTENSION_NAME_SIZE],
+            spec_version: 0,
+        };
+        count as usize
+    ];
+    // SAFETY: `records` has room for `count` entries, which is what `count`
+    // now says, and both pointers outlive the call.
+    if unsafe { enumerate(ptr::null(), &raw mut count, records.as_mut_ptr()) } < VK_SUCCESS {
+        return Vec::new();
+    }
+
+    // The driver may have written fewer than it first said, and reports that by
+    // lowering `count`. Trusting the first number would read records it never
+    // touched — here that is a name of 256 zero bytes rather than a wild
+    // pointer, but it is still an extension the loader would go on to report.
+    records.truncate(count as usize);
+    records.iter().map(Extension::from_record).collect()
+}
+
+/// The instance extensions of every driver in `registry`, merged.
+///
+/// Kept separate from [`enumerate_instance_extension_properties`] for the same
+/// reason [`create_across`] is separate from [`create_instance`]: the fan-out
+/// is the part with a policy in it, and a test can only drive it against a
+/// registry it built. The process-wide one cannot be populated from a test
+/// without leaking a driver into every other test in the binary.
+///
+/// # Safety
+///
+/// Every driver in `registry` must have live entry points.
+unsafe fn extensions_across(registry: &Registry) -> Vec<Extension> {
+    let mut per_driver: Vec<Vec<Extension>> = Vec::with_capacity(registry.drivers().len());
+    for driver in registry.drivers() {
+        // SAFETY: forwarded from this function's contract.
+        per_driver.push(unsafe { driver_extensions(driver) });
+    }
+    global::merge(&per_driver)
+}
+
+/// `vkEnumerateInstanceVersion`.
+///
+/// Vulkan 1.0, because that is what this loader implements. This is a question
+/// about the *loader*, not about any driver — what a driver supports is asked
+/// of a `VkPhysicalDevice` — so it is answered without consulting the registry
+/// and gives the same answer on a machine with no drivers at all.
+///
+/// # Safety
+///
+/// `api_version` must be null or a writable `u32`.
+#[unsafe(export_name = "vkEnumerateInstanceVersion")]
+pub unsafe extern "C" fn enumerate_instance_version(api_version: *mut u32) -> VkResult {
+    if api_version.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    // SAFETY: checked non-null just above, and the caller guarantees it is a
+    // writable `u32`.
+    unsafe { *api_version = global::VERSION };
+    VK_SUCCESS
+}
+
+/// `vkEnumerateInstanceLayerProperties`.
+///
+/// Always none. A layer is a shared library inserted into the call chain, and
+/// loading one needs `dlopen`, which returns null on SlateOS — so there is no
+/// mechanism by which a layer could be present, and reporting none is a finding
+/// rather than a shrug. See [`crate::global`] for why that distinction is the
+/// whole difference between this and the stub it looks like.
+///
+/// `out` is `*mut c_void` rather than a declared `VkLayerProperties`: the count
+/// is always zero, so no record is ever written, and the crate declares a
+/// structure only where it must genuinely read a field.
+///
+/// # Safety
+///
+/// `count` must be null or a writable `u32`.
+#[unsafe(export_name = "vkEnumerateInstanceLayerProperties")]
+pub unsafe extern "C" fn enumerate_instance_layer_properties(
+    count: *mut u32,
+    _out: *mut c_void,
+) -> VkResult {
+    if count.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    // SAFETY: checked non-null just above. Zero is written on both the
+    // count-only call and the fill call, which is what an empty list looks
+    // like in the two-call idiom.
+    unsafe { *count = 0 };
+    VK_SUCCESS
+}
+
+/// `vkEnumerateInstanceExtensionProperties`.
+///
+/// The de-duplicated union of every registered driver's list, at the lowest
+/// `specVersion` among the drivers offering each one. Both of those are policy
+/// rather than specification, and [`crate::global::merge`] is where they are
+/// argued.
+///
+/// A non-null `layer_name` names a layer, and there are none, so it is
+/// `VK_ERROR_LAYER_NOT_PRESENT` — the answer the specification asks for, and a
+/// more useful one than an empty list for something that does not exist.
+///
+/// # Safety
+///
+/// `layer_name` must be null or a NUL-terminated string, `count` a writable
+/// `u32`, and `out` either null or an array of at least `*count` records.
+#[unsafe(export_name = "vkEnumerateInstanceExtensionProperties")]
+pub unsafe extern "C" fn enumerate_instance_extension_properties(
+    layer_name: *const c_char,
+    count: *mut u32,
+    out: *mut ExtensionProperties,
+) -> VkResult {
+    if count.is_null() {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if !layer_name.is_null() {
+        return VK_ERROR_LAYER_NOT_PRESENT;
+    }
+
+    let merged = {
+        let registry = DRIVERS.lock();
+        // SAFETY: every registered driver's entry points were guaranteed live
+        // for the process by whoever registered it.
+        unsafe { extensions_across(&registry) }
+    };
+
+    let available = merged.len();
+    if out.is_null() {
+        // SAFETY: `count` was checked non-null and the caller guarantees it is
+        // writable.
+        unsafe { *count = clamp_count(available) };
+        return VK_SUCCESS;
+    }
+
+    // SAFETY: as above; the first call left the array's capacity here.
+    let capacity = unsafe { *count } as usize;
+    let (writable, result) = array_query(available, capacity);
+
+    for (slot, extension) in merged.iter().take(writable).enumerate() {
+        // SAFETY: the caller guarantees `out` holds at least `capacity`
+        // records, and `slot < writable <= capacity`.
+        unsafe { *out.add(slot) = extension.to_record() };
+    }
+
+    // SAFETY: `count` is the caller's writable `u32`.
+    unsafe { *count = clamp_count(writable) };
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -748,12 +957,12 @@ pub unsafe extern "C" fn enumerate_physical_devices(
     result
 }
 
-/// A device count as the `u32` the C API reports it in.
+/// A count as the `u32` the C API reports it in.
 ///
 /// Saturating rather than wrapping. Neither can happen — it would take four
-/// billion GPUs — but of the two impossible answers, "more devices than fit in
-/// the count" is the one that does not silently report a small number and hand
-/// back a truncated list.
+/// billion GPUs, or four billion extension names — but of the two impossible
+/// answers, "more than fits in the count" is the one that does not silently
+/// report a small number and hand back a truncated list.
 fn clamp_count(n: usize) -> u32 {
     u32::try_from(n).unwrap_or(u32::MAX)
 }
@@ -1387,17 +1596,21 @@ pub unsafe extern "C" fn destroy_device(device: Handle, allocator: *const c_void
 mod tests {
     use super::{
         SpinLock, create_across, create_device, create_instance, destroy_across, destroy_device,
-        destroy_instance, enumerate_across, enumerate_physical_devices, get_device_proc_addr,
+        destroy_instance, enumerate_across, enumerate_instance_extension_properties,
+        enumerate_instance_layer_properties, enumerate_instance_version,
+        enumerate_physical_devices, extensions_across, get_device_proc_addr,
         get_instance_proc_addr, get_physical_device_format_properties,
         get_physical_device_queue_family_properties, register_driver, table,
     };
     use crate::dispatch::{ICD_LOADER_MAGIC, is_loader_magic, loader_data};
+    use crate::global::Extension;
     use crate::icd::{CURRENT, DriverReply};
     use crate::instance::PhysicalDevice;
     use crate::registry::{Entry, Registry};
     use crate::vk::{
-        Handle, VK_ERROR_INCOMPATIBLE_DRIVER, VK_ERROR_INITIALIZATION_FAILED, VK_INCOMPLETE,
-        VK_SUCCESS, VkEnum, VkResult, VoidFn,
+        ExtensionProperties, Handle, MAX_EXTENSION_NAME_SIZE, VK_ERROR_INCOMPATIBLE_DRIVER,
+        VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_LAYER_NOT_PRESENT, VK_INCOMPLETE, VK_SUCCESS,
+        VkEnum, VkResult, VoidFn,
     };
     use alloc::boxed::Box;
     use alloc::vec;
@@ -1574,6 +1787,129 @@ mod tests {
     /// A driver that exports nothing at all.
     unsafe extern "C" fn gipa_empty(_instance: Handle, _name: *const c_char) -> VoidFn {
         None
+    }
+
+    // -----------------------------------------------------------------------
+    // Stub drivers that report instance extensions
+    // -----------------------------------------------------------------------
+
+    /// Answer an extension query from a list, in the two-call idiom a driver is
+    /// required to implement.
+    unsafe fn report_extensions(
+        list: &[(&[u8], u32)],
+        count: *mut u32,
+        out: *mut ExtensionProperties,
+    ) -> VkResult {
+        let available = list.len();
+        if out.is_null() {
+            unsafe { *count = available as u32 };
+            return VK_SUCCESS;
+        }
+        let capacity = unsafe { *count } as usize;
+        let writable = capacity.min(available);
+        for (slot, (name, spec_version)) in list.iter().take(writable).enumerate() {
+            let mut record = ExtensionProperties {
+                extension_name: [0; MAX_EXTENSION_NAME_SIZE],
+                spec_version: *spec_version,
+            };
+            record.extension_name[..name.len()].copy_from_slice(name);
+            unsafe { *out.add(slot) = record };
+        }
+        unsafe { *count = writable as u32 };
+        if writable < available {
+            VK_INCOMPLETE
+        } else {
+            VK_SUCCESS
+        }
+    }
+
+    unsafe extern "C" fn extensions_a(
+        _layer: *const c_char,
+        count: *mut u32,
+        out: *mut ExtensionProperties,
+    ) -> VkResult {
+        unsafe {
+            report_extensions(
+                &[
+                    (b"VK_KHR_surface" as &[u8], 25),
+                    (b"VK_KHR_display" as &[u8], 23),
+                ],
+                count,
+                out,
+            )
+        }
+    }
+
+    /// Overlaps with [`extensions_a`] on `VK_KHR_surface`, at a lower version.
+    unsafe extern "C" fn extensions_b(
+        _layer: *const c_char,
+        count: *mut u32,
+        out: *mut ExtensionProperties,
+    ) -> VkResult {
+        unsafe {
+            report_extensions(
+                &[
+                    (b"VK_KHR_surface" as &[u8], 20),
+                    (b"VK_EXT_debug_utils" as &[u8], 2),
+                ],
+                count,
+                out,
+            )
+        }
+    }
+
+    /// Says it has two and then writes one. Legal — the set can shrink between
+    /// the two calls — and it is what stops the loader reporting a record it
+    /// allocated but the driver never touched.
+    unsafe extern "C" fn extensions_shrinking(
+        _layer: *const c_char,
+        count: *mut u32,
+        out: *mut ExtensionProperties,
+    ) -> VkResult {
+        if out.is_null() {
+            unsafe { *count = 2 };
+            return VK_SUCCESS;
+        }
+        unsafe { report_extensions(&[(b"VK_KHR_surface" as &[u8], 25)], count, out) }
+    }
+
+    /// Reports a failure rather than a list.
+    unsafe extern "C" fn extensions_failing(
+        _layer: *const c_char,
+        _count: *mut u32,
+        _out: *mut ExtensionProperties,
+    ) -> VkResult {
+        VK_ERROR_INITIALIZATION_FAILED
+    }
+
+    /// A stub driver that creates instances and also answers the extension
+    /// query with `extensions`.
+    unsafe fn answer_with_extensions(name: *const c_char, extensions: *const ()) -> VoidFn {
+        if unsafe { CStr::from_ptr(name) }.to_bytes() == b"vkEnumerateInstanceExtensionProperties" {
+            return Some(unsafe {
+                core::mem::transmute::<*const (), unsafe extern "C" fn()>(extensions)
+            });
+        }
+        unsafe { answer(name, create_with_one_device as *const ()) }
+    }
+
+    unsafe extern "C" fn gipa_extensions_a(_instance: Handle, name: *const c_char) -> VoidFn {
+        unsafe { answer_with_extensions(name, extensions_a as *const ()) }
+    }
+
+    unsafe extern "C" fn gipa_extensions_b(_instance: Handle, name: *const c_char) -> VoidFn {
+        unsafe { answer_with_extensions(name, extensions_b as *const ()) }
+    }
+
+    unsafe extern "C" fn gipa_extensions_shrinking(
+        _instance: Handle,
+        name: *const c_char,
+    ) -> VoidFn {
+        unsafe { answer_with_extensions(name, extensions_shrinking as *const ()) }
+    }
+
+    unsafe extern "C" fn gipa_extensions_failing(_instance: Handle, name: *const c_char) -> VoidFn {
+        unsafe { answer_with_extensions(name, extensions_failing as *const ()) }
     }
 
     // -----------------------------------------------------------------------
@@ -2244,14 +2580,186 @@ mod tests {
     fn an_unimplemented_command_is_null_rather_than_a_wrong_pointer() {
         // Null is the C API's own answer for "no such entry point". Returning
         // anything else here is how a loader ships a jump to the wrong function.
-        // The three instance-enumeration commands are the loader's real
-        // omissions; `vkCmdDraw` is here for a different reason — it is a device
-        // command, and device commands are the driver's to answer through
-        // `vkGetDeviceProcAddr`, not this loader's.
-        assert!(lookup(ptr::null_mut(), c"vkEnumerateInstanceVersion").is_none());
-        assert!(lookup(an_instance(), c"vkEnumerateInstanceLayerProperties").is_none());
+        // `vkCmdDraw` is a device command, and device commands are the driver's
+        // to answer through `vkGetDeviceProcAddr`, not this loader's; the empty
+        // name is nobody's.
         assert!(lookup(an_instance(), c"vkCmdDraw").is_none());
         assert!(lookup(an_instance(), c"").is_none());
+    }
+
+    #[test]
+    fn the_three_global_commands_answer_only_to_a_null_instance() {
+        // These are looked up before any instance exists, which is the whole
+        // reason they cannot be forwarded to a driver. Vulkan makes the handle
+        // part of the question rather than an afterthought: asking for one of
+        // them *through* an instance is null, and an application that gets a
+        // pointer back either way learns nothing about which it may call.
+        for name in [
+            c"vkEnumerateInstanceVersion",
+            c"vkEnumerateInstanceLayerProperties",
+            c"vkEnumerateInstanceExtensionProperties",
+        ] {
+            assert!(
+                lookup(ptr::null_mut(), name).is_some(),
+                "{name:?} is not reachable with a null instance",
+            );
+            assert!(
+                lookup(an_instance(), name).is_none(),
+                "{name:?} was answered through an instance",
+            );
+        }
+    }
+
+    #[test]
+    fn the_reported_instance_version_is_the_one_the_loader_implements() {
+        let mut version: u32 = 0xdead_beef;
+        assert_eq!(
+            unsafe { enumerate_instance_version(&raw mut version) },
+            VK_SUCCESS,
+        );
+        assert_eq!(version, crate::global::VERSION);
+    }
+
+    #[test]
+    fn asking_for_the_version_with_nowhere_to_put_it_fails_rather_than_writing() {
+        assert_eq!(
+            unsafe { enumerate_instance_version(ptr::null_mut()) },
+            VK_ERROR_INITIALIZATION_FAILED,
+        );
+    }
+
+    #[test]
+    fn no_layers_are_reported_and_the_count_is_written() {
+        // The count must be *written*, not merely left alone: an application
+        // that passes an uninitialised `u32` and gets `VK_SUCCESS` back would
+        // otherwise allocate for whatever was on its stack.
+        let mut count: u32 = 7;
+        assert_eq!(
+            unsafe { enumerate_instance_layer_properties(&raw mut count, ptr::null_mut()) },
+            VK_SUCCESS,
+        );
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn a_named_layer_is_absent_rather_than_empty() {
+        // `VK_ERROR_LAYER_NOT_PRESENT` says the layer does not exist; an empty
+        // list would say it exists and offers nothing, which is a different
+        // claim and a false one.
+        let mut count: u32 = 0;
+        assert_eq!(
+            unsafe {
+                enumerate_instance_extension_properties(
+                    c"VK_LAYER_KHRONOS_validation".as_ptr(),
+                    &raw mut count,
+                    ptr::null_mut(),
+                )
+            },
+            VK_ERROR_LAYER_NOT_PRESENT,
+        );
+    }
+
+    #[test]
+    fn asking_for_extensions_with_nowhere_to_put_the_count_fails() {
+        assert_eq!(
+            unsafe {
+                enumerate_instance_extension_properties(
+                    ptr::null(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                )
+            },
+            VK_ERROR_INITIALIZATION_FAILED,
+        );
+    }
+
+    /// The names in a merged list, in order, so a test can state its
+    /// expectation as the thing an application would actually read.
+    fn names_of(extensions: &[Extension]) -> Vec<&[u8]> {
+        extensions.iter().map(|e| e.name.as_slice()).collect()
+    }
+
+    #[test]
+    fn a_registry_with_no_drivers_offers_no_extensions() {
+        let registry = registry_of(&[]);
+        assert!(unsafe { extensions_across(&registry) }.is_empty());
+    }
+
+    #[test]
+    fn two_drivers_lists_are_merged_at_the_lower_version_in_first_seen_order() {
+        // The whole of the merge policy, driven through real driver entry
+        // points rather than through `global::merge` alone: the overlap
+        // collapses to one entry, the version is the lower of the two even
+        // though the higher was seen first, and the order is registration
+        // order so a log can be read against the registry.
+        let registry = registry_of(&[gipa_extensions_a, gipa_extensions_b]);
+        let merged = unsafe { extensions_across(&registry) };
+
+        assert_eq!(
+            names_of(&merged),
+            [
+                b"VK_KHR_surface" as &[u8],
+                b"VK_KHR_display",
+                b"VK_EXT_debug_utils",
+            ],
+        );
+        assert_eq!(merged[0].spec_version, 20, "the higher version was kept");
+        assert_eq!(merged[1].spec_version, 23);
+        assert_eq!(merged[2].spec_version, 2);
+    }
+
+    #[test]
+    fn a_driver_without_the_command_contributes_nothing_rather_than_sinking_the_call() {
+        // `gipa_one_device` answers null for this name. Intersecting, or
+        // treating the absence as a failure, would hide the other driver's
+        // extensions behind a driver that has nothing to say about them.
+        let registry = registry_of(&[gipa_one_device, gipa_extensions_a]);
+        assert_eq!(
+            names_of(&unsafe { extensions_across(&registry) }),
+            [b"VK_KHR_surface" as &[u8], b"VK_KHR_display"],
+        );
+    }
+
+    #[test]
+    fn a_driver_that_fails_the_query_contributes_nothing_rather_than_sinking_the_call() {
+        let registry = registry_of(&[gipa_extensions_failing, gipa_extensions_a]);
+        assert_eq!(
+            names_of(&unsafe { extensions_across(&registry) }),
+            [b"VK_KHR_surface" as &[u8], b"VK_KHR_display"],
+        );
+    }
+
+    #[test]
+    fn a_driver_that_writes_fewer_than_it_promised_is_not_read_past() {
+        // The loader allocated two records and the driver filled one. Reporting
+        // the second would report an extension whose name is 256 zero bytes —
+        // not a crash, which is why this is the kind of bug that ships.
+        let registry = registry_of(&[gipa_extensions_shrinking]);
+        assert_eq!(
+            names_of(&unsafe { extensions_across(&registry) }),
+            [b"VK_KHR_surface" as &[u8]],
+        );
+    }
+
+    #[test]
+    fn the_process_registry_answers_the_extension_query_without_crashing() {
+        // This one goes through `DRIVERS`, the process-wide registry, which a
+        // test cannot populate without leaking a driver into every other test
+        // in the binary. What it can check is the part that is this module's
+        // rather than `global`'s: the two-call idiom writes a count, reports
+        // success, and does not touch the array on the count-only call.
+        let mut count: u32 = 0xffff_ffff;
+        assert_eq!(
+            unsafe {
+                enumerate_instance_extension_properties(
+                    ptr::null(),
+                    &raw mut count,
+                    ptr::null_mut(),
+                )
+            },
+            VK_SUCCESS,
+        );
+        assert_ne!(count, 0xffff_ffff, "the count was not written");
     }
 
     #[test]

@@ -25,6 +25,7 @@
 //! | [`instance`] | What one `vkCreateInstance` means across several drivers: which failure the application is told about, and the loader's own dispatchable instance and physical-device objects. |
 //! | [`device`] | What one `vkCreateDevice` means when exactly one driver is behind it: the record a device's dispatch word points at, and which of the two device-level commands the loader must answer itself. |
 //! | [`physical`] | The other side of that coin: the commands a wrapped `VkPhysicalDevice` forces the loader to name one by one, and the order a driver is asked for them in. |
+//! | [`global`] | The three commands asked with no handle at all, before an instance exists — so the loader has to answer them itself rather than forward them. |
 //! | [`entry`] | The exported symbols, the process-wide driver registry, and the dispatch table their addresses come from. |
 //! | [`vk`] | The few Vulkan C types the loader's own signatures cannot avoid naming. Not a binding, and not becoming one. |
 //!
@@ -60,17 +61,27 @@
 //! here: `apps/jsonviewer` already carries a private one, and a second
 //! private copy is exactly the duplication `textfmt` exists to prevent.
 //!
-//! # What is deliberately not here yet
+//! # A deliberate omission, and the day it stopped being one
 //!
-//! The three remaining omissions are `vkEnumerateInstanceExtensionProperties`,
-//! `vkEnumerateInstanceLayerProperties` and `vkEnumerateInstanceVersion`, and
-//! they are omissions rather than stubs: they are *not exported at all*, so an
-//! application that needs one fails to link with that symbol named.
+//! `vkEnumerateInstanceExtensionProperties`, `vkEnumerateInstanceLayerProperties`
+//! and `vkEnumerateInstanceVersion` were for a while *not exported at all*, so
+//! that an application needing one failed to link with the symbol named. The
+//! alternative — exporting them to return an empty list — is the defect this
+//! tree keeps filing bugs about: a tool reporting success for work it never did.
+//! A link error names the missing thing; an empty extension list produces a bug
+//! report about the driver.
 //!
-//! Exporting them to return an empty list would be the alternative, and it is
-//! the defect this tree has been filing bugs about — a tool that reports
-//! success for work it never did. A link error names the missing thing; an
-//! empty extension list produces a bug report about the driver.
+//! That argument had an expiry date, and [`global`] is where it ran out. It only
+//! ever justified the omission *while there was no honest answer*, and there now
+//! is one for each: the union of the drivers' extension lists, an empty layer
+//! list because loading a layer needs `dlopen`, and Vulkan 1.0 because that is
+//! what this loader implements. The distinction that matters, and is easy to
+//! lose: an empty list computed from a real registry is a correct answer; an
+//! empty list returned without looking is a lie that happens to be short.
+//!
+//! The habit worth taking from it is to write the closing condition next to the
+//! omission. Nothing in the tree was watching for the moment the reason stopped
+//! applying.
 //!
 //! Device-level Vulkan is the layer [`device`] adds, and building it corrected
 //! a guess this paragraph used to state as fact. It said a device dispatch
@@ -113,6 +124,7 @@ extern crate alloc;
 pub mod device;
 pub mod dispatch;
 pub mod entry;
+pub mod global;
 pub mod icd;
 pub mod instance;
 pub mod physical;

@@ -12,11 +12,10 @@
 //! promise is a crash rather than a type error. A list this short can be
 //! checked against `vulkan_core.h` by reading; a whole binding cannot.
 //!
-//! # No structure is declared here, and that is the rule rather than the
-//! current state
+//! # Exactly one structure is declared here, and the rule is why
 //!
-//! Every Vulkan structure the loader touches appears in these signatures as
-//! `*const c_void` or `*mut c_void` — `VkInstanceCreateInfo`,
+//! Nearly every Vulkan structure the loader touches appears in these signatures
+//! as `*const c_void` or `*mut c_void` — `VkInstanceCreateInfo`,
 //! `VkDeviceCreateInfo`, `VkPhysicalDeviceProperties`, `VkQueueFamilyProperties`
 //! and the rest. That is not laziness; it is the only part of this module that
 //! is genuinely load-bearing.
@@ -27,12 +26,28 @@
 //! crash. A wrong *structure* layout is caught by nothing. The caller writes
 //! field `A`, the driver reads field `B`, and the result is a plausible wrong
 //! answer — the failure mode this tree keeps filing bugs about. Since the
-//! loader never reads a field of any of these structures, declaring one would
-//! buy nothing and stake everything.
+//! loader never reads a field of those structures, declaring one would buy
+//! nothing and stake everything.
 //!
-//! The consequence to keep in mind when adding a command: if a new one needs
-//! the loader to *look inside* a structure, that is the point to stop and think,
-//! not to reach for a `#[repr(C)]` copy of a header.
+//! The rule is therefore not "never declare one". It is:
+//!
+//! > **Declare a structure only when the loader must read a field of it, and
+//! > argue the case where the reading happens.**
+//!
+//! [`ExtensionProperties`] is the only item that has met that bar, and
+//! [`crate::global`] is where it is argued. The short version: the loader's
+//! answer to `vkEnumerateInstanceExtensionProperties` is the de-duplicated union
+//! of every driver's list, there is no instance yet and so no driver to forward
+//! to, and de-duplicating means comparing extension *names* — which means
+//! knowing where the name is. What makes it survivable is that it is two fields
+//! with no `pNext` and no version-dependent tail, and that its size and
+//! alignment are asserted at compile time, so the failure mode the paragraph
+//! above describes is a build error here rather than a wrong answer at runtime.
+//!
+//! When the next command tempts you, the question to ask is not "would a struct
+//! be convenient" but "does the loader have to read a field, and can the layout
+//! be pinned by an assertion the compiler checks?" Two noes and one yes is not
+//! enough.
 //!
 //! # Naming
 //!
@@ -71,6 +86,14 @@ pub const VK_ERROR_OUT_OF_HOST_MEMORY: VkResult = -1;
 /// `VK_ERROR_INITIALIZATION_FAILED`.
 pub const VK_ERROR_INITIALIZATION_FAILED: VkResult = -3;
 
+/// `VK_ERROR_LAYER_NOT_PRESENT`.
+///
+/// The loader's answer when asked for the extensions belonging to a named
+/// layer. There are no layers on SlateOS — loading one needs `dlopen`, which
+/// returns null — so every name is absent, and saying so is more useful than
+/// reporting an empty list for a layer that does not exist.
+pub const VK_ERROR_LAYER_NOT_PRESENT: VkResult = -6;
+
 /// `VK_ERROR_INCOMPATIBLE_DRIVER`.
 ///
 /// The loader sees this in two quite different roles, which is worth keeping
@@ -105,6 +128,43 @@ pub type VkEnum = i32;
 /// `VkFlags` is `typedef uint32_t VkFlags` in the header, so unlike [`VkEnum`]
 /// there is nothing to infer.
 pub type VkFlags = u32;
+
+/// `VK_MAX_EXTENSION_NAME_SIZE`.
+pub const MAX_EXTENSION_NAME_SIZE: usize = 256;
+
+/// `VkExtensionProperties` — the only Vulkan structure this module declares.
+///
+/// The rule that permits it, and the argument that it is the only thing meeting
+/// that rule, are in this module's documentation and in [`crate::global`]. In
+/// one line: `vkEnumerateInstanceExtensionProperties` has no instance and so no
+/// driver to forward to, its answer is a union that must be de-duplicated, and
+/// de-duplication compares names.
+///
+/// `extensionName` is declared `[u8; 256]` rather than `[c_char; 256]`. The two
+/// are layout-identical, and the byte array drops a signedness question that
+/// bears on nothing: the loader compares these bytes and never interprets them
+/// as characters, which is also what this tree's rule about data crossing the
+/// OS boundary already asks for.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ExtensionProperties {
+    /// `extensionName`. NUL-terminated; the bytes after the NUL are
+    /// unspecified, which is why a reader must stop at it rather than compare
+    /// the whole array.
+    pub extension_name: [u8; MAX_EXTENSION_NAME_SIZE],
+    /// `specVersion` — the version of the extension itself, which has nothing
+    /// to do with the Vulkan API version.
+    pub spec_version: u32,
+}
+
+// The layout is the entire risk this one declaration takes on, so it is checked
+// rather than trusted. `char[256]` at offset 0 followed by a `uint32_t` is 260
+// bytes at alignment 4; a mistake is a build failure here rather than a driver
+// reading the wrong field at runtime. This assertion is what makes the
+// declaration a bounded risk instead of the open-ended one the module
+// documentation refuses to take.
+const _: () = assert!(core::mem::size_of::<ExtensionProperties>() == 260);
+const _: () = assert!(core::mem::align_of::<ExtensionProperties>() == 4);
 
 /// `VkInstance`, and every other dispatchable handle, as an untyped address.
 ///
@@ -170,6 +230,26 @@ pub type CreateInstanceFn = unsafe extern "C" fn(
 /// `instance` must be null or a handle the callee created and has not already
 /// destroyed; `allocator` must match the one creation was given.
 pub type DestroyInstanceFn = unsafe extern "C" fn(instance: Handle, allocator: *const c_void);
+
+/// `PFN_vkEnumerateInstanceExtensionProperties`.
+///
+/// Takes no handle, which is the point of it: an application asks this before it
+/// has an instance, and the loader asks each *driver* the same way, through that
+/// driver's `vk_icdGetInstanceProcAddr` with a null instance.
+///
+/// This is the one signature in the module naming a declared structure rather
+/// than `*mut c_void`, because it is the one command whose answer the loader has
+/// to read rather than pass along. See [`ExtensionProperties`].
+///
+/// # Safety
+///
+/// `layer_name` must be null or a NUL-terminated string, `count` a writable
+/// `u32`, and `out` either null or an array of at least `*count` records.
+pub type EnumerateInstanceExtensionPropertiesFn = unsafe extern "C" fn(
+    layer_name: *const c_char,
+    count: *mut u32,
+    out: *mut ExtensionProperties,
+) -> VkResult;
 
 /// `PFN_vkEnumeratePhysicalDevices`.
 ///

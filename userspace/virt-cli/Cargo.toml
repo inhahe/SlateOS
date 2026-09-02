@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # virt-cli names domains, storage pools and the disks it clones, identifiers
 # chosen by whoever defined the guest.
 quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # ocaml-cli names source files, modules and packages, taken from the command
 # line and from the project's dune files.
 quoting = { path = "../quoting" }

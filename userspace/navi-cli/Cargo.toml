@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # navi-cli names cheatsheets and snippets, read out of cheat files that are
 # commonly fetched from a shared repository.
 quoting = { path = "../quoting" }

@@ -3,6 +3,7 @@ name = "ruby"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+notimpl = { path = "../notimpl" }
 # gem and bundle echo the rejected command name back, and that word is
 # whatever followed the program name.
 quoting = { path = "../quoting" }

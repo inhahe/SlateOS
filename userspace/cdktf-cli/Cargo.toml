@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # cdktf-cli names stacks and providers, taken from the command line and from
 # cdktf.json in the project tree.
 quoting = { path = "../quoting" }

@@ -110,6 +110,9 @@ fn run_grbl_send(args: &[String]) -> i32 {
 }
 
 fn main() {
+    // Not implemented: everything below reports work this crate cannot do.
+    // Fail rather than mislead a caller. Delete this line when it is real.
+    notimpl::guard(env!("CARGO_PKG_NAME"));
     let args: Vec<String> = env::args().collect();
     let prog = args
         .first()

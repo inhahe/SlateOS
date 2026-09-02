@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # pass-cli names password-store entries and the source and destination of a
 # move or copy, every one of them a path the user typed.
 quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The new project's name and the dub subcommand name are argv words echoed
 # back.
 quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The output WAV path for flite and text2wave is an argv word -- a file
 # name, which may hold any byte but `/`.
 quoting = { path = "../quoting" }

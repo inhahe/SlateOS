@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # redpanda-cli names topics, groups and brokers, identifiers created by any
 # client with access to the cluster.
 quoting = { path = "../quoting" }

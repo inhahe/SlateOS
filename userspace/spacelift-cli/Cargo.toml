@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # spacelift-cli names stacks, runs and modules, identifiers created on the
 # service side.
 quoting = { path = "../quoting" }

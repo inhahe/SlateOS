@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The rejected command names etcdctl and etcdutl print are the argv words
 # themselves.
 quoting = { path = "../quoting" }

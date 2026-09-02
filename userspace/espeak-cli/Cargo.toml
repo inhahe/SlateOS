@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # It interpolates `wav`, `voice`, `speed` and the positional text into
 # "Writing to {}: voice={}, speed={} wpm" and its two sibling lines. Every
 # one of those is a raw argv string taken from `-w`, `-v`, `-s` or the

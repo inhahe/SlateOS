@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The PDF being opened is a path from argv, and the rejected mutool command
 # name is another argv word.
 quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # cml-cli names runners, reports and metrics files, taken from the command
 # line and from the repository.
 quoting = { path = "../quoting" }

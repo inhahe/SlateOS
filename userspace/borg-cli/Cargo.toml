@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The repository path and the rejected command name are argv words; a borg
 # repo path is a file name and may hold a newline.
 quoting = { path = "../quoting" }

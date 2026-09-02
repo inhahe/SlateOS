@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The colour-scheme file being converted and the directory being opened are
 # paths from argv.
 quoting = { path = "../quoting" }

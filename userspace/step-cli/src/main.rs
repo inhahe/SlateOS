@@ -131,6 +131,9 @@ fn run_step_ca(args: Vec<String>) -> i32 {
 }
 
 fn main() {
+    // Not implemented: everything below reports work this crate cannot do.
+    // Fail rather than mislead a caller. Delete this line when it is real.
+    notimpl::guard(env!("CARGO_PKG_NAME"));
     let args: Vec<String> = env::args().collect();
     let prog_name = {
         let s = args.first().map(|s| s.as_str()).unwrap_or("step");

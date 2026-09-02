@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The queue name is an argv word, and the rq subcommand is another.
 quoting = { path = "../quoting" }

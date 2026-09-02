@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # firecracker-cli names VM sockets, kernel images and drive paths, all
 # supplied by the caller.
 quoting = { path = "../quoting" }

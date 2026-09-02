@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # gettext-cli names PO and MO files and locale identifiers, taken from the
 # command line and from a catalog on disk.
 quoting = { path = "../quoting" }

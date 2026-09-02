@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # alsa-utils names sound cards, PCM devices and mixer controls, strings that
 # come out of the driver and the card's own descriptors.
 quoting = { path = "../quoting" }

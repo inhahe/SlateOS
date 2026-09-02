@@ -3,6 +3,7 @@ name = "powertop"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+notimpl = { path = "../notimpl" }
 # It interpolates `t.description` into " Setting {}: {} → {}". That value
 # comes from this program's own simulated tunable table, so the quoting is
 # presentation rather than defence -- but the line names a device path, and

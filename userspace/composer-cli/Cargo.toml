@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The search term and the subcommand name are argv words echoed back.
 quoting = { path = "../quoting" }

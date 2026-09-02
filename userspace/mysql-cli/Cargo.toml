@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The database name in the dump header and the mysqladmin subcommand are
 # argv words.
 quoting = { path = "../quoting" }

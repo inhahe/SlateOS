@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The world file being loaded and the gz subcommand name are argv words.
 quoting = { path = "../quoting" }

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # newrelic-cli names applications, accounts and alert policies, identifiers
 # created on the service side.
 quoting = { path = "../quoting" }

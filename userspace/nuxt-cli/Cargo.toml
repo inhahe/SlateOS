@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The name of the component it created and the nuxi subcommand are argv
 # words.
 quoting = { path = "../quoting" }

@@ -3,6 +3,7 @@ name = "mcelog"
 version = "0.1.0"
 edition = "2024"
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The rejected command names mcelog and mcelog-client print are the argv
 # words themselves.
 quoting = { path = "../quoting" }

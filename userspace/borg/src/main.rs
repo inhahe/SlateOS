@@ -296,6 +296,9 @@ fn borg_diff(_args: &[String]) -> i32 {
 // ── Entry point ───────────────────────────────────────────────────────
 
 fn main() {
+    // Not implemented: everything below reports work this crate cannot do.
+    // Fail rather than mislead a caller. Delete this line when it is real.
+    notimpl::guard(env!("CARGO_PKG_NAME"));
     let args: Vec<String> = env::args().collect();
     let rest: Vec<String> = args.into_iter().skip(1).collect();
     let code = run_borg(rest);

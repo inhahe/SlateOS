@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # The command and object names iw echoes back are argv words.
 quoting = { path = "../quoting" }

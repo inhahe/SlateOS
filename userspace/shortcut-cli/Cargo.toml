@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # shortcut-cli names stories, workflow states and epics, identifiers created
 # on the service side.
 quoting = { path = "../quoting" }

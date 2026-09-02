@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # btrfs-cli names subvolumes, snapshots and mount points by path, all
 # supplied by the caller.
 quoting = { path = "../quoting" }

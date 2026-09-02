@@ -522,6 +522,9 @@ fn show_ac() -> i32 {
 // ── Entry point ───────────────────────────────────────────────────────
 
 fn main() {
+    // Not implemented: everything below reports work this crate cannot do.
+    // Fail rather than mislead a caller. Delete this line when it is real.
+    notimpl::guard(env!("CARGO_PKG_NAME"));
     let args: Vec<String> = env::args().collect();
 
     let prog_name = {

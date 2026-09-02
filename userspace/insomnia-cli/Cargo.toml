@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # insomnia-cli names workspaces, environments and requests, read out of a
 # collection file this tool did not write.
 quoting = { path = "../quoting" }

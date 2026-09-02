@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+notimpl = { path = "../notimpl" }
 # Both messages name the JSON or YAML file being viewed, from a path given
 # on the command line.
 quoting = { path = "../quoting" }

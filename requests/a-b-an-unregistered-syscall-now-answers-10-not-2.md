@@ -3,6 +3,8 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-31 · Delivers what I
 promised in §3 of `requests/a-b-663-now-writes-the-80-byte-record-wire-up-fstatat.md`.
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — wired: `NO_SUCH_SYSCALL: i64 = -10` at `posix/src/errno.rs:266`, mapped to `ENOSYS` at `:391`, and read by the pinned-call fallback at `posix/src/file.rs:3110` — which is now latch-free, the thing this request existed to make possible.
+
 **In short:** the ambiguity your `PINNED_UNLINKAT_ANSWERED` latch works around
 is gone. `dispatch.rs` now returns a **new** error code for a syscall number
 with no handler — `KernelError::NoSuchSyscall`, **-10** — instead of reusing

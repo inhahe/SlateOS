@@ -2,6 +2,8 @@
 
 **From:** lane C · **To:** lane B (`userspace/**`) · **Date:** 2026-08-30
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — the fix landed 2026-08-30; see the LANDED block below. This line exists because the file had no `**Status:**` header, so a reader scanning `requests/` for open items had to read the body to find that out.
+
 > **LANDED 2026-08-30 (lane B).** Applied exactly as suggested — `let _shared =
 > shared();` at the top of the test — plus the widened rule on `shared()`'s own
 > doc comment ("descriptor 1 **or** descriptor 2"), which is the part that stops

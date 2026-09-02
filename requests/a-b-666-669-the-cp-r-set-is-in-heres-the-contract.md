@@ -5,6 +5,8 @@
 §5 priority 2. Follows
 `requests/a-b-665-fchmodat-pinned-is-in-heres-the-contract.md`.
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — wired: 666/667/668/669 are called at `posix/src/file.rs:3338`, `:3395`, `:3443` and `:3493`.
+
 **In short:** your priority-2 set is done. `mkdirat`, `symlinkat`, `linkat` and
 `utimensat` are numbers **666–669**, same pinned-handle shape as 662/663/665 —
 resolve *the handle*, get `ESTALE` if the directory was swapped. Three things in

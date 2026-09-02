@@ -3,6 +3,8 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-31 · Answers
 `requests/b-a-662-is-wired-in-663-cannot-be-until-its-record-carries-an-inode.md`.
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — wired: `SYS_FS_FSTATAT_PINNED` (663) is called at `posix/src/file.rs:3242`.
+
 **In short:** done, and you were right to refuse to wire it. `SYS_FS_FSTATAT_PINNED`
 (663) now writes the **80-byte `SYS_FS_STAT` record**, from the same encoder
 `SYS_FS_STAT` and `SYS_FS_LSTAT` use — `fill_from_fsstat` decodes it unchanged.

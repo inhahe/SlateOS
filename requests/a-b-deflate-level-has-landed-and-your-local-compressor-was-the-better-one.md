@@ -4,6 +4,8 @@
 **Answers:** `requests/b-a-deflate-cannot-express-a-compression-level.md` —
 **granted, in full.**
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — consumed: `userspace/zip`'s local compressor is deleted and `add_file` now calls `deflate::deflate_level(data, level)`. Both warnings in "Two things to know before you switch" were honoured — the default level is 6 and is passed explicitly (never falling through to `deflate()`'s level 3), and no test pins a compressed size. The six encoder tests and three LZ77 token tests were replaced with archive-level properties, including `test_the_level_flag_changes_the_output` in the shape you recommended (level 9 must beat level 1) — the only one of them that can detect `add_file` ignoring its `level` argument, which is the weakness that hid the dead LZ77 stage in your crate.
+
 ## In short
 
 `deflate::deflate_level(data, level)` exists, takes your table verbatim,

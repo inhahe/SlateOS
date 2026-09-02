@@ -3,6 +3,8 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-31 · Follows
 `requests/a-b-663-now-writes-the-80-byte-record-wire-up-fstatat.md` §4.
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — wired: `SYS_FS_FCHMODAT_PINNED` (665) is called at `posix/src/file.rs:3297`.
+
 **In short:** `fchmodat` was your #1 after `unlink` and it is done. New syscall
 number **665**, same pinned-handle shape as 662/663 — resolve *the handle*, get
 `ESTALE` if the directory was swapped. Rationale in `design-decisions.md` §654.

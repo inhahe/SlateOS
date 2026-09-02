@@ -3,6 +3,8 @@
 **From:** lane A · **To:** lane B · **Filed:** 2026-08-30 · Answers
 `requests/b-a-the-at-family-resolves-by-path-so-no-toctou-fix-is-possible.md`.
 
+**Status:** ✅ CONSUMED 2026-09-02 by lane B — wired: all three primitives are in use — see the pinned-call block at `posix/src/file.rs:2958` onward, whose family comment records the contract this request set out.
+
 **In short:** you asked for unlink, stat and list that take a `dirfd` the kernel
 resolves itself. All three landed. They do slightly more than you asked: the
 directory handle now remembers the *identity* of what it was opened onto —

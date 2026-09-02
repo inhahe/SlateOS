@@ -65,8 +65,8 @@ const MODE_DOMAIN: u16 = 0o7777;
 /// Floor for a nonzero timestamp, in nanoseconds since the epoch.
 ///
 /// `1e16` ns is 1970-04-26. The point is not the date — no file in any fixture
-/// or on any real disk predates it — but that it sits above every wrong *unit*
-/// a backend could plausibly return for a present-day time:
+/// or on any real disk *should* predate it — but that it sits above every wrong
+/// *unit* a backend could plausibly return for a present-day time:
 ///
 /// | unit returned | value for 2026 | verdict |
 /// |---|---|---|
@@ -78,6 +78,16 @@ const MODE_DOMAIN: u16 = 0o7777;
 /// A lower floor would let the microsecond case through, which is the one most
 /// likely to be written by accident: a driver whose on-disk format is `timespec`
 /// with a microsecond fraction, converted with one `* 1000` too few.
+///
+/// "Should" is doing real work in that first paragraph, and it was not always
+/// there. On 2026-09-01 the btrfs fixture falsified the flat claim: its four
+/// timestamps were `1_000`/`2_000`/`3_000`/`4_000` seconds — 1970-01-01, a
+/// quarter of an hour after the epoch — chosen only to be distinct from one
+/// another, and every btrfs object failed all four clauses. The driver was
+/// correct; the fixture was a 1970 file, so the floor caught exactly what it
+/// was built to catch. **A fixture must therefore declare present-day dates,**
+/// not merely distinct ones: writing one below this line does not exercise the
+/// check, it fails it.
 const TS_NS_FLOOR: u64 = 10_000_000_000_000_000;
 
 /// Ceiling for a nonzero timestamp, in nanoseconds since the epoch.

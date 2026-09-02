@@ -177,13 +177,34 @@ const PREALLOC_GARBAGE: u8 = 0xAB;
 /// value rather than as two zeroes that happen to match.
 const TEST_UID: u32 = 1000;
 const TEST_GID: u32 = 1001;
-const ATIME_SEC: u64 = 1_000;
+
+/// The four timestamps are distinct *and* plausible present-day dates, one day
+/// apart starting at 2024-01-01T00:00:00Z.
+///
+/// They used to be 1000/2000/3000/4000 seconds — 1970-01-01, a quarter of an
+/// hour after the epoch — which satisfied "distinct" and nothing else. That
+/// broke `fs::conformance`'s timestamp-unit check on every btrfs object (24
+/// failing clauses on the 2026-09-01 boot): the check rejects a nonzero
+/// timestamp below `TS_NS_FLOOR` (1e16 ns, 1970-04-26) on the grounds that
+/// such a value is far more likely to be a *unit* error — seconds or micros
+/// left in a nanosecond field — than a real date. That reasoning is sound, and
+/// the floor's own doc comment states the premise it rests on: "no file in any
+/// fixture or on any real disk predates it". This fixture was the counter-
+/// example to its own harness's stated assumption.
+///
+/// The driver was never wrong here — `timespec_ns` multiplies seconds by 1e9
+/// correctly — so the fix belongs in the fixture, which is also what the other
+/// three synthetic volumes already do (ntfs: `1_704_067_200_000_000_000`; zfs:
+/// `1_700_000_000`). **Keep these above the floor.** A synthetic volume is
+/// supposed to stand in for a plausible one, and a value chosen only to be
+/// distinct is not a value a real filesystem would ever hold.
+const ATIME_SEC: u64 = 1_704_067_201;
 const ATIME_NSEC: u32 = 11;
-const CTIME_SEC: u64 = 2_000;
+const CTIME_SEC: u64 = 1_704_153_602;
 const CTIME_NSEC: u32 = 22;
-const MTIME_SEC: u64 = 3_000;
+const MTIME_SEC: u64 = 1_704_240_003;
 const MTIME_NSEC: u32 = 33;
-const OTIME_SEC: u64 = 4_000;
+const OTIME_SEC: u64 = 1_704_326_404;
 const OTIME_NSEC: u32 = 44;
 
 /// Volume UUID; arbitrary, and never checked by the driver.

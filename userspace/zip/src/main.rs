@@ -1796,8 +1796,7 @@ mod tests {
     #[test]
     fn test_zip_single_file_stored() {
         let mut writer = ZipWriter::new();
-        writer
-            .add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0);
+        writer.add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -1885,8 +1884,7 @@ mod tests {
     fn test_zip_multiple_files() {
         let mut writer = ZipWriter::new();
         writer.add_file("a.txt", b"file A", 6, 0, 0);
-        writer
-            .add_file("b.txt", b"file B contents here", 6, 0, 0);
+        writer.add_file("b.txt", b"file B contents here", 6, 0, 0);
         writer.add_file("c.txt", b"", 0, 0, 0);
         let archive = writer.finish();
 
@@ -1906,8 +1904,7 @@ mod tests {
     fn test_zip_directory_entry() {
         let mut writer = ZipWriter::new();
         writer.add_directory("subdir", 0, 0);
-        writer
-            .add_file("subdir/file.txt", b"inside dir", 0, 0, 0);
+        writer.add_file("subdir/file.txt", b"inside dir", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();

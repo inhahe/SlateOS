@@ -441,6 +441,18 @@ fi
 # commits touching `posix/` or `userspace/`, so a lane A or C push never pays
 # for it and can never be blocked by it.
 #
+# WHY IT JUDGES THE COMMIT, NOT THE WORKTREE. `--head "$sha"` makes the checker
+# read that revision — every `.rs`, every `Cargo.toml`, and the baseline — via
+# scripts/gittree.py. Without it the gate enumerates the commits being pushed
+# and then reads the *disk*, which approves a race you committed and have since
+# tidied out of your worktree, and refuses a clean commit over an edit you have
+# not committed. Gate 7 had that defect and published two unformatted commits.
+# Measured on this tree: the revision run is 3m49s against the working tree's
+# 4m55s, so this is not a cost either.
+#
+# One run per ref being pushed, as gate 2 does: this asks a question about a
+# *state* rather than a diff, so only each ref's tip matters.
+#
 # Bypass: ALLOW_RACED_GLOBAL=1 git push origin <branch>
 # ---------------------------------------------------------------------------
 
@@ -454,6 +466,10 @@ fi
 raced="${repo_root:-.}/scripts/raced-globals.py"
 [ -f "$raced" ] || skip_raced=1
 touches posix/ userspace/ || skip_raced=1
+# Nothing being published is nothing to judge — and this is also what stops the
+# `--head` loop below from silently degrading to zero runs while `note_gate` had
+# already reported the gate as having run.
+[ -n "${pushed_shas# }" ] || skip_raced=1
 note_gate raced-global "$skip_raced"
 
 raced_failed=0
@@ -463,11 +479,22 @@ if [ "$skip_raced" != "1" ]; then
     # tree, and each is a regex a future edit can break silently. A broken
     # detector does not report a broken tree -- it reports a clean one, so
     # --check passing means nothing unless --selftest passed first.
+    #
+    # No `--head` here, deliberately, and it is not an oversight the
+    # `HEAD_GATES` rule should be widened to cover: --selftest runs the rules
+    # against source literals inside the script and touches no tree at all.
     if ! run_checker raced-global-selftest "$py" "$raced" --selftest; then
         echo "pre-push: raced-globals.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         raced_failed=1
-    elif ! run_checker raced-global "$py" "$raced" --check; then
-        raced_failed=1
+    else
+        for sha in $pushed_shas; do
+            # Per-sha gate name, for gate 9's reason: a shared name lets a
+            # later clean sha delete the kept log of an earlier failing one.
+            if ! run_checker "raced-global-$sha" "$py" "$raced" \
+                             --check --head "$sha"; then
+                raced_failed=1
+            fi
+        done
     fi
 fi
 

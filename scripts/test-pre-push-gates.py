@@ -226,6 +226,7 @@ def test_the_request_deletion_gate_judges_the_commit(text):
 # looking, because a gate that dropped it looks like every other gate.
 HEAD_GATES = {
     "multicall-aliases.py": "gate 2, unreachable command names",
+    "raced-globals.py": "gate 3, raced process-globals",
     "check-requests-not-deleted.py": "gate 9, request deletion",
 }
 

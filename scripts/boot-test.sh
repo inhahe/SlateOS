@@ -27,6 +27,12 @@
 #       separately because the *evidence* differs: 4 and 5 are this script
 #       declining to start, whereas 6 is a gate that ran, produced no judgement,
 #       and must not be read as having produced a clean one.
+#       Unlike 4 and 5, retrying is NOT the indicated response.  A crash that
+#       host memory could explain — commit headroom below the floor at the
+#       moment of death — is waited out and retried *inside* the gate, and
+#       becomes a 5 if the host never recovers.  So a 6 that reaches the caller
+#       has already survived that filter: it crashed with memory to spare, or
+#       twice.  Investigate the toolchain; do not re-run expecting better.
 #
 # 2 and 3 are listed here because they were not: exit 2 has existed since the
 # stall detector landed and this header still claimed the script only ever
@@ -4420,79 +4426,130 @@ check_kernel_clippy() {
     mkdir -p "$PROJECT_ROOT/build"
 
     echo "=== Checking that the kernel is clippy-clean (clippy::all = deny) ==="
-    local start
-    start="$(date +%s)"
-    # Output to a file, never to this log.  18,000 warning lines would bury the
-    # boot output that the rest of this script greps, and the full text is worth
-    # keeping for whoever is working the pedantic backlog.
-    #
-    # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's status is
-    # "did I match", which for an error filter is *inverted* -- a clean crate
-    # would report failure and a broken one success.
-    if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
-            ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
-            --message-format=short) > "$log" 2>&1; then
-        local warns
-        warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
-        echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
+
+    # `attempt` exists because a crash caused by this host running out of commit
+    # is a *host* condition that this script already knows how to wait out, and
+    # throwing away the run instead would discard however many minutes of
+    # dependency compilation clippy had already banked.  It is bounded to one
+    # retry: a second crash is evidence of something other than a transient, and
+    # a gate that retries indefinitely is a gate that never reports.
+    local attempt=1
+    local start free_mb warns
+    while : ; do
+        start="$(date +%s)"
+        # Output to a file, never to this log.  18,000 warning lines would bury
+        # the boot output that the rest of this script greps, and the full text
+        # is worth keeping for whoever is working the pedantic backlog.
+        #
+        # Not a pipe: `cargo ... | grep` would make `$?` grep's, and grep's
+        # status is "did I match", which for an error filter is *inverted* -- a
+        # clean crate would report failure and a broken one success.
+        if (cd "$PROJECT_ROOT" && "$CARGO" clippy -p kernel \
+                ${CARGO_PROFILE_ARGS[@]+"${CARGO_PROFILE_ARGS[@]}"} \
+                --message-format=short) > "$log" 2>&1; then
+            warns="$(grep -c ' warning: ' "$log" 2>/dev/null || echo 0)"
+            echo "Clippy OK ($BENCH_PROFILE profile, $(( $(date +%s) - start ))s, \
 0 errors, $warns pedantic-level warnings -> $log)."
-        return 0
-    fi
+            return 0
+        fi
 
-    # A non-zero clippy is not automatically a lint finding.  `clippy-driver`
-    # can *crash* -- on 2026-09-02 it died with STATUS_STACK_BUFFER_OVERRUN
-    # (0xc0000409) while the host was at 3.1 GiB of free commit under another
-    # lane's build -- and a crash exits non-zero too.  Reading that as "at least
-    # one clippy::all violation" is the same error `boot-history.py` used to
-    # make about exit 127: a verdict that rests on the *absence* of findings
-    # cannot be asserted when the tool that would have found them never
-    # finished.  The message below would have printed "Sites:" and then nothing,
-    # which is the shape of a gate accusing the tree of something it did not
-    # observe.
-    #
-    # The discriminator is cargo's own: a genuine lint failure ends with
-    # "could not compile ... due to N previous errors" and no "Caused by".  A
-    # crashed subprocess produces "process didn't exit successfully" carrying a
-    # signal or an NTSTATUS, which cargo only prints when the child died rather
-    # than reported.  Matching on that, rather than on the specific status code,
-    # keeps this correct for a SIGSEGV on a POSIX host as well.
-    if grep -qE "process didn't exit successfully|internal compiler error" "$log"; then
-        echo "" >&2
-        echo "ERROR: clippy-driver crashed instead of reporting a verdict." >&2
-        echo "" >&2
-        grep -E "process didn't exit successfully|internal compiler error" "$log" \
-            | sed -E 's/^(.{0,200}).*/  \1/' >&2
-        echo "" >&2
-        echo "THIS SAYS NOTHING ABOUT THE TREE.  The gate ran and produced no" >&2
-        echo "judgement; it did not produce a clean one.  Do not read a crashed" >&2
-        echo "linter as a clean linter, and do not #[allow] anything on the" >&2
-        echo "strength of it." >&2
-        echo "" >&2
-        echo "The usual cause on this host is memory: at the Windows commit" >&2
-        echo "limit a compiler dies wherever it happens to be, and another" >&2
-        echo "lane's cargo build is normally what got us there.  Wait for it" >&2
-        echo "and re-run -- see check_commit_headroom and exit 5." >&2
-        echo "" >&2
-        echo "Full output: $log" >&2
-        exit 6
-    fi
+        # A non-zero clippy is not automatically a lint finding.  `clippy-driver`
+        # can *crash* -- on 2026-09-02 it died with STATUS_STACK_BUFFER_OVERRUN
+        # (0xc0000409) while the host was at 3.1 GiB of free commit under another
+        # lane's build -- and a crash exits non-zero too.  Reading that as "at
+        # least one clippy::all violation" is the same error `boot-history.py`
+        # used to make about exit 127: a verdict that rests on the *absence* of
+        # findings cannot be asserted when the tool that would have found them
+        # never finished.  The message below would have printed "Sites:" and then
+        # nothing, which is the shape of a gate accusing the tree of something it
+        # did not observe.
+        #
+        # The discriminator is cargo's own: a genuine lint failure ends with
+        # "could not compile ... due to N previous errors" and no "Caused by".  A
+        # crashed subprocess produces "process didn't exit successfully" carrying
+        # a signal or an NTSTATUS, which cargo only prints when the child died
+        # rather than reported.  Matching on that, rather than on the specific
+        # status code, keeps this correct for a SIGSEGV on a POSIX host as well.
+        if grep -qE "process didn't exit successfully|internal compiler error" "$log"; then
+            # Is memory the explanation?  Ask now rather than assume.  Unlike the
+            # pre-boot headroom gate -- which reads the host ~38 minutes before
+            # QEMU needs it, and so is explicitly *not* a prediction anyone
+            # should make at t=0 -- this reading is taken at the moment of the
+            # failure it is trying to explain.  It is a measurement of a current
+            # need, not a forecast of a later one.
+            free_mb=""
+            if [ "$attempt" -eq 1 ] && [ "${MIN_COMMIT_FREE_MB:-0}" -gt 0 ] 2>/dev/null \
+               && free_mb="$(measure_commit_free_mb)" \
+               && [ "$free_mb" -lt "$MIN_COMMIT_FREE_MB" ]; then
+                echo "" >&2
+                echo "NOTE: clippy-driver crashed with only ${free_mb} MiB of commit free" >&2
+                echo "      (floor ${MIN_COMMIT_FREE_MB} MiB), so memory explains it.  Waiting for" >&2
+                echo "      headroom and running the gate once more rather than discarding" >&2
+                echo "      the dependency build that already succeeded." >&2
+                echo "" >&2
+                # Exits 5 if the host never recovers.  That is the right status:
+                # the run died of host load having produced no verdict about the
+                # tree, which is exactly what 5 means, and it names the real
+                # cause more precisely than 6 would.
+                check_commit_headroom "after clippy-driver crashed, before retrying"
+                attempt=2
+                continue
+            fi
 
-    echo "" >&2
-    echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
-    echo "which under this workspace's lint policy means at least one" >&2
-    echo "clippy::all violation -- those are deny-level.  Sites:" >&2
-    echo "" >&2
-    grep ' error: ' "$log" >&2 || true
-    echo "" >&2
-    echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
-    echo "failed this gate): $log" >&2
-    echo "" >&2
-    echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
-    echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
-    echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
-    echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
-    echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
-    exit 1
+            echo "" >&2
+            echo "ERROR: clippy-driver crashed instead of reporting a verdict." >&2
+            echo "" >&2
+            grep -E "process didn't exit successfully|internal compiler error" "$log" \
+                | sed -E 's/^(.{0,200}).*/  \1/' >&2
+            echo "" >&2
+            echo "THIS SAYS NOTHING ABOUT THE TREE.  The gate ran and produced no" >&2
+            echo "judgement; it did not produce a clean one.  Do not read a crashed" >&2
+            echo "linter as a clean linter, and do not #[allow] anything on the" >&2
+            echo "strength of it." >&2
+            echo "" >&2
+            # Say which of the two cases this is, because they call for opposite
+            # responses: "the host was busy" means wait, whereas "it crashed with
+            # memory to spare, twice" means investigate the toolchain.  A single
+            # message covering both would send the reader to wait out a condition
+            # that is not there.
+            if [ "$attempt" -gt 1 ]; then
+                echo "It crashed TWICE, the second time after commit headroom had" >&2
+                echo "recovered above the ${MIN_COMMIT_FREE_MB} MiB floor.  Host memory does not" >&2
+                echo "explain this one; suspect the toolchain or a genuine ICE, and" >&2
+                echo "do not simply re-run expecting a different answer." >&2
+            elif [ -n "$free_mb" ]; then
+                echo "Commit headroom was ${free_mb} MiB at the moment it died, at or above" >&2
+                echo "the ${MIN_COMMIT_FREE_MB} MiB floor, so this host's memory does not explain" >&2
+                echo "it.  Suspect the toolchain or a genuine ICE." >&2
+            else
+                echo "Commit headroom could not be read, so whether memory explains" >&2
+                echo "this is unknown.  On this host it usually does: at the Windows" >&2
+                echo "commit limit a compiler dies wherever it happens to be, and" >&2
+                echo "another lane's cargo build is normally what got us there." >&2
+                echo "Wait for it and re-run -- see check_commit_headroom and exit 5." >&2
+            fi
+            echo "" >&2
+            echo "Full output: $log" >&2
+            exit 6
+        fi
+
+        echo "" >&2
+        echo "ERROR: refusing to build.  cargo clippy -p kernel exited non-zero," >&2
+        echo "which under this workspace's lint policy means at least one" >&2
+        echo "clippy::all violation -- those are deny-level.  Sites:" >&2
+        echo "" >&2
+        grep ' error: ' "$log" >&2 || true
+        echo "" >&2
+        echo "Full output (including the pedantic-level backlog, which is NOT what" >&2
+        echo "failed this gate): $log" >&2
+        echo "" >&2
+        echo "Fix them rather than #[allow] them.  Every one of the eight found on" >&2
+        echo "2026-08-24 was a case clippy was right about, and seven were the" >&2
+        echo "one-line rewrite clippy dictated verbatim.  If a lint genuinely does" >&2
+        echo "not apply here, the allow goes at the narrowest possible scope with a" >&2
+        echo "comment saying why -- per CLAUDE.md, not at workspace scope." >&2
+        exit 1
+    done
 }
 
 check_kernel_clippy

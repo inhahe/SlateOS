@@ -103716,19 +103716,200 @@ So the residual-match report is not noise to be tuned out of the script — it i
 the only thing that would have surfaced this, and it should be read on every
 run, not just when the number changes.
 
-**crossword is next**, at 7 sites (`apps/crossword/src/main.rs:1374, 1385, 1414,
-1444, 1474, 1625, 1662`). A read-ahead predicts two faults, one familiar and one
-new. The familiar one is sokoban's shape 9: `text_at` pushes `max_width: None`,
-so no run it draws is cut to anything. The new one is that **every centring in
-the file is computed against `font_size` rather than `line_height`** —
-`r.y + (row_h - l.font) / 2.0`, `cy - size / 2.0` — which none of the seven
-finished apps did. The renderer places a run by its top-left and the run then
-occupies a full line height, so a box centred on the font size is short by the
-face's leading (33% here) and every centred run in the app sits high by half of
-that. It is not a containment fault at ordinary sizes, which is presumably why
-it survived, but it is the same confusion between "how big the letters are" and
-"how much room the line takes" that shape 12 named, and it will *become* a
-containment fault in any band squeezed to near one line.
+**crossword** (2026-09-01) — done: 77 tests (from 70), 7 sites → 0.
+
+**The mutation sweep is incomplete, and this is the honest number: 16 of 107
+rows ran, all 16 caught, and the remaining 91 were never executed.** The sweep
+was killed part-way by a client restart, not by a failure. Two things follow.
+First, the three survivors described below were found by the rows that *did*
+run, so the shapes they taught are real; what is unverified is only whether the
+other 91 mutants would also have been caught. Second, a killed harness leaves
+the file it was mutating **mutated in place** — `apps/crossword/src/main.rs` was
+recovered from the `main.rs.bak` the harness writes, and it had a live
+`while let` → `if let` mutation in `offset()` at line 863 at the moment the
+process died. Anyone resuming a sweep after an interruption must diff against
+that backup before doing anything else; committing the tree as found would have
+committed the mutant.
+
+Re-running the remaining 91 rows is parked with the rest of the campaign
+(below). It is ~9 minutes per row of exclusive cargo-lock time — around 14
+hours — which is why it is not being finished ahead of the WiFi work the
+operator asked for.
+
+The read-ahead had predicted two faults and both were
+there: sokoban's shape 9 (`text_at` pushed `max_width: None`, so no run it drew
+was cut to anything) and the new one — **every centring in the file was computed
+against `font_size` rather than `line_height`**. The renderer places a run by
+its top-left — the compositor's `draw_text` computes `baseline = y + ascent`, so
+a run occupies `[y, y + line_height)` — and a box centred on the font size is
+therefore short by the face's leading, 33% here. Every centred run in the app
+sat **low** by half of that, which is the direction worth stating: the slack
+above the run grows and the slack below it shrinks, so the edge the fault
+reaches first is always the band's *bottom*.
+
+That second fault is what makes this app worth reading, because **the campaign's
+central test cannot see it, and not for want of sizes**. It produced three
+separate mutation survivors before the cause was understood, and the four shapes
+below are the generalisation.
+
+29. **Containment is strictly weaker than centring, and the gap is exactly the
+    band's slack.** A clue row here is `small * 1.7` tall and a line of `small`
+    is `small * 1.33`; a run centred on the font size instead of the line height
+    is off by a sixth of a line and *never leaves the row*. No window size
+    reaches it, no `squeezes()` entry reaches it, and no squeeze ever will —
+    the fault is invisible to containment **by construction**, in every band
+    with more than 1.33× slack, which is most bands in most apps. This is a
+    second structural blind spot alongside shape 22's "drawing nothing is
+    contained" and shape 24's "an unreachable feature is contained". The
+    counterweight is cheap and general: **where a pass fills a box and then
+    writes in it, the fill *is* the band**, so assert that the run and the fill
+    share a centre line. `a_run_in_a_band_the_drawing_filled_is_centred_in_it_
+    and_not_merely_inside_it` needs no fixture beyond the ones already there and
+    caught all three survivors. Every app in this campaign should have it.
+
+    **And the seven already-finished apps were checked for it, and three have
+    it.** The test is a one-line grep — an app that calls `centre_line` but
+    never calls `text::line_height` is passing font sizes to it, because there
+    is nothing else it could be passing:
+
+    | App | `centre_line` calls | `line_height` calls | Verdict |
+    |---|---|---|---|
+    | automator | 21 | **0** | every centring is on the font size |
+    | taskscheduler | 8 | **0** | every centring is on the font size |
+    | hangman | 11 | **0** | every centring is on the font size |
+    | sokoban | 13 | 9 | mixed — read each site |
+    | klotski | 13 | 14 | mixed — read each site |
+    | rush | 13 | 20 | mixed — read each site |
+    | magnifier | 15 | 16 | mixed — read each site |
+
+    So the campaign's first three apps carry the fault it has only now learned
+    to see, on every run they draw, and their containment suites cannot report
+    it for the structural reason above. `centre_line(rect, l.font)` reads as
+    correct and is the shape the campaign has been *recommending* — which is the
+    uncomfortable part. **The helper's signature is what allows it**: `size` is
+    an `f32` and a font size is an `f32`, so the wrong one is spellable and
+    looks right. Each of the three needs a pass and the shape-29 test, and
+    `centre_line`'s own doc comment must say that `size` is a *line height*
+    and never a font size. This is logged as its own work item below rather
+    than folded into the per-app progress, because it is a regression in
+    finished work.
+30. **Pair a run to its band by the run's centre point, not by containment.**
+    The first draft of that test paired a run with a fill only when the run's box
+    was *inside* the fill, and the grid pass then contributed exactly zero
+    checked runs: a crossword cell's fill is the cell inset by one point while
+    the letter is bounded to the whole cell, so the run is never inside the fill
+    it belongs to. An inset does not move a centre, so pairing on the centre
+    point pairs correctly and the comparison — of centre lines — is unaffected.
+    A test that pairs by containment silently drops precisely the boxes that are
+    drawn tight to their band, which are the ones worth checking.
+31. **A coverage counter must be per pass.** That zero was invisible behind a
+    single `checked > 40` total, which the panel and footer passes met on their
+    own. It only surfaced when the count was broken out per pass and each
+    required to be non-zero. And the reason the grid contributed nothing was a
+    *fixture* fault, not a code fault — `playing(0)` is a fresh puzzle with no
+    letters in it at all, so the pass had no runs to give. **A fixture that
+    stops one pass producing output hides behind the passes that do**, and an
+    aggregate assertion is what lets it hide. Break the counter out by whatever
+    the test iterates over.
+32. **A bound that refuses rather than clamps moves the failure to a different
+    test — expect the mutation row's expectation to change with it.** Mutating
+    the footer's button strip to be taller than the footer used to spill; with
+    `centre_line` in front of it the strip is not drawn at all, so the
+    containment tests are content and the *existence* tests are what fail. This
+    read as a `WRONG TESTS` verdict and looks at first like a hole in the suite.
+    It is the opposite: it is the fix working. Retarget the row and say so in a
+    comment, because the next reader will make the same misdiagnosis.
+
+**The new sliver sizes found a real bug that twelve sizes had not.** The height
+grid gained `(900, 26)`, `(900, 18)` and `(900, 14)` — added only because two
+mutations of the help card's and end card's row fences survived for want of a
+window short enough to reach them — and at 900×18 the *menu* drew its
+17.29-point heading at a fixed `l.pad`, four points down an eighteen-point
+window. The heading had never been in a named band at all. This is rule 3
+("sample the sliver") paying out a second time, and the mechanism is worth
+noting: **the sizes were added to make a mutation reachable, and they found an
+unmutated fault on the way.** A size grid extended for one reason routinely
+pays for itself in another.
+
+**Two survivors here were genuine equivalent mutants, and both were *proved*
+rather than assumed.** `line_height(small, Bold).max(line_height(small, Regular))`
+→ `.min(…)` survives because this font's Bold and Regular faces have identical
+vertical metrics — measured with a throwaway probe test, not reasoned about: 8pt
+→ 10.640625 and 23pt → 30.591797 for both weights. The `.max()` stays, because
+the reason it is the taller of the two does not depend on today's metrics. (The
+probe also showed the cache **quantises size**, so 12.6pt → 17.29, a ratio of
+1.372 rather than the 1.330 the integer sizes give. **Never compute an expected
+line height by multiplying — probe it.**) The second was `let mut y =
+head.bottom();` → the literal offset it used to be: `head.h` is that expression
+`.min(window.h)`, so the two differ only when the window is shorter than the
+heading band, and in that case both produce a first row already past the fence.
+Both rows now carry a `NOT A MUTATION` note with the proof, and the second was
+replaced by a row that does bind — deleting the fence itself.
+
+One more small thing, which is shape 22 in a new dress: `inked` gives a run with
+a zero width limit a zero-width box, and `inside` treats an empty box as inside
+anything, so **a run the layout has left no room for passes containment because
+it has nowhere to go**. A direct scan of the command stream for
+`max_width: Some(w)` with `w <= 0.0` is a two-line addition to
+`check_containment` and catches it; every app in the campaign should carry it.
+
+### Open follow-up: the finished apps centre on the font size
+
+**Status:** OPEN 2026-09-01, raised by crossword's shape 29.
+
+**In short:** Every line of text in automator, taskscheduler and hangman is
+drawn about a sixth of a line lower in its strip than it should be. It is a
+small, uniform misalignment rather than a break — nothing overlaps at ordinary
+window sizes — but it is wrong everywhere in three apps this campaign has
+already signed off, and none of their tests can see it.
+
+**Why they cannot see it.** `centre_line(band, size)` divides the *band's* slack
+around a thing `size` tall. The thing being placed is a run of text, and a run
+is `text::line_height(size, weight)` tall, not `size` tall — the compositor
+draws it with `baseline = y + ascent`, so it occupies `[y, y + line_height)`.
+Passing the font size understates the run's height by the face's leading (33%
+at this face), which pushes the run down by half of that. It stays inside the
+band wherever the band has that much slack, so containment — the campaign's
+central test — is structurally blind to it (shape 29).
+
+**Where.** `apps/automator/src/main.rs` (21 sites), `apps/taskscheduler/src/main.rs`
+(8), `apps/hangman/src/main.rs` (11). The four other finished apps mix the two
+and need reading site by site rather than wholesale.
+
+**The fix, per app:** pass `text::line_height(size, weight)` at every
+`centre_line` call that places a run (a *fill* is still its own height), add
+crossword's `a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_
+inside_it`, and add a mutation row that puts the font size back.
+
+**And fix the helper, not just the callers.** The reason three apps got this
+wrong is that `centre_line(band, size: f32)` accepts a font size and a line
+height equally, and the wrong one is the shorter thing to write. Either the doc
+comment must say plainly that `size` is a line height and never a font size, or
+— better — the run-placing callers should go through a `centre_run(band, size,
+weight)` that computes the line height itself, so the mistake is unspellable.
+That is shape 9's rule ("make the wrong call unspellable") applied to a helper
+this campaign introduced.
+
+**If never fixed:** nothing overlaps and nothing crashes at ordinary sizes; text
+sits slightly low in its strip in three apps, and becomes a genuine overflow at
+the band's bottom edge in any strip squeezed to near one line.
+
+### Next
+
+`scripts/count_centrings.py` on 2026-09-01, after crossword: **spades at 6**
+(`apps/spades/src/main.rs:1835, 1851, 2067, 2120, 2159, 2171`), then emojipicker,
+hearts and snippets at 5, then asteroids, camera, gomoku, maze and pomodoro at 4.
+
+A read-ahead of spades predicts crossword's two faults exactly. `text_at` pushes
+`max_width: None` — but unlike crossword's, spades already has a correct
+`bounded` beside it with only **three** `text_at` callers, so shape 9's proper
+form here is to *delete* `text_at` rather than give it a limit, which makes
+"no limit" unspellable rather than merely discouraged. And all six sites are
+`band.y + (band.h - l.title | l.small | l.font) / 2.0` — the font size again, so
+shape 29's test is needed from the start rather than discovered by a survivor.
+Its size grid is already a 7x6 cross-product, which is better than most, but
+`GRID_H` jumps `0.0 -> 57.0`: it needs sliver entries near 14 and 26, the exact
+gap that has now paid out twice.
 
 ---
 

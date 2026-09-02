@@ -1348,19 +1348,32 @@ impl Crossword {
     /// at `x: 300.0` whatever the window was.
     fn draw_menu(&self, f: &mut Frame<Target>, l: &Layout) {
         let heading = "Crossword Puzzles";
-        centred(
-            f,
+        // The heading owns the strip above the first row, and is centred in a
+        // band cut to the window rather than written at a fixed `l.pad` from
+        // its top. The fixed offset was a fault, not a stylistic choice: an
+        // 18pt-tall window still gets a 12.6pt title, whose line is 17.3, and
+        // `4 + 17.3` is outside the window it was drawn for.
+        let head = Rect::new(
             l.window.x,
+            l.window.y,
             l.window.w,
-            l.pad,
-            heading,
-            TEXT_COLOR,
-            l.title,
-            FontWeightHint::Bold,
+            (l.pad + l.title * 2.2).min(l.window.h),
         );
+        if let Some(ty) = centre_line(head, text::line_height(l.title, FontWeightHint::Bold)) {
+            centred(
+                f,
+                head.x,
+                head.w,
+                ty,
+                heading,
+                TEXT_COLOR,
+                l.title,
+                FontWeightHint::Bold,
+            );
+        }
 
         let row_h = (l.title * 2.0).max(1.0);
-        let mut y = l.pad + l.title * 2.2;
+        let mut y = head.bottom();
         for (i, def) in PUZZLES.iter().enumerate() {
             let r = Rect::new(l.pad, y, (l.window.w - l.pad * 2.0).max(0.0), row_h);
             if r.bottom() > l.window.h - l.pad {
@@ -2152,6 +2165,7 @@ mod tests {
 
     use super::*;
     use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, shift};
+    use std::collections::BTreeMap;
 
     // ── Fixtures ───────────────────────────────────────────────────
 
@@ -2172,7 +2186,7 @@ mod tests {
     /// three around it are its neighbours on both sides of that boundary, so a
     /// change that moves the boundary shows up as a failure rather than as a
     /// probe that quietly stops probing.
-    const SIZES: [(f32, f32); 16] = [
+    const SIZES: [(f32, f32); 18] = [
         (860.0, 580.0),
         (320.0, 240.0),
         (240.0, 320.0),
@@ -2189,6 +2203,8 @@ mod tests {
         (160.0, 900.0),
         (110.0, 1000.0),
         (900.0, 26.0),
+        (900.0, 18.0),
+        (900.0, 14.0),
     ];
 
     /// An app with puzzle `index` open, driven to the size a probe uses.
@@ -2632,6 +2648,29 @@ mod tests {
                 "{state}: the {pass} pass, given {region:?}, inked {s:?} at {r:?}"
             );
         }
+        // The containment assertion above cannot see this one, and that is not
+        // a gap to be argued away: `inked` gives a run bounded to zero a box of
+        // no width, and a box of no area is inside everything. So a run placed
+        // where there is no room passes containment precisely *because* it has
+        // nowhere to go. What is wrong with it is the same thing that is wrong
+        // with a fill of no area -- it is a command the renderer is entitled to
+        // treat however it likes, and an `Ellipsis` into zero width may well be
+        // an ellipsis drawn outside the band. `text_at` refuses it; this is
+        // where that refusal is checked, on every screen and every squeeze.
+        for c in f.commands() {
+            if let RenderCommand::Text {
+                text,
+                max_width: Some(limit),
+                ..
+            } = c
+            {
+                assert!(
+                    *limit > 0.0,
+                    "{state}: the {pass} pass gave {text:?} a width of {limit} \
+                     to fit in, which is no room at all"
+                );
+            }
+        }
         for (target, rect) in f.hits() {
             assert!(
                 inside(region, *rect),
@@ -2674,6 +2713,146 @@ mod tests {
             None,
             "and a band with height but no width is still a band with no area"
         );
+    }
+
+    #[test]
+    fn text_at_refuses_a_run_with_no_room_to_draw_it() {
+        // Both halves, because a refusal that refuses everything is not a
+        // refusal. The three inputs below are the three ways there is nothing
+        // to draw: no text, no size, no width. Each must produce no command;
+        // the fourth case must produce exactly one.
+        for (why, s, size, limit) in [
+            ("no text", "", 12.0, 100.0),
+            ("no size", "Across", 0.0, 100.0),
+            ("no width", "Across", 12.0, 0.0),
+            ("a negative width", "Across", 12.0, -40.0),
+        ] {
+            let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+            text_at(
+                &mut f,
+                10.0,
+                10.0,
+                s,
+                TEXT_COLOR,
+                size,
+                FontWeightHint::Regular,
+                limit,
+            );
+            assert!(
+                f.commands().is_empty(),
+                "a run with {why} must not reach the renderer, yet {:?} did",
+                f.commands()
+            );
+        }
+        let mut f: Frame<Target> = Frame::new(200.0, 200.0);
+        text_at(
+            &mut f,
+            10.0,
+            10.0,
+            "Across",
+            TEXT_COLOR,
+            12.0,
+            FontWeightHint::Regular,
+            100.0,
+        );
+        assert!(
+            matches!(
+                f.commands(),
+                [RenderCommand::Text {
+                    max_width: Some(100.0),
+                    overflow: TextOverflow::Ellipsis,
+                    ..
+                }]
+            ),
+            "a run with room in it is one bounded command, not {:?}",
+            f.commands()
+        );
+    }
+
+    #[test]
+    fn a_run_in_a_band_the_drawing_filled_is_centred_in_it_and_not_merely_inside_it() {
+        // Containment is a *weaker* property than centring, and this app has
+        // bands with slack in them. A clue row is `small * 1.7` tall and a line
+        // is about `small * 1.33`, so a run centred on the font size instead of
+        // on the line still lands inside its row -- a sixth of a line low, and
+        // invisible to every containment sweep above, because nothing has left
+        // anything. The same holds for a footer button. Where the drawing fills
+        // a box and then writes in it, the fill *is* the band, and the run and
+        // the fill must share a centre line; that is the assertion containment
+        // cannot make.
+        let mut checked = 0_u32;
+        let mut per: BTreeMap<&str, u32> = BTreeMap::new();
+        for (w, h) in SIZES {
+            let mut app = playing(0);
+            app.size = (w, h);
+            app.check_mode = true;
+            // A freshly-opened puzzle has no letters in it, and a grid with no
+            // letters draws no runs a cell can be off-centre in -- so without
+            // this the grid pass contributed nothing and the test said so only
+            // through the counter. Revealing fills every cell of the word the
+            // cursor is in, which is the state a player is in most of the time
+            // anyway.
+            app.reveal_word();
+            let l = Layout::solve(w, h, app.width, app.height);
+            for (name, pass) in [
+                ("panel", Crossword::draw_panel as Pass),
+                ("footer", Crossword::draw_footer as Pass),
+                ("grid", Crossword::draw_grid as Pass),
+            ] {
+                let mut f = Frame::new(w, h);
+                pass(&app, &mut f, &l);
+                for band in filled(&f) {
+                    for (s, r) in inked(&f) {
+                        // Paired by the run's *centre point*, not by whole
+                        // containment. A cell's fill is its box inset by a
+                        // pixel, so the letter -- bounded to the cell -- is a
+                        // hair wider than the fill and no containment test
+                        // pairs the two. An inset does not move a centre,
+                        // which is the thing being compared, so pairing by the
+                        // centre asks the question the band was drawn to
+                        // answer.
+                        let (rx, ry) = r.centre();
+                        if rx < band.x || rx > band.right() || ry < band.y || ry > band.bottom() {
+                            continue;
+                        }
+                        // A cell's *number* is the one run in this app that is
+                        // deliberately not centred: it sits in the top-left
+                        // corner of its cell, which is where a crossword puts
+                        // its numbers. It has a corner band of its own and the
+                        // containment sweep checks it there; skipping it here
+                        // is not excusing it. Digits tell it from the letter,
+                        // which is a single capital.
+                        if s.chars().all(|c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        let (_, by) = band.centre();
+                        assert!(
+                            (ry - by).abs() < 0.02,
+                            "{name} at {w}x{h}: {s:?} is centred on {ry} in a band                              centred on {by} ({band:?}); a run centred on its font                              size rather than on its line lands exactly here --                              inside the band, and off its middle"
+                        );
+                        checked += 1;
+                        *per.entry(name).or_insert(0_u32) += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 40,
+            "only {checked} runs were paired with the box that was filled for \
+             them; this test says nothing about a pass whose fill it never found"
+        );
+        // Per pass, not just in total. A fixture change that stops one of the
+        // three producing runs at all -- an unrevealed grid draws no letters,
+        // which is exactly how this test first passed while saying nothing
+        // about a cell -- would otherwise hide behind the other two.
+        for name in ["panel", "footer", "grid"] {
+            let n = per.get(name).copied().unwrap_or(0);
+            assert!(
+                n > 5,
+                "the {name} pass contributed {n} centred runs; a pass this test \
+                 never sees a run from is a pass it does not cover"
+            );
+        }
     }
 
     #[test]

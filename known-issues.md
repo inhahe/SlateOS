@@ -103372,14 +103372,363 @@ landed at y = -0.71. Inset the rectangle by half the line width inside `stroke`
 itself rather than at each call site; hangman fixed the same fault one call site
 at a time, and sokoban shows it belongs in the helper.
 
-And the counts to date, remeasured 2026-09-01 after this app: **47 apps and 140
-sites remain**, with only automator, taskscheduler, hangman and sokoban carrying
-`no_pass_paints_outside_the_region_it_owns`. The largest remaining are rush,
-magnifier and klotski at 7 each, then spades and snippets at 6. klotski is the
-same program as sokoban structurally -- same `Layout`, same five `draw_*` passes,
-same `fill`/`push_text`/`label`/`label_right`/`label_centred` helpers with
-`push_text` still taking an `Option<f32>` -- so this app's fix transfers to it
-nearly verbatim.
+**klotski** (2026-09-01) — done: 90 tests, 80/80 mutation rows caught. The
+prediction above was right that sokoban's fix transfers nearly verbatim — shapes
+8, 9, 2 and 11 all recurred and were fixed the same way — and wrong about the
+two faults that mattered, which no amount of transferring would have found. Both
+are new shapes:
+
+14. **A pass is bounded by the region it *paints*, not by the region the layout
+    named after it — and a solve is the easiest place to get that wrong.**
+    `Layout::board` is the grid; what `draw_board` paints first and outermost is
+    a mat one `gap` wider than the grid on every side. The solve sized only the
+    grid, so on whichever axis binds — `cell` is a `min` of the two, and on the
+    winner the grid fills the band *exactly* — the shortfall a centring has to
+    divide is nought and the mat's ring has nowhere to go but outside. At
+    900x500, where height binds, the mat's top edge landed a whole gap above the
+    band it was solved from. Note what does **not** help: centring cannot
+    rescue a child bigger than its parent (it just splits the overhang in two),
+    and no clamp on the grid can either, because the grid was never the thing
+    that overflowed. The fix is in the solve — `per_w`/`per_h` count the well as
+    well as the grid — and in the *naming*: `Layout::board_frame` is the region
+    `draw_board` owns, for the same reason a picture's region is its frame and
+    not its canvas. **The trap here is the test, not the code.** The obvious
+    containment check measures `draw_board` against `l.board`, which is the one
+    region in the program this fault is invisible in; a pass checked against the
+    wrong region is a test that cannot fail. Before writing the check, ask what
+    each pass paints *first* and *outermost* and name that — every app with a
+    solved-then-decorated region (a mat, a well, a card behind a list, a focus
+    ring around a canvas) has the same hole.
+15. **A "visibility floor" is an unbound, and dangerous specifically as an
+    outset.** `(derived * k).max(CONST)` is written to keep a decoration legible
+    when the thing it decorates gets small, so by construction it stops asking
+    how much room there is — which is fine growing *inward* and is a licence to
+    paint outside growing *outward*. klotski's selection halo grew by
+    `(l.gap * 0.8).max(1.0)` around the picked-up block: on a board whose gap is
+    a fifth of a point the halo is five times the ring it was meant to sit in.
+    It grows by `l.gap` now — into the mat's ring and no further, which is what
+    reserving the ring in the solve bought. Audit the `.max(` floors in each app
+    by *direction*: inward `ring`/`inset` uses (checkers, chess, reversi,
+    yahtzee) are safe; `apps/rush/src/main.rs:1451` is this fault
+    character-for-character.
+
+And one about the suite rather than the program, which is the reason fault 8
+survived a fix that had already been made once in sokoban:
+
+16. **A test can hold a fault in place, and it will read as the strictest test
+    in the file.** `label_centred` insets the run by half the slack and handed
+    the renderer `r.w` — the box's own width — as the limit, so the "Next" label
+    was licensed to reach 123.5 in a band 120 wide. That is shape 8 exactly, in
+    the third app to hit it, and it was missed on the read-through because
+    klotski already had `a_centred_label_is_given_the_width_of_the_box_it_sits_in`
+    asserting `max_width == Some(rects[i].w)` — a test whose *name* says the
+    property is checked and whose body pins the bug. Only the new containment
+    grid could contradict it. When a bound moves, **grep the suite for the
+    tests that assert the old bound and rewrite them to the new claim** — here,
+    `a_centred_label_is_stopped_at_the_right_hand_edge_of_its_box`, asserting
+    `x + max == box.right()`. A test that must be rewritten to make a fix pass
+    is not a test that was protecting anything.
+
+And five more that the **mutation sweep** found and the read-through could not.
+Every one of them is a test that could not fail rather than a program that was
+wrong, which is the whole argument for running the sweep before calling an app
+done: eleven of the seventy-nine rows the table then held survived their first
+run, and not one of them was fixed by weakening an assertion. The eightieth row
+is shape 18's, added because the field shape 17 introduced needed pinning.
+
+17. **A derived region cannot check the thing that derived it.** Shape 14 above
+    fixed the solve *and* named the region — `board_frame` — the board pass is
+    measured against. But `board_frame` is computed *from* the solve, so a solve
+    that oversizes the mat oversizes the region by exactly as much, and
+    containment stays green however far the mat has escaped. The three rows that
+    break the solve all survived. The window and the chrome cannot see it
+    either: `pad` separates the band from both, and the overrun is one `gap`,
+    which is smaller. **The only rectangle that holds still while the solve
+    moves is the room the solve was handed — and it was a local, so the solve's
+    contract had no name and therefore no test.** The fix is one field,
+    `Layout::board_band`, and one test,
+    `the_board_fits_the_room_it_was_solved_from`. Any app whose layout solves a
+    size and then decorates it has this hole; the tell is a `let band = …` in
+    `Layout::new` that never reaches the struct literal.
+18. **A check whose subject is itself a claim needs its subject pinned.** Once
+    `board_band` is a field, a mutation that reports the *whole window* as the
+    room passes `the_board_fits_the_room_it_was_solved_from` trivially — a
+    bigger room is a weaker check, and the check cannot object to its own
+    subject. That row survived too. What a room that has swallowed the chrome
+    cannot pass is `the_board_never_overlaps_the_chrome`, so that test now asks
+    about the *band* as well as the frame. Whenever you add a field for a test
+    to hold, add the row that widens it and find the test that says no.
+19. **A fit check feeding a second fit check does not spill; it blanks.**
+    `two_lines` (header) and `shown` (footer) choose *how many* lines to stack,
+    and `centre_line` then refuses a stack the band cannot hold. Forcing either
+    to its two-line answer therefore makes the band draw **nothing** — and
+    nothing is inside everything, so every containment test in the file passes
+    on a program whose header has vanished. The converse test the campaign
+    already prescribes for whole passes has to exist for *bands* too:
+    `a_band_tall_enough_for_a_line_draws_one`, sweeping the band's height and
+    asserting that a band with room for one line draws one. Note it sweeps
+    height only: a band can be legitimately too *narrow* to draw in, because
+    `split` can collapse onto `left`, so a width sweep here would assert the
+    opposite of shape 20.
+20. **A guard no input reaches is indistinguishable from its own absence.**
+    `push_text`'s `limit <= 0.0` refusal — the bound that stops a run being
+    ellipsised into nothing — was never entered on a real window. It only bites
+    where the header's `split` collapses onto `left`, which only the *squeezed*
+    sweep produces. Deleting it changed no test's answer until
+    `no_run_is_pushed_into_a_box_with_no_room` swept the squeezes as well as the
+    window list. A guard is verified by the input that reaches it, not by
+    reading it.
+21. **A shared edge makes a mutation degenerate rather than visible.** `split`
+    is the title's right bound *and* the counters' left bound. Widening it to
+    the band's far edge does not let the title cross the counters — it leaves
+    the counters nought points of room, `push_text` refuses them, and two
+    columns of which one was never drawn do not overlap. The column test cannot
+    fail; what dies is every test that expects a counter. This is not a fault to
+    fix but a fact to record in the row's expectation, and it generalises: when
+    a single number bounds two things from opposite sides, breaking it starves
+    one of them instead of overlapping them.
+
+Two smaller carries. `push_text` and `label_right` picked up sokoban's shape 9
+and shape 8 fixes unchanged, and the header needed the same column split (a
+title column that takes what the "Moves:"/"Undo:" counters leave) to have a real
+number to pass. And three bounds in this app are genuinely **bounded by
+construction** — the board solve, whose `min` over both axes does the work; the
+button row, whose height is `controls.h - pad` so the centring offset is a
+constant `pad / 2.0`; and the win panel, which is a *fraction* of the window and
+so has a shortfall that scales. Each got the proof written out as a comment
+rather than a redundant clamp, because shape 2 says the clamp would be a claim
+no test could check.
+
+And the counts to date, remeasured 2026-09-01 after this app: **46 apps and 133
+sites remain**, with only automator, taskscheduler, hangman, sokoban and klotski
+carrying `no_pass_paints_outside_the_region_it_owns`. The largest remaining are
+rush and magnifier at 7 each, then spades and snippets at 6. **rush is next, and
+it is klotski's before-state character-for-character**: same `Layout`, same five
+`draw_*` passes, `push_text` still taking an `Option<f32>` with a `label()` that
+passes `None`, a `label_right` with no left bound, the halo floor at line 1451,
+and a `label_centred` whose doc comment claims it is "**limited to `r`**" while
+passing `Some(r.w)` from a run inset by half the slack — fault 16's twin, one
+app on.
+
+**rush** (2026-09-01) — done: 124 tests, 89/89 mutation rows caught. The
+prediction was exact: every fault named above was there, in those words, and the
+whole of klotski's fix transferred. Shapes 14 and 15 recurred — the board's
+solve sized the grid and not the mat and exit strip drawn around it, and the
+halo's `(gap * 0.8).max(1.0)` floor was the same outward-growing "visibility
+floor" character-for-character — and shapes 17 and 18 with them, so `board_band`
+is a field here too. That is the campaign working as intended: the second app
+costs a fraction of the first, and the sweep is what proves it rather than the
+resemblance.
+
+Two things this app added that klotski could not have shown.
+
+22. **A modal that scrims the window owns the window, so the containment test
+    is structurally blind to the modal's own panel.** `PASSES` gives the sheet
+    `window`, correctly — it darkens the whole screen — and therefore
+    `no_pass_paints_outside_the_region_it_owns` has nothing whatever to say
+    about the panel the sheet's contents belong to. A heading hanging off its
+    panel onto the scrim is still inside the window. Nor can `centre_line`
+    object: the heading's box is a *nominal* `pad` below the panel's top and
+    exactly one line tall, and a one-line box always fits itself — a bound on a
+    run is only as good as the box it is measured against, and the box with the
+    claim on it is the panel. Both the heading's and the hint's boxes are cut to
+    the panel with `Rect::intersect` now (which bounds all four edges and
+    answers `None` for a panel with no room, the same shape `centre_line`
+    answers in), and `every_run_the_sheet_draws_stays_inside_its_panel` is the
+    test. It must sweep **squeezed** windows as well as real ones for the reason
+    `SQUEEZABLE` exists at all: at every size in `WINDOWS` the panel is generous
+    enough that the nominal offsets land inside it, so a bound only those sizes
+    exercise is a bound that has not been exercised. **Every app with a modal,
+    an overlay or a dialog has this hole**, and it does not show up in a
+    read-through, because the containment test it hides behind is present and
+    green.
+23. **When a guard has two halves, check whether one of them already has a
+    backstop — because the half that does is the half that hides the other.**
+    The guard dropping a car's letter when it will not fit the car reads as one
+    condition and is really two, and replacing the whole of it with `true`
+    survived all 124 tests. The height half is not its own bound: `centre_line`
+    refuses whenever the box is shorter than a line, which is that half word for
+    word, so deleting the guard still draws nothing at a size where the cells
+    are short — shape 19 again, the check that blanks rather than spills. The
+    old test stood on one small window, which was exactly such a size. The width
+    half has no backstop, since `label_centred` clamps a run to the box and
+    ellipsises it rather than refusing, so it is the half that had to be
+    reached — and reaching it needs a car *tall* enough for its letter and too
+    *narrow* for it, which only a vertical car can be. A brute-force probe over
+    the 40..900 square found 2580 such sizes; 40x55 is one. The lesson for the
+    remaining apps: **a guard whose halves bind on different axes needs a size
+    per axis**, found by probe rather than by argument (the analytic estimate
+    here said the width half was unreachable, and it was wrong), and the
+    contract asserted as a biconditional with a coverage assertion per half —
+    "drawn only if it fits" alone is satisfied by a program that draws nothing.
+
+**magnifier** (2026-09-01) — done: 105 tests (from 92), 106/106 mutation rows
+caught. The first app in the campaign that is not a board game, and the first
+whose fixes were driven as much by the *mutation sweep* as by the containment
+test. Two faults fell out of the new suite on its first run, and both were
+hidden by a clip: `draw_pane`'s half-pixel seam filler spends its half pixel
+outside the pane on the last block of each row and column, and `draw_help` did
+not merely overflow, it **panicked** — `f32::clamp` requires `min <= max`, and a
+sheet narrower than its own two margins inverts them. Neither was visible to any
+of the 92 tests already there. `Frame::clip` pushes its command unconditionally,
+so a bound only the clip enforces is a bound no test reading the command stream
+can see; the campaign has now met that three times and it should be assumed
+present wherever a pass clips.
+
+Four things this app added.
+
+24. **A guard that no input satisfies is not a bound. It is a delete button on
+    the feature behind it, and it reads exactly like a bound.** `draw_info`
+    stacked the status line under the coordinate reading behind
+    `line_h + status_h <= info.h`. That condition is never true: two rows want
+    2.55× the font at this face, and `Layout` gives the info band at most 2.28×
+    at *every* window height from 40 to 2160, coming closest at h=309 where it
+    is still 1.41px short. So every "Picked #89B4FA", every "Zoom 4x", every
+    "Ruler cleared" had never been drawn, at any size, since the code was
+    written — a whole user-facing feature, dead, behind a line that looks like
+    careful defensive arithmetic. **No containment test can ever see this**, and
+    not by accident: a run that is never emitted is trivially inside every band
+    it might have left, so the campaign's central test is *structurally* blind
+    to it, exactly as it is blind to a modal's own panel (shape 22). What
+    pointed at it was a **mutation that survived**. The generalisation is the
+    valuable part: *a survivor does not always mean a missing test — sometimes
+    it means the code you broke is unreachable*, and the two are told apart by
+    probing the guard's reachability before writing a test for it. A second
+    tell was sitting in the file the whole time: `pick_colour_at`'s doc comment
+    says the unfiltered value is "in the status line **beside** it", and the
+    code stacked it *below*. **A doc comment that disagrees with the code it
+    sits on is evidence about which of the two is wrong**, and it is cheaper to
+    read than a sweep. The fix was not to widen the band but to move the
+    feature: the info band is a one-line strip by construction (16..=30px
+    against a single font), so the room it has is horizontal, and the status now
+    shares the reading's row. The mutation table carries a row that puts the
+    dead guard *back* — a bug found once should not be findable twice.
+25. **Two clamps that cancel mean the first one is in the wrong place.**
+    `status_size` was `(size * 0.92).max(7.0).min(size)`. The `.max(7.0)`
+    legibility floor cannot bite — it needs `size` under 7.6, and `shows`
+    refusing any band under 11 tall floors `size` at 7.7 — so it is inert, and
+    inert by a *tenth of a pixel*, which is a coincidence rather than a margin.
+    The `.min(size)` existed solely to undo the floor's one real effect: a floor
+    is the only shape that can make a status *taller* than the reading beside
+    it, and centring a taller run inside a shorter one's line box lifts it out
+    through the band's top — this campaign's own fault, arrived at from the
+    opposite direction. With both gone, `status_size <= size` is arithmetic,
+    `status_h <= line_h` follows by monotonicity, and the offset is non-negative
+    with nothing left to prove about reachability. **Look for the cancelling
+    pair whenever a clamp is followed by a second clamp on the same value.**
+26. **A no-overlap assertion is not a separation assertion.** Two runs that abut
+    exactly do not intersect, so `a.intersect(b).is_none()` passes on a layout
+    that a reader sees as one word. Any test asserting that two runs sharing a
+    row stay out of each other must assert the *gap* — otherwise the padding
+    between them is free to fall to zero and no test objects.
+27. **When a test sweeps only the sizes the layout hands out, it says nothing
+    about a bound only a squeezed band reaches — and the axis to squeeze is not
+    always the axis the campaign has been squeezing.** The header's
+    two-independent-guesses split (a flat `w * 0.5` for the title against a flat
+    `w * 0.45` for the reading) survived the sweep, and correctly: at every size
+    in `WINDOWS` the reading is far too short to reach a flat half of the band,
+    because "paused" is the longest thing the header ever says and the widest
+    band is 1920. The size that reaches it is narrow but **tall** — the
+    reading's font follows `header.h` and the window's `big`, and *neither
+    shrinks when the width does* — so a 120px-wide header on a 900px-tall window
+    sets a 19px reading against a 63px half and runs the two straight through
+    each other. The containment tests in this campaign squeeze both axes, but
+    the ordinary tests beside them mostly sweep `WINDOWS` alone; **wherever a
+    size is derived from one axis and spent on another, the fault lives at a
+    band squeezed on the axis it was not derived from.** As in shape 23, the
+    no-overlap claim now carries a coverage assertion — some band must actually
+    have been narrow enough to collide — so it cannot silently return to
+    asserting nothing.
+
+And the counts to date, measured 2026-09-01 with `scripts/count_centrings.py`:
+**49 apps and 113 sites remain**, with automator, taskscheduler, hangman,
+sokoban, klotski, rush and magnifier carrying
+`no_pass_paints_outside_the_region_it_owns`. The largest remaining is
+**crossword at 7**, then spades at 6, then emojipicker, hearts and snippets at
+5, then asteroids, camera, gomoku, maze and pomodoro at 4.
+
+**Every count above this line in this entry was quoted from an ad-hoc grep, and
+they are not comparable with the ones below it.** That is the point of the
+script and it is worth stating plainly. The greps did not agree with each other:
+a pattern loose enough to catch the forms rustfmt had wrapped also caught
+horizontal centrings and the already-fixed helper, and a pattern tight enough to
+exclude those missed every wrapped site. A raw grep gave 189 hits in 55 files
+against a recorded 126 in 45, with no way to reconcile them, because neither had
+written down what it counted. Nor is this hypothetical: the first draft of *this
+paragraph* said "44 apps and 122 sites" — a number carried forward by
+subtracting magnifier from the previous figure — and running the script gave 49
+and 113. Both digits were wrong, in opposite directions, and the apps count was
+wrong because the old tally had been undercounting all along. **A number in a
+tracking document that cannot be reproduced is worse than no number**, because
+it is quoted, subtracted from, and carried forward exactly as if it could be.
+
+So the script is now the one executable definition of a site: it matches across
+line breaks, outside `#[cfg(test)]` and comments, excludes the
+`centre_line`/`centred_in`/`label_centred` helper bodies, and detects finished
+apps by the presence of `fn centre_line(` rather than from a hand-kept list that
+can go stale. It also reports residual matches *inside* finished apps, which is
+the interesting case rather than the boring one: each is either a site bounded
+by construction — with the proof in a comment beside it, per shape 2 — or a site
+the campaign missed. The seven finished apps carry 21 such residuals between
+them (automator 6, sokoban 5, hangman 3, klotski 2, rush 2, taskscheduler 2,
+magnifier 1), and re-reading those 21 was a task in its own right: they are the
+campaign's own claim that a site is safe, and until now nothing had checked it.
+
+**That audit is done, and it found one.** Twenty of the twenty-one are bounded,
+and they come in three grades, which is worth naming because the grades are not
+equally trustworthy:
+
+| Grade | How the bound is enforced | Count |
+|---|---|---|
+| **A — bounded at the site, proof written** | `X.min(band.h)` / `(band.h - k).max(0.0)`, *and* a comment saying why | 13 |
+| **B — bounded at the site, proof unwritten** | same shapes, no comment; the reader re-derives it | 7 |
+| **C — bounded only by an argument about `Layout`** | the site itself constrains nothing | 1 |
+
+Grade A is the campaign's intended end state. Grade B is fine but costs the next
+reader the derivation each time. **Grade C is a bug waiting for a layout change**,
+and its one instance is `apps/automator/src/main.rs:2274` — the macro-list
+trigger dot, `let dot = l.small * 0.8;` centred in a row of height `l.row - 2.0`.
+Nothing at the site relates the two. It is safe *today* only because
+`Layout::solve` derives both from `font`: `dot = 0.8 * max(font - 2, 8)` against
+`max(2.2 * font, 14) - 2`, which over `font ∈ [9, 15]` is 6.4–10.4 against
+17.8–31, a margin of about 2.7×. Comfortable — but that margin is an accident of
+two unrelated formulas, and any edit to `Layout::row` or `Layout::small` can
+close it silently, with no test and no comment to object.
+
+The damning detail is that the dot is **inconsistent with its own neighbours two
+lines away**: the count and the name in the same loop body both go through
+`centre_line(rect, …)`, which refuses when the row is too short. The dot is the
+one thing in that row that cannot refuse. That is shape 28.
+
+> **Shape 28 — an unrelated-derivation bound is not a bound, it is a coincidence
+> with tenure.** A site whose safety rests on an arithmetic relationship between
+> two `Layout` fields that were never written to have one is not bounded; it is
+> unfalsified. Grade C differs from grade B in kind, not degree: grade B's proof
+> is a re-derivation of something the site enforces, grade C's is a re-derivation
+> of something nothing enforces. Prefer the fix that costs nothing — `.min(rect.h)`
+> on the fill, or `centre_line` when a refusal is the right answer — over the
+> comment that records the coincidence, and reach for the comment only when
+> shrinking would be wrong. The tell that found this one is **local
+> inconsistency**: when two sites in the same loop treat the same band
+> differently, the one that cannot refuse is the suspect.
+
+So the residual-match report is not noise to be tuned out of the script — it is
+the only thing that would have surfaced this, and it should be read on every
+run, not just when the number changes.
+
+**crossword is next**, at 7 sites (`apps/crossword/src/main.rs:1374, 1385, 1414,
+1444, 1474, 1625, 1662`). A read-ahead predicts two faults, one familiar and one
+new. The familiar one is sokoban's shape 9: `text_at` pushes `max_width: None`,
+so no run it draws is cut to anything. The new one is that **every centring in
+the file is computed against `font_size` rather than `line_height`** —
+`r.y + (row_h - l.font) / 2.0`, `cy - size / 2.0` — which none of the seven
+finished apps did. The renderer places a run by its top-left and the run then
+occupies a full line height, so a box centred on the font size is short by the
+face's leading (33% here) and every centred run in the app sits high by half of
+that. It is not a containment fault at ordinary sizes, which is presumably why
+it survived, but it is the same confusion between "how big the letters are" and
+"how much room the line takes" that shape 12 named, and it will *become* a
+containment fault in any band squeezed to near one line.
 
 ---
 
@@ -105305,6 +105654,24 @@ engine is a red `main` for all three lanes:
 2. The per-file copy and its preserve tail — the `copy_reg` equivalent — which
    is where `mv`'s existing `preserve_onto_file` should end up being the same
    code rather than a parallel one.
+
+   **This stage is not a pure move, and knowingly so.** The two copy *bodies*
+   it merges are each half-right in opposite directions, so there is no
+   behaviour to preserve — only a correct one to arrive at. `mv` uses
+   `io::copy`, which gets the `copy_file_range` offload and loses the failing
+   side; `cp` uses a plain 64 KiB read/write loop, which keeps the two
+   sentences and never offloads at all. GNU's `sparse_copy` does both and has a
+   **third** sentence, `error copying SRC to DST` (`copy.c:376`), for the
+   offload failure that names neither end — which is why it never needs to tell
+   read from write there. The unified body is GNU's, and it closes
+   `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`
+   (see that entry for the errno list the fallback is entered on).
+
+   So the "harness numbers must not move" rule below is suspended **for this
+   stage only, and only for cases that reach a copy failure or measure copy
+   throughput**. Everything else must still be byte-identical, and the
+   exception must be spent deliberately: any case that moves has to be one this
+   note predicts, not one discovered afterwards and rationalised.
 3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
    struct.
 4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
@@ -105553,28 +105920,58 @@ io::copy(&mut source, &mut dest)
 `io::copy` returns one `io::Error` for both ends and does not say which end it
 came from.
 
-**What GNU does.** `copy_reg` reads and writes itself, so the two have separate
-error sites (`copy.c:1287` and `copy.c:1300`). It reaches `copy_file_range`
-first and falls back to a read/write loop, and *its* fallback keeps the
-distinction because the loop is its own code.
+**What GNU does — corrected 2026-09-01, having read `sparse_copy` rather than
+recalling it.** Not two sentences: **three**, and the third dissolves the
+problem rather than solving it. `sparse_copy` runs `copy_file_range` in a loop
+and, on a failure it cannot fall back from, prints
 
-**Why it is written this way.** `io::copy` is specialised by `std` to
+```c
+error (0, errno, _("error copying %s to %s"),
+       quoteaf_n (0, src_name), quoteaf_n (1, dst_name));   /* copy.c:376 */
+```
+
+— a sentence naming **both** files, precisely because the kernel-side copy does
+not say which end failed either. GNU never tells read from write on the offload
+path; it has a sentence for "one of these two, and here is the errno".
+`error reading %s` (`copy.c:402`) and `error writing %s` (`copy.c:435`) belong
+only to the read/write **fallback** loop, which is its own code and so does know.
+
+The fallback is entered on a narrow listed set of errnos, and only while nothing
+has been copied yet: `is_CLONENOTSUP (errno)`, plus a special case for `ENOENT`
+"seen sometimes across CIFS shares". `EINTR` retries. Everything else is a real
+failure and takes the third sentence.
+
+**Why ours is written the way it is.** `io::copy` is specialised by `std` to
 `copy_file_range` when both sides are files, which is the same kernel-side copy
 GNU reaches for and matters for two reasons: the bytes never cross into
 userspace, and a sparse file's holes are reproduced as holes rather than written
-out as zeroes. A hand-written loop would tell the two failures apart and would
-lose both of those. The destination's sentence is the one kept because that is
-the end that fails in practice — a full filesystem, an exceeded quota, a device
+out as zeroes. The destination's sentence was the one kept because that is the
+end that fails in practice — a full filesystem, an exceeded quota, a device
 unplugged mid-write — while a read error means the source medium is failing,
-which is rarer.
+which is rarer. That reasoning was sound given the two-sentence premise; the
+premise was wrong.
 
-**The proper fix.** Keep `io::copy` for the common path and learn the side from
-the descriptors after it fails, rather than from the error: on failure, check
-whether the source is still readable (a zero-length `read` at the current
-offset). If it is not, the failure was the read. That gets the distinction back
-without giving up `copy_file_range`, at the cost of one syscall on a path that
-has already failed. The alternative — a loop — is the one GNU uses and is not
-worth the sparse-file regression.
+**The proper fix — superseded 2026-09-01.** The fix previously recorded here was
+to keep `io::copy` and *infer* the failing side afterwards, by probing whether
+the source was still readable. That was a workaround for a distinction GNU does
+not actually attempt, and it is now withdrawn: it would have invented an answer
+("it was the read") in a case where upstream deliberately declines to, and a
+probe on a failing device is not reliable evidence anyway.
+
+Reproduce GNU's structure instead: drive `copy_file_range` ourselves rather than
+through `io::copy`, emit `error copying SRC to DST` when it fails outside the
+listed fallback errnos, and fall back to an explicit read/write loop that emits
+`error reading SRC` and `error writing DST` from its own two sites. Nothing is
+given up — the offload stays, the holes stay — and all three sentences come out
+byte-identical to GNU's, which is more than the withdrawn fix would have managed
+even if its inference were always right.
+
+This lands with **Stage 2 of the copy-engine extraction**, which unifies this
+copy body with `cp`'s. That is not scheduling convenience: `cp` has the opposite
+half of the same bug — a plain 64 KiB read/write loop with the two sentences and
+**no offload at all**, so it is both slower than GNU on a large same-filesystem
+copy and incapable of ever printing `error copying`. One unified body fixes both,
+and writing the fix twice is what the extraction exists to stop.
 
 **How it would be caught.** Nothing measures it today. `scripts/mv-diff.sh` §22
 has cases for a source that cannot be *opened* and a destination directory that

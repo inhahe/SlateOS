@@ -2583,19 +2583,60 @@ fn copy_across_devices<E: Write>(
 /// `set_mode`, so the extra bit leaves with the rest of the temporary mode.
 #[cfg_attr(not(unix), allow(unused_variables))]
 fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
+    let extra = if fsattr::chown_privileges() {
+        0
+    } else {
+        OWNER_WRITE
+    };
     let mut opts = fs::OpenOptions::new();
     opts.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        let extra = if fsattr::chown_privileges() {
-            0
-        } else {
-            OWNER_WRITE
-        };
         opts.mode((mode & !GROUP_AND_OTHER) | extra);
     }
-    opts.open(target)
+    let file = opts.open(target)?;
+    top_up_extra(&file, extra);
+    Ok(file)
+}
+
+/// Put the extra owner-write bit on if the `open` did not manage it.
+///
+/// The mode handed to `open` is narrowed by the umask, which can perfectly well
+/// include `0o200` — `umask 0222` is unusual but legal, and under it the bit
+/// asked for at creation simply does not arrive. Asking is therefore not the
+/// same as having, and a move of a read-only file under such a umask carries no
+/// extended attributes at all: every `setxattr` onto the copy is refused by
+/// `xattr_permission`, and each refusal is reported, so what should be a silent
+/// move becomes a screenful of `Permission denied`.
+///
+/// GNU makes the same repair in the same place, immediately after the open and
+/// before any attribute is written (`copy.c:1539`), and states the fallback for
+/// when even that fails: *"if that fails give up with extra permissions, letting
+/// `copy_attr` fail later."* Which is why both failures here are discarded — the
+/// step is an optimisation of a permission check, and the thing it exists to
+/// make possible reports its own failure with a better sentence than this
+/// function could.
+///
+/// Nothing has to take the bit off again. [`preserve_onto_file`]'s closing
+/// [`fsattr::copy_permissions`] writes the source's mode absolutely, so the
+/// temporary widening leaves with the rest of the temporary mode — that is
+/// `copy.c:1672`'s `if (x->preserve_mode || x->move_mode)` claiming the chain
+/// before GNU's own `extra_permissions` branch can be reached.
+fn top_up_extra(file: &fs::File, extra: u32) {
+    if extra == 0 {
+        return;
+    }
+    let Ok(meta) = file.metadata() else {
+        // See above: a descriptor opened a moment ago has no reachable stat
+        // failure, and the fallback for one is the same as for a refused chmod.
+        return;
+    };
+    let now = fsattr::permission_bits(&meta);
+    if now | extra != now {
+        // Discarded deliberately; see above.
+        let _ = fsattr::set_mode(On::File(file), now | extra);
+    }
 }
 
 /// `S_IRWXG | S_IRWXO` — the bits [`create_destination`] holds back until the
@@ -2604,8 +2645,8 @@ fn create_destination(target: &Path, mode: u32) -> io::Result<fs::File> {
 const GROUP_AND_OTHER: u32 = 0o077;
 
 /// `S_IWUSR` — the bit [`create_destination`] adds so the extended attributes
-/// can be written onto a read-only file.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// can be written onto a read-only file, and [`top_up_extra`] re-adds if the
+/// umask took it off again.
 const OWNER_WRITE: u32 = 0o200;
 
 /// Carry the source's times, owner and mode onto the copy, reporting what would

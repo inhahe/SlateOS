@@ -564,6 +564,36 @@ MUTATIONS = [
         # measurement bounds.
         ["no_pass_paints_outside_the_region_it_owns"],
     ),
+    (
+        "a sidebar row is shortened until the trigger dot does not fit it",
+        "        let row = (font * 2.2).max(14.0);",
+        "        let row = (font * 0.4).max(9.0);",
+        # The trigger dot is a fill of size `small * 0.8` centred in a row of
+        # height `row - 2.0`, and a fill cannot refuse the way `centre_line`
+        # can.  Nothing at that site relates the two numbers; they are safe
+        # only because `Layout` derives both from `font` and they happen never
+        # to meet.  This closes the gap.
+        #
+        # Note which test is expected: *not* the containment sweep.  The dot
+        # clears the row at every window size in the grid, so containment
+        # passes for a reason it never states and would keep passing here.
+        # The assertion that notices is the one written where the relationship
+        # actually lives.  See lesson 109 shape 28.
+        ["a_sidebar_row_is_taller_than_the_marks_it_carries"],
+    ),
+    (
+        "the row keeps holding the dot, but with almost nothing to spare",
+        "        let row = (font * 2.2).max(14.0);",
+        "        let row = (font * 1.0).max(14.0);",
+        # The same edit, stopped just short of a fault: the dot still fits, by
+        # about 2.6 points instead of about 11.  Without the margin assertion
+        # this row survives, and the test is then one edit away from being all
+        # that stands between the dot and the row below it, while still
+        # reporting itself green.  A bound that is merely still-true is not the
+        # same as a bound that is still slack, and this row is what keeps the
+        # difference tested.
+        ["a_sidebar_row_is_taller_than_the_marks_it_carries"],
+    ),
 ]
 
 if __name__ == "__main__":

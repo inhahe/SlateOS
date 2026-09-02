@@ -553,8 +553,8 @@ MUTATIONS = [
         # not physically cover goes on answering clicks the user cannot see the
         # targets of.
         "the open sheet covers only its own pixels, not the window",
-        "        f.hit(Target::ToggleHelp, l.window);",
-        "        f.hit(Target::ToggleHelp, h);",
+        "        }\n        f.hit(Target::ToggleHelp, l.window);",
+        "        }\n        f.hit(Target::ToggleHelp, h);",
         [
             "while_the_sheet_is_up_every_point_in_the_window_belongs_to_it",
             "a_click_anywhere_while_the_sheet_is_up_closes_it_and_reaches_nothing_behind",
@@ -583,8 +583,8 @@ MUTATIONS = [
     ),
     (
         "the header says the zoom while the program is paused",
-        '        let right = if self.paused {\n            "paused".to_string()\n        } else {\n            trim_zoom(self.zoom())\n        };',
-        "        let right = trim_zoom(self.zoom());",
+        '        let right_text = if self.paused {\n            "paused".to_string()\n        } else {\n            trim_zoom(self.zoom())\n        };',
+        "        let right_text = trim_zoom(self.zoom());",
         ["the_header_says_the_zoom_and_says_paused_instead_when_it_is"],
     ),
     (
@@ -657,6 +657,271 @@ MUTATIONS = [
         "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
         "        self.frame(width, height).into_tree()",
         ["rendering_a_frame_is_what_sets_the_size_the_next_click_is_read_against"],
+    ),
+    # ── C-CENTRING-IS-NOT-A-BOUND (lesson 109) ────────────────────────────
+    #
+    # `band.y + (band.h - size) / 2.0` is an offset, not a bound.  When the
+    # band is shorter than the thing being centred in it the slack goes
+    # negative and the run is placed *above* the band's top -- and because it
+    # spills symmetrically, half of it leaves each end, so no amount of
+    # squinting at the picture shows which band the fault is in.  Every one of
+    # this app's ten centring sites now goes through `centre_line`, which
+    # answers `None` rather than a negative offset.
+    #
+    # Two of the rows below break bounds that were, until this campaign,
+    # enforced only by a *clip*.  A clip is invisible to any test that reads
+    # the drawing commands: the drawing is wrong, the picture is right, and
+    # nothing can tell.  That is the worst shape a bound can have, and it is
+    # why `draw_pane`'s seam filler and the ruler's reading are cut in the
+    # drawing now instead of being left to `f.clip`.
+    (
+        "a band shorter than the run is centred anyway rather than refused",
+        "    (!band.is_empty() && band.h >= height).then(|| band.y + (band.h - height) / 2.0)",
+        "    Some(band.y + (band.h - height) / 2.0)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a band with no area at all is treated as a band",
+        "(!band.is_empty() && band.h >= height)",
+        "(band.h >= height)",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "the slack is not halved, so every run sits at its band's foot",
+        ".then(|| band.y + (band.h - height) / 2.0)",
+        ".then(|| band.y + (band.h - height))",
+        ["centre_line_refuses_a_band_it_cannot_fill_rather_than_going_negative"],
+    ),
+    (
+        "a run is pushed into a column with no room left in it",
+        "    if size <= 0.0 || text_str.is_empty() || limit <= 0.0 {",
+        "    if size <= 0.0 || text_str.is_empty() {",
+        # Retargeted.  The sweep test was the nominal owner and the mutation
+        # survived it: after the centring rewrite no band in the layout produces
+        # a limit of zero any more, so the arm is real but unreachable from a
+        # window size.  The guard is a promise `push_text` makes to every
+        # caller, so it is now tested on `push_text` directly.  Widening the
+        # sweep until it manufactured a zero limit would have been testing the
+        # layout in order to test the helper.
+        ["push_text_refuses_a_box_with_no_room_in_it"],
+    ),
+    (
+        "a run is drawn with no right-hand limit at all",
+        "        max_width: Some(limit),",
+        "        max_width: None,",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a centred run is measured without first being cut to its box",
+        "    let w = text::measure(s, size, weight).min(r.w);",
+        "    let w = text::measure(s, size, weight);",
+        ["no_pass_paints_outside_the_region_it_owns"],
+    ),
+    (
+        "a centred run is given its box's whole width as its limit",
+        "    push_text(f, x, y, s, size, color, weight, r.right() - x);",
+        "    push_text(f, x, y, s, size, color, weight, r.w);",
+        ["every_centred_string_is_stopped_at_the_right_hand_edge_of_its_box"],
+    ),
+    (
+        "a centred run is placed in a box too short to hold it",
+        "    let Some(y) = centre_line(r, line_h) else {\n        return;\n    };\n"
+        "    let x = r.x + (r.w - w) / 2.0;",
+        "    let y = r.y + (r.h - line_h) / 2.0;\n    let x = r.x + (r.w - w) / 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    (
+        "the pause notice centres one line and hangs the other off it",
+        "        let stack = line_h + small_h;",
+        "        let stack = line_h;",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the pause notice is drawn in a viewport too short for both its lines",
+        "        let Some(top) = centre_line(v, stack) else {\n            return;\n        };",
+        "        let top = v.y + (v.h - stack) / 2.0;",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the pause notice's second line is set back inside its first",
+        "            Rect::new(v.x, top + line_h, v.w, small_h),",
+        "            Rect::new(v.x, top + line_h * 0.4, v.w, small_h),",
+        ["the_pause_notice_is_drawn_whole_or_not_at_all_and_never_outside_the_viewport"],
+    ),
+    (
+        "the header's title column is a flat half of the band again",
+        "        let split = (right - reading_w - l.pad).max(left);",
+        "        let split = left + l.header.w * 0.5;",
+        ["the_header_title_gives_way_to_the_reading_rather_than_running_under_it"],
+    ),
+    (
+        "the header's title is placed in a band too short for it",
+        "        if let Some(y) = centre_line(l.header, text::line_height(size, FontWeightHint::Bold)) {",
+        "        {\n            let y = l.header.y\n                + (l.header.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    # NOT a mutation: the reading's `centre_line(l.header, line_height(small))`
+    # -> the bare offset.  It is an equivalent mutant.  `small` is
+    # `(size * 0.7).max(8.0)` and `size` is `big.min(header.h * 0.8)`; when the
+    # `.max(8.0)` floor is not binding the line is `0.931 * size` and `size` is
+    # at most `0.8 * header.h`, and when it is binding the line is 10.64px
+    # against the 11px `shows` will not go below.  So the `None` arm is
+    # unreachable at every band, and the mutant paints nothing outside anything.
+    #
+    # It fits by a third of a pixel, though, which is not a margin, so the guard
+    # stays -- the floor is a literal that knows nothing about the band, and it
+    # is the term that bites first if any of the three numbers move.  What
+    # replaces the row is `a_header_tall_enough_to_be_shown_always_says_what_the
+    # _zoom_is`, which fails the moment the arm becomes reachable.  A guard no
+    # test can enter needs a proof that it cannot be entered, not a mutation
+    # that cannot fail.
+    (
+        "both header runs are centred by the larger one's line height",
+        "        if let Some(y) = centre_line(l.header, text::line_height(small, FontWeightHint::Bold))",
+        "        if let Some(y) = centre_line(l.header, text::line_height(size, FontWeightHint::Bold))",
+        ["a_band_tall_enough_for_a_line_draws_one"],
+    ),
+    (
+        "the readout's swatch is a bare fraction of a band it may overrun",
+        "        let swatch = (l.info.h * 0.6).clamp(0.0, 18.0).min(l.info.h);",
+        "        let swatch = 18.0;",
+        ["no_pass_paints_outside_a_band_squeezed_below_anything_the_layout_hands_out"],
+    ),
+    # `centre_line(l.info, swatch).unwrap_or(l.info.y)` carries no row, and
+    # deliberately.  `swatch` is `(info.h * 0.6).clamp(0.0, 18.0).min(info.h)`,
+    # so `swatch <= info.h` is arithmetic and the `None` arm cannot be reached
+    # by any band; a mutation replacing the call with the bare offset is an
+    # identity, and would sit in the table for ever as a survivor that means
+    # nothing.  The precedent is this app's colour-matrix clamp, dropped for
+    # the same reason.  What guards the site is the `.min(l.info.h)` above,
+    # which has its own row.
+    #
+    # The three rows that used to live here -- against `stack`, `two_rows` and
+    # `centre_line(l.info, stack)` -- are gone with the code they broke.  All
+    # three survived the sweep, and the reason was not a missing test: the
+    # status was stacked *under* the reading behind a guard that no window size
+    # satisfies, so the entire second row was unreachable.  See the commit
+    # "the status line was never once drawn".  The status now shares the
+    # reading's row, and these are the bounds that arrangement actually has.
+    (
+        "the status takes the whole row instead of its own half of it",
+        "        let mid = left + ((run_right - left) * 0.5).max(0.0);",
+        "        let mid = left;",
+        ["a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row"],
+    ),
+    (
+        "the status is measured but never cut to the room it has",
+        "        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular)\n            .min((run_right - mid - l.pad).max(0.0));",
+        "        let status_w = text::measure(&self.status, status_size, FontWeightHint::Regular);",
+        ["a_long_status_is_cut_rather_than_taking_the_readings_half_of_the_row"],
+    ),
+    (
+        "the status is set against the reading with no gap between them",
+        "        let gap = if status_w > 0.0 { l.pad } else { 0.0 };",
+        "        let gap = 0.0;",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
+    ),
+    (
+        "the status hangs from the reading's line top rather than its centre",
+        "            top + (line_h - status_h) / 2.0,",
+        "            top,",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
+    ),
+    (
+        "the status is drawn only when a band could have stacked it",
+        "        push_text(\n            f,\n            status_x,",
+        "        if line_h + status_h > l.info.h {\n            return;\n        }\n        push_text(\n            f,\n            status_x,",
+        ["a_status_worth_reporting_reaches_the_frame_at_every_ordinary_window_size"],
+    ),
+    # NOT A MUTATION: the help sheet's `inner.is_empty()` early return, and the
+    # `.intersect(h)` on each row.  Both were rows here; both survived the full
+    # sweep; both are equivalent mutants, and the sweep is what proved it rather
+    # than an argument made in front of it.
+    #
+    # The early return.  When the sheet is narrower than its own two margins
+    # `inner.w` goes negative, and *every* box built from it downstream --
+    # title, each row, footer -- is then a rectangle of negative width.
+    # `Rect::intersect` answers `None` for any zero-or-negative extent, so each
+    # of those sites already refuses on its own.  Deleting the early return
+    # therefore changes nothing observable: the same two fills, the same hit box,
+    # not one run either way.  The old comment beside it called it "the bound",
+    # which was the actual error -- a reader who believed that would feel free to
+    # loosen the intersects, which are what really hold.  The comment now says
+    # what it is: a fast path in front of four refusals that do the work.
+    #
+    # The row cut.  `room` is measured down from `h.bottom()`, so the last row
+    # ends at `h.bottom() - foot` by arithmetic and no row can hang off the
+    # sheet for the cut to trim.  This is a bound held by arithmetic elsewhere,
+    # which is exactly the grade-C shape lesson 109 shape 28 warns about, so it
+    # does not get a comment recording the coincidence -- it gets
+    # `the_help_sheets_rows_are_inside_it_before_they_are_cut_to_it`, which
+    # fails the moment an edit to `room` or `top` makes the cut load-bearing.
+    # The `intersect` stays: it is what keeps the rows safe *independently* of
+    # that arithmetic, and a guard being currently-inert is not a reason to
+    # remove the thing that will catch the edit that un-inerts it.
+    #
+    # The two are listed together because they are the same judgement made twice
+    # and it is a judgement worth being able to re-check: an equivalent mutant is
+    # a claim that no input distinguishes two programs, and the honest way to
+    # record one is to say which input space was searched.  Here it is the full
+    # `help_sheets()` sweep -- every window in `WINDOWS`, each with every
+    # `squeezes()` variant of its own rectangle.
+    (
+        "the sheet's title is placed inside its panel rather than cut to it",
+        "        if let Some(box_) = Rect::new(left, h.y + l.pad, inner.w, title_h).intersect(h)\n            && let Some(y) = centre_line(box_, title_h)\n        {",
+        "        if let Some(box_) = Some(Rect::new(left, h.y + l.pad, inner.w, title_h))\n            && let Some(y) = Some(box_.y)\n        {",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's footer is placed inside its panel rather than cut to it",
+        "        if let Some(box_) = Rect::new(left, h.bottom() - foot, inner.w, small_h).intersect(h)\n            && let Some(y) = centre_line(box_, small_h)",
+        "        if let Some(box_) = Some(Rect::new(left, h.bottom() - foot, inner.w, small_h))\n            && let Some(y) = Some(box_.y)",
+        ["every_run_the_help_sheet_draws_stays_inside_its_panel"],
+    ),
+    (
+        "the sheet's rows are drawn in a strip too short for their own type",
+        "            let Some(y) = centre_line(row, text::line_height(size, FontWeightHint::Bold)) else {\n                continue;\n            };",
+        "            let y = row.y + (row.h - text::line_height(size, FontWeightHint::Bold)) / 2.0;",
+        # Retargeted.  Containment was the nominal owner and could never have
+        # been: the row's type is sized *from* the strip, so a strip too short
+        # for its line is short by at most eight points, and eight points of
+        # overhang cannot clear the sheet's own title and footer margins.  The
+        # rows do not escape -- they land on each other.  Both runs stay inside
+        # the panel and both are unreadable, which is a fault containment is
+        # structurally unable to describe.
+        ["no_two_help_rows_are_drawn_on_top_of_each_other"],
+    ),
+    (
+        "the sheet's two columns are two independent guesses again",
+        "        let split = left + inner.w * 0.42;",
+        "        let split = h.x + h.w * 0.42;",
+        # Retargeted, and for a subtler reason than the row above.  Both columns
+        # are placed from this one number, so taking it from the panel's width
+        # instead of the column's moves the keys and the description *together*:
+        # they stay consistent with each other and the pair simply slides into
+        # the sheet's left margin.  Nothing crosses, nothing leaves the panel,
+        # and a test measuring runs against the panel sees a correct picture.
+        # The box with the claim on it is the column, so the column is what the
+        # runs have to be measured against.
+        ["every_run_the_help_sheet_draws_stays_inside_its_inner_column"],
+    ),
+    (
+        "the ruler's reading is left to the clip instead of cut to its pane",
+        "        if let Some(box_) = Rect::new(\n            f32::midpoint(x1, x2) - w / 2.0,\n            f32::midpoint(y1, y2) - line_h - 2.0,\n            w,\n            line_h,\n        )\n        .intersect(pane)\n        {",
+        "        if let Some(box_) = Some(Rect::new(\n            f32::midpoint(x1, x2) - w / 2.0,\n            f32::midpoint(y1, y2) - line_h - 2.0,\n            w,\n            line_h,\n        )) {",
+        ["the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in"],
+    ),
+    (
+        "the ruler's reading is allowed the pane's whole width from wherever it starts",
+        "                box_.right() - box_.x,\n            );\n        }\n        f.unclip();",
+        "                pane.w,\n            );\n        }\n        f.unclip();",
+        ["the_rulers_reading_is_cut_to_the_pane_the_measurement_was_taken_in"],
+    ),
+    (
+        "the magnified blocks spend their seam filler outside the pane",
+        "                    width: (bw + 0.5).min(pane.right() - bx),\n                    height: (bh + 0.5).min(pane.bottom() - by),",
+        "                    width: bw + 0.5,\n                    height: bh + 0.5,",
+        ["no_pass_paints_outside_the_region_it_owns"],
     ),
 ]
 

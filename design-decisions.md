@@ -47803,6 +47803,216 @@ from `gui/toolkit/src/lib.rs`.
 
 ---
 
+## 575. WiFi starts as two shared root crates — `net80211` for the wire format and `aes` for the cipher — before any radio exists to run them
+
+**Date:** 2026-09-01
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** The roadmap says the WiFi supplicant (the program that types the
+password into a wireless network for you) is done. It is not: what exists
+turns a password into a key and stops there. There is no code anywhere in the
+tree that can read or write a single WiFi packet, and — checked, not assumed —
+no AES anywhere either, AES being the cipher every modern WiFi network's
+security is built on. The decision is *where the missing pieces go*: two new
+small libraries at the top of the tree, `net80211/` and `aes/`, rather than
+code inside the supplicant or inside the future wireless driver. Nothing
+observable changes yet; this is the foundation the rest of WiFi is built on.
+
+**Why this is the first thing built, and not the radio.** Operator decision
+§264 puts WiFi ahead of Mesa and Chromium, on the grounds that a machine that
+cannot reach a network has nothing for a browser to display. Within WiFi,
+the wire format is the part that has no prerequisites: a beacon frame has
+the same layout whether it arrives from real hardware, from a simulated
+radio, or from a test vector typed into a unit test. So it can be built,
+and fully tested, while the thing that would carry it does not exist. The
+radio itself is kernel-side and therefore lane A's; a request for a
+`mac80211_hwsim` equivalent follows this entry rather than preceding it, so
+that it can cite working code instead of a plan.
+
+**Why `net80211` is a root crate and not a module of the supplicant.** Three
+separate consumers need exactly these bytes, and they live in three different
+places:
+
+| Consumer | Where | Needs it for |
+|---|---|---|
+| the wireless driver | `kernel/` — lane A | building probe requests and parsing beacons, before any of the rest of the stack exists |
+| the supplicant | `userspace/wpa` — lane B | the EAPOL-Key frames its state machine has nothing to run over today |
+| the netstack | `services/netstack` | seeing a data frame as Ethernet once the LLC/SNAP shim is off |
+
+This is precisely the shape §610 settled for DEFLATE, arrived at from the
+other direction: there, two copies already existed and one was promoted;
+here, no copy exists yet and the promotion is done up front. The lesson §610
+draws — that a parser of untrusted input is the worst thing to duplicate,
+because each copy is independently an attack surface and a fix to one leaves
+the other broken — applies with more force here, not less. Every byte
+`net80211` parses arrives from the air, from anyone, unauthenticated, before
+any key has been agreed. A malformed frame is the *expected* case.
+
+**Why `aes` is a separate crate from `net80211`.** WiFi is its first caller
+but plainly not its last: disk encryption already names `Aes256Xts` in
+`kernel/src/fs/diskencrypt.rs` with nothing behind it, and TLS will want the
+same cipher. Folding it into `net80211` would mean the disk encryptor
+eventually depends on a WiFi library, which is the same inversion §610
+rejected. The `crc32` crate's own history is the argument: that polynomial
+had been written **four separate times** before it was factored out. A block
+cipher is a far worse thing to get four copies of than a checksum — a
+mistyped S-box entry does not produce a detectably wrong answer, it produces
+a cipher that interoperates with nothing, and the symptom looks like a
+network fault rather than a crypto bug.
+
+**Members, not `exclude`d.** `netproto`, `netipc`, `netring` and `tzrules` are
+excluded from the workspace, and mirroring them here would have been the
+obvious move — it was in fact the original plan. It is wrong. Those four are
+excluded for one specific reason: they link into `services/netstack`, which is
+built as a bare-metal target *outside* the workspace. Every consumer of
+`net80211` and `aes` is inside it. And exclusion has a real cost: an excluded
+crate does not inherit `[lints] workspace = true`, so it silently opts out of
+the tree's `indexing_slicing` / `arithmetic_side_effects` / `unwrap_used`
+lints — the exact lints that matter most in a parser of hostile input and in
+a cipher. Membership is the default; exclusion needs the netstack-shaped
+excuse.
+
+**The AES here is not constant-time, deliberately, and says so.** It uses
+table lookups indexed by key-dependent bytes, which leak through the cache to
+anything that can measure it. Constant-time AES on x86 means AES-NI, which
+means `unsafe` intrinsics, and both crates are `#![forbid(unsafe_code)]`
+today. The tradeoff is acceptable for what actually calls it — unwrapping a
+group key once per handshake, and keys at rest — and would not be for bulk
+encryption on a machine running untrusted local code. That boundary is
+written in the module docs at the top of the crate, not buried in a comment,
+because the next caller is the one at risk from it. Revisit when either a
+bulk-data caller appears or the tree grows a place where `unsafe` intrinsics
+are allowed.
+
+**The inverse S-box is derived, not transcribed.** `INV_SBOX` is built at
+compile time by inverting `SBOX` in a `const` block. Two hand-typed 256-entry
+tables are two chances to make a typo that no test catches unless it happens
+to touch the wrong byte; one table plus an inversion makes the entire class of
+error unrepresentable, and a test asserts the round-trip on all 256 values
+anyway.
+
+**Where it lives:** `net80211/` — `frame` (MAC header), `mgmt` (beacon, auth,
+assoc, deauth bodies), `ie` (information elements), `rsn` (the security
+element), `llc` (the SNAP shim to Ethernet), `fcs` (the frame checksum, via
+`crc32`), `eapol` (802.1X key frames and the 4-way handshake classifier).
+`aes/` — `lib` (the cipher) and `keywrap` (RFC 3394, how the group key
+arrives inside message 3). Registered in the root `Cargo.toml` `members`, in
+`scripts/pre-boot.py`'s lane map and `scripts/which-lane.py`, and in the
+`roadmap.md` ownership table, all as lane C.
+
+---
+
+## 576. The supplicant's defence against key reinstallation is a return-type variant, not a flag the caller is trusted to read
+
+**Date:** 2026-09-01
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** When a WiFi station finishes negotiating with an access point,
+it installs the encryption key it just agreed. If it ever installs that same
+key a *second* time, the encryption silently becomes breakable — this is a
+real published attack, KRACK. The trouble is that the access point routinely
+re-sends the last message of the negotiation when it does not hear the reply,
+so "install the key" and "you have already installed the key, just answer
+again" arrive as *identical frames*. Something has to tell those two cases
+apart. The decision is about where that distinction lives: in a boolean the
+caller is expected to check, or in the shape of the value the caller gets
+back — such that the code will not compile unless the caller has considered
+both cases.
+
+**Decision:** `Handshake::on_eapol` returns `Result<Outcome, Error>` where
+`Outcome` is a three-variant enum:
+
+```rust
+pub enum Outcome {
+    Reply { len: usize },           // send this; the handshake continues
+    Complete { len: usize },        // send this, and install the keys
+    Retransmission { len: usize },  // send this, and do NOTHING else
+}
+```
+
+Only `Complete` authorises installing a key. A repeated message 3 — the
+attack's vehicle — returns `Retransmission`, which carries a reply to send
+and no permission to touch the keys.
+
+**Why this is a decision and not an obvious call.** The alternative is
+smaller and reads perfectly well:
+
+```rust
+pub struct Outcome { pub len: usize, pub install: bool }
+```
+
+That is one field instead of three variants, needs no `match`, and is the
+shape most C supplicants use. It has a genuine advantage: a caller who wants
+"just send the bytes" writes `out[..o.len]` with no ceremony at all, whereas
+the enum makes every caller name three cases even when two of them do the
+same thing.
+
+The reason it lost is what happens to each shape under the mistake actually
+being guarded against. With the boolean, forgetting `if o.install` is a
+*missing* line — nothing in the type system, the compiler, or a code review
+diff shows an absence. The resulting bug is invisible in testing, because a
+supplicant that installs the key twice associates perfectly and passes every
+functional test; the only symptom is that the traffic is decryptable by
+someone listening. With the enum, the same mistake is a non-exhaustive
+`match`, which is a compile error. The class of bug is converted from
+"silent, security-critical, undetectable by testing" into "will not build".
+
+That trade — a little ceremony at every call site, in exchange for making
+one specific catastrophic error unrepresentable — is worth taking precisely
+because the error is undetectable any other way. It would not be worth
+taking for a mistake that a test could catch.
+
+**Why the third variant, rather than just two.** `Retransmission` could have
+been folded into `Reply`, since both mean "send this and continue". They are
+kept apart because they mean different things to a caller that logs or
+counts: a burst of `Retransmission`s is the signature of either a lossy link
+or an attacker replaying frames, and a supplicant that cannot distinguish
+them from normal progress cannot report either. The variant costs nothing —
+a caller that does not care writes `Reply | Retransmission` in one arm.
+
+**The escape hatch, and why it is not the primary API.**
+`Outcome::installs_keys()` exists and returns the boolean. It is there for a
+caller genuinely writing a dispatch table, and it is documented as the less
+safe of the two spellings. Making it the *only* spelling would have been the
+rejected design; making it available alongside the enum costs nothing,
+because a caller who reaches for it has had to type its name and read its
+doc comment, which is exactly the moment of attention the boolean-only
+design never provides.
+
+**Two smaller calls recorded here rather than separately, both with the same
+character — the type refuses to let the caller be careless:**
+
+- **The station's nonce is supplied by the caller, not generated.** `new`
+  takes `snonce: [u8; 32]`. `net80211` is `no_std` and has no entropy source,
+  and inventing one — a counter, a clock — would produce a supplicant that
+  works in every test and derives a predictable key in the field. Requiring
+  the caller to pass it makes the dependency on real randomness impossible to
+  overlook. The doc comment says why, at the parameter.
+- **Both RSN elements are borrowed slices, not parsed structures.**
+  `Config` holds `sta_rsn_element: &[u8]` and `ap_rsn_element: &[u8]`.
+  Message 3 must be compared against the beacon's element *byte for byte*;
+  comparing parsed structures would compare this parser's opinion of two
+  elements rather than the elements, and a downgrade hidden in a field the
+  parser ignores would compare equal. The borrow also keeps the handshake
+  allocation-free, but that is a secondary benefit, not the reason.
+
+**Where it lives:** `net80211/src/supplicant.rs` — `Outcome`, `Handshake`,
+`Config`. Tested by `a_retransmitted_message_three_is_answered_but_does_not_reinstall_the_key`,
+`a_replayed_group_message_cannot_reinstall_the_group_key` and
+`a_downgraded_rsn_element_in_message_three_is_caught`. The rationale is
+repeated in the module docs, since that is where a driver author will read
+it, and in `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
+since the driver is the code that performs the install.
+
+---
+
+
 ## 610. Code that two lanes both need is promoted to a root leaf crate by the lane that owns the better copy — not duplicated, and not handed over
 
 *Date: 2026-08-26*

@@ -104781,7 +104781,7 @@ documented rather than silent, which is the difference that matters.
 
 ---
 
-### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED TWICE (the three instances are FIXED; the *domain* half of the missing test landed 2026-09-01 in `63936036a`/`58d6caebe` as `fs::conformance`; the *declared-value* half — the half that would actually have caught this bug — landed 2026-09-01 in `5fa72bc13`. Still OPEN only because the trigger to close requires a **green boot**, and neither the new layer nor the backends it drives have reached QEMU yet. See the two "Narrowed" sections below.)**
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED TWICE (the three instances are FIXED; the *domain* half of the missing test landed 2026-09-01 in `63936036a`/`58d6caebe` as `fs::conformance`; the *declared-value* half — the half that would actually have caught this bug — landed 2026-09-01 in `5fa72bc13`. Now **✅ FIXED 2026-09-02** — the green boot the trigger required happened, and both layers ran in QEMU. See the two "Narrowed" sections below and the Resolution at the end.)**
 
 **Lane:** A
 
@@ -104957,6 +104957,58 @@ host has been at its Windows commit limit under three-lane concurrent builds
 (see `A-BOOT-RECORDER-FILES-A-HOST-FORK-FAILURE-AS-A-KERNEL-TIMEOUT`). Do not
 close this on the strength of a clean type-check: every assertion here is
 boot-time, so an unrun harness has demonstrated nothing.
+
+> **Resolution — 2026-09-02, lane A.** The harness reached QEMU and passed.
+> The paragraph immediately above is what set the bar, and it is worth
+> recording that the bar was met on its own terms rather than waived: this is
+> closed on a boot, not on a type-check.
+>
+> **The evidence.** Boot test PASSED end-to-end (`child exited: PASS`, 5192 s,
+> tree at `d9e224706`), and in `build/serial-test.txt`:
+>
+> ```
+> [fsconform] Running cross-backend FileMeta conformance...
+> [fsconform] Conformance passed (2347 clause(s) over 521 object(s), 0 voided).
+> ```
+>
+> Zero `[fsconform] FAIL` lines anywhere in the 47,087-line serial log. The
+> boot recorder logged it as a tracking run, not an experiment, so it extends
+> the streak (now 2 consecutive clean) — which matters here because the
+> `--no-rootfs` experiments deliberately test *less* and are excluded from
+> exactly this kind of claim.
+>
+> **Why that summary line is sufficient, given this entry's own thesis.** The
+> thesis is that a test which does not run proves nothing, so a bare "passed"
+> would be a weak thing to close on — the pass line names no backend. It is
+> sufficient because the harness cannot emit it while a backend is missing:
+>
+> | Failure mode | What `check_fixture_backends` does |
+> |---|---|
+> | A backend absent from the run | Impossible — `FIXTURES` is a fixed 4-entry table (`btrfs`, `f2fs`, `ntfs`, `zfs`) iterated unconditionally |
+> | A fixture that will not build or mount | `r.failed += 1` — a **failure, not a skip**, because the images are byte arrays built from constants and depend on nothing about the boot |
+> | A fixture that declares an *empty* mode table | `r.failed += 1`, with the reason given in the source as "the shape of `A-GATES-SILENTLY-STOPPED-CHECKING`" — opting out of the only layer that catches a narrowing, while still appearing in the pass line |
+>
+> So "passed, 0 voided" entails that all four backends built, mounted, and
+> checked a non-empty declared table. The third row is the one that makes this
+> closable: it is the guard against precisely the failure this entry is about,
+> written into the harness rather than left to a reader to notice.
+>
+> **What was actually proven.** `check_declared` asserts
+> `meta.permissions == mode & !may_drop` — equality, not superset — over
+> fixtures whose objects carry bits *above* `0o777` (btrfs and zfs
+> `/hello.txt` at `0o104644` setuid and `/sub` at `0o043755` setgid+sticky,
+> f2fs the same two as per-inode overrides). A driver that masked to `0o777`,
+> which is the original bug, now fails. So does one that *invented* a bit,
+> which is why the check is equality: a spurious setuid bit is a privilege
+> granted to a file that never had one.
+>
+> **Not closed:** the `0o777` narrowing as a *class* across all thirteen
+> `FileMeta` implementations. This closes it for the four that build a
+> synthetic volume — including all three that had the bug. The nine that do
+> not build one are still only covered by the domain layer, which by this
+> entry's own analysis "would **not** have caught the btrfs/zfs/f2fs bug."
+> Extending the declared-value layer to a backend needs that backend to grow a
+> synthetic fixture first; that is the trigger if one ever does.
 
 ### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
 

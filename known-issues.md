@@ -108398,7 +108398,13 @@ would pin is lane B's to accept.
 
 ---
 
-## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — OPEN 2026-09-02 (lane C)
+## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — PARTIALLY FIXED 2026-09-02 (lane C)
+
+**Physical-device half FIXED 2026-09-02** — design-decisions.md §803,
+`gui/vulkan/src/unknown.rs`. That is the WSI family and most other extension
+commands, and it is the half that was blocking real applications.
+**Instance-level half still OPEN**; see "What remains" at the bottom. The
+original report follows unchanged.
 
 **In short:** As of design-decisions.md §802 the Vulkan loader answers
 "which optional add-ons are available?" with the union of every installed
@@ -108490,5 +108496,47 @@ exactly the empty-list stub §578 refused to write.
 **Where it is:** `get_instance_proc_addr` in `gui/vulkan/src/entry.rs`;
 the nine-name match in `gui/vulkan/src/physical.rs`; the promise in
 `enumerate_instance_extension_properties` and `gui/vulkan/src/global.rs`.
+
+### What was fixed, 2026-09-02
+
+The first bullet above, exactly as described. `gui/vulkan/src/unknown.rs` adds a
+fixed pool of 128 `#[unsafe(naked)]` trampolines; `get_instance_proc_addr` now
+falls through to `unknown_across`, which asks every driver behind the instance
+through `vk_icdGetPhysicalDeviceProcAddr`, assigns the name a slot if any of
+them answered, records each driver's function in that driver's own table, and
+hands back the slot's trampoline. Full reasoning in design-decisions.md §803.
+
+An application enabling `VK_KHR_surface` now gets a working
+`vkGetPhysicalDeviceSurfaceSupportKHR` and its siblings.
+
+Two limitations came with it and are deliberate, not oversights:
+
+- **Drivers below interface version 4 contribute nothing to this path**, even
+  when they do export the symbol. `vkGetInstanceProcAddr` answers for
+  device-level commands too and does not say which kind it gave, so using it
+  here would eventually hand a trampoline a `VkDevice` and read two words out
+  of the middle of the driver's own object. There is no safe way to ask such a
+  driver the question, so it is not asked.
+- **The pool is 128 distinct physical-device extension command names**, never
+  recycled. The 129th is reported missing rather than stealing an earlier
+  slot, because a reassigned slot would silently turn one command into another
+  in an application that did nothing wrong. Raising the ceiling is a one-line
+  change if a real machine ever approaches it; the whole of WSI is a
+  single-figure number of names.
+
+### What remains
+
+The **instance-level** half of the second bullet, unchanged. A command whose
+first argument is a `VkInstance` still cannot be forwarded, because the loader
+holds several driver instances behind one handle and must decide *per command*
+which of them answers — a policy, not a forwarding rule, and not something a
+trampoline can encode. `vkCreateDebugUtilsMessengerEXT`,
+`vkDestroySurfaceKHR` and the platform `vkCreate*SurfaceKHR` calls are in this
+group, so WSI is reachable but not yet complete.
+
+The Khronos loader generates one trampoline per command from `vk.xml`. Ours
+would need the same, and it is the point at which "declare no Vulkan
+structures" (§802) finally becomes untenable — a surface-creation command takes
+a structure the loader has to read to know which platform it is for.
 
 ---

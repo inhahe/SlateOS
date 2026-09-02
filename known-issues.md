@@ -104610,7 +104610,7 @@ documented rather than silent, which is the difference that matters.
 
 ---
 
-### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED 2026-09-01 in `63936036a`/`58d6caebe` (the three instances are FIXED; the *domain* half of the missing test now exists as `fs::conformance` and runs on every boot; the *declared-value* half — the half that would actually have caught this bug — does not yet. See "Narrowed" below.)**
+### A-NO-CROSS-BACKEND-METADATA-CONFORMANCE-TEST. `FileMeta` is a contract with thirteen implementations and no test that reads the contract, so three of them reported a nine-bit mode under a twelve-bit promise for months — 2026-09-01 — **Status: OPEN, NARROWED TWICE (the three instances are FIXED; the *domain* half of the missing test landed 2026-09-01 in `63936036a`/`58d6caebe` as `fs::conformance`; the *declared-value* half — the half that would actually have caught this bug — landed 2026-09-01 in `5fa72bc13`. Still OPEN only because the trigger to close requires a **green boot**, and neither the new layer nor the backends it drives have reached QEMU yet. See the two "Narrowed" sections below.)**
 
 **Lane:** A
 
@@ -104709,6 +104709,83 @@ therefore plumbing, not fixture authoring:
 **Trigger to close:** step 2 landing for btrfs, zfs and f2fs — the three
 backends that had the bug — with the setuid file surviving the round trip on a
 green boot.
+
+#### NARROWED FURTHER 2026-09-01 — the declared-value layer landed (`5fa72bc13`)
+
+**What landed.** Step 2 above, for all four backends that build a synthetic
+volume: btrfs, f2fs, ntfs and zfs. Each backend's `tests.rs` now exports
+
+```rust
+pub(crate) fn conformance_fixture()
+    -> KernelResult<(Box<dyn FileSystem>, &'static [Declared])>
+```
+
+which mounts the volume that backend already built and hands back a table of
+`Declared { path, mode, may_drop }` rows. `conformance::check_declared`
+asserts `meta.permissions == mode & !may_drop` — **equality, not superset**,
+because a superset test would pass a driver that *invented* a bit, and a
+spurious setuid bit is a privilege granted to a file that never had one.
+
+`may_drop` exists for one real case: these fixtures mount read-only, and a
+read-only mount legitimately withholds the write bits. It does not make a
+setuid binary not-setuid, it makes it unmodifiable — hence `may_drop: 0o222`
+and not a blanket `0o777`.
+
+The fixtures were changed to write bits *above* `0o777`, which is the whole
+point: btrfs `/hello.txt` `0o100644` → `0o104644` (setuid) and `/sub`
+`0o040755` → `0o043755` (setgid+sticky), zfs the same two objects, f2fs the
+same two as per-inode overrides rather than in its shared `InodeSpec::file()`
+/ `dir()` constructors — a fixture in which *every* object is setuid cannot
+distinguish "preserved this file's bits" from "returns one mode for
+everything." The paired in-file assertions moved with them in the same commit
+(`0o444` → `0o4444`, `0o555` → `0o3555`).
+
+When the assertion fails, the harness additionally recognises the specific
+shape `got == want & 0o777 && want & !0o777 != 0` and names it as the
+`& 0o777` narrowing this layer exists to catch, so the next occurrence is
+diagnosed rather than merely detected.
+
+**A second gap closed on the way, which was arguably the larger one.** Layer
+one had never run over *any* on-disk driver — only memfs and live VFS mounts.
+On a diskless boot, which is every boot of the boot test, none of the four
+backends whose `FileMeta` actually diverged were being checked at all.
+`check_fixture_backends` now runs `check_tree` over each synthetic volume
+before `check_declared`, so the domain layer finally covers the
+implementations it was written for.
+
+**Three structural guards**, on the same principle as the vacuous-run check
+above — a harness that reports a pass it did not earn is worse than none:
+
+- a fixture that fails to build or mount is a **failure**, not a skip: it is a
+  byte array assembled from constants and depends on nothing about this boot,
+  so there is no environment in which "could not build it" is a legitimate
+  abstention;
+- an **empty `Declared` table is a failure**, because a table with no rows
+  catches no narrowing while still reporting a pass — the
+  `A-GATES-SILENTLY-STOPPED-CHECKING` shape;
+- NTFS is included even though it has no on-disk Unix mode. What it pins is
+  `mod.rs:985`'s *synthesis* (`0o555` dirs / `0o444` files, `may_drop: 0`).
+  Its doc comment says plainly that NTFS cannot carry a bit above `0o777` and
+  therefore cannot detect a narrowing; it is there because a drift to the
+  "obvious" `0o644` would advertise write access on a mount that refuses every
+  write.
+
+**Correction to step 1 of the plan above: it was not needed.** The entry said
+each backend's image builder must be widened to `pub(crate)` so `check_tree`
+could drive it. That turned out to be wrong — `conformance_fixture()` lives
+*inside* each backend's `tests` module and calls the private builders
+directly, so no visibility changed anywhere. Recorded so the next reader does
+not go looking for four widenings that were never made.
+(`design-decisions.md` §671, which planned this layer, carries the same
+expectation, and the same correction applies to it.)
+
+**Status is still OPEN, and deliberately so.** `cargo check -p kernel` is
+clean, but the trigger to close is explicitly *"the setuid file surviving the
+round trip on a green boot"*, and this code has not yet reached QEMU — the
+host has been at its Windows commit limit under three-lane concurrent builds
+(see `A-BOOT-RECORDER-FILES-A-HOST-FORK-FAILURE-AS-A-KERNEL-TIMEOUT`). Do not
+close this on the strength of a clean type-check: every assertion here is
+boot-time, so an unrun harness has demonstrated nothing.
 
 ### A-READDIR-AT-TRAIT-METHOD-HAS-TWO-IMPLEMENTATIONS-AND-NO-CALLERS
 

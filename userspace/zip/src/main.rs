@@ -27,9 +27,10 @@
 //! refused at the byte that exceeds the claim rather than after the expansion
 //! has been allocated.
 //!
-//! Compression is still local (`deflate_compress`), because `zip` accepts
-//! `-0`..`-9` and the crate's `deflate()` takes no level. See
-//! `requests/b-a-deflate-cannot-express-a-compression-level.md`.
+//! Compression is [`deflate::deflate_level`], which takes the `-0`..`-9` level
+//! this tool accepts. It used to be a local encoder for exactly that reason —
+//! the crate's `deflate()` fixes the level and there was nothing to call — and
+//! `deflate_level` is what closed the gap.
 
 // Lint policy is inherited from the workspace (`[lints] workspace = true`):
 // `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
@@ -46,7 +47,7 @@ use crc32::crc32;
 use quoting::{quoteaf_os, quotef_os};
 use std::env;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::SystemTime;
@@ -134,206 +135,20 @@ const VERSION_MADE_BY: u16 = 0x0314; // 3 = Unix, 20 = version 2.0
 const GP_DATA_DESCRIPTOR: u16 = 1 << 3;
 
 // ============================================================================
-// DEFLATE constants and tables
+// DEFLATE: see the `deflate` crate
 // ============================================================================
-
-const MAX_DIST: usize = 32768;
-const MAX_MATCH: usize = 258;
-const MIN_MATCH: usize = 3;
-const HASH_SIZE: usize = 65536;
-
-/// (base_length, extra_bits) for length codes 257..=285.
-const LENGTH_TABLE: [(u16, u8); 29] = [
-    (3, 0),
-    (4, 0),
-    (5, 0),
-    (6, 0),
-    (7, 0),
-    (8, 0),
-    (9, 0),
-    (10, 0),
-    (11, 1),
-    (13, 1),
-    (15, 1),
-    (17, 1),
-    (19, 2),
-    (23, 2),
-    (27, 2),
-    (31, 2),
-    (35, 3),
-    (43, 3),
-    (51, 3),
-    (59, 3),
-    (67, 4),
-    (83, 4),
-    (99, 4),
-    (115, 4),
-    (131, 5),
-    (163, 5),
-    (195, 5),
-    (227, 5),
-    (258, 0),
-];
-
-/// (base_distance, extra_bits) for distance codes 0..=29.
-const DISTANCE_TABLE: [(u16, u8); 30] = [
-    (1, 0),
-    (2, 0),
-    (3, 0),
-    (4, 0),
-    (5, 1),
-    (7, 1),
-    (9, 2),
-    (13, 2),
-    (17, 3),
-    (25, 3),
-    (33, 4),
-    (49, 4),
-    (65, 5),
-    (97, 5),
-    (129, 6),
-    (193, 6),
-    (257, 7),
-    (385, 7),
-    (513, 8),
-    (769, 8),
-    (1025, 9),
-    (1537, 9),
-    (2049, 10),
-    (3073, 10),
-    (4097, 11),
-    (6145, 11),
-    (8193, 12),
-    (12289, 12),
-    (16385, 13),
-    (24577, 13),
-];
-
-fn length_code(len: usize) -> usize {
-    match len {
-        3..=10 => len - 3,
-        11..=12 => 8,
-        13..=14 => 9,
-        15..=16 => 10,
-        17..=18 => 11,
-        19..=22 => 12,
-        23..=26 => 13,
-        27..=30 => 14,
-        31..=34 => 15,
-        35..=42 => 16,
-        43..=50 => 17,
-        51..=58 => 18,
-        59..=66 => 19,
-        67..=82 => 20,
-        83..=98 => 21,
-        99..=114 => 22,
-        115..=130 => 23,
-        131..=162 => 24,
-        163..=194 => 25,
-        195..=226 => 26,
-        227..=257 => 27,
-        _ => 28, // 258 and above → code 285
-    }
-}
-
-fn distance_code(dist: usize) -> usize {
-    match dist {
-        1 => 0,
-        2 => 1,
-        3 => 2,
-        4 => 3,
-        5..=6 => 4,
-        7..=8 => 5,
-        9..=12 => 6,
-        13..=16 => 7,
-        17..=24 => 8,
-        25..=32 => 9,
-        33..=48 => 10,
-        49..=64 => 11,
-        65..=96 => 12,
-        97..=128 => 13,
-        129..=192 => 14,
-        193..=256 => 15,
-        257..=384 => 16,
-        385..=512 => 17,
-        513..=768 => 18,
-        769..=1024 => 19,
-        1025..=1536 => 20,
-        1537..=2048 => 21,
-        2049..=3072 => 22,
-        3073..=4096 => 23,
-        4097..=6144 => 24,
-        6145..=8192 => 25,
-        8193..=12288 => 26,
-        12289..=16384 => 27,
-        16385..=24576 => 28,
-        _ => 29,
-    }
-}
-
-/// Encode a literal/length symbol with fixed Huffman codes (RFC 1951 §3.2.6).
-/// Returns (code_value, bit_count). Code value is MSB-first; caller reverses bits.
-fn fixed_litlen_encode(sym: u16) -> (u32, u32) {
-    match sym {
-        0..=143 => (0b0011_0000 + u32::from(sym), 8),
-        144..=255 => (0b1_1001_0000 + u32::from(sym) - 144, 9),
-        256..=279 => (u32::from(sym) - 256, 7),
-        280..=287 => (0b1100_0000 + u32::from(sym) - 280, 8),
-        _ => (0, 0),
-    }
-}
-
-fn reverse_bits(v: u32, n: u32) -> u32 {
-    let mut r = 0u32;
-    let mut val = v;
-    for _ in 0..n {
-        r = (r << 1) | (val & 1);
-        val >>= 1;
-    }
-    r
-}
-
-// ============================================================================
-// Bit writer (LSB-first, as DEFLATE requires)
-// ============================================================================
-
-struct BitWriter<W: Write> {
-    inner: W,
-    buf: u64,
-    bits: u32,
-}
-
-impl<W: Write> BitWriter<W> {
-    fn new(inner: W) -> Self {
-        Self {
-            inner,
-            buf: 0,
-            bits: 0,
-        }
-    }
-
-    fn write_bits(&mut self, val: u32, n: u32) -> io::Result<()> {
-        self.buf |= u64::from(val) << self.bits;
-        self.bits += n;
-        while self.bits >= 8 {
-            self.inner.write_all(&[(self.buf & 0xFF) as u8])?;
-            self.buf >>= 8;
-            self.bits -= 8;
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> io::Result<W> {
-        if self.bits > 0 {
-            self.inner.write_all(&[(self.buf & 0xFF) as u8])?;
-        }
-        Ok(self.inner)
-    }
-}
-
-// ============================================================================
-// DEFLATE decompressor: see the `deflate` crate
-// ============================================================================
+//
+// Neither half of RFC 1951 lives here any more. Both halves came out for the
+// same underlying reason -- this file was the tree's third independent
+// implementation of the format -- but they came out at different times and for
+// different immediate causes, so both are recorded.
+//
+// The decompressor went first, per
+// requests/a-b-userspace-zip-carries-a-third-deflate-and-a-second-zip-parser.md.
+// It was a `BitReader`, a canonical-Huffman decoder, and `deflate_decompress` /
+// `decode_huffman_block` / `decode_dynamic_headers` -- about 350 lines, now
+// `deflate::inflate_limited`.
+//
 //
 // This file used to carry its own: a `BitReader`, a canonical-Huffman decoder,
 // and `deflate_decompress` / `decode_huffman_block` / `decode_dynamic_headers`
@@ -356,193 +171,26 @@ impl<W: Write> BitWriter<W> {
 // would exceed it, so the entry's declared `uncompressed_size` -- a number we
 // have from the central directory before decoding starts -- is now an
 // enforced ceiling instead of an after-the-fact assertion.
+//
+// The compressor followed once `deflate::deflate_level` landed, per
+// requests/a-b-deflate-level-has-landed-and-your-local-compressor-was-the-better-one.md.
+// The `-0`..`-9` levels this tool accepts were the only reason the local
+// `deflate_compress` outlived the decompressor: the crate's `deflate()` takes no
+// level, so at that point there was simply nothing to call. `deflate_level(data,
+// level)` closed that, and the local LZ77 + fixed-Huffman encoder -- about 380
+// lines carrying its own length/distance tables, a `BitWriter`, and a hash-chain
+// match finder -- went with it.
+//
+// This is not a byte-for-byte swap, and it is worth knowing why before anyone
+// diffs two archives. The local encoder emitted fixed-Huffman blocks and
+// nothing else; the crate tries both fixed and dynamic Huffman and keeps
+// whichever is smaller, so the same input at the same level generally
+// compresses further and never to the identical bytes. What is preserved is
+// the only property that matters at a container boundary: every level still
+// emits a valid DEFLATE stream that any unzip decodes. The tests below assert
+// that, and that compressible input gets smaller -- not a byte count, which is
+// an encoder detail and was never ours to pin.
 // ============================================================================
-// DEFLATE compressor (LZ77 + fixed Huffman)
-// ============================================================================
-
-#[derive(Clone, Copy)]
-enum Token {
-    Literal(u8),
-    Match { dist: u16, len: u16 },
-}
-
-#[inline]
-fn hash3(data: &[u8], pos: usize) -> usize {
-    if pos + 2 >= data.len() {
-        return 0;
-    }
-    let h = u32::from(data[pos]).wrapping_mul(2_654_435_761)
-        ^ u32::from(data[pos + 1]).wrapping_mul(1_234_567)
-        ^ u32::from(data[pos + 2]);
-    (h as usize) & (HASH_SIZE - 1)
-}
-
-fn lz77_compress(input: &[u8], level: u8) -> Vec<Token> {
-    let n = input.len();
-    if n == 0 {
-        return Vec::new();
-    }
-
-    let max_chain: usize = match level {
-        1 => 4,
-        2 => 8,
-        3 => 16,
-        4 => 32,
-        5 => 64,
-        6 => 128,
-        7 => 256,
-        8 => 512,
-        _ => 1024,
-    };
-
-    let mut tokens = Vec::with_capacity(n);
-    let mut head = vec![usize::MAX; HASH_SIZE];
-    let mut prev = vec![usize::MAX; MAX_DIST];
-    let mut pos = 0;
-
-    while pos < n {
-        if pos + MIN_MATCH > n {
-            tokens.push(Token::Literal(input[pos]));
-            pos += 1;
-            continue;
-        }
-
-        let h = hash3(input, pos);
-        let mut best_len = MIN_MATCH - 1;
-        let mut best_dist = 0usize;
-        let mut cur = head[h];
-        let mut chain_len = 0;
-
-        while cur != usize::MAX && chain_len < max_chain {
-            let dist = pos.wrapping_sub(cur);
-            if dist == 0 || dist > MAX_DIST {
-                break;
-            }
-            let max_cmp = (n - pos).min(MAX_MATCH);
-            let mut mlen = 0;
-            while mlen < max_cmp && input[pos + mlen] == input[cur + mlen] {
-                mlen += 1;
-            }
-            if mlen > best_len {
-                best_len = mlen;
-                best_dist = dist;
-                if best_len >= MAX_MATCH {
-                    break;
-                }
-            }
-            cur = prev[cur % MAX_DIST];
-            chain_len += 1;
-        }
-
-        prev[pos % MAX_DIST] = head[h];
-        head[h] = pos;
-
-        if best_len >= MIN_MATCH {
-            tokens.push(Token::Match {
-                dist: best_dist as u16,
-                len: best_len as u16,
-            });
-            for k in 1..best_len {
-                if pos + k + MIN_MATCH <= n {
-                    let hk = hash3(input, pos + k);
-                    prev[(pos + k) % MAX_DIST] = head[hk];
-                    head[hk] = pos + k;
-                }
-            }
-            pos += best_len;
-        } else {
-            tokens.push(Token::Literal(input[pos]));
-            pos += 1;
-        }
-    }
-
-    tokens
-}
-
-/// Compress `input` into a raw DEFLATE stream (no gzip wrapper).
-fn deflate_compress(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
-    if level == 0 {
-        return Ok(deflate_compress_stored(input));
-    }
-
-    let tokens = lz77_compress(input, level);
-    let mut output = Vec::new();
-    let mut bw = BitWriter::new(&mut output);
-
-    bw.write_bits(1, 1)
-        .map_err(|e| format!("deflate: BFINAL: {e}"))?;
-    bw.write_bits(1, 2)
-        .map_err(|e| format!("deflate: BTYPE: {e}"))?;
-
-    for token in &tokens {
-        match *token {
-            Token::Literal(b) => {
-                let (bits, n) = fixed_litlen_encode(u16::from(b));
-                bw.write_bits(reverse_bits(bits, n), n)
-                    .map_err(|e| format!("deflate: literal: {e}"))?;
-            }
-            Token::Match { dist, len } => {
-                let lc = length_code(len as usize);
-                let (bits, n) = fixed_litlen_encode((lc + 257) as u16);
-                bw.write_bits(reverse_bits(bits, n), n)
-                    .map_err(|e| format!("deflate: len code: {e}"))?;
-
-                let (base_len, extra_len_bits) = LENGTH_TABLE[lc];
-                if extra_len_bits > 0 {
-                    bw.write_bits(
-                        u32::from(len) - u32::from(base_len),
-                        u32::from(extra_len_bits),
-                    )
-                    .map_err(|e| format!("deflate: len extra: {e}"))?;
-                }
-
-                let dc = distance_code(dist as usize);
-                bw.write_bits(reverse_bits(dc as u32, 5), 5)
-                    .map_err(|e| format!("deflate: dist code: {e}"))?;
-
-                let (base_dist, extra_dist_bits) = DISTANCE_TABLE[dc];
-                if extra_dist_bits > 0 {
-                    bw.write_bits(
-                        u32::from(dist) - u32::from(base_dist),
-                        u32::from(extra_dist_bits),
-                    )
-                    .map_err(|e| format!("deflate: dist extra: {e}"))?;
-                }
-            }
-        }
-    }
-
-    // End-of-block symbol 256.
-    let (bits, n) = fixed_litlen_encode(256);
-    bw.write_bits(reverse_bits(bits, n), n)
-        .map_err(|e| format!("deflate: EOB: {e}"))?;
-
-    bw.finish().map_err(|e| format!("deflate: flush: {e}"))?;
-    Ok(output)
-}
-
-fn deflate_compress_stored(input: &[u8]) -> Vec<u8> {
-    let mut output = Vec::new();
-    let mut pos = 0;
-    loop {
-        let chunk_end = (pos + 65_535).min(input.len());
-        let chunk = &input[pos..chunk_end];
-        let len = chunk.len() as u16;
-        let nlen = !len;
-        let is_final = chunk_end == input.len();
-        output.push(u8::from(is_final)); // BFINAL (BTYPE=00 stored)
-        output.push((len & 0xFF) as u8);
-        output.push((len >> 8) as u8);
-        output.push((nlen & 0xFF) as u8);
-        output.push((nlen >> 8) as u8);
-        output.extend_from_slice(chunk);
-        pos = chunk_end;
-        if is_final {
-            break;
-        }
-    }
-    output
-}
 
 // ============================================================================
 // ZIP archive structures
@@ -842,18 +490,16 @@ impl ZipWriter {
     /// `data` is the raw (uncompressed) file contents.
     /// `level` is the compression level (0 = stored, 1-9 = deflate).
     /// `mod_date` and `mod_time` are DOS-encoded date/time.
-    fn add_file(
-        &mut self,
-        name: &str,
-        data: &[u8],
-        level: u8,
-        mod_date: u16,
-        mod_time: u16,
-    ) -> Result<(), String> {
+    ///
+    /// Infallible, like [`ZipWriter::add_directory`]. It used to return
+    /// `Result` because the local encoder it called could report a bad level;
+    /// `deflate::deflate_level` clamps instead, so there is no longer an error
+    /// to return and callers should not have to pretend otherwise.
+    fn add_file(&mut self, name: &str, data: &[u8], level: u8, mod_date: u16, mod_time: u16) {
         let (method, compressed) = if level == 0 {
             (METHOD_STORED, data.to_vec())
         } else {
-            let comp = deflate_compress(data, level)?;
+            let comp = deflate::deflate_level(data, level);
             // Only use deflate if it actually shrinks the data.
             if comp.len() < data.len() {
                 (METHOD_DEFLATE, comp)
@@ -901,8 +547,6 @@ impl ZipWriter {
             external_attrs: 0,
             internal_attrs: 0,
         });
-
-        Ok(())
     }
 
     /// Add a directory entry (stored, no data).
@@ -1559,7 +1203,7 @@ fn add_one_file(
     let data = read_file(path)?;
     let (mod_date, mod_time) = encode_dos_datetime(file_mtime(path));
 
-    writer.add_file(arc_name, &data, level, mod_date, mod_time)?;
+    writer.add_file(arc_name, &data, level, mod_date, mod_time);
 
     if verbose && !quiet {
         let last = writer.entries.last();
@@ -1998,64 +1642,153 @@ mod tests {
         assert!(!glob_matches("a*b*c", "abx"));
     }
 
-    // ---- DEFLATE compressor/decompressor ----
+    // ---- Level handling ----
+    //
+    // These used to be six tests of a local DEFLATE encoder. That encoder is
+    // gone (see the `DEFLATE: see the `deflate` crate` banner above), and
+    // re-testing `deflate::deflate_level` from here would only duplicate that
+    // crate's own suite while pinning this file to its output. What is still
+    // this file's to get wrong is the *method choice* -- the `-0`..`-9` flag
+    // is parsed here, the STORED/DEFLATE decision is made here, and neither is
+    // visible to the crate. So that is what these assert, through the archive
+    // rather than through the encoder.
 
+    /// Round-trip through the container at every level `zip` accepts, since
+    /// the level reaches the encoder only via `add_file` and a level that
+    /// silently produced an undecodable member would look like a good archive
+    /// until someone tried to open it.
     #[test]
-    fn test_deflate_roundtrip_empty() {
-        let input = b"";
-        for level in 0u8..=3 {
-            let comp = deflate_compress(input, level).unwrap();
-            let out = deflate::inflate(&comp).unwrap();
-            assert_eq!(out.as_slice(), input, "level={level}");
-        }
-    }
-
-    #[test]
-    fn test_deflate_roundtrip_short() {
-        let input = b"Hello, DEFLATE world!";
-        let comp = deflate_compress(input, 6).unwrap();
-        let out = deflate::inflate(&comp).unwrap();
-        assert_eq!(out.as_slice(), input);
-    }
-
-    #[test]
-    fn test_deflate_roundtrip_repeated() {
+    fn test_every_level_round_trips_through_the_archive() {
         let input: Vec<u8> = (0u8..=9).cycle().take(2000).collect();
-        for level in 1u8..=6 {
-            let comp = deflate_compress(&input, level).unwrap();
-            assert!(
-                comp.len() < input.len(),
-                "level={level}: compressed ({}) should be < input ({})",
-                comp.len(),
-                input.len()
-            );
-            let out = deflate::inflate(&comp).unwrap();
+        for level in 0u8..=9 {
+            let mut writer = ZipWriter::new();
+            writer.add_file("data.bin", &input, level, 0, 0);
+            let archive = writer.finish();
+
+            let entries = zip_read_central_directory(&archive).unwrap();
+            let out = zip_extract_entry(&archive, &entries[0]).unwrap();
             assert_eq!(out, input, "level={level}");
         }
     }
 
+    /// `-0` means "do not compress", and it is the one level whose method is
+    /// fixed rather than chosen by whether the output shrank.
     #[test]
-    fn test_deflate_roundtrip_binary() {
-        let input: Vec<u8> = (0u8..=255).cycle().take(3000).collect();
-        let comp = deflate_compress(&input, 6).unwrap();
-        let out = deflate::inflate(&comp).unwrap();
-        assert_eq!(out, input);
+    fn test_level_zero_stores_even_when_the_input_would_compress() {
+        let input = vec![b'a'; 4096];
+        let mut writer = ZipWriter::new();
+        writer.add_file("rep.bin", &input, 0, 0, 0);
+        let archive = writer.finish();
+
+        let entries = zip_read_central_directory(&archive).unwrap();
+        assert_eq!(entries[0].method, METHOD_STORED);
+        assert_eq!(entries[0].compressed_size, 4096);
     }
 
+    /// The complement: at any non-zero level, compressible input must actually
+    /// take the DEFLATE path and land smaller. A regression that made
+    /// `deflate_level` return something larger than its input would otherwise
+    /// be invisible -- the fallback below would quietly store every member and
+    /// every round-trip test would still pass.
     #[test]
-    fn test_deflate_all_same_byte() {
-        let input = vec![0xAAu8; 1024];
-        let comp = deflate_compress(&input, 9).unwrap();
-        let out = deflate::inflate(&comp).unwrap();
-        assert_eq!(out, input);
+    fn test_compressible_input_deflates_and_shrinks() {
+        let input: Vec<u8> = (0u8..=9).cycle().take(2000).collect();
+        for level in 1u8..=9 {
+            let mut writer = ZipWriter::new();
+            writer.add_file("rep.bin", &input, level, 0, 0);
+            let archive = writer.finish();
+
+            let entries = zip_read_central_directory(&archive).unwrap();
+            assert_eq!(entries[0].method, METHOD_DEFLATE, "level={level}");
+            assert!(
+                (entries[0].compressed_size as usize) < input.len(),
+                "level={level}: compressed ({}) should be < input ({})",
+                entries[0].compressed_size,
+                input.len()
+            );
+        }
     }
 
+    /// The `-N` flag must actually *reach* the encoder, and this is the only
+    /// test here that can tell.
+    ///
+    /// Every other test above passes unchanged if `add_file` ignores its
+    /// `level` argument and hardcodes one — the archive still round-trips, the
+    /// method is still DEFLATE, the member is still smaller. Asserting that
+    /// the knob has an observable *effect* is what closes that, and it is the
+    /// shape lane A recommended in
+    /// `requests/a-b-deflate-level-has-landed-and-your-local-compressor-was-the-better-one.md`
+    /// after the same weakness hid a dead LZ77 stage in the `deflate` crate
+    /// for weeks: a compression test asserting only "output got smaller"
+    /// cannot distinguish a real encoder from a `memcpy`.
+    ///
+    /// The assertion is `<=` and not `<` because level 9 is permitted to find
+    /// nothing more than level 1 did on a given input; what it may never do is
+    /// come out *larger*. The corpus is chosen so the inequality is strict in
+    /// practice, which is what the second assertion pins.
     #[test]
-    fn test_deflate_stored_block() {
-        let input = b"stored block test data";
-        let comp = deflate_compress_stored(input);
-        let out = deflate::inflate(&comp).unwrap();
+    fn test_the_level_flag_changes_the_output() {
+        // Long repeats at varying distances: deeper hash-chain searching has
+        // something to find here, so effort translates into ratio.
+        let mut input = Vec::new();
+        for i in 0..400 {
+            input.extend_from_slice(b"the quick brown fox jumps over the lazy dog");
+            input.extend_from_slice(&[(i % 251) as u8]);
+        }
+
+        let size_at = |level: u8| -> u32 {
+            let mut writer = ZipWriter::new();
+            writer.add_file("corpus.bin", &input, level, 0, 0);
+            let archive = writer.finish();
+            let entries = zip_read_central_directory(&archive).unwrap();
+            entries[0].compressed_size
+        };
+
+        let fast = size_at(1);
+        let small = size_at(9);
+        assert!(
+            small <= fast,
+            "level 9 ({small}) must not be larger than level 1 ({fast})"
+        );
+        assert!(
+            small < fast,
+            "on this corpus level 9 ({small}) should beat level 1 ({fast}); \
+             equal sizes mean the level never reached the encoder"
+        );
+    }
+
+    /// Incompressible input must fall back to STORED rather than ship a member
+    /// larger than the bytes it holds.
+    #[test]
+    fn test_incompressible_input_falls_back_to_stored() {
+        // Four bytes: too short for DEFLATE's block header to pay for itself,
+        // so the encoder cannot help but produce more bytes than it consumed.
+        let input = b"\x00\x01\x02\x03";
+        let mut writer = ZipWriter::new();
+        writer.add_file("tiny.bin", input, 9, 0, 0);
+        let archive = writer.finish();
+
+        let entries = zip_read_central_directory(&archive).unwrap();
+        assert_eq!(entries[0].method, METHOD_STORED);
+        let out = zip_extract_entry(&archive, &entries[0]).unwrap();
         assert_eq!(out.as_slice(), input);
+    }
+
+    /// An empty member is the edge case that has broken every ZIP writer at
+    /// least once: zero-length input, zero CRC, and a compressor that must not
+    /// emit a member whose declared sizes disagree with its bytes.
+    #[test]
+    fn test_empty_member_round_trips_at_every_level() {
+        for level in 0u8..=9 {
+            let mut writer = ZipWriter::new();
+            writer.add_file("empty.txt", b"", level, 0, 0);
+            let archive = writer.finish();
+
+            let entries = zip_read_central_directory(&archive).unwrap();
+            assert_eq!(entries[0].uncompressed_size, 0, "level={level}");
+            let out = zip_extract_entry(&archive, &entries[0]).unwrap();
+            assert!(out.is_empty(), "level={level}");
+        }
     }
 
     // ---- ZIP archive round-trips ----
@@ -2064,8 +1797,7 @@ mod tests {
     fn test_zip_single_file_stored() {
         let mut writer = ZipWriter::new();
         writer
-            .add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0)
-            .unwrap();
+            .add_file("hello.txt", b"Hello, ZIP!", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2082,7 +1814,7 @@ mod tests {
         // Compressible input so deflate actually shrinks it.
         let input: Vec<u8> = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
         let mut writer = ZipWriter::new();
-        writer.add_file("rep.bin", &input, 6, 0, 0).unwrap();
+        writer.add_file("rep.bin", &input, 6, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2101,7 +1833,7 @@ mod tests {
         // and far easier to read than patching two headers by hand.
         let input = vec![b'a'; 50_000];
         let mut writer = ZipWriter::new();
-        writer.add_file("bomb.bin", &input, 6, 0, 0).unwrap();
+        writer.add_file("bomb.bin", &input, 6, 0, 0);
         let archive = writer.finish();
 
         let mut entries = zip_read_central_directory(&archive).unwrap();
@@ -2136,7 +1868,7 @@ mod tests {
         // this. Both checks are load-bearing; they catch opposite faults.
         let input = vec![b'b'; 4_000];
         let mut writer = ZipWriter::new();
-        writer.add_file("short.bin", &input, 6, 0, 0).unwrap();
+        writer.add_file("short.bin", &input, 6, 0, 0);
         let archive = writer.finish();
 
         let mut entries = zip_read_central_directory(&archive).unwrap();
@@ -2152,11 +1884,10 @@ mod tests {
     #[test]
     fn test_zip_multiple_files() {
         let mut writer = ZipWriter::new();
-        writer.add_file("a.txt", b"file A", 6, 0, 0).unwrap();
+        writer.add_file("a.txt", b"file A", 6, 0, 0);
         writer
-            .add_file("b.txt", b"file B contents here", 6, 0, 0)
-            .unwrap();
-        writer.add_file("c.txt", b"", 0, 0, 0).unwrap();
+            .add_file("b.txt", b"file B contents here", 6, 0, 0);
+        writer.add_file("c.txt", b"", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2176,8 +1907,7 @@ mod tests {
         let mut writer = ZipWriter::new();
         writer.add_directory("subdir", 0, 0);
         writer
-            .add_file("subdir/file.txt", b"inside dir", 0, 0, 0)
-            .unwrap();
+            .add_file("subdir/file.txt", b"inside dir", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2197,7 +1927,7 @@ mod tests {
     #[test]
     fn test_zip_crc_mismatch_detected() {
         let mut writer = ZipWriter::new();
-        writer.add_file("test.txt", b"test data", 0, 0, 0).unwrap();
+        writer.add_file("test.txt", b"test data", 0, 0, 0);
         let mut archive = writer.finish();
 
         // Corrupt a byte in the file data region.
@@ -2233,7 +1963,7 @@ mod tests {
         // 64 KiB of repeating data — exercises stored-block path and hash chains.
         let input: Vec<u8> = (0u8..=255).cycle().take(65536).collect();
         let mut writer = ZipWriter::new();
-        writer.add_file("large.bin", &input, 6, 0, 0).unwrap();
+        writer.add_file("large.bin", &input, 6, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2244,7 +1974,7 @@ mod tests {
     #[test]
     fn test_zip_name_with_path() {
         let mut writer = ZipWriter::new();
-        writer.add_file("a/b/c.txt", b"nested", 0, 0, 0).unwrap();
+        writer.add_file("a/b/c.txt", b"nested", 0, 0, 0);
         let archive = writer.finish();
 
         let entries = zip_read_central_directory(&archive).unwrap();
@@ -2272,28 +2002,10 @@ mod tests {
         assert_eq!(name, "file.txt");
     }
 
-    // ---- LZ77 ----
-
-    #[test]
-    fn test_lz77_empty() {
-        let tokens = lz77_compress(b"", 6);
-        assert!(tokens.is_empty());
-    }
-
-    #[test]
-    fn test_lz77_short_no_match() {
-        let tokens = lz77_compress(b"ab", 6);
-        assert_eq!(tokens.len(), 2);
-        assert!(matches!(tokens[0], Token::Literal(b'a')));
-        assert!(matches!(tokens[1], Token::Literal(b'b')));
-    }
-
-    #[test]
-    fn test_lz77_finds_back_ref() {
-        let tokens = lz77_compress(b"aaaaaa", 9);
-        let has_match = tokens.iter().any(|t| matches!(t, Token::Match { .. }));
-        assert!(has_match, "LZ77 should find a back-reference in 'aaaaaa'");
-    }
+    // The three LZ77 token tests that stood here went with the local encoder:
+    // they reached into `lz77_compress`'s `Token` stream, which is now internal
+    // to the `deflate` crate and tested there against a match finder that
+    // actually finds matches. Nothing at this layer can see a token.
 
     // ---- human_size ----
 

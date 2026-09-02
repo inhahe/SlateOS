@@ -98077,9 +98077,36 @@ shell's error *reporting* (kshell has no "bad substitution" concept at all),
 not about substring arithmetic, and folding it in would have made this commit
 two changes.
 
-## TD-B-USERSPACE-ZIP-STILL-CARRIES-ITS-OWN-DEFLATE-COMPRESSOR
+## TD-B-USERSPACE-ZIP-STILL-CARRIES-ITS-OWN-DEFLATE-COMPRESSOR — **FIXED 2026-09-02**
 
-**Status:** open, blocked on lane A
+**Status:** **fixed 2026-09-02 (lane B).** `deflate::deflate_level` landed on
+lane A (`requests/a-b-deflate-level-has-landed-and-your-local-compressor-was-the-better-one.md`),
+which is exactly the unblocker named under "What unblocks it" below, and
+`add_file` now calls it. Every item in the "Where" list is deleted.
+
+Two things did **not** go as this entry predicted, and both are worth keeping:
+
+1. **It was not "a pure deletion with no behaviour change at all."** Writing the
+   level knob uncovered that the shared crate's LZ77 match-finder had never
+   found a match on any input — it inserted into the hash chain before reading
+   it, so its own first `candidate < pos` guard was false on every call, and
+   `deflate` had silently degraded to Huffman-only coding. Adopting the shared
+   crate at any point before 2026-08-30 would have been a real regression. See
+   `A-DEFLATE-LZ77-NEVER-FOUND-A-MATCH`. The transferable lesson is in the last
+   paragraph below, which needs amending: *the shared implementation being
+   shared is not evidence that it is right.*
+2. **The claim that "no attacker-supplied bytes reach it" was correct but was
+   not the reason this was safe to leave.** What actually made the duplication
+   cheap to carry is that the local compressor was the *correct* one of the
+   two. That is luck, not a property, and it is not a defence available next
+   time.
+
+The replacement tests assert properties rather than sizes, per lane A's
+recommendation — including `test_the_level_flag_changes_the_output`, which is
+the only test in the file that fails if `add_file` ignores its `level`
+argument. Verified by mutation: hardcoding the level makes exactly that one
+test fail and leaves the other 40 green.
+
 **Filed:** 2026-08-30 (lane B)
 **Where:** `userspace/zip/src/main.rs` — `Token`, `hash3`, `lz77_compress`,
 `deflate_compress`, `deflate_compress_stored`, `BitWriter`, `length_code`,

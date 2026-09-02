@@ -1189,7 +1189,20 @@ impl Crossword {
         }
     }
 
+    /// Handle keyboard input.
+    ///
+    /// Releases are ignored. They were not: no arm below read `pressed`, so
+    /// every keystroke arrived twice and did its work twice. In a crossword
+    /// that is worse than a doubled arrow key, because the grid is edited by
+    /// typing: a letter was written into the current cell and then, on the
+    /// release, into the *next* one as well, so a five-letter answer needed
+    /// its own letters typed into alternate squares to come out right.
+    /// Backspace cleared two cells, Ctrl-R revealed two letters, and Tab
+    /// skipped a clue.
     fn handle_key(&mut self, key: &KeyEvent) -> EventResult {
+        if !key.pressed {
+            return EventResult::Ignored;
+        }
         match self.view {
             View::PuzzleSelect => self.key_in_menu(key),
             View::Playing => self.key_in_puzzle(key),
@@ -2164,7 +2177,7 @@ mod tests {
     )]
 
     use super::*;
-    use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, shift};
+    use guitk::probe::{click_sized, ctrl, is_visible_sized, press, rect_of_sized, release, shift};
     use std::collections::BTreeMap;
 
     // ── Fixtures ───────────────────────────────────────────────────
@@ -3645,6 +3658,93 @@ mod tests {
         app.key_at(&press(Key::Backspace), Crossword::SIZE);
         assert_eq!(app.cell(0, 0).unwrap().entry, None, "a full cell empties");
         assert_eq!(app.cursor, (0, 0), "without moving");
+    }
+
+    /// A key does its work once per press, not again on the release.
+    ///
+    /// It did it twice: `handle_key` read `key.key` and never `key.pressed`,
+    /// so the release that follows every press ran the same arm again. The
+    /// grid is edited by typing, which makes the damage worse here than a
+    /// doubled arrow key: the press wrote the letter and advanced, and then
+    /// the release wrote the *same* letter into the next cell and advanced
+    /// again, so typing `SPY` produced `SSPPYY` across six squares.
+    #[test]
+    fn a_typed_letter_lands_once_and_not_again_on_the_release() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+
+        assert_eq!(
+            app.key_at(&press(Key::S), Crossword::SIZE),
+            EventResult::Consumed
+        );
+        assert_eq!(app.cell(0, 0).unwrap().entry, Some('S'));
+        assert_eq!(app.cursor, (0, 1), "one press advanced one cell");
+
+        assert_eq!(
+            app.key_at(&release(Key::S), Crossword::SIZE),
+            EventResult::Ignored,
+            "the release was acted on"
+        );
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            None,
+            "the release typed a second S into the next cell"
+        );
+        assert_eq!(app.cursor, (0, 1), "the release advanced the cursor");
+    }
+
+    /// The same, stated as the thing the player would actually see: a word
+    /// typed one key at a time spells that word, and not each letter twice.
+    #[test]
+    fn a_word_typed_key_by_key_spells_that_word() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+
+        for key in [Key::S, Key::P, Key::Y] {
+            app.key_at(&press(key), Crossword::SIZE);
+            app.key_at(&release(key), Crossword::SIZE);
+        }
+
+        let typed: String = (0..3)
+            .map(|col| app.cell(0, col).and_then(|c| c.entry).unwrap_or(' '))
+            .collect();
+        assert_eq!(typed, "SPY", "each keystroke was entered twice");
+    }
+
+    /// Backspace, too: a release that clears is a release that eats a letter
+    /// the player did not ask to lose.
+    #[test]
+    fn backspace_deletes_one_cell_per_press() {
+        let mut app = playing(0);
+        app.cursor = (0, 0);
+        app.direction = Direction::Across;
+        for key in [Key::S, Key::P, Key::Y] {
+            app.key_at(&press(key), Crossword::SIZE);
+            app.key_at(&release(key), Crossword::SIZE);
+        }
+        // The cursor stops on the answer's last cell rather than running off
+        // its end, so it is sitting on a *full* cell — the case where
+        // backspace clears in place and does not step back.
+        assert_eq!(app.cursor, (0, 2));
+
+        app.key_at(&press(Key::Backspace), Crossword::SIZE);
+        app.key_at(&release(Key::Backspace), Crossword::SIZE);
+        assert_eq!(
+            app.cell(0, 2).unwrap().entry,
+            None,
+            "the press did not clear the cell it was on"
+        );
+        // The double-fire's exact shape here: having emptied the cell, the
+        // release found an empty one, and an empty one is the case that steps
+        // back and clears its neighbour. So one keystroke ate two letters.
+        assert_eq!(
+            app.cell(0, 1).unwrap().entry,
+            Some('P'),
+            "one backspace cleared two cells"
+        );
+        assert_eq!(app.cursor, (0, 2), "one backspace stepped back a cell");
     }
 
     #[test]

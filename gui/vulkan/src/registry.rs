@@ -40,9 +40,11 @@
 //! which apply the gate. A caller that never sees the ungated pointer cannot
 //! call it too early.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use crate::icd::{self, DriverReply, InterfaceVersion, Negotiation, Unusable};
+use crate::unknown::{Slots, Table};
 use crate::vk::{
     GetInstanceProcAddrFn, GetPhysicalDeviceProcAddrFn, NegotiateFn, VK_ERROR_INCOMPATIBLE_DRIVER,
     VK_SUCCESS, VkResult,
@@ -80,6 +82,17 @@ pub struct Driver {
     name: &'static str,
     entry: Entry,
     version: InterfaceVersion,
+    /// This driver's answers for the extension commands the loader forwards
+    /// without knowing their signatures — see [`crate::unknown`].
+    ///
+    /// Boxed because its *address* is copied into every physical-device wrapper
+    /// enumerated from this driver, and lives in those wrappers for as long as
+    /// the application holds them. The `Driver` itself is an element of a `Vec`
+    /// that moves whenever another driver registers; a `Box`'s contents do not
+    /// move when the box does, which is what makes the copied address stay
+    /// valid. Storing the table inline here would leave every wrapper pointing
+    /// into a freed buffer the moment a second driver appeared.
+    ext: Box<Table>,
 }
 
 impl Driver {
@@ -125,6 +138,12 @@ impl Driver {
         } else {
             None
         }
+    }
+
+    /// This driver's table of unknown-extension entry points.
+    #[must_use]
+    pub fn ext(&self) -> &Table {
+        &self.ext
     }
 }
 
@@ -193,6 +212,15 @@ pub struct Registry {
     loader: InterfaceVersion,
     drivers: Vec<Driver>,
     rejected: Vec<Rejection>,
+    /// Which trampoline slot each unknown extension command was given.
+    ///
+    /// Process-wide rather than per-driver, because the address handed to the
+    /// application is one address for all drivers: a name has to mean the same
+    /// slot whichever driver's device it is later called on. It lives here
+    /// because it is written in the same breath as the per-driver tables, under
+    /// the same lock, and a second lock over the two halves of one operation is
+    /// a deadlock waiting for an ordering mistake.
+    slots: Slots,
 }
 
 impl Registry {
@@ -203,7 +231,23 @@ impl Registry {
             loader,
             drivers: Vec::new(),
             rejected: Vec::new(),
+            slots: Slots::new(),
         }
+    }
+
+    /// The name-to-slot assignment for unknown extension commands.
+    #[must_use]
+    pub const fn slots(&self) -> &Slots {
+        &self.slots
+    }
+
+    /// The slot for `name`, assigning a fresh one if it has none.
+    ///
+    /// `None` means the pool is exhausted, which reaches the application as the
+    /// null `vkGetInstanceProcAddr` returns for a command it does not have. See
+    /// [`crate::unknown`] for why a slot is never taken back to make room.
+    pub fn slot_for(&mut self, name: &[u8]) -> Option<usize> {
+        self.slots.assign(name)
     }
 
     /// The interface version this registry proposes to drivers.
@@ -224,6 +268,7 @@ impl Registry {
                     name,
                     entry,
                     version,
+                    ext: Table::new(),
                 });
                 Admission::Accepted(version)
             }

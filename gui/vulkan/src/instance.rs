@@ -293,6 +293,14 @@ impl Instance {
 /// `#[repr(C)]` with the dispatch word first, for the same reason as
 /// [`Instance`]: this is what the application is handed, and anything treating
 /// it as a `VkPhysicalDevice` reads offset 0.
+///
+/// Two of the fields are also read by three instructions of assembly — see
+/// [`crate::unknown`] — which is why their byte offsets are published as
+/// [`PhysicalDevice::HANDLE_OFFSET`] and [`PhysicalDevice::EXT_OFFSET`] rather
+/// than written out there as numbers. Reordering the fields changes the
+/// constants and the assembly together; writing the numbers twice would let the
+/// two drift, and the symptom would be a jump through whatever word landed at
+/// the old offset.
 #[repr(C)]
 pub struct PhysicalDevice {
     /// `VK_LOADER_DATA`. Must be the first member.
@@ -300,21 +308,48 @@ pub struct PhysicalDevice {
     driver: usize,
     instance: Handle,
     handle: Handle,
+    /// This device's driver's table of unknown-extension entry points.
+    ///
+    /// Reached from the trampolines in [`crate::unknown`], which have one copy
+    /// of the code per slot shared by every driver and so cannot hold a function
+    /// pointer themselves. Points into a `Box` owned by the driver record, which
+    /// outlives every device enumerated from it.
+    ext: *const crate::unknown::Table,
 }
 
+// The dispatch word being first is the one layout fact the whole crate assumes,
+// and the one a field reordering would break silently: a driver or a validation
+// layer handed this object reads offset 0 and would find the driver index.
+const _: () = assert!(core::mem::offset_of!(PhysicalDevice, dispatch) == 0);
+
 impl PhysicalDevice {
+    /// Byte offset of [`PhysicalDevice::handle`] — the driver's own device — for
+    /// the assembly in [`crate::unknown`], which substitutes it for argument 0.
+    pub const HANDLE_OFFSET: usize = core::mem::offset_of!(Self, handle);
+
+    /// Byte offset of the driver's unknown-extension table, for the same
+    /// assembly, which reads it *before* overwriting argument 0.
+    pub const EXT_OFFSET: usize = core::mem::offset_of!(Self, ext);
+
     /// Wrap one device belonging to `driver`, stamped with the loader magic.
     ///
     /// `driver` indexes [`crate::registry::Registry::drivers`], `instance` is
-    /// the `VkInstance` *that driver* returned, and `handle` is what that
-    /// driver's `vkEnumeratePhysicalDevices` returned.
+    /// the `VkInstance` *that driver* returned, `handle` is what that driver's
+    /// `vkEnumeratePhysicalDevices` returned, and `ext` is that driver's
+    /// [`crate::unknown::Table`].
     #[must_use]
-    pub fn new(driver: usize, instance: Handle, handle: Handle) -> Box<Self> {
+    pub fn new(
+        driver: usize,
+        instance: Handle,
+        handle: Handle,
+        ext: *const crate::unknown::Table,
+    ) -> Box<Self> {
         let mut boxed = Box::new(Self {
             dispatch: 0,
             driver,
             instance,
             handle,
+            ext,
         });
         // SAFETY: `boxed` is a live, owned, correctly aligned `PhysicalDevice`
         // that no other thread has seen yet, and the type is `#[repr(C)]` with
@@ -351,6 +386,18 @@ impl PhysicalDevice {
     #[must_use]
     pub const fn handle(&self) -> Handle {
         self.handle
+    }
+
+    /// This device's driver's table of unknown-extension entry points.
+    ///
+    /// Exposed so that the field the assembly reads can be *checked* from Rust.
+    /// A trampoline that reached the wrong table would still run; the failure
+    /// would be calling one driver's function with another driver's device,
+    /// which is exactly the kind of plausible wrong answer a test has to be able
+    /// to look for directly.
+    #[must_use]
+    pub const fn ext(&self) -> *const crate::unknown::Table {
+        self.ext
     }
 
     /// The current contents of the dispatch word. See
@@ -463,6 +510,16 @@ mod tests {
     /// An address to install as a dispatch table. Never dereferenced.
     fn a_table() -> *const c_void {
         core::ptr::without_provenance::<c_void>(0x1234_5678)
+    }
+
+    /// A driver's unknown-extension table, for the wrappers below.
+    ///
+    /// A real one rather than a null pointer, even though nothing here jumps
+    /// through it: a `PhysicalDevice` with a null `ext` is an object that could
+    /// not exist in the loader, and a fixture that models an impossible state is
+    /// a fixture that stops catching the possible ones.
+    fn an_ext_table() -> alloc::boxed::Box<crate::unknown::Table> {
+        crate::unknown::Table::new()
     }
 
     #[test]
@@ -649,9 +706,12 @@ mod tests {
         let mut object = DriverObject::stamped();
         let instance = driver_instance.handle();
         let handle = object.handle();
-        let device = PhysicalDevice::new(3, instance, handle);
+        let ext = an_ext_table();
+        let device = PhysicalDevice::new(3, instance, handle, ext.as_ptr());
         assert_eq!(device.driver(), 3);
         assert_eq!(device.handle(), handle);
+        // The field three instructions of assembly read; see `crate::unknown`.
+        assert_eq!(device.ext(), ext.as_ptr());
         // Kept because `vkCreateDevice` is given a physical device and nothing
         // else, yet has to find the driver's `vkCreateDevice` through an
         // instance-level lookup, which needs a real instance.
@@ -668,7 +728,9 @@ mod tests {
         // goes back to the driver exactly as it came out.
         let mut driver_instance = DriverObject::stamped();
         let mut object = DriverObject::stamped();
-        let mut device = PhysicalDevice::new(0, driver_instance.handle(), object.handle());
+        let ext = an_ext_table();
+        let mut device =
+            PhysicalDevice::new(0, driver_instance.handle(), object.handle(), ext.as_ptr());
         // SAFETY: the address is never dereferenced by this crate.
         assert_eq!(unsafe { device.install_table(a_table()) }, Ok(()));
         assert_eq!(device.dispatch_word(), a_table() as usize);
@@ -699,9 +761,11 @@ mod tests {
         let mut one = DriverObject::stamped();
         let mut two = DriverObject::stamped();
         let mut instance = Instance::new(Vec::new());
+        let one_ext = an_ext_table();
+        let two_ext = an_ext_table();
         instance.set_physical_devices(vec![
-            PhysicalDevice::new(0, one_instance.handle(), one.handle()),
-            PhysicalDevice::new(1, two_instance.handle(), two.handle()),
+            PhysicalDevice::new(0, one_instance.handle(), one.handle(), one_ext.as_ptr()),
+            PhysicalDevice::new(1, two_instance.handle(), two.handle(), two_ext.as_ptr()),
         ]);
         assert_eq!(instance.physical_devices().len(), 2);
         assert_eq!(instance.physical_devices()[0].driver(), 0);

@@ -72,6 +72,7 @@ use crate::icd::CURRENT;
 use crate::instance::{DriverInstance, Instance, PhysicalDevice, adopt_all, array_query, outcome};
 use crate::physical::{self, Ask, Command};
 use crate::registry::{Admission, Driver, Entry, Registry};
+use crate::unknown;
 use crate::vk::{
     CreateDeviceFn, CreateInstanceFn, DestroyDeviceFn, DestroyInstanceFn,
     EnumerateDeviceExtensionPropertiesFn, EnumerateDeviceLayerPropertiesFn,
@@ -344,9 +345,14 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
     if name.is_null() {
         return None;
     }
+    // The raw pointer is kept as well as the bytes: an unknown extension command
+    // is resolved by handing this same string back to each driver, and rebuilding
+    // a NUL-terminated copy of a string that is already NUL-terminated would be
+    // an allocation on a path that must not need one.
+    let raw = name;
     // SAFETY: the caller guarantees a NUL-terminated string valid for the call,
     // and the borrow does not outlive this function.
-    let name = unsafe { CStr::from_ptr(name) }.to_bytes();
+    let name = unsafe { CStr::from_ptr(raw) }.to_bytes();
 
     // SAFETY: every argument to `erase` below is a function pointer cast in
     // place, which is the whole of its contract.
@@ -391,9 +397,115 @@ pub unsafe extern "C" fn get_instance_proc_addr(instance: Handle, name: *const c
             // The nine commands taking a `VkPhysicalDevice`, answered from one
             // place rather than nine arms so that the set stays exactly
             // [`crate::physical::Command`] and the compiler checks it is covered.
-            _ => physical::lookup(name).map(physical_trampoline),
+            //
+            // Anything the loader still does not recognise gets one last chance:
+            // the drivers are asked whether it is a physical-device command of an
+            // extension, and if any of them says yes it is answered with a
+            // trampoline rather than with null. That is the difference between
+            // advertising `VK_KHR_surface` and being able to serve it.
+            //
+            // SAFETY (this is inside the `unsafe` block opened above):
+            // `instance` is non-null on this path, and the caller guarantees it
+            // is one this loader created; `raw` is the caller's NUL-terminated
+            // string, which is the same one `name` was decoded from.
+            _ => physical::lookup(name)
+                .map(physical_trampoline)
+                .or_else(|| unknown_physical_device_command(instance, raw, name)),
         }
     }
+}
+
+/// Answer for an extension command the loader has never heard of, if the drivers
+/// say it is one that takes a `VkPhysicalDevice`.
+///
+/// Every driver behind this instance is asked, and the answers are written into
+/// the per-driver tables *before* the address is handed out, so a machine where
+/// only one of three drivers implements the extension gets a trampoline that
+/// aborts on the other two rather than one that jumps through a null.
+///
+/// Re-resolution on every lookup is deliberate. It costs a handful of
+/// `GetProcAddr` calls on a path an application takes once at startup, and it
+/// removes the class of bug where a driver that registered after the first
+/// lookup is reachable through a slot whose table entry nobody ever filled.
+///
+/// # Safety
+///
+/// `instance` must be a non-null `VkInstance` this loader created, and `raw` a
+/// NUL-terminated string valid for the call — the same string `name` was decoded
+/// from.
+unsafe fn unknown_physical_device_command(
+    instance: Handle,
+    raw: *const c_char,
+    name: &[u8],
+) -> VoidFn {
+    // SAFETY: the caller guarantees this handle came from this loader's
+    // `vkCreateInstance`. Borrowed shared: nothing here mutates the instance.
+    let instance: &Instance = unsafe { &*instance.cast::<Instance>() };
+    let mut registry = DRIVERS.lock();
+    // SAFETY: forwarded — the drivers behind this instance are this registry's,
+    // and `raw` is the caller's NUL-terminated string.
+    unsafe { unknown_across(&mut registry, instance, raw, name) }
+}
+
+/// The decision half of [`unknown_physical_device_command`], over a registry
+/// passed in rather than the process-wide one.
+///
+/// Split for the same reason as [`create_across`] and [`extensions_across`]: the
+/// interesting cases here are a driver that is not entitled to be asked, a
+/// machine where one driver of two implements the extension, and a name nobody
+/// has — and none of them can be set up against a `static` registry that no test
+/// can empty.
+///
+/// # Safety
+///
+/// Each `DriverInstance` in `instance` must name a driver of `registry` and
+/// carry that driver's own live `VkInstance`, and `raw` must be a
+/// NUL-terminated string valid for the call.
+unsafe fn unknown_across(
+    registry: &mut Registry,
+    instance: &Instance,
+    raw: *const c_char,
+    name: &[u8],
+) -> VoidFn {
+    let mut answers: Vec<(usize, VoidFn)> = Vec::with_capacity(instance.drivers().len());
+    let mut anyone_has_it = false;
+
+    for driver_instance in instance.drivers() {
+        let Some(driver) = registry.drivers().get(driver_instance.driver) else {
+            continue;
+        };
+        // Only the version-4 entry point may be asked. Falling back to this
+        // driver's `vkGetInstanceProcAddr` — which is required for the nine
+        // *known* commands, and is what `physical::Ask` encodes — would be
+        // memory corruption here: it answers for device-level commands too, and
+        // a device command reached through a trampoline would have a `VkDevice`
+        // read as if it were a loader wrapper. See `crate::unknown`.
+        let found = match driver.physical_device_proc_addr() {
+            // SAFETY: the driver settled at interface version 4 or above, which
+            // is what `physical_device_proc_addr` gates on; `driver_instance`
+            // is that driver's own `VkInstance`; and `raw` is the caller's
+            // NUL-terminated string.
+            Some(ask) => unsafe { ask(driver_instance.handle, raw) },
+            None => None,
+        };
+        anyone_has_it |= found.is_some();
+        answers.push((driver_instance.driver, found));
+    }
+
+    if !anyone_has_it {
+        return None;
+    }
+
+    // Only now is a slot spent. Asking first means a name no driver has costs
+    // nothing permanent, which matters because the pool is never reclaimed.
+    let slot = registry.slot_for(name)?;
+    for (index, found) in answers {
+        if let Some(driver) = registry.drivers().get(index) {
+            driver.ext().set(slot, found);
+        }
+    }
+
+    unknown::trampoline(slot)
 }
 
 // ---------------------------------------------------------------------------
@@ -882,7 +994,16 @@ unsafe fn enumerate_across(
         };
         // SAFETY: forwarded from this function's contract.
         for handle in unsafe { devices_of(driver, instance.handle) } {
-            let mut wrapper = PhysicalDevice::new(instance.driver, instance.handle, handle);
+            // The driver's unknown-extension table is reached from the wrapper by
+            // three instructions of assembly, so the address has to be stable:
+            // it points into a `Box` the driver record owns, not into the `Vec`
+            // that record lives in. See `crate::unknown`.
+            let mut wrapper = PhysicalDevice::new(
+                instance.driver,
+                instance.handle,
+                handle,
+                driver.ext().as_ptr(),
+            );
             // SAFETY: `TABLE` is a `static`, so it outlives every use.
             if unsafe { wrapper.install_table(table()) }.is_err() {
                 // Unreachable: `PhysicalDevice::new` stamps what this checks.
@@ -1600,13 +1721,14 @@ mod tests {
         enumerate_instance_layer_properties, enumerate_instance_version,
         enumerate_physical_devices, extensions_across, get_device_proc_addr,
         get_instance_proc_addr, get_physical_device_format_properties,
-        get_physical_device_queue_family_properties, register_driver, table,
+        get_physical_device_queue_family_properties, register_driver, table, unknown_across,
     };
     use crate::dispatch::{ICD_LOADER_MAGIC, is_loader_magic, loader_data};
     use crate::global::Extension;
     use crate::icd::{CURRENT, DriverReply};
-    use crate::instance::PhysicalDevice;
+    use crate::instance::{DriverInstance, Instance, PhysicalDevice};
     use crate::registry::{Entry, Registry};
+    use crate::unknown;
     use crate::vk::{
         ExtensionProperties, Handle, MAX_EXTENSION_NAME_SIZE, VK_ERROR_INCOMPATIBLE_DRIVER,
         VK_ERROR_INITIALIZATION_FAILED, VK_ERROR_LAYER_NOT_PRESENT, VK_INCOMPLETE, VK_SUCCESS,
@@ -2245,10 +2367,23 @@ mod tests {
         unsafe { get_instance_proc_addr(instance, name.as_ptr()) }
     }
 
-    /// An address that stands in for an instance. Never dereferenced, because
-    /// `vkGetInstanceProcAddr` only tests it against null.
+    /// A `VkInstance` this loader could really have returned, with no drivers
+    /// behind it.
+    ///
+    /// It used to be a fabricated address, on the stated grounds that
+    /// `vkGetInstanceProcAddr` never dereferences the handle — which was true
+    /// until the unknown-command fallback, whose entire job is to ask the
+    /// instance's drivers a question. The lookups below then read
+    /// `0x1234_5678` as an `Instance` and the whole binary died with an access
+    /// violation. Worth keeping as a shape: **a fixture justified by "nobody
+    /// looks inside this" stops being a fixture the day somebody looks**, and it
+    /// fails at the far end of the file from the change that broke it.
+    ///
+    /// Leaked, because the C API hands an application a bare handle with no
+    /// lifetime attached and a borrowed one would dangle at the end of the
+    /// expression that built it. A few dozen bytes per call, in a test binary.
     fn an_instance() -> Handle {
-        ptr::without_provenance_mut::<c_void>(0x1234_5678)
+        Box::into_raw(Instance::new(Vec::new())).cast::<c_void>()
     }
 
     /// The device lifetime, driven entirely through the symbols an application
@@ -2765,5 +2900,265 @@ mod tests {
     #[test]
     fn a_null_name_is_answered_rather_than_dereferenced() {
         assert!(unsafe { get_instance_proc_addr(ptr::null_mut(), ptr::null()) }.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Commands the loader has never heard of
+    // -----------------------------------------------------------------------
+
+    /// A physical-device command this loader has no signature for and never
+    /// will — which is the point: `unknown_across` forwards it without one.
+    const UNKNOWN_COMMAND: &CStr = c"vkGetPhysicalDeviceSurfaceSupportKHR";
+
+    /// A second one, so that a test can watch two names get two slots.
+    const OTHER_UNKNOWN_COMMAND: &CStr = c"vkGetPhysicalDeviceSurfaceFormatsKHR";
+
+    /// A name no stub driver here implements.
+    const UNIMPLEMENTED_COMMAND: &CStr = c"vkGetPhysicalDeviceSurfaceCapabilities2EXT";
+
+    /// What one driver's implementation of [`UNKNOWN_COMMAND`] would be.
+    ///
+    /// Never called by these tests: what is under test here is *resolution* —
+    /// which driver is asked, what lands in which table, whether a slot is
+    /// spent. That the jump then works is [`crate::unknown`]'s own tests, and
+    /// keeping the two apart is what stops one failure being reported as the
+    /// other.
+    unsafe extern "C" fn surface_support() {}
+
+    /// A second driver's implementation of the same command. Distinct from
+    /// [`surface_support`] because one slot must reach a *different* function
+    /// per driver — that is the whole reason the table is per driver.
+    unsafe extern "C" fn other_surface_support() {}
+
+    /// The two stubs as fn *pointers*. A table entry holds an address, and a
+    /// function item in Rust is a zero-sized type of its own — so naming the
+    /// pointer once is what makes each comparison below a pointer cast rather
+    /// than a coercion hidden inside one.
+    const SURFACE_SUPPORT: unsafe extern "C" fn() = surface_support;
+    const OTHER_SURFACE_SUPPORT: unsafe extern "C" fn() = other_surface_support;
+
+    /// A version-4 driver that implements [`UNKNOWN_COMMAND`].
+    unsafe extern "C" fn gpdpa_surface(_instance: Handle, name: *const c_char) -> VoidFn {
+        if unsafe { CStr::from_ptr(name) }.to_bytes() == UNKNOWN_COMMAND.to_bytes() {
+            return Some(surface_support);
+        }
+        None
+    }
+
+    /// A version-4 driver that implements the same command differently, and
+    /// [`OTHER_UNKNOWN_COMMAND`] as well.
+    unsafe extern "C" fn gpdpa_other_surface(_instance: Handle, name: *const c_char) -> VoidFn {
+        let bytes = unsafe { CStr::from_ptr(name) }.to_bytes();
+        if bytes == UNKNOWN_COMMAND.to_bytes() || bytes == OTHER_UNKNOWN_COMMAND.to_bytes() {
+            return Some(other_surface_support);
+        }
+        None
+    }
+
+    /// A version-4 driver with no extension commands at all. Not the same as an
+    /// absent driver: it is asked, and its silence must leave its own table
+    /// aborting rather than holding another driver's pointer.
+    unsafe extern "C" fn gpdpa_silent(_instance: Handle, _name: *const c_char) -> VoidFn {
+        None
+    }
+
+    /// A registry of drivers that settled at `version`, each with the given
+    /// `vk_icdGetPhysicalDeviceProcAddr`.
+    ///
+    /// Separate from [`registry_of`] because that one leaves the version-4
+    /// entry point null — and null is the very condition the code under test
+    /// refuses to work around.
+    fn registry_of_v4(
+        version: u32,
+        lookups: &[unsafe extern "C" fn(Handle, *const c_char) -> VoidFn],
+    ) -> Registry {
+        let mut registry = Registry::new(CURRENT);
+        for lookup in lookups {
+            registry.admit(
+                "v4-stub",
+                Entry {
+                    get_instance_proc_addr: gipa_one_device,
+                    icd_get_instance_proc_addr: None,
+                    get_physical_device_proc_addr: Some(*lookup),
+                    negotiate: None,
+                },
+                DriverReply::Success { reported: version },
+            );
+        }
+        registry
+    }
+
+    /// One driver instance per driver in `registry`, in order — the argument to
+    /// [`Instance::new`] rather than the instance itself, so that each test owns
+    /// the box whose address a real application would hold.
+    ///
+    /// The per-driver `VkInstance` handles are fabricated. Nothing in the path
+    /// under test dereferences them — they are handed straight back to the
+    /// driver that supposedly made them, and these stubs ignore them — and
+    /// giving each driver a *different* one is what would make a mix-up visible
+    /// if the stubs ever started looking.
+    fn one_instance_per_driver(registry: &Registry) -> Vec<DriverInstance> {
+        (0..registry.drivers().len())
+            .map(|driver| DriverInstance {
+                driver,
+                handle: ptr::without_provenance_mut::<c_void>(0x1000 + driver),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_command_one_driver_implements_gets_a_slot_and_that_drivers_function() {
+        let mut registry = registry_of_v4(4, &[gpdpa_surface]);
+        let instance = Instance::new(one_instance_per_driver(&registry));
+        assert_eq!(registry.slots().assigned(), 0);
+
+        let answer = unsafe {
+            unknown_across(
+                &mut registry,
+                &instance,
+                UNKNOWN_COMMAND.as_ptr(),
+                UNKNOWN_COMMAND.to_bytes(),
+            )
+        };
+
+        assert_eq!(
+            answer.map(|f| f as usize),
+            unknown::trampoline(0).map(|f| f as usize),
+            "the application was not given slot 0's trampoline"
+        );
+        assert_eq!(registry.slots().assigned(), 1);
+        assert_eq!(
+            registry.slots().name(0),
+            Some(UNKNOWN_COMMAND.to_bytes()),
+            "the slot was assigned to some other name"
+        );
+        assert_eq!(
+            registry.drivers()[0].ext().get(0),
+            SURFACE_SUPPORT as usize,
+            "the driver's own function did not reach its table"
+        );
+    }
+
+    #[test]
+    fn a_command_no_driver_implements_answers_null_and_spends_no_slot() {
+        // The pool is never reclaimed, so a name that nobody has must cost
+        // nothing permanent — otherwise an application probing for extensions
+        // it does not find can exhaust the loader.
+        let mut registry = registry_of_v4(4, &[gpdpa_surface, gpdpa_silent]);
+        let instance = Instance::new(one_instance_per_driver(&registry));
+
+        let answer = unsafe {
+            unknown_across(
+                &mut registry,
+                &instance,
+                UNIMPLEMENTED_COMMAND.as_ptr(),
+                UNIMPLEMENTED_COMMAND.to_bytes(),
+            )
+        };
+
+        assert!(answer.is_none(), "a command nobody implements was answered");
+        assert_eq!(
+            registry.slots().assigned(),
+            0,
+            "a slot was spent on a name no driver has"
+        );
+        assert!(
+            registry.drivers()[0].ext().is_unresolved(0),
+            "slot 0 was written even though no slot was assigned"
+        );
+    }
+
+    #[test]
+    fn a_driver_below_version_four_is_not_asked_even_though_it_has_the_symbol() {
+        // The safety test of this module. `physical_device_proc_addr` gates on
+        // *entitlement*, not on the pointer being non-null, and this path has
+        // no `vkGetInstanceProcAddr` fallback on purpose: that entry point
+        // answers for device-level commands too, and a `VkDevice` arriving at a
+        // trampoline would have two words pulled out of the driver's own object
+        // and be jumped through.
+        let mut registry = registry_of_v4(3, &[gpdpa_surface]);
+        let instance = Instance::new(one_instance_per_driver(&registry));
+        assert!(
+            registry.drivers()[0].physical_device_proc_addr().is_none(),
+            "the fixture did not model a sub-version-4 driver"
+        );
+
+        let answer = unsafe {
+            unknown_across(
+                &mut registry,
+                &instance,
+                UNKNOWN_COMMAND.as_ptr(),
+                UNKNOWN_COMMAND.to_bytes(),
+            )
+        };
+
+        assert!(
+            answer.is_none(),
+            "a driver that did not settle at version 4 was asked anyway"
+        );
+        assert_eq!(registry.slots().assigned(), 0);
+    }
+
+    #[test]
+    fn one_slot_reaches_a_different_function_in_each_driver_and_aborts_in_the_silent_one() {
+        // Three drivers, one name, one slot — and three different destinations:
+        // each implementer's own function, and the aborting stub for the one
+        // that has nothing. Leaving the silent driver holding a neighbour's
+        // pointer would call the wrong driver's code with this driver's handle.
+        let mut registry = registry_of_v4(4, &[gpdpa_surface, gpdpa_silent, gpdpa_other_surface]);
+        let instance = Instance::new(one_instance_per_driver(&registry));
+
+        let answer = unsafe {
+            unknown_across(
+                &mut registry,
+                &instance,
+                UNKNOWN_COMMAND.as_ptr(),
+                UNKNOWN_COMMAND.to_bytes(),
+            )
+        };
+
+        assert!(answer.is_some());
+        assert_eq!(registry.slots().assigned(), 1);
+        assert_eq!(registry.drivers()[0].ext().get(0), SURFACE_SUPPORT as usize);
+        assert!(
+            registry.drivers()[1].ext().is_unresolved(0),
+            "a driver that does not implement the command would have been called"
+        );
+        assert_eq!(
+            registry.drivers()[2].ext().get(0),
+            OTHER_SURFACE_SUPPORT as usize,
+        );
+    }
+
+    #[test]
+    fn asking_twice_returns_the_same_address_and_a_second_name_gets_a_second_slot() {
+        // Vulkan lets an application call `vkGetInstanceProcAddr` for one name
+        // as often as it likes; a loader that answered a different address each
+        // time would still work, but would leak a slot per call out of a pool
+        // that is never reclaimed. And two names must never share a slot: the
+        // address is all the application keeps, so a shared one would silently
+        // turn one command into the other.
+        let mut registry = registry_of_v4(4, &[gpdpa_other_surface]);
+        let instance = Instance::new(one_instance_per_driver(&registry));
+
+        let ask = |registry: &mut Registry, command: &CStr| {
+            unsafe { unknown_across(registry, &instance, command.as_ptr(), command.to_bytes()) }
+                .map(|f| f as usize)
+        };
+
+        let first = ask(&mut registry, UNKNOWN_COMMAND);
+        let again = ask(&mut registry, UNKNOWN_COMMAND);
+        assert!(first.is_some());
+        assert_eq!(first, again, "the same command was given two addresses");
+        assert_eq!(registry.slots().assigned(), 1);
+
+        let other = ask(&mut registry, OTHER_UNKNOWN_COMMAND);
+        assert!(other.is_some());
+        assert_ne!(first, other, "two commands share one trampoline");
+        assert_eq!(registry.slots().assigned(), 2);
+        assert_eq!(
+            registry.drivers()[0].ext().get(1),
+            OTHER_SURFACE_SUPPORT as usize,
+        );
     }
 }

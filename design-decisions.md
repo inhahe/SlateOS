@@ -60001,6 +60001,7 @@ second afternoon spent on it.
 ## §675 — a measured ratio publishes both halves together, because a numerator and a denominator timed by different parties are not the same interval
 
 **Date:** 2026-09-02
+**Lane:** A
 **Decided by:** Claude (autonomous)
 
 **In short:** the build harness runs its own self-tests before it compiles

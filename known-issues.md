@@ -108347,8 +108347,8 @@ that range:
 | 9 request-deletion | pushed tip | checker takes `--head "$sha"` |
 | 7 rustfmt | pushed tip | mirror of pushed blobs — **fixed 2026-09-02** |
 | 2 unreachable-command | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
-| 3 raced-global | working tree | `--check`, checker walks the filesystem |
-| 4 argv-utf8 | working tree | same |
+| 3 raced-global | pushed tip | `--head "$sha"` via the `Tree` seam — **fixed 2026-09-02** |
+| 4 argv-utf8 | working tree | `--check`, checker walks the filesystem |
 | 5 getopt-table | working tree | same |
 | 6 host-errmsg | working tree | same |
 | 8 quote-names | working tree | same |
@@ -108535,6 +108535,77 @@ the regression test all exist. The work is:
      things that must hold however they are delivered: the deletion is allowed
      however broken the working tree is, and the tally reports the gate
      `skipped` rather than `ran`.
+
+7. **The seam itself was pruning the wrong set, found while starting gate 4**
+   (`gittree.py`, 2026-09-02). `_PRUNE` was `("target", ".git")` — but
+   `.gitignore` also carries `**/target-*/`, the alternate cargo build dirs
+   (`target-lint`, `target-test`, `target-hl2`, `target-probe`) that a lane
+   creates whenever it needs a second build that will not fight the first for
+   cargo's lock. Those are gitignored, so a `RevTree` can never list one, and
+   they are on the disk while a build is running, so a `WorkTree` listed all of
+   them. That is the seam breaking its own central promise — and in the worst
+   available way, because whether it happens depends on **whether another lane
+   is running clippy at that moment**. A gate that judges a commit one way at
+   10:00 and the other way at 10:05, with no commit in between, is a gate
+   nobody can act on.
+
+   It was not hypothetical for gate 4: `argv-utf8.py` prunes `target-*` by hand
+   today, so moving it onto the seam would have *lost* a rule it already had.
+   Gate 3 shipped earlier the same day with the defect latent — `raced-globals`
+   walks the whole repo through `files_under("", prune=SKIP_DIRS)` and
+   `SKIP_DIRS` has no `target-*` either.
+
+   The fix mirrors `.gitignore` rather than enumerating names, for the reason
+   `.gitignore`'s own comment gives: "Neither the count nor the names are
+   principled … so match the shape instead of enumerating the instances."
+   `_PRUNE_DIR_PREFIX = ("target-",)`, applied through a single `_prune_dir`
+   so the walk (which prunes by directory name) and the filter (which prunes by
+   path) cannot drift apart.
+
+   **That pattern's trailing slash is load-bearing, and getting it wrong would
+   have been worse than the bug.** It matches directories only, so a
+   tracked file `posix/src/target-arch.rs` is source and must survive. A rule
+   that pruned the prefix wherever it appeared would hide such a file from
+   *both* sides at once — which the seam's headline equality assertion cannot
+   see, because both sides would be equally wrong. Hence the split into
+   `_pruned` (a file path: the prefix family applies to every component but the
+   last) and `_pruned_prefix` (a directory prefix: every component), and a
+   `files_under` that answers a file-named prefix by file rules *first*. There
+   are no such files today — measured across all 13846 tracked paths — which is
+   the argument for fixing the rule while it is cheap, not for skipping it.
+
+   Mutation-verified with ten mutants against `test-gittree.py`; nine caught
+   after the suite was strengthened three times. What the run found:
+
+   * **Two survivors were "same answer, different work."** Reverting the walk
+     prune to exact names, and reverting `WorkTree`'s prefix guard to file
+     rules, both still answer `[]` — the per-file filter drops whatever the
+     walk turns up. Only the descent differs, and on this repository a
+     `target/` is tens of gigabytes inside a push gate. No assertion about
+     return values can see either, so `case_the_walk_never_descends_into_build_output`
+     records the directories `os.walk` actually yields. Note a call *count*
+     is not enough: `os.walk` is invoked once per `files_under` however deep it
+     goes, which is why the existing probe missed this.
+   * **One survivor was a missing fixture**, not a missing assertion: nothing
+     in the tree had a directory whose name merely *contains* `target-`, so a
+     substring spelling of the rule passed everything. `cross-target-tests/` is
+     now committed in the fixture for that one mutant.
+   * **One survivor is genuinely equivalent and is documented, not removed.**
+     `RevTree`'s guard cannot tell `_pruned_prefix` from `_pruned`, because a
+     prefix whose last component starts with `target-` is already decided
+     before the guard runs — either it names a tracked file and the `_fileset`
+     branch answers first, or `__init__` has already dropped everything under
+     it from the index. The guard stays: it is the correct call if the index
+     filter changes, and the seam's rule is that both implementations spell the
+     same thing the same way. The equivalence rests on the index being
+     pre-filtered, which the suite asserts separately, so it fails loudly
+     rather than silently if that stops holding.
+
+   Behaviour on the real tree is unchanged and that was checked rather than
+   assumed: the only gitignored directories present are `target`, `build`,
+   `limine` and `toolchain/sysroot`, and no tracked path has a `target-`
+   component — so the change is a no-op today and matters only while a lane is
+   mid-build, which is exactly when it was unobservable before.
 
 ### Why it is not done yet
 

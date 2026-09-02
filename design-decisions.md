@@ -50880,6 +50880,461 @@ information that was missing was the wire/not-wire split, and that is one bit.
 `kernel/src/syscall/handlers.rs`. Full account in `known-issues.md` →
 `A-NET-INTERFACE-COUNTERS-CONFLATE-THE-NIC-WITH-EVERY-VETH-PAIR`.
 
+## 800. The Vulkan loader hands back the driver's own `VkDevice`, keeps one record per device rather than per driver, and forwards every device command it has not heard of
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** A Vulkan "device" is the handle a program uses to actually draw —
+it gets one from a graphics driver and then makes thousands of calls a second
+through it. Our loader sits between the program and the driver, and had to
+decide how much of itself to leave in that path. It leaves none: the handle the
+program receives *is* the driver's handle, so drawing calls go straight to the
+driver. The loader keeps a small private record for each device, off to one
+side, and only intercepts the two calls it genuinely has to.
+
+Three decisions, taken together because each is the reason the next one is
+available. They govern `gui/vulkan/src/device.rs` and the device half of
+`gui/vulkan/src/entry.rs`.
+
+### 1. Adopt the driver's handle, do not wrap it
+
+The layer below this one wraps. `vkEnumeratePhysicalDevices` hands the
+application a `PhysicalDevice` the *loader* allocated, holding the driver's real
+handle inside, because one `vkCreateInstance` fans out to every installed driver
+and a bare physical-device handle would be un-attributable — with three drivers
+registered there is nothing in the handle itself to say which one produced it.
+
+A device does not have that problem. An application creates a device *from a
+particular physical device*, that physical device belongs to exactly one driver,
+and so does the device. There is nothing to fan out to and nothing to choose
+between, which means the loader can take the driver's `VkDevice` and stamp its
+own record into the dispatch word — offset 0 of every dispatchable Vulkan handle,
+which the Loader–Driver Interface gives the loader outright — rather than
+allocating something new around it.
+
+**The alternative and what it costs.** Wrapping would work and would be
+consistent with the physical-device layer. It would also mean that every device
+command the application ever calls arrives at the loader holding a pointer the
+driver has never seen, so the loader would have to substitute the real handle
+and forward — for every command, forever, including commands invented after this
+loader was written, which it therefore could not name. That is not a
+micro-optimisation being traded away; it is the loader inserting itself into a
+path that runs thousands of times per frame, and it would require the loader to
+export a trampoline for the entire device API in order to work at all.
+
+Adopting means the pointer the application holds is already the one the driver
+wants, so `vkCmdDraw` and its several hundred siblings reach the driver **with
+the loader nowhere in the call path**. That separation is the reason Vulkan has
+device-level dispatch distinct from instance-level dispatch at all, and a loader
+that wrapped devices would throw it away for symmetry with a layer whose problem
+it does not share.
+
+**What is given up:** the loader can no longer tell a `VkDevice` of its own from
+one it never saw by looking at the pointer, because there is nothing of the
+loader's in the pointer. It reads the dispatch word instead, which is a load
+rather than a search, and is what the word is for.
+
+### 2. One record per device, not one per driver
+
+Tempting to share: the driver index and the driver's `vkGetDeviceProcAddr` are
+both per-driver facts, so two devices from the same driver look like they could
+point at the same record.
+
+They cannot. `vkGetDeviceProcAddr` is specified to return a pointer *specific to
+the device it was asked about*. Two devices from one driver may legitimately be
+given different function pointers for the same command — that is precisely how a
+driver specialises a command for one device without a runtime test on every
+call, which is the optimisation device-level dispatch exists to permit. A shared
+record would be a place to cache those pointers under the wrong key: correct
+today, because nothing is cached yet, and silently wrong the first time
+something is.
+
+So the record is per device and the sharing question never arises. The cost is
+one small allocation per device, which is a per-device cost paid once against a
+per-call cost paid forever.
+
+This corrects a guess `gui/vulkan/src/lib.rs` had been carrying in prose since
+the instance layer landed — it said a device dispatch table was needed "per
+driver". The wrong version is left in that file, named as wrong, rather than
+quietly deleted, because it is the version that sounds right.
+
+### 3. Forward by default; two named exceptions
+
+The loader's `vkGetDeviceProcAddr` answers for exactly two names —
+`vkGetDeviceProcAddr` itself and `vkDestroyDevice` — and forwards everything else
+to the driver, whose answer, including "no such command", is the answer.
+
+There is deliberately **no list of device commands to accept**. Such a list would
+be the commands known when the loader was written, and every extension a driver
+supports that this loader has never heard of would be missing from it — the
+application would get null for a command that exists. Forwarding by default is
+what makes an unknown command work.
+
+The two exceptions are exceptions because the loader has state riding on them:
+
+| Command | Why the loader must own it |
+|---|---|
+| `vkGetDeviceProcAddr` | Handing back the driver's own would mean every later lookup made through it skipped the row below, and the loader would never hear about a device being destroyed. |
+| `vkDestroyDevice` | Destroying a device also has to free the loader's record, which the driver knows nothing about. The driver's own, reached directly, would free the driver's object and leak the loader's — and leave a freed handle whose dispatch word still points at it. |
+
+### The record holds what is used and nothing else
+
+A loader's device dispatch table is conventionally an array of every device
+command's function pointer, so the loader's exported `vkCmdDraw` can read a fixed
+offset and jump. This loader exports no device commands — that is the point of
+decision 1 — so such a table would be a few hundred slots that nothing reads: a
+structure that looks like a working dispatch table right up until someone relies
+on it, which is the same defect this tree has been filing bugs about elsewhere
+(a tool reporting success for work it never did).
+
+The record therefore holds two fields: which driver, and that driver's
+`vkGetDeviceProcAddr` for this device. When the loader does start exporting
+device commands, each one adds its pointer and its trampoline together, and the
+field is read the moment it exists.
+
+**Ordering consequence, worth stating because it is easy to get backwards.**
+`vkDestroyDevice` must read the dispatch word *before* the driver destroys the
+device, because that word lives inside the driver's object; and it must free the
+loader's record *after*, because until the driver's call returns the device's
+dispatch word still points at it. Creation has the mirror of this: the driver's
+`vkGetDeviceProcAddr` is resolved *before* `vkCreateDevice` is called, so that a
+driver which cannot supply one is refused while there is still nothing to unwind
+— rather than after, leaving a live device to be destroyed through the very
+lookup function that turned out to be missing.
+
+**Where it is:** `gui/vulkan/src/device.rs` (the record, the lookup rule, and the
+argument for all of the above); `create_device`, `get_device_proc_addr`,
+`destroy_device`, `driver_destroy_device` and `record_of` in
+`gui/vulkan/src/entry.rs`; `GetDeviceProcAddrFn`, `CreateDeviceFn` and
+`DestroyDeviceFn` in `gui/vulkan/src/vk.rs`. `PhysicalDevice` gained an
+`instance` field in `gui/vulkan/src/instance.rs` for a reason that falls out of
+decision 1: `vkCreateDevice` is handed a physical device and nothing else, but
+the driver's `vkCreateDevice` is an instance-level command and cannot be looked
+up with a null handle, and the loader does not track its live instances, so
+without that field it could not find the instance the device was enumerated
+from.
+
+## 801. Wrapping a `VkPhysicalDevice` costs one hand-written forwarder per command, and the loader writes all nine
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** Before a program can draw anything it has to pick a graphics card
+and ask that card what it can do — how much memory, which image formats, and
+above all which *queue families* it has (a queue family is a group of the card's
+work-submission slots; you must name one to create a device at all). Our loader
+answered "no such command" to every one of those questions, because they were
+simply not implemented. The consequence is the part worth remembering: the
+device layer recorded in §800 was finished, tested and green, and **no
+conforming application could reach it**, because the one command that reports
+queue families was missing and `vkCreateDevice` cannot be called without a queue
+family index. This entry adds the nine missing commands, and records why they
+have to be written out one at a time when §800's several hundred device commands
+did not.
+
+Governs `gui/vulkan/src/physical.rs` and the physical-device half of
+`gui/vulkan/src/entry.rs`.
+
+### 1. The bill for wrapping, arriving
+
+§800 chose to *adopt* the driver's `VkDevice` — hand the application the
+driver's own handle with only its dispatch word restamped — rather than *wrap*
+it, and gave the cost of wrapping as the reason. A wrapped handle is a pointer
+the driver has never seen, so every command taking it must pass through the
+loader; and to pass through the loader it must be *named* by the loader, which
+means a command invented after the loader was written cannot work at all.
+
+Physical devices are wrapped, and for a reason §800 also gives: one
+`vkCreateInstance` fans out to every installed driver, so the loader merges
+several drivers' physical devices into one list, and a bare driver handle coming
+back would be un-attributable — with three drivers registered there is nothing
+in the handle to say which produced it. That decision was taken when physical
+devices were first enumerated. This entry is the invoice.
+
+**It is still the right trade, and the numbers are the argument.** Vulkan 1.0
+has exactly ten commands taking a `VkPhysicalDevice`. They are called a handful
+of times while an application chooses a GPU and never again; none is on a
+per-frame path; and the set is closed, because Vulkan 1.0 is finished. The set
+the loader would have had to write had it wrapped devices instead is open-ended,
+per-frame, and unknowable in advance. Ten bounded startup calls against several
+hundred unbounded drawing calls is not a close question — but it is a real cost,
+and pretending a decision is free is how the second half of it goes unbuilt for
+a day, which is exactly what happened here.
+
+### 2. A version-4 driver is asked through its version-4 entry point *first*, and the instance one is still asked after
+
+A driver can be asked for a physical-device command two ways. Every driver
+exports `vk_icdGetInstanceProcAddr`; from interface version 4 a driver may also
+export `vk_icdGetPhysicalDeviceProcAddr`. The rule adopted is: ask the
+version-4 one first if it exists, and if it answers null, ask the instance one.
+
+**Why the version-4 one first.** An extension may define a command name that
+exists at device level, at physical-device level, or at both. Asked through
+`vkGetInstanceProcAddr` a driver returns a pointer either way, and the answer
+carries no clue which kind it is — yet the two need opposite handling, since a
+physical-device command's first argument must be unwrapped and a device
+command's must not. `vk_icdGetPhysicalDeviceProcAddr` answers exactly one
+question — "is this a physical-device command, and if so, here it is" — and null
+means no. That disambiguation is the entire reason the entry point was added to
+the interface, and preferring it is using the interface as designed.
+
+**Why the fallback is not merely defensive.** It is required by the
+Loader–Driver Interface, and there is a real case behind the requirement: a
+driver may route only its *extension* physical-device commands through the
+version-4 entry point and answer for the core ten through the instance one.
+Treating a null from the first as final would lose `vkGetPhysicalDeviceProperties`
+on a driver that is behaving correctly.
+
+**What was rejected.** "Instance lookup only, it is simpler and works for all ten
+core commands" — true today and wrong the first time an extension command is
+added, which is the same defect as a hard-coded list of known commands. And
+"version-4 only where available", which drops conforming drivers on the floor.
+
+This finally gives `Driver::physical_device_proc_addr` a caller. It has been
+exposed, version-gated and unit-tested since the registry was written, and until
+now nothing in the tree read it — a gate correctly implemented and guarding
+nothing.
+
+### 3. All nine go in the instance dispatch table
+
+`entry.rs`'s `Table` is what the first word of a `VkInstance` or
+`VkPhysicalDevice` points at, and its stated membership rule is *what the handle
+dispatches through*, not what level the command is named for. A
+`VkPhysicalDevice` dispatches through this table, so by that rule the table is
+exhaustive over the commands one can be called with, and the nine belong in it.
+
+The alternative was to leave them out on the grounds that nothing dispatches
+through the table by offset yet, so the entries would be unread. That is the
+argument §800 makes *against* a device dispatch table — and it does not carry
+over, because these nine are read: `vkGetInstanceProcAddr` returns them from the
+table. Thirteen entries every one of which is read is a different proposition
+from several hundred that none are. Leaving them out would have produced the
+defect §800 names: a structure that looks like a working dispatch table right up
+until someone relies on it.
+
+### 4. `vkCreateDevice` is a physical-device command and is deliberately not in the table of them
+
+`physical::Command` is the commands the loader **only forwards** — unwrap the
+handle, call the driver, return what it says. `vkCreateDevice` does much more:
+it creates loader state that outlives the call, and has its own ordering
+requirements (§800). Listing it alongside nine entries whose defining property
+is having no body would make the table mean two things.
+
+### 5. What a driver that cannot supply one of these gets
+
+All nine are core Vulkan 1.0, so a driver missing one is not a Vulkan 1.0
+driver. It is still a case with a decision in it, and the decision follows what
+`driver_destroy_device` already does: the command does what it can and no more.
+
+| Shape of the command | What happens |
+|---|---|
+| Returns `VkResult` | `VK_ERROR_INITIALIZATION_FAILED` — a failure the application can act on. |
+| Returns void, has a count out-parameter | The count is set to **zero**. |
+| Returns void, has neither | The caller's structure is left untouched. |
+
+The middle row is the one worth arguing. Leaving the count untouched would hand
+the application whatever was on its stack and then have it read that many
+structures out of an array that size — an arbitrarily large read from a garbage
+count. Zero is a wrong answer that is survivable and legible: "this card has no
+queue families" makes the application's own `vkCreateDevice` fail next, at a
+point where it can report something.
+
+The last row is the residue. There is nowhere to report from — the command
+returns void and has no count — and the loader does not know the structure's
+size, so it cannot even zero it. It is recorded here as noticed rather than
+overlooked.
+
+### The loader still declares no Vulkan structure layout, and that is the invariant rather than the tally
+
+`vk.rs` used to justify itself by counting: "six declarations can be checked
+against `vulkan_core.h` by reading; six hundred cannot." Nine commands later the
+count is no longer the point, so the module now states the rule the count was
+standing in for: **every structure is `*const c_void` or `*mut c_void`, and none
+is declared.**
+
+The asymmetry is why. A wrong *function* signature is nearly always caught,
+because the loader passes a handle and some scalars and forwards — getting one
+wrong means a wrong argument count, which is a compile error or an immediate
+crash. A wrong *structure layout* is caught by nothing: the caller writes field
+`A`, the driver reads field `B`, and out comes a plausible wrong answer. Since
+the loader never reads a field of any of them, declaring one would buy nothing
+and stake everything.
+
+Two scalar aliases were added — `VkEnum` (signed, because every Vulkan
+enumeration carries a `..._MAX_ENUM = 0x7FFFFFFF` member for the express purpose
+of pinning it to a 32-bit signed integer) and `VkFlags` (`uint32_t` in the
+header). They record which parameters are enumerations and which are flag words,
+a fact `u32` everywhere would have thrown away for nothing gained.
+
+### The shape to remember
+
+The bug this entry fixes was not a wrong answer anywhere. Every test passed;
+`device.rs` and its twelve tests were correct in isolation and would have stayed
+correct forever. What was wrong was that nothing could *get there* — the layer
+below did not export the one command needed to supply an argument the layer
+above requires. A subsystem can be complete, tested, green and inert, and no
+test that stays inside it will say so. The check that would have caught it is
+the one asked from outside: *what sequence of calls does a real application
+make, and does every step in it exist?*
+
+**Where it is:** `gui/vulkan/src/physical.rs` (the command set, the ask-order
+rule, and the argument for both); `physical_trampoline`, `forward`, and the nine
+exported commands from `get_physical_device_properties` to
+`enumerate_device_layer_properties` in `gui/vulkan/src/entry.rs`, along with the
+nine new `Table` fields; `VkEnum`, `VkFlags` and the nine `PFN_` types in
+`gui/vulkan/src/vk.rs`.
+
+## 802. The loader declares exactly one Vulkan structure, and the command that forced it is the one it cannot forward
+
+**Date:** 2026-09-02
+**Lane:** C
+**Decided by:** Claude (autonomous)
+
+**In short:** Three Vulkan commands can be called before a program has anything
+to call them on: "which version of Vulkan is this?", "which optional add-ons
+are available?" and "which debugging layers are installed?" Our loader did not
+export any of them, deliberately — §578 argued that a command answering "none"
+without having looked is worse than a missing symbol, because the missing
+symbol names itself and the false "none" gets reported as a driver bug. That
+argument expires the moment an honest answer exists, and it now does for all
+three. Getting there required breaking a rule the loader had held since it was
+written: it now declares the memory layout of exactly one Vulkan data
+structure, where before it declared none. This entry is about why that one is
+different, and about two policy choices with no specification behind them.
+
+Governs `gui/vulkan/src/global.rs`, the structure declaration in
+`gui/vulkan/src/vk.rs`, and the three exported commands in
+`gui/vulkan/src/entry.rs`.
+
+### 1. Why these three could not simply be forwarded
+
+Every other command this loader exports has a driver to hand it to. These do
+not: they are asked with a **null instance**, before any driver has been
+selected, which is the whole reason they exist — an application uses them to
+decide what to put in the `vkCreateInstance` it has not made yet.
+
+So the loader must *answer* rather than forward, and each answer is a decision:
+
+| Command | The loader's answer | Where it comes from |
+|---|---|---|
+| `vkEnumerateInstanceVersion` | Vulkan 1.0 | What this loader implements — not what any driver implements, which is a different question asked of a `VkPhysicalDevice`. |
+| `vkEnumerateInstanceLayerProperties` | an empty list | There is no mechanism by which a layer could exist: loading one needs `dlopen`, which returns null on SlateOS. |
+| `vkEnumerateInstanceExtensionProperties` | the de-duplicated union of every registered driver's list | Every driver is asked, because any of them might serve the extension later. |
+
+The middle row is the one that looks like the stub §578 refused to write, and
+the difference is worth stating because it is easy to lose: **an empty list
+computed from a real registry is a correct answer; an empty list returned
+without looking is a lie that happens to be short.** What changed is not the
+answer but that the answer now has a reason attached, and the reason is a fact
+about the machine rather than about the loader's completeness.
+
+The version is the same shape of argument in reverse. Reporting 1.1 would be
+the *generous* lie: an application seeing 1.1 is entitled to ask for
+`vkGetPhysicalDeviceProperties2` and would get null.
+
+### 2. The invariant that broke, and why it broke here and nowhere else
+
+`vk.rs` has said since §801 that **every Vulkan structure is `*const c_void` or
+`*mut c_void`, and none is declared** — with the asymmetry as the argument: a
+wrong function signature means a wrong argument count, which is a compile error
+or an immediate crash, while a wrong structure layout is caught by nothing,
+because the caller writes field `A`, the driver reads field `B`, and out comes
+a plausible wrong answer. That section also named the moment to revisit it:
+*when a command needs the loader to look inside a structure.*
+
+`vkEnumerateInstanceExtensionProperties` is that command, and it is not a near
+miss. Its answer is a union across drivers, a union must be de-duplicated, and
+de-duplication compares extension **names** — so the loader has to know where
+the name is. Comparing whole records instead does not work: two drivers
+reporting the same extension at different `specVersion`s produce different
+bytes and must still collapse to one entry. There is no forwarding to fall back
+on, because there is nothing to forward to.
+
+`VkExtensionProperties` is therefore declared, and these are the properties
+that make it a tolerable exception rather than the first of many:
+
+- **Two fields**, one a fixed-size byte array whose length is itself part of the
+  ABI (`VK_MAX_EXTENSION_NAME_SIZE`, 256). No `pNext`, no version-dependent
+  tail, no enumeration whose width could be wrong.
+- **Checked, not trusted.** `const _: () = assert!(size_of == 260)` and the
+  matching alignment assertion make a layout mistake a build failure rather
+  than a driver reading the wrong field at runtime. This is exactly the check
+  the original argument said a structure declaration cannot have — and it can,
+  for a structure this simple, which is the whole of why this one is allowed.
+- **The name is declared `[u8; 256]`, not `[c_char; 256]`.** Layout-identical,
+  and it removes a sign question that has no bearing on anything: the loader
+  compares these bytes, it does not interpret them as characters. It is also
+  what the tree's rule about OS-boundary data already says.
+
+**What was rejected.** "Three loose constants — offset 0, length 256, stride
+260 — rather than a struct" is the same declaration wearing a disguise, and a
+worse one, because the compiler checks a `#[repr(C)]` layout and does not check
+three integers. And "do not export the command" leaves an application unable to
+discover any instance extension, which is the state the WSI work will walk
+straight into.
+
+The rule the invariant becomes is not "never declare one" but **"declare one
+only when the loader must read a field, and argue it at the point of use."**
+
+### 3. Union, not intersection
+
+An extension one driver offers is reported even when another does not.
+
+Intersecting would let a driver the application was never going to use veto a
+capability its actual GPU has — a machine with a discrete card and a software
+rasteriser would report whatever the rasteriser lacks as unavailable. That is
+the same failure §578's "a partial success is a success" rule exists to avoid,
+and the consistency is not decorative: because one driver declining does not
+sink `vkCreateInstance`, an application that enables an extension only some
+drivers have still gets an instance.
+
+### 4. The lowest `specVersion`, not the highest
+
+When two drivers offer the same extension at different versions, the reported
+version is the **minimum among the drivers that have it** — a driver that does
+not report the extension at all contributes nothing rather than counting as
+zero, which would collapse every version to 0 the moment one driver was silent.
+
+The argument is not which number is more accurate; both are true of some
+driver. It is which way the mistake falls:
+
+| If the loader reports | And the app is served by a weaker driver | Cost |
+|---|---|---|
+| the minimum | it skips a feature that was in fact available | a missed optimisation |
+| the maximum | it calls an entry point that is not there, **having asked first and been told yes** | a crash after doing everything right |
+
+Under-promising fails safe and over-promising does not, and that settles it.
+The Loader–Driver Interface says nothing about either this or §3, so both are
+recorded as policy — the same distinction `instance.rs` draws, and blurring it
+is how a plausible invention becomes a citation later.
+
+### 5. Ordering is first-seen, not sorted
+
+The list is small and an application looks names up rather than scanning, so
+sorting would buy nothing. First-seen order keeps the answer stable between
+runs and makes a log legible: the extensions appear in registration order, so
+which driver contributed what can be read off directly.
+
+### The shape to remember
+
+§578 wrote down a reason for *not* building something, and the reason had a
+built-in expiry date that was not written next to it: "there is no honest
+answer yet" stops being true the moment there is one, and nothing in the tree
+was watching for that moment. The omission outlived its justification by two
+days — not long, but the mechanism does not have a length limit. A deliberate
+gap should carry the condition that closes it, or it becomes a permanent one
+defended by an argument that no longer applies.
+
+**Where it is:** `gui/vulkan/src/global.rs` (the three answers, the merge
+policy and both of its arguments); `ExtensionProperties`,
+`MAX_EXTENSION_NAME_SIZE` and the layout assertions in `gui/vulkan/src/vk.rs`,
+along with the rewritten invariant section; `enumerate_instance_version`,
+`enumerate_instance_layer_properties` and
+`enumerate_instance_extension_properties` in `gui/vulkan/src/entry.rs`.
+
 ## 630. The shellcheck gate stops the build on a finding but waves it through when the tool is missing
 
 **Date:** 2026-08-29

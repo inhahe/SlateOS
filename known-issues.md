@@ -108501,3 +108501,98 @@ Run it by hand. Converting it to a pinned ratchet in the shape of
 would pin is lane B's to accept.
 
 ---
+
+## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — OPEN 2026-09-02 (lane C)
+
+**In short:** As of design-decisions.md §802 the Vulkan loader answers
+"which optional add-ons are available?" with the union of every installed
+driver's list. It has no way to hand out the *functions* those add-ons
+consist of, so an application that asks the advertised question, gets
+"yes", and then asks for the function gets nothing back. The loader tells
+the truth about what exists and then cannot deliver it.
+
+This is the exact failure shape §802 was written to argue against, created
+by §802 itself, and it was not noticed while writing it — which is why it
+is filed rather than quietly fixed in the same commit.
+
+### What happens
+
+`vkEnumerateInstanceExtensionProperties` now reports, say,
+`VK_KHR_surface`, because a registered driver reported it. The application
+enables it in `vkCreateInstance` — which succeeds, because the create-info
+is passed through to the drivers untouched and at least one of them
+supports it (§578: a partial success is a success). It then calls
+`vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR")`
+and gets **null**.
+
+`gui/vulkan/src/entry.rs`'s `get_instance_proc_addr` ends in
+`physical::lookup(name).map(physical_trampoline)`, and
+`gui/vulkan/src/physical.rs` matches exactly nine byte-string literals —
+the core Vulkan 1.0 physical-device commands. Anything else is null. That
+was correct and deliberate before §802 (`physical.rs`'s own test
+`a_prefix_of_a_command_is_not_that_command` asserts
+`vkGetPhysicalDeviceProperties2` is null); what changed is that the loader
+now *advertises* the things it then declines to name.
+
+Per the Vulkan specification this is a conformance failure: if an
+extension is supported and enabled, `vkGetInstanceProcAddr` must return a
+valid pointer for its commands.
+
+### Why it cannot be fixed by forwarding
+
+The reason is §801's, and it is the whole cost of wrapping: a
+`VkPhysicalDevice` the loader hands out is a **loader-owned object the
+driver has never seen**. Passing an unknown command straight through would
+hand the driver a pointer to a `crate::instance::PhysicalDevice` where it
+expects its own handle — memory corruption, not an error. The same is true
+of `VkInstance`, which is likewise a loader object fanning out to several
+drivers.
+
+So every command needs its first argument unwrapped, and the loader has no
+signature for a command it has never heard of.
+
+### What the proper fix is
+
+Two halves, and they are not equally hard:
+
+- **Commands whose first argument is a `VkPhysicalDevice`** — the WSI
+  family (`vkGetPhysicalDeviceSurfaceSupportKHR`,
+  `…SurfaceCapabilitiesKHR`, `…SurfaceFormatsKHR`, `…PresentModesKHR`) and
+  most other extension physical-device commands. These are fixable
+  *generically*, with no signature knowledge at all: a naked trampoline
+  that replaces argument 0 with the unwrapped driver handle and **tail-jumps**
+  to the driver's function, leaving every other register and the whole
+  stack untouched. This is what the Khronos loader does
+  (`unknown_ext_chain_*.asm`), and it is the reason
+  `vk_icdGetPhysicalDeviceProcAddr` exists in interface version 4 at all —
+  it is the only way to ask a driver "is this unknown name a
+  physical-device command?", and `gui/vulkan/src/physical.rs` already asks
+  through it first. Needs `#[unsafe(naked)]` + `naked_asm!`, a per-slot
+  table of (driver function, slot index), and a fixed pool of slots.
+
+- **Commands whose first argument is a `VkInstance`** — these cannot be
+  mechanised, because the loader must decide a *fan-out policy* per
+  command (which driver answers? all of them? the first that succeeds?),
+  and that is a decision, not a forwarding rule. The Khronos loader
+  generates a trampoline per command from `vk.xml`. Ours would need the
+  same, and it is the point at which "declare no Vulkan structures"
+  finally becomes untenable.
+
+### What to do in the meantime
+
+Nothing silently. The gap is now stated in `gui/vulkan/src/global.rs`'s
+module documentation next to the promise that creates it, so the next
+reader of the union policy meets its limit in the same breath.
+
+Do **not** "fix" this by narrowing the reported list to what the loader can
+dispatch. Many instance extensions add no commands at all
+(`VK_KHR_portability_enumeration` is a flag and nothing else), so
+intersecting with the loader's dispatch table would deny an application
+extensions that need no dispatching — and for the rest it would reproduce
+exactly the empty-list stub §578 refused to write.
+
+**Where it is:** `get_instance_proc_addr` in `gui/vulkan/src/entry.rs`;
+the nine-name match in `gui/vulkan/src/physical.rs`; the promise in
+`enumerate_instance_extension_properties` and `gui/vulkan/src/global.rs`.
+
+---

@@ -287,8 +287,8 @@ impl Instance {
     }
 }
 
-/// The loader's own `VkPhysicalDevice` — one driver's device, plus the note of
-/// whose it is.
+/// The loader's own `VkPhysicalDevice` — one driver's device, plus the notes of
+/// whose it is and which of that driver's instances it came from.
 ///
 /// `#[repr(C)]` with the dispatch word first, for the same reason as
 /// [`Instance`]: this is what the application is handed, and anything treating
@@ -298,19 +298,22 @@ pub struct PhysicalDevice {
     /// `VK_LOADER_DATA`. Must be the first member.
     dispatch: usize,
     driver: usize,
+    instance: Handle,
     handle: Handle,
 }
 
 impl PhysicalDevice {
     /// Wrap one device belonging to `driver`, stamped with the loader magic.
     ///
-    /// `driver` indexes [`crate::registry::Registry::drivers`], and `handle` is
-    /// what that driver's `vkEnumeratePhysicalDevices` returned.
+    /// `driver` indexes [`crate::registry::Registry::drivers`], `instance` is
+    /// the `VkInstance` *that driver* returned, and `handle` is what that
+    /// driver's `vkEnumeratePhysicalDevices` returned.
     #[must_use]
-    pub fn new(driver: usize, handle: Handle) -> Box<Self> {
+    pub fn new(driver: usize, instance: Handle, handle: Handle) -> Box<Self> {
         let mut boxed = Box::new(Self {
             dispatch: 0,
             driver,
+            instance,
             handle,
         });
         // SAFETY: `boxed` is a live, owned, correctly aligned `PhysicalDevice`
@@ -326,6 +329,21 @@ impl PhysicalDevice {
     #[must_use]
     pub const fn driver(&self) -> usize {
         self.driver
+    }
+
+    /// The driver's own `VkInstance` this device was enumerated from.
+    ///
+    /// Kept because `vkCreateDevice` needs it and is not given it. That call
+    /// receives a `VkPhysicalDevice` and nothing else, but the driver's
+    /// `vkCreateDevice` has to be found through that driver's
+    /// `vkGetInstanceProcAddr`, which for an instance-level command must be
+    /// asked with a real instance rather than null. Without this field the
+    /// loader would have to search every live instance for the one that
+    /// enumerated this device — and it does not track its live instances, so
+    /// it could not.
+    #[must_use]
+    pub const fn instance(&self) -> Handle {
+        self.instance
     }
 
     /// The driver's own handle for this device — what the loader passes back
@@ -627,11 +645,17 @@ mod tests {
 
     #[test]
     fn a_wrapped_physical_device_remembers_its_driver_and_handle() {
+        let mut driver_instance = DriverObject::stamped();
         let mut object = DriverObject::stamped();
+        let instance = driver_instance.handle();
         let handle = object.handle();
-        let device = PhysicalDevice::new(3, handle);
+        let device = PhysicalDevice::new(3, instance, handle);
         assert_eq!(device.driver(), 3);
         assert_eq!(device.handle(), handle);
+        // Kept because `vkCreateDevice` is given a physical device and nothing
+        // else, yet has to find the driver's `vkCreateDevice` through an
+        // instance-level lookup, which needs a real instance.
+        assert_eq!(device.instance(), instance);
         assert!(
             is_loader_magic(device.dispatch_word()),
             "a layer inspecting this handle would call it corrupt"
@@ -642,8 +666,9 @@ mod tests {
     fn wrapping_a_device_does_not_touch_the_drivers_object() {
         // The whole point of wrapping rather than adopting: the driver's handle
         // goes back to the driver exactly as it came out.
+        let mut driver_instance = DriverObject::stamped();
         let mut object = DriverObject::stamped();
-        let mut device = PhysicalDevice::new(0, object.handle());
+        let mut device = PhysicalDevice::new(0, driver_instance.handle(), object.handle());
         // SAFETY: the address is never dereferenced by this crate.
         assert_eq!(unsafe { device.install_table(a_table()) }, Ok(()));
         assert_eq!(device.dispatch_word(), a_table() as usize);
@@ -669,12 +694,14 @@ mod tests {
 
     #[test]
     fn enumerated_devices_are_kept_in_order() {
+        let mut one_instance = DriverObject::stamped();
+        let mut two_instance = DriverObject::stamped();
         let mut one = DriverObject::stamped();
         let mut two = DriverObject::stamped();
         let mut instance = Instance::new(Vec::new());
         instance.set_physical_devices(vec![
-            PhysicalDevice::new(0, one.handle()),
-            PhysicalDevice::new(1, two.handle()),
+            PhysicalDevice::new(0, one_instance.handle(), one.handle()),
+            PhysicalDevice::new(1, two_instance.handle(), two.handle()),
         ]);
         assert_eq!(instance.physical_devices().len(), 2);
         assert_eq!(instance.physical_devices()[0].driver(), 0);

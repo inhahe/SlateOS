@@ -28,6 +28,13 @@ netring = { path = "../netring" }
 # kernel's custom target. See requests/
 # c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md.
 net80211 = { path = "../net80211" }
+# The shared AES-128/192/256 and RFC 3394 key wrap. Linked here by
+# `net::hwsim_ap`, the simulated access point, which has to *wrap* the GTK it
+# puts in EAPOL message 3 with the same algorithm lane C's supplicant uses to
+# unwrap it. Writing a second key wrap for the AP side would defeat the point
+# of the exercise: a wrap and an unwrap that are wrong in the same way agree
+# with each other and pass. no_std, no `alloc`, dependency-free.
+aes = { path = "../aes" }
 # The POSIX `TZ`-rule engine, shared with the libc (`posix`), the shell
 # (`oils`), the desktop shell, the world clock and `hwclock`. The kernel's
 # locale/timezone tables used to store a fixed `utc_offset_min`, which cannot

@@ -15751,6 +15751,52 @@ candidates; the `\xNN` escape (still must be built); the editor buffer
 (`line_buf`, `History.entries`) and the 3580 input guard, with the 3583
 `ch as char` landmine still live.
 
+**[A] Correction 5 (2026-09-02) — the "still remaining" list directly above
+names work that the chosen option does not want done. Read this before picking
+the task up.**
+
+That list predates nothing — it was written after §261 was decided — but it
+still carries two items from the *rejected* option A, and one of them is the
+scariest-sounding thing in the whole entry, so it has been deterring the wrong
+reader. `design-decisions.md` §261 says, in the operator's own decision:
+
+> A raw byte still cannot be *typed* literally — you write `$'\xff'`, exactly
+> as in bash […] Completion emits the `$'\xff'` spelling for candidates that
+> are not valid UTF-8.
+
+**So under the option that was actually chosen, `line_buf` and
+`History.entries` stay `String`, and the 3580 input guard is never widened.**
+Every byte the user needs to reach is spelled in ASCII on the command line and
+becomes a raw byte during *expansion*. That is the whole content of the
+"data-flow split, not a layer split" argument §261 is built on.
+
+Two consequences, and both make the job smaller than this entry reads:
+
+- **The 3583 `ch as char` landmine is not on the path.** It is armed only by
+  widening the 3580 guard, which option B never does. It remains a real trap
+  and the warning above should stay — but it is a warning to anyone who
+  wanders back toward option A, not a task.
+- **The editor is not touched at all.** Which means the "must land as one
+  coherent change over the editor **and** the statement executors" sequencing
+  constraint, quoted from Correction 3, does not bind here either — there is
+  no editor half to keep in step.
+
+**What is genuinely left, measured 2026-09-02 against the file:**
+
+| piece | where | state |
+|---|---|---|
+| `$'…'` ANSI-C quoting with `\xNN` | word expansion | **must be built** — Correction 2 is the right one; kshell has no `$'…'` parser (Correction 4's "already parses, 7 sites" counted `b'$'` Rust literals) |
+| the byte accumulator it feeds | `expand_vars_bytes`, `kshell.rs:881` | **already exists**, and already copies uninterpreted bytes through verbatim |
+| the narrowing seam to delete | `expand_vars`, `kshell.rs:1117` | **8 production callers** (1569, 2396, 2769, 2994, 3152, 3233, 3300, 6051); the ~30 other matches are `self_test` assertions. The "24 callers" figure above is stale, and the wrapper's own doc comment already nominates itself as the seam |
+| completion stops dropping candidates | `tab_complete`, `kshell.rs:5922`; the drop is the `.filter_map(\|e\| e.name.to_str()…)` at 5982 | re-spell as `$'\xff'` rather than skip. Note the inserted text stays ASCII, which is exactly why the editor needs no change |
+| `resolve_path`, `CWD`, path-consuming commands | — | **already byte-clean** since `961a160a3` |
+
+The one ordering constraint that *does* still bind: the escape parser and the
+completion re-spelling must agree on the spelling, since completion's output is
+fed back through the parser on the next keystroke. A round-trip assertion over
+a 0xFF name (complete → re-expand → compare bytes) is the test that pins it,
+and it is the one case a self-test in this area must have.
+
 **[A] 2026-08-24 — the follow-up landed too: the line-oriented commands are
 byte-clean end to end** (`b3c828edb`, `eb8f4109d`). The sink could carry bytes
 that no *command* could produce; that gap is closed for the commands where
@@ -107649,6 +107695,64 @@ should not be "optimised" in response to this.
    before forming a theory about the gate's *logic*. The first theory was
    wrong in a way that would have produced a real change to a correct file.
 
+#### Addendum 2026-09-02 (lane A), second measurement: it is not "another lane *building*" — three lanes running their own gate suites is enough, and 3000s is also not a large enough budget
+
+A lane-A boot test was killed at **3000s having never reached QEMU**, the same
+shape as the run above. The interesting part is what the machine looked like
+while it happened, because it rules out the explanation the addendum above
+gives:
+
+| | value |
+|---|---|
+| commit charge | **65.3%** (167.2 GB of 255.9 GB) — nowhere near the 96-97% ceiling |
+| `cargo` / `rustc` processes, any lane | **0** |
+| `qemu-system-x86_64` processes | **0** |
+| other lanes active | yes — lane C running `check-doc-links.py`, lane B with live sessions |
+
+So there was no compile anywhere on the machine, and memory pressure was not a
+factor. What *was* running was three lanes' worth of pre-build gates at once —
+and those gates are themselves whole-tree file walks. Lane A's own suite at
+that moment was a `grep -rh --include=*.rs include_bytes!` across the
+workspace, with `bootstrap-worktree.sh --check` beside it.
+
+**The refinement: the contended resource is the file walk, not the compiler.**
+Every lane's pre-build phase reads all ~6441 `.rs` files, repeatedly, once per
+gate. Three lanes doing that concurrently saturates the disk just as
+effectively as a `cargo build` does — which means the trigger condition for the
+slow-gate regime is *any other lane being awake*, not "another lane is
+building". That is a much easier condition to meet, and it is invisible from
+the two things one would naturally check (free RAM and commit charge), both of
+which looked healthy here.
+
+Per-gate costs measured from this run, by pairing each `=== Checking` header
+against the nearest `run-timeout` heartbeat:
+
+| gate | duration |
+|---|---|
+| `scan-orphan-modules.py` | ~420s |
+| `check-variant-lists.py` | ~300s |
+| `scripts/test-*.py` suite | ~730s |
+| VFS permission gate → usage-message gate | ~180s |
+| the other 26 gates | 0-120s each |
+| **total before the first line of kernel is compiled** | **>3000s** |
+
+**Consequences, both of which sharpen advice already given above.**
+
+1. **7200s is a floor, not a target.** Point 1 above says "budget 7200s when
+   another lane is building". Read it as "when another lane is *running*", and
+   note that 3000s has now failed for this reason twice on the same day
+   (1800s once, 3000s once). The relaunch here used 9000s.
+2. **Do not "fix" this by caching the gates on a source digest.** That was the
+   first idea this measurement suggested, and the addendum above already
+   forecloses it: the gates are innocent, and their inputs *had* changed on
+   both of these runs anyway, so a digest cache would have skipped nothing. The
+   cost is contention, and the honest levers are budget and scheduling.
+
+One thing that *is* cheap and was not obvious: the clippy gate inside the same
+run reported `Clippy OK (debug profile, 38s, ...)`. The build cache was warm
+throughout. The 50 minutes were entirely pre-build static analysis — so a run
+lost this way has not lost any compilation work, only wall clock.
+
 ---
 
 ### A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE. The Path-Z attribution warning fires on every lane boot, always, because the search never looks at the tree being tested — 2026-09-01 — **Status: OPEN**
@@ -108750,5 +108854,100 @@ file, so the message can also say "its first line is …", which is where
 investigate the wrong thing first. Bounded, but it wastes exactly the time of
 whatever run it advises repeating — which at the push boundary is the most
 expensive run in the project.
+
+---
+
+## C-VKLOADER-ADVERTISES-EXTENSIONS-WHOSE-ENTRY-POINTS-IT-ANSWERS-NULL-FOR — OPEN 2026-09-02 (lane C)
+
+**In short:** As of design-decisions.md §802 the Vulkan loader answers
+"which optional add-ons are available?" with the union of every installed
+driver's list. It has no way to hand out the *functions* those add-ons
+consist of, so an application that asks the advertised question, gets
+"yes", and then asks for the function gets nothing back. The loader tells
+the truth about what exists and then cannot deliver it.
+
+This is the exact failure shape §802 was written to argue against, created
+by §802 itself, and it was not noticed while writing it — which is why it
+is filed rather than quietly fixed in the same commit.
+
+### What happens
+
+`vkEnumerateInstanceExtensionProperties` now reports, say,
+`VK_KHR_surface`, because a registered driver reported it. The application
+enables it in `vkCreateInstance` — which succeeds, because the create-info
+is passed through to the drivers untouched and at least one of them
+supports it (§578: a partial success is a success). It then calls
+`vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceSurfaceSupportKHR")`
+and gets **null**.
+
+`gui/vulkan/src/entry.rs`'s `get_instance_proc_addr` ends in
+`physical::lookup(name).map(physical_trampoline)`, and
+`gui/vulkan/src/physical.rs` matches exactly nine byte-string literals —
+the core Vulkan 1.0 physical-device commands. Anything else is null. That
+was correct and deliberate before §802 (`physical.rs`'s own test
+`a_prefix_of_a_command_is_not_that_command` asserts
+`vkGetPhysicalDeviceProperties2` is null); what changed is that the loader
+now *advertises* the things it then declines to name.
+
+Per the Vulkan specification this is a conformance failure: if an
+extension is supported and enabled, `vkGetInstanceProcAddr` must return a
+valid pointer for its commands.
+
+### Why it cannot be fixed by forwarding
+
+The reason is §801's, and it is the whole cost of wrapping: a
+`VkPhysicalDevice` the loader hands out is a **loader-owned object the
+driver has never seen**. Passing an unknown command straight through would
+hand the driver a pointer to a `crate::instance::PhysicalDevice` where it
+expects its own handle — memory corruption, not an error. The same is true
+of `VkInstance`, which is likewise a loader object fanning out to several
+drivers.
+
+So every command needs its first argument unwrapped, and the loader has no
+signature for a command it has never heard of.
+
+### What the proper fix is
+
+Two halves, and they are not equally hard:
+
+- **Commands whose first argument is a `VkPhysicalDevice`** — the WSI
+  family (`vkGetPhysicalDeviceSurfaceSupportKHR`,
+  `…SurfaceCapabilitiesKHR`, `…SurfaceFormatsKHR`, `…PresentModesKHR`) and
+  most other extension physical-device commands. These are fixable
+  *generically*, with no signature knowledge at all: a naked trampoline
+  that replaces argument 0 with the unwrapped driver handle and **tail-jumps**
+  to the driver's function, leaving every other register and the whole
+  stack untouched. This is what the Khronos loader does
+  (`unknown_ext_chain_*.asm`), and it is the reason
+  `vk_icdGetPhysicalDeviceProcAddr` exists in interface version 4 at all —
+  it is the only way to ask a driver "is this unknown name a
+  physical-device command?", and `gui/vulkan/src/physical.rs` already asks
+  through it first. Needs `#[unsafe(naked)]` + `naked_asm!`, a per-slot
+  table of (driver function, slot index), and a fixed pool of slots.
+
+- **Commands whose first argument is a `VkInstance`** — these cannot be
+  mechanised, because the loader must decide a *fan-out policy* per
+  command (which driver answers? all of them? the first that succeeds?),
+  and that is a decision, not a forwarding rule. The Khronos loader
+  generates a trampoline per command from `vk.xml`. Ours would need the
+  same, and it is the point at which "declare no Vulkan structures"
+  finally becomes untenable.
+
+### What to do in the meantime
+
+Nothing silently. The gap is now stated in `gui/vulkan/src/global.rs`'s
+module documentation next to the promise that creates it, so the next
+reader of the union policy meets its limit in the same breath.
+
+Do **not** "fix" this by narrowing the reported list to what the loader can
+dispatch. Many instance extensions add no commands at all
+(`VK_KHR_portability_enumeration` is a flag and nothing else), so
+intersecting with the loader's dispatch table would deny an application
+extensions that need no dispatching — and for the rest it would reproduce
+exactly the empty-list stub §578 refused to write.
+
+**Where it is:** `get_instance_proc_addr` in `gui/vulkan/src/entry.rs`;
+the nine-name match in `gui/vulkan/src/physical.rs`; the promise in
+`enumerate_instance_extension_properties` and `gui/vulkan/src/global.rs`.
 
 ---

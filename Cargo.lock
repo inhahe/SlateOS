@@ -8422,6 +8422,7 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "bitflags",
  "crc32",
  "deflate",

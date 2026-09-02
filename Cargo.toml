@@ -105,6 +105,35 @@ members = [
     # the gzip trailer and `gui/imagecodec` needs it for PNG chunk CRCs, and
     # neither can name `crate::crypto`.
     "crc32",
+    # AES (FIPS-197) and RFC 3394 key wrap. Nothing in the tree implemented the
+    # cipher at all -- `kernel/src/fs/diskencrypt.rs` names `Aes256Xts` in an
+    # enum and stops there -- so the first caller that genuinely needed it, the
+    # WiFi supplicant unwrapping the group key out of message 3 of the 4-way
+    # handshake, would have had to grow a private copy. Started shared rather
+    # than consolidated later, because a block cipher is a worse thing to
+    # duplicate than a checksum: a mistyped S-box entry does not give a wrong
+    # answer anything notices, it gives a cipher that interoperates with
+    # nothing and whose failure looks like a network problem.
+    "aes",
+    # IEEE 802.11 frame parsing and construction: MAC headers, management
+    # bodies, information elements, the RSN element, EAPOL-Key, and the
+    # LLC/SNAP shim that turns an 802.11 data frame into an Ethernet one. The
+    # WiFi counterpart of `netproto`, and shared for the same reason -- the
+    # kernel-side wireless driver, the supplicant and the netstack each need
+    # the identical wire format, and the driver needs it before an IP stack
+    # exists to hand anything to. A *member* rather than an `exclude` entry,
+    # unlike `netproto`, because every one of those consumers is in this
+    # workspace, so it can inherit `[lints] workspace = true`.
+    "net80211",
+    # HMAC (RFC 2104) and PBKDF2 (RFC 8018) over `sha1` and `sha2`. The keyed
+    # hash underneath every part of WPA2/WPA3: turning the passphrase into the
+    # PMK, expanding the PMK into session keys, and the MIC on every handshake
+    # frame. `userspace/wpa` had already grown a private SHA-1 *and* a private
+    # HMAC-SHA1 on `Vec`, at a point when the dependency-free `sha1` crate
+    # existed -- the same fifth-copy-of-CRC-32 shape, and worse here, because a
+    # subtly wrong keyed hash produces a tag of the right length that merely
+    # never matches, so it reads as a network fault rather than a crypto bug.
+    "hmac",
     # DEFLATE (RFC 1951) with its gzip (RFC 1952) and zlib (RFC 1950)
     # wrappers, promoted out of `kernel/src/fs/compress.rs` for the same
     # reason and at lane C's request (`requests/c-a-two-inflates.md`): a PNG

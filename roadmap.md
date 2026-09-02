@@ -103,7 +103,7 @@ Rules that follow from this:
 |------|------|---|----------------------|--------------|
 | **A** | **Kernel & Core** | `.claude` (or unset) | `kernel/**`, `bench/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh` | `posix/**`, `userspace/**`, `gui/**`, `apps/**`, `net/**`, `services/**` |
 | **B** | **POSIX & Userland** | `.claude-account-b` | `posix/**`, `userspace/**`, `services/**`, `init/**`, `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh` | `kernel/**`, `gui/**`, `apps/**`, `net/**` |
-| **C** | **Graphics, Apps & Net** | `.claude-account-c` | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `pkg/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
+| **C** | **Graphics, Apps & Net** | `.claude-account-c` | `gui/**`, `apps/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `pkg/**` | `kernel/**`, `posix/**`, `userspace/**`, `services/**` |
 
 Rationale for the cut: the workspace already splits three ways almost
 exactly along these lines. `kernel` and `posix` are the two `no_std`
@@ -1366,7 +1366,15 @@ Roadmap:
   rasterizer (lines ~4605, ~4619)
 - `[C]` Video-encoded capture fallback, H.264/VP9 (lines ~4623, ~5060)
 - `[C]` `netstack` userspace migration (line ~1125) — see joint task
-- `[C]` WiFi + wpa_supplicant port (line ~1181)
+- `[C]` WiFi + wpa_supplicant port (line ~1181) — **in progress.** The parts
+  that need no hardware are done and green: `net80211/` (802.11 frames, IEs,
+  RSN, EAPOL-Key, LLC/SNAP, and clause-12 key derivation — PTK/PRF/KDF, MIC,
+  KDEs), `aes/` (AES-128/192/256, RFC 3394 key wrap, RFC 4493 CMAC) and
+  `hmac/` (HMAC, PBKDF2). 162 tests against the published vectors, including
+  IEEE 802.11-2020 Annex J. Still to come, both hardware-gated: a wireless
+  driver (lane A — no radio and no `mac80211_hwsim` equivalent exists yet, so
+  nothing can carry these frames) and the supplicant state machine that
+  drives the 4-way handshake over them.
 - `[C]` Port FreeRDP (line ~5058)
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
@@ -2592,7 +2600,32 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] SSH-2 server (RFC 4253/4252/4254): curve25519-sha256 key exchange (RFC 8731), ssh-ed25519 host keys (RFC 8709), chacha20-poly1305@openssh.com AEAD cipher, password+publickey authentication, channel multiplexing, shell integration via kshell::capture_command(), LF→CRLF terminal output conversion; crypto module: SHA-512 (FIPS 180-4), Ed25519 signatures (RFC 8032) with extended Edwards coordinates, X25519 ECDH; `sshd` kshell command (start/stop/status/port/test); 9 SSH self-tests + 5 Ed25519 self-tests
   - [x] Cryptographic benchmarks: SHA-256 (64B/1KiB), SHA-512 (64B), HMAC-SHA256, ChaCha20 (1KiB), Poly1305 (1KiB), ChaCha20-Poly1305 AEAD (1KiB), X25519 key exchange, Ed25519 sign/verify; baselines in bench/baselines.toml with OpenSSL references and QEMU measured values
   - [x] HTTP/dashboard benchmarks: request parsing, MIME lookup, percent-decode, ETag computation (FNV-1a 4KiB), response building (plain + gzip), gzip 1KiB/8KiB, dashboard API status/health/metrics generation; baselines with targets in bench/baselines.toml
-- [ ] `[C]` Later: WiFi (requires wireless driver + wpa_supplicant port)
+- [-] `[C]` Later: WiFi (requires wireless driver + wpa_supplicant port)
+  - [x] `net80211` crate: `no_std`, allocation-free 802.11 wire format — MAC
+    header and frame-control parsing, management-frame bodies (beacon, probe,
+    auth, assoc), information elements, the RSN element (ciphers, AKMs,
+    PMKIDs, capabilities), the LLC/SNAP shim to and from Ethernet, the FCS
+    (via the shared `crc32`), and EAPOL-Key frames; 118 tests
+  - [x] `net80211::kdf`: clause-12 key derivation — the §12.7.1.2 SHA-1 PRF
+    and the §12.7.1.6.2 SHA-256 KDF (different counter widths, start values
+    and orderings; neither is substitutable for the other), PTK expansion
+    into KCK/KEK/TK over the sorted address/nonce context, AKM→KDF and
+    descriptor-version→MIC-algorithm selection (WPA1's HMAC-MD5 refused as a
+    downgrade), MIC compute/verify over a frame with its own MIC field
+    zeroed, and the Key Data KDE/element parser (GTK, PMKID, RSN); checked
+    against IEEE 802.11-2020 Annex J
+  - [x] `aes` crate: AES-128/192/256 (FIPS-197) with the inverse S-box
+    derived from the forward one at compile time, RFC 3394 key wrap for
+    encrypted Key Data, and RFC 4493 AES-CMAC for the SHA-256 AKMs' MIC;
+    32 tests
+  - [x] `hmac` crate: `Hmac<H>` over SHA-1/SHA-256, PBKDF2, and a
+    constant-time tag comparison; RFC 2202/4231/6070 vectors plus the
+    IEEE §J.4.2 WPA2 PMK; 12 tests. Factored out because `userspace/wpa`
+    carried a private SHA-1 and HMAC (see
+    `requests/c-b-userspace-wpa-has-a-private-sha1-and-hmac-…`)
+  - [ ] Wireless driver — **blocked on lane A.** There is no radio and no
+    `mac80211_hwsim` equivalent, so nothing yet carries these frames
+  - [ ] Supplicant state machine: the 4-way handshake driven over the above
 
 ### 2.5 POSIX compatibility layer
 - [-] `[B]` Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)

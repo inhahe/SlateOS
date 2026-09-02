@@ -127,6 +127,10 @@ name = "aerc-cli"
 version = "0.1.0"
 
 [[package]]
+name = "aes"
+version = "0.1.0"
+
+[[package]]
 name = "affinity-cli"
 version = "0.1.0"
 
@@ -5307,6 +5311,14 @@ name = "hiver-cli"
 version = "0.1.0"
 
 [[package]]
+name = "hmac"
+version = "0.1.0"
+dependencies = [
+ "sha1",
+ "sha2",
+]
+
+[[package]]
 name = "homeassistant-cli"
 version = "0.1.0"
 dependencies = [
@@ -8252,6 +8264,15 @@ version = "0.1.0"
 [[package]]
 name = "nestopia-cli"
 version = "0.1.0"
+
+[[package]]
+name = "net80211"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "crc32",
+ "hmac",
+]
 
 [[package]]
 name = "netcat-cli"

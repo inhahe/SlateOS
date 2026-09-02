@@ -1,0 +1,19 @@
+[package]
+name = "aes"
+version = "0.1.0"
+edition = "2024"
+description = "AES-128/192/256 and RFC 3394 key wrap, written once, checked against the FIPS-197 and RFC 3394 vectors."
+
+[lib]
+path = "src/lib.rs"
+
+# Intentionally dependency-free, and `no_std` with no `alloc`, for the same
+# reason as `sha2`: the key schedule is a fixed-size array and every operation
+# is in-place on a caller-supplied block, so there is nothing to allocate. The
+# consumers with the least heap are the ones that need it most — the WiFi
+# supplicant's key unwrap runs before the station has an address, let alone an
+# allocator, and disk encryption runs under the filesystem.
+[dependencies]
+
+[lints]
+workspace = true

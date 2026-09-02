@@ -778,6 +778,98 @@ def host_failure(text: str) -> str | None:
     return None
 
 
+#: Exit statuses `boot-test.sh` cannot produce, mapped to what they mean.
+#:
+#: The harness's own vocabulary is 0 (pass), 1 (kernel/self-test failure),
+#: 2 (hang/wedge), 3 (booted but produced no artefact) and 4 (boot lock held --
+#: nothing was booted). Every one of those comes from an explicit `exit` the
+#: script reaches after it has looked at the boot. 126 and 127 come from
+#: somewhere else entirely: they are the *shell's* statuses for "found the
+#: command but could not execute it" and "could not run the command at all",
+#: and on this host the second is what a fork() refused by the Windows commit
+#: limit looks like from outside (`dofork: child -1 ... 0xC000012D`).
+#:
+#: This is HOST_FAIL_SIGNATURES' trick taken from the other end. There the
+#: evidence is trustworthy because the guest cannot write to that stream; here
+#: it is trustworthy because the guest cannot set the harness's exit status --
+#: the number is produced by the shell, above the emulator, after the kernel
+#: has had its say. Neither can be forged from inside the tree.
+#:
+#: Deliberately two literal codes and not a range. "Anything unexpected is a
+#: host failure" would be a predicate whose false-positive rate nobody can
+#: bound, and a false positive here does not merely mislabel a row -- it
+#: *removes* a real failure from the counts, which is the one direction this
+#: file must never fail in. 124 is excluded on purpose despite being outside
+#: the vocabulary: it is `run-timeout.py`'s expiry, which *is* a statement
+#: about the tree (something did not finish in the time allowed).
+HARNESS_ABORT_EXITS = {
+    126: "the harness could not execute a command it found (exit 126)",
+    127: "the harness could not run a command at all (exit 127) -- on this "
+         "host that is what a fork() refused by the Windows commit limit "
+         "looks like from outside",
+}
+
+
+def harness_abort(exit_code: int) -> str | None:
+    """The reason the *harness* died, or None if it exited on its own terms.
+
+    Distinct from `host_failure` in where it looks, identical in what it means:
+    neither says anything about the kernel. They stay two functions because the
+    evidence is two things -- a run can have host stderr and no harness abort,
+    or the reverse -- and merging them would make it impossible to say which
+    one actually fired when a row is read back months later.
+    """
+    return HARNESS_ABORT_EXITS.get(exit_code)
+
+
+#: Verdicts the serial log establishes on its own, without consulting the exit
+#: status.
+#:
+#: This is the guard that keeps `harness_abort` from deleting real failures,
+#: and it exists because the history already contained the counter-example.
+#: The boot of 2026-09-01T11:06 exited 127 *and* its log ends
+#: `FATAL: virtio-gpu render-resource self-test failed`. Both things happened:
+#: the kernel died, and then the harness could not fork on its way out. A rule
+#: that excused every 127 would have rewritten that row to HOST_FAIL and
+#: removed a genuine FATAL from the counts -- the exact direction this file
+#: exists to prevent.
+#:
+#: The distinction is what the verdict rests on. PANIC is read out of the log:
+#: the kernel said it died, and the harness stumbling afterwards does not
+#: un-say it. TIMEOUT and SELFTEST_FAIL rest on *absence* -- a marker that
+#: never arrived, a gate that never reported -- and absence is precisely what a
+#: harness that stopped running cannot testify to. So the harness override
+#: applies to those and not to this set.
+#:
+#: Note this guard is the harness half's alone; the stderr half deliberately
+#: *does* override PANIC, because QEMU saying it could not map guest memory is
+#: evidence about the cause of that panic, whereas a failed fork minutes later
+#: is evidence about nothing but the fork.
+LOG_EVIDENCED_VERDICTS = frozenset({"PANIC"})
+
+
+def not_about_the_tree(qemu_stderr: str, exit_code: int) -> str | None:
+    """Why this run is not evidence about the kernel, or None if it is.
+
+    One derivation with two callers -- `classify` and `main` -- for the same
+    reason `main` reads QEMU's stderr exactly once: the verdict and the reason
+    recorded beside it must be two views of one piece of evidence.
+
+    Answering "why is this run not about the tree" is not the same as deciding
+    whether the verdict is overridden, and this function does only the first.
+    `classify` owns the second, because the two halves are guarded differently
+    (see LOG_EVIDENCED_VERDICTS) -- so a row can legitimately carry a reason
+    while keeping a verdict that blames the tree. That is exactly what the boot
+    which both panicked and exited 127 needs, in order to record both facts
+    instead of choosing between them.
+
+    The host is asked before the harness only so a run with both gets the more
+    specific answer: QEMU's own words name the resource that ran out, whereas
+    exit 127 can say only that *something* could not be started.
+    """
+    return host_failure(qemu_stderr) or harness_abort(exit_code)
+
+
 VERDICT_HELP = {
     "PASS": "marker reached, every gate green",
     "PASS_TOOLING": "kernel booted; the harness failed to produce an artefact",
@@ -786,7 +878,8 @@ VERDICT_HELP = {
     "PANIC": "kernel died (PANIC / FATAL in the serial log)",
     "WEDGE": "serial output stalled; kernel stopped progressing",
     "TIMEOUT": "marker never arrived, no panic, no stall detected",
-    "HOST_FAIL": "the host ran out of resources; says nothing about the tree",
+    "HOST_FAIL": "the host or the harness failed underneath the boot; "
+                 "says nothing about the tree",
 }
 
 
@@ -795,15 +888,16 @@ def classify(serial: Serial | None, exit_code: int,
     """The verdict for one run: evidence first, host override second.
 
     `qemu_stderr` defaults to empty so every existing caller keeps its exact
-    behaviour, and so the override can only ever be reached by a caller that
-    went and got the host's own words.
+    behaviour, and so the stderr half of the override can only ever be reached
+    by a caller that went and got the host's own words. The harness half needs
+    no such opt-in: `exit_code` is required of every caller already, and a
+    status the harness cannot produce means the same thing to all of them.
     """
     verdict = _verdict_from_evidence(serial, exit_code)
-    if host_failure(qemu_stderr) is None:
-        return verdict
-    # A host failure replaces a verdict that blames the tree, and never one
-    # that clears it -- which is why this is an override on the result rather
-    # than a branch taken before the evidence is read.
+
+    # An override replaces a verdict that blames the tree, and never one that
+    # clears it -- which is why this is applied to the result rather than as a
+    # branch taken before the evidence is read.
     #
     # Both halves are load-bearing. Downward: a kernel that reached BOOT_OK
     # reached it, and a warning QEMU printed on the way does not un-boot it;
@@ -815,7 +909,26 @@ def classify(serial: Serial | None, exit_code: int,
     # in it.
     if verdict in CLEAN_VERDICTS or verdict == "NO_BOOT":
         return verdict
-    return "HOST_FAIL"
+
+    # QEMU's own stderr overrides everything below that guard, PANIC included:
+    # "cannot set up guest memory" is evidence about *why* the guest died, and
+    # the boot this was built for is one where the host OOM surfaced inside the
+    # guest as a kernel panic.
+    if host_failure(qemu_stderr) is not None:
+        return "HOST_FAIL"
+
+    # The harness's exit status does not reach that far. It proves the harness
+    # stopped running; it says nothing about what the kernel had already
+    # printed. So it may retract a verdict that rests on absence -- TIMEOUT's
+    # missing marker, SELFTEST_FAIL's silent gate, neither of which a stopped
+    # harness could have observed -- and may not touch one the log establishes
+    # on its own. See LOG_EVIDENCED_VERDICTS for the boot that proves the
+    # difference matters.
+    if (harness_abort(exit_code) is not None
+            and verdict not in LOG_EVIDENCED_VERDICTS):
+        return "HOST_FAIL"
+
+    return verdict
 
 
 def _verdict_from_evidence(serial: Serial | None, exit_code: int) -> str:
@@ -1786,8 +1899,14 @@ def report(records: list[dict], current: dict | None) -> None:
                 print(f"[boot-history] host failure: {host_why} "
                       f"-- excluded from the counts below; re-run this boot")
             else:
-                print(f"[boot-history] note: the host complained ({host_why}), "
-                      f"but the kernel booted anyway")
+                # Not "but the kernel booted anyway". Since the harness's exit
+                # status became a reason, this branch is also reached by a boot
+                # that PANICKED and *then* had its harness die -- and telling
+                # the reader that kernel booted anyway would be flatly untrue
+                # on exactly the row where the panic needs believing.
+                print(f"[boot-history] note: something outside the kernel also "
+                      f"went wrong ({host_why}), but this verdict does not "
+                      f"rest on it")
         if hits:
             print("[boot-history] matches known issue(s): " + ", ".join(hits))
             for fp in FINGERPRINTS:
@@ -1817,8 +1936,8 @@ def report(records: list[dict], current: dict | None) -> None:
               f"nothing about the tree)")
     if host_fails:
         print(f"[boot-history] {host_fails} boot(s) excluded as host failures "
-              f"(the machine running QEMU ran out of resources; the kernel was "
-              f"not what failed)")
+              f"(the machine running QEMU ran out of resources, or the harness "
+              f"itself could not run; the kernel was not what failed)")
 
     print("[boot-history] current consecutive clean streak: "
           f"{tail_clean_streak(records)}")
@@ -1963,7 +2082,7 @@ def main(argv=None) -> int:
     # Read once, used twice: the verdict and the recorded reason must be two
     # views of one piece of evidence, not two readings of one file.
     qemu_stderr = read_qemu_stderr(args.qemu_stderr)
-    host_fail = host_failure(qemu_stderr)
+    host_fail = not_about_the_tree(qemu_stderr, args.exit_code)
     verdict = classify(serial, args.exit_code, qemu_stderr)
 
     if args.classify:
@@ -1983,7 +2102,10 @@ def main(argv=None) -> int:
         print("[boot-history] no serial output -- nothing to record "
               "(build or harness failure, not a boot outcome)")
         if host_fail:
-            print(f"[boot-history] qemu's stderr says why: {host_fail}")
+            # Not "qemu's stderr says why": the reason may equally have come
+            # from the harness's own exit status, and naming the wrong source
+            # sends whoever reads this line to a file that will not contain it.
+            print(f"[boot-history] and it was not the tree's doing: {host_fail}")
         return 0
 
     record = build_record(serial, verdict, args, host_fail=host_fail)

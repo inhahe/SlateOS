@@ -1370,11 +1370,17 @@ Roadmap:
   that need no hardware are done and green: `net80211/` (802.11 frames, IEs,
   RSN, EAPOL-Key, LLC/SNAP, and clause-12 key derivation — PTK/PRF/KDF, MIC,
   KDEs), `aes/` (AES-128/192/256, RFC 3394 key wrap, RFC 4493 CMAC) and
-  `hmac/` (HMAC, PBKDF2). 162 tests against the published vectors, including
-  IEEE 802.11-2020 Annex J. Still to come, both hardware-gated: a wireless
-  driver (lane A — no radio and no `mac80211_hwsim` equivalent exists yet, so
-  nothing can carry these frames) and the supplicant state machine that
-  drives the 4-way handshake over them.
+  `hmac/` (HMAC, PBKDF2), and `net80211::supplicant` — the station-side state
+  machine that drives scan → auth → assoc → 4-way handshake → group rekey →
+  data encapsulation, with the KRACK key-reinstallation defence expressed as
+  an `Outcome` variant rather than a comment. 194 tests against the published
+  vectors, including IEEE 802.11-2020 Annex J. One piece remains and it is
+  hardware-gated: a **wireless driver** (lane A — there is no radio in QEMU
+  and no `mac80211_hwsim` equivalent, so nothing can carry these frames
+  anywhere). Requested in
+  `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
+  which asks for a *simulated* device first so the join can be run end to end;
+  it also offers to let lane C build it if lane A would rather not.
 - `[C]` Port FreeRDP (line ~5058)
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
@@ -2623,9 +2629,25 @@ _Port ext4 first. Don't write a custom filesystem._
     IEEE §J.4.2 WPA2 PMK; 12 tests. Factored out because `userspace/wpa`
     carried a private SHA-1 and HMAC (see
     `requests/c-b-userspace-wpa-has-a-private-sha1-and-hmac-…`)
+  - [x] `net80211::supplicant`: the station-side state machine — scan
+    (beacon/probe-response → a joinable `Candidate`), auth and assoc request
+    construction, the 4-way handshake (M1→M2, M3→M4) with every MIC verified
+    *before* the frame it protects is read, group rekey, and the LLC/SNAP
+    data path once the keys are in. Refuses a replayed or backwards replay
+    counter, an ANonce that changes mid-handshake, an M3 whose RSN element
+    does not match the beacon's byte-for-byte (the downgrade), unencrypted
+    Key Data, and descriptor version 1. The KRACK defence
+    (Vanhoef & Piessens, CCS 2017) is an `Outcome` variant, not a comment:
+    only `Complete` authorises installing a key, and a retransmitted M3
+    returns `Retransmission`, so a caller that matches on the enum cannot
+    reinstall a key — and so replay a CCMP nonce — by accident. 32 tests
   - [ ] Wireless driver — **blocked on lane A.** There is no radio and no
-    `mac80211_hwsim` equivalent, so nothing yet carries these frames
-  - [ ] Supplicant state machine: the 4-way handshake driven over the above
+    `mac80211_hwsim` equivalent, so nothing yet carries these frames.
+    Requested in
+    `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`
+  - [ ] End-to-end association in the boot test — lane C's, and gated purely
+    on the line above: with a simulated device, scan → join → handshake →
+    an ARP exchange over the encapsulated data path becomes testable
 
 ### 2.5 POSIX compatibility layer
 - [-] `[B]` Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)

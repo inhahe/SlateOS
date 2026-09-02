@@ -247,7 +247,7 @@
 
 use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
 use coreutils::copy::{
-    self, Chowned, Made, ModeDebt, Source, chown_to_source, current_mode, make_dir,
+    self, Chowned, Made, ModeDebt, Source, chown_to_source, copy_bytes, current_mode, make_dir,
     preserve_attributes, read_dir_fastread,
 };
 use coreutils::diag;
@@ -265,7 +265,7 @@ use coreutils::yesno::{Answers, StdinAnswers};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -3005,31 +3005,20 @@ fn copy_regular_file<O: Write, E: Write>(
         }
     };
 
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = match input.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            // A signal arriving mid-read is not a read failure, and reporting
-            // it as one would make `cp` unreliable under any job control.
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: error reading {}: {why}", quoteaf_os(src));
-                return false;
-            }
-        };
-        let Some(chunk) = buf.get(..n) else {
-            // Unreachable: `read` returns at most the buffer's length. Handled
-            // rather than indexed so the crate's `indexing_slicing` lint has
-            // nothing to complain about and a broken `Read` cannot panic here.
-            break;
-        };
-        if let Err(e) = output.write_all(chunk) {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: error writing {}: {why}", quoteaf_os(dst));
-            return false;
-        }
+    // The engine's body rather than a loop here, which is what makes this arm
+    // and `mv`'s cross-device arm the same code. The gain is not only the
+    // de-duplication: the loop that used to live here never offloaded, so it
+    // pushed every byte of every copy through userspace where GNU hands the
+    // work to the kernel. See [`copy::copy_bytes`].
+    //
+    // The sentence comes back rather than being printed there because `mv` has
+    // a backup to undo before it can print; `cp` has nothing to undo, so it
+    // prints immediately and gives up on this operand — which is what the
+    // `false` says, and it is the same `false` the loop returned.
+    if let Err(copy::CopyError { what, err }) = copy_bytes(&mut input, &mut output, src, dst) {
+        let why = strerror(&err);
+        let _ = writeln!(job.err, "cp: {what}: {why}");
+        return false;
     }
 
     // Through the descriptor the bytes were just written through, and not

@@ -2611,26 +2611,28 @@ fn copy_across_devices<E: Write>(
         )
     })?;
 
-    // `io::copy` and not a hand-written loop, because `std` specialises it to
-    // `copy_file_range` when both sides are files — the same kernel-side copy
-    // GNU reaches for, and the same reason: it moves the data without a trip
-    // through userspace and it reproduces a sparse file's holes instead of
-    // writing out the zeroes.
+    // The engine's body, which is the same call `cp` makes. It was `io::copy`
+    // here and a 64 KiB read/write loop there, each missing exactly what the
+    // other had: `io::copy` reaches `copy_file_range` through `std`'s
+    // specialisation but hands back one error for both ends, so every failure
+    // had to be reported as `error writing TARGET`; `cp`'s loop knew which end
+    // failed but never offloaded at all.
     //
-    // **The price is that a read failure and a write failure arrive as one
-    // error**, where GNU distinguishes `error reading %s` from
-    // `error writing %s`. The destination's sentence is the one used, because
-    // that is the side that fails in practice — `ENOSPC`, `EDQUOT`, a full
-    // quota, a device going away mid-write — while a read error means the
-    // *source* medium is failing, which is rarer and louder. Telling them apart
-    // would mean giving up `copy_file_range`, which is a real loss for a real
-    // gain in a case nothing measures; it is logged rather than traded for.
-    // See `known-issues.md` →
-    // `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`
-    // for the recoverable version, and `design-decisions.md` §741 for the whole
-    // of the argument, including the two alternatives that were rejected.
-    io::copy(&mut source, &mut dest)
-        .map_err(|e| Failed::new(format!("error writing {}", quoteaf_os(target)), e))?;
+    // GNU has both because it has a **third** sentence — `error copying SRC to
+    // DST` for the offload, which does not know either and does not pretend to.
+    // Adopting it is what let the two bodies become one without either losing
+    // anything, and it closes
+    // `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`.
+    // See [`copy::copy_bytes`] and `design-decisions.md` §745, which supersedes
+    // §741 — the entry that argued for `io::copy` here, on a two-sentence
+    // premise that turned out to be a false choice.
+    //
+    // The sentence is carried out as data rather than printed at the failure,
+    // because this caller cannot print yet: a `-b` backup may have to be put
+    // back first, which is [`give_up_cross_device`] and upstream's `un_backup`
+    // label. [`Failed`] is exactly that pairing already.
+    copy::copy_bytes(&mut source, &mut dest, src, target)
+        .map_err(|copy::CopyError { what, err }| Failed::new(what, err))?;
 
     // The same tail `cp` runs, out of the same code: times, then ownership, then
     // the extended attributes, then the mode — an order that is correctness

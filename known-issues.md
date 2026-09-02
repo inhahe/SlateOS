@@ -105539,12 +105539,15 @@ Both §22 cases became XPASS on the first run after the fix and are now plain
 because it does the move. It keeps the old wording deliberately — it is a refusal
 of the *operation*, not of a step inside it.
 
-**What is still funnelled.** The bytes. A failure part-way through the copy is
-reported as `error writing %s` whichever end failed, because `io::copy` returns
-one error for both — see
-`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`, which
-is the residue of this entry and was logged rather than folded into it, since its
-fix trades against `copy_file_range` and this one did not.
+**What is still funnelled — nothing, as of 2026-09-01.** This paragraph used to
+read: "The bytes. A failure part-way through the copy is reported as
+`error writing %s` whichever end failed, because `io::copy` returns one error for
+both." That was the residue of this entry, logged separately as
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE` on the
+belief that its fix "trades against `copy_file_range`". It does not — GNU has a
+third sentence, `error copying SRC to DST`, for exactly the case where the
+offload cannot say which end failed. That issue is now ✅ RESOLVED and both
+programs share `copy::copy_bytes`; there is no funnelled sentence left here.
 
 ---
 
@@ -105626,6 +105629,15 @@ engine is a red `main` for all three lanes:
 3. The walk and `place_entity`, with `CpFlags` becoming the engine's options
    struct.
 4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
+
+**Progress: stages 1 and 2 have landed.** `userspace/coreutils/src/copy.rs`
+holds the leaf helpers, the shared preserve tail (`preserve_attributes` and
+everything it calls), and now the shared byte copy (`copy_bytes`), all of which
+both programs call. The copy-body defect stage 2 predicted was real and is
+closed; see `design-decisions.md` §745, which supersedes §741. Stage 3 —
+opening the destination, which is `cp`'s `create_dest` against `mv`'s
+`create_destination` and where the two genuinely differ — is next, followed by
+the walk and then stage 4.
 
 Each stage is certifiable the same way the `fsattr` moves in this chain were:
 `scripts/cp-diff.sh` and `scripts/mv-diff.sh` must stay byte-identical across
@@ -105858,7 +105870,7 @@ applies: mv's cross-device directory default-ACL case waits on the same issue.
 
 ---
 
-## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — ✅ RESOLVED 2026-09-01
 
 **In short:** if the bytes cannot be moved, ours always blames the destination.
 GNU says `error reading 'src'` when the source medium fails and `error writing
@@ -105938,6 +105950,36 @@ a device that can be made to fail on demand. The reachable version is a
 destination on a filesystem small enough to fill — `/dev/shm` with a size limit,
 or a loopback image — which is a fixture the harness does not have and would be
 the same fixture several other unmeasured cases want.
+
+**✅ RESOLVED 2026-09-01, exactly as the "proper fix" above describes.** Stage 2
+of the copy-engine extraction landed `copy::copy_bytes`
+(`userspace/coreutils/src/copy.rs`), which is GNU's `sparse_copy` minus the hole
+detection this tree does not have yet:
+
+* `copy_file_range` is driven directly, in a loop, with `COPY_MAX` =
+  `MIN(SSIZE_MAX, SIZE_MAX) >> 30 << 30` and null offsets.
+* A failure outside the fallback set emits **`error copying SRC to DST`** — the
+  third sentence, which is what closes this issue.
+* The fallback is entered only while *nothing has been copied* — a correctness
+  precondition, not a tuning knob, since the loop resumes from the file offsets
+  the offload advanced — and only for `is_CLONENOTSUP` errnos or the CIFS
+  `ENOENT`. It emits `error reading SRC` and `error writing DST` from its own
+  two sites.
+* `EINTR` retries at both layers; a zero return with nothing copied falls back,
+  for the procfs bug upstream documents at `copy.c:345`.
+
+Both programs call it. `mv`'s `io::copy` and `cp`'s bespoke 64 KiB loop are both
+gone, so `cp` gained the offload it never had and `mv` gained the two precise
+sentences — the two halves of the same bug, fixed once. See
+`design-decisions.md` §745, which supersedes §741.
+
+**Still not measured.** The "How it would be caught" paragraph above stands
+unchanged: no harness case reaches a mid-byte copy failure, so all three
+sentences are verified by reading against `coreutils-9.4/src/copy.c` and not by
+a diff run. The fixture that would test it — a destination filesystem small
+enough to fill — remains unbuilt and is still wanted by several other cases.
+What *is* mechanically checked is that the change did not disturb the cases that
+do run: cp-diff and mv-diff were taken before and after.
 
 ---
 

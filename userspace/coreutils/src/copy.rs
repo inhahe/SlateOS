@@ -19,13 +19,19 @@
 //!
 //! * **Stage 1**, the leaf helpers that were already free of any option struct:
 //!   [`ModeDebt`], [`read_dir_fastread`], [`make_dir`].
-//! * **The first half of stage 2**, the *preserve tail* —
-//!   [`preserve_attributes`] and everything it calls. This is
-//!   `copy_internal`'s closing run of steps (`copy.c:3205` onwards) merged with
-//!   `copy_reg`'s (`copy.c:1626` onwards), which upstream writes twice because
-//!   they live in two functions and which this tree, until now, wrote *four*
-//!   times — twice in `cp.rs` following upstream, and twice more in `mv.rs`
-//!   because a move was written as its own program.
+//! * **Stage 2's preserve tail** — [`preserve_attributes`] and everything it
+//!   calls. This is `copy_internal`'s closing run of steps (`copy.c:3205`
+//!   onwards) merged with `copy_reg`'s (`copy.c:1626` onwards), which upstream
+//!   writes twice because they live in two functions and which this tree, until
+//!   then, wrote *four* times — twice in `cp.rs` following upstream, and twice
+//!   more in `mv.rs` because a move was written as its own program. Both
+//!   programs now reach this one copy.
+//! * **Stage 2's byte copy** — [`copy_bytes`], which is `sparse_copy`
+//!   (`copy.c:307`) minus the hole detection nothing here has yet. This one had
+//!   diverged rather than merely doubled: `cp` ran a read/write loop that could
+//!   say which end failed but never offloaded, `mv` ran `io::copy` that
+//!   offloaded but could not. Upstream's third sentence, `error copying SRC to
+//!   DST`, is what let them become one without either giving anything up.
 //!
 //! That is what brought [`Opts`] and [`Run`] in, and their arrival is the point
 //! at which this module stops being a bag of helpers and becomes an engine.
@@ -38,12 +44,12 @@
 //! constant `mv.c`'s `cp_option_init` supplies. A module that refused one would
 //! not be shareable; it would just be empty.
 //!
-//! What is **not** here yet is everything that writes bytes: opening a
-//! destination, the copy proper, and the walk. Those are still `cp`'s, and the
-//! tail below is reached from `cp.rs` through call sites that build a [`Run`]
-//! from its `Job`. `mv` still has its own copy of the tail as well; making it
-//! call this one is the next step, and is the point at which the duplication
-//! this module exists to end actually ends.
+//! What is **not** here yet is *opening* a destination — `cp`'s `create_dest`
+//! and `mv`'s `create_destination`, which differ in more than shape and are
+//! stage 3's business — and the walk that decides what to copy at all, which is
+//! stage 4's. Both are still `cp`'s. Everything in this module is reached from
+//! `cp.rs` and `mv.rs` alike through call sites that build a [`Run`] from each
+//! program's own `Job`.
 
 use crate::errmsg::strerror;
 use crate::fsattr::{
@@ -345,6 +351,283 @@ pub fn create_dir_with_mode(path: &Path, mode: u32) -> io::Result<()> {
 #[cfg(not(unix))]
 pub fn create_dir_with_mode(path: &Path, _mode: u32) -> io::Result<()> {
     fs::create_dir(path)
+}
+
+/// A byte copy that failed, carrying the sentence GNU prints for it.
+///
+/// **Returned rather than printed**, which is where this differs from
+/// [`preserve_attributes`] and the rest of the tail. Those report an attribute
+/// that would not go and carry on to the next one, so the caller has nothing to
+/// decide and printing at the site is right. A failed byte copy *ends* the copy,
+/// and the two callers then do different things: `cp` prints and moves to the
+/// next operand; `mv` has a `-b` backup to put back first, which is its
+/// `give_up_cross_device` and upstream's `un_backup` label. Returning the
+/// sentence lets each do its own thing while keeping the wording — the part that
+/// diverged and is the whole reason this function exists — in one place.
+pub struct CopyError {
+    /// The sentence, with no program prefix and no `: errno` tail. One of
+    /// `error copying 'a' to 'b'`, `error reading 'a'`, `error writing 'b'`.
+    pub what: String,
+    /// The errno the caller renders after `: `, through `errmsg::strerror`.
+    pub err: io::Error,
+}
+
+/// How far the in-kernel offload got.
+///
+/// `#[cfg(unix)]` along with [`offload`] itself, rather than defined always and
+/// left half-unused off it: on a host with no `copy_file_range` there is no
+/// offload to have got anywhere, so `Done` and `Failed` are not merely
+/// unreachable but meaningless, and the compiler says so — a `dead_code`
+/// warning for both variants on `x86_64-pc-windows-gnu`. Silencing that with an
+/// `allow` would assert the type is fine there when the honest statement is
+/// that it does not apply.
+#[cfg(unix)]
+enum Offload {
+    /// The bytes are down; nothing further to do.
+    Done,
+    /// Nothing was copied and the reason says this pair of files cannot be
+    /// offloaded. Fall back to the read/write loop, which starts from the top
+    /// because nothing has been consumed.
+    Unsupported,
+    /// A real failure. Neither end can be blamed, so the caller gets the
+    /// sentence that names both.
+    Failed(io::Error),
+}
+
+/// Copy `input` to `output`, GNU's way: the in-kernel offload first, an explicit
+/// read/write loop when that is not available.
+///
+/// This is `sparse_copy` (`copy.c:307`) minus its hole detection, which nothing
+/// in this tree has yet — `hole_size` is always 0 for us, so the `if (!hole_size
+/// && allow_reflink)` guard on the offload is always taken and the second loop is
+/// reached only as a fallback.
+///
+/// **Three sentences, not two, and the third is the point.** Before this
+/// function there were two copy bodies here, each half-right in the opposite
+/// direction. `mv` used `io::copy` — which `std` specialises to
+/// `copy_file_range`, so it got the offload — and reported every failure as
+/// `error writing DST`, because one `io::Error` comes back for both ends and the
+/// destination is the end that fails in practice. `cp` used a plain 64 KiB
+/// read/write loop, which knows which end failed and says so, but never
+/// offloaded at all and so was slower than GNU on any large copy. Each was
+/// missing exactly what the other had.
+///
+/// GNU has neither problem because it has a **third** sentence. `copy_file_range`
+/// does not report which side failed either, so upstream does not pretend to
+/// know: it prints `error copying SRC to DST` (`copy.c:376`), naming both files
+/// and letting the errno say the rest. `error reading %s` (`copy.c:402`) and
+/// `error writing %s` (`copy.c:435`) belong to the fallback loop, which is its
+/// own code and genuinely does know. So the distinction is not lost by
+/// offloading; it is simply not claimed where it cannot be had.
+///
+/// **When the fallback is entered.** Only while *nothing has been copied yet*,
+/// and only for an errno on upstream's list — `is_CLONENOTSUP` (`copy.c:298`),
+/// plus a special case for the `ENOENT` "seen sometimes across CIFS shares"
+/// (`copy.c:367`). The "nothing copied yet" half is not an optimisation but a
+/// correctness condition: the fallback restarts from the current file offsets,
+/// and after a partial offload those are no longer the beginning. Upstream's
+/// comment gives the reason for the errno half — `EPERM` can mean
+/// `copy_file_range` is filtered out by seccomp, in which case a plain copy
+/// works, or it can mean the file is immutable, in which case the plain copy
+/// fails too and reports the more accurate error.
+///
+/// `EINTR` is a retry at both layers. A signal arriving mid-copy is not a copy
+/// failure, and reporting it as one would make both programs unreliable under
+/// any job control.
+///
+/// See `known-issues.md` →
+/// `B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`.
+pub fn copy_bytes(
+    input: &mut fs::File,
+    output: &mut fs::File,
+    src: &Path,
+    dst: &Path,
+) -> Result<(), CopyError> {
+    // The offload is attempted only where one exists; everywhere else this
+    // statement is not compiled at all and the function *is* the fallback loop,
+    // which is the truthful shape rather than a stub that always declines. See
+    // [`Offload`].
+    #[cfg(unix)]
+    match offload(input, output) {
+        Offload::Done => return Ok(()),
+        Offload::Failed(err) => {
+            return Err(CopyError {
+                what: format!("error copying {} to {}", quoteaf_os(src), quoteaf_os(dst)),
+                err,
+            });
+        }
+        // Nothing copied, and the reason was "not this pair of files". Falling
+        // through to the loop below, which starts from the current file
+        // offsets — unmoved, which is what `Unsupported` guarantees.
+        Offload::Unsupported => {}
+    }
+
+    read_write_copy(input, output, src, dst)
+}
+
+/// Whether a `copy_file_range` failure means "not this pair of files" rather
+/// than "the copy failed".
+///
+/// Upstream's `is_CLONENOTSUP` (`copy.c:298`) as one test, spelled the way the
+/// rest of this crate spells an errno set — named constants matched against
+/// `raw_os_error`, as `rename.rs` and `fsattr.rs` both do. `io::ErrorKind`
+/// could not carry it in any case: it has no variant for `ENOSYS`, `ENOTTY`,
+/// `EBADF`, `EXDEV` or `ETXTBSY`, and folds them into `Uncategorized`, which
+/// cannot be named in a pattern on stable.
+///
+/// The numbers are Linux's, which is the only ABI this ships on — the same
+/// statement `fsattr.rs` makes above its own `ENOTSUP`.
+#[cfg(unix)]
+fn is_clone_not_supported(e: &io::Error) -> bool {
+    /// "Operation not permitted", which here may mean only that seccomp
+    /// filters the call out — in which case a plain copy still works. It can
+    /// also mean the file is immutable, in which case the fallback fails too
+    /// and reports the more accurate error; that is upstream's stated reason
+    /// (`copy.c:296`) for listing it despite the ambiguity.
+    const EPERM: i32 = 1;
+    /// "Permission denied", listed for the same reason as `EPERM`.
+    const EACCES: i32 = 13;
+    /// "Bad file descriptor" — a descriptor the call declines, such as one
+    /// opened `O_APPEND`.
+    const EBADF: i32 = 9;
+    /// "Cross-device link": the two files are on different filesystems, which
+    /// only the read/write fallback can bridge.
+    const EXDEV: i32 = 18;
+    /// "Not a typewriter", the kernel's answer for a file type it will not
+    /// offload.
+    const ENOTTY: i32 = 25;
+    /// "Text file busy".
+    const ETXTBSY: i32 = 26;
+    /// "Invalid argument", including the answer for a source that is not a
+    /// regular file.
+    const EINVAL: i32 = 22;
+    /// "Function not implemented" — the kernel predates the call.
+    const ENOSYS: i32 = 38;
+    /// `ENOTSUP`, which is `EOPNOTSUPP` on Linux: the filesystem declines.
+    const ENOTSUP: i32 = 95;
+
+    matches!(
+        e.raw_os_error(),
+        Some(EPERM | EACCES | EBADF | EXDEV | ENOTTY | ETXTBSY | EINVAL | ENOSYS | ENOTSUP)
+    )
+}
+
+/// `copy_file_range` until EOF, or until something says it cannot be used.
+///
+/// The offset arguments are null, so both file positions advance and the next
+/// call resumes where this one stopped — which is also what makes the fallback's
+/// "nothing copied yet" precondition necessary.
+///
+/// `COPY_MAX` is upstream's `MIN (SSIZE_MAX, SIZE_MAX) >> 30 << 30`
+/// (`copy.c:340`): the largest length that is safely representable, rounded down
+/// to a gigabyte boundary so the kernel is never handed an awkward size.
+#[cfg(unix)]
+fn offload(input: &mut fs::File, output: &mut fs::File) -> Offload {
+    use std::os::unix::io::AsRawFd;
+
+    unsafe extern "C" {
+        fn copy_file_range(
+            fd_in: i32,
+            off_in: *mut i64,
+            fd_out: i32,
+            off_out: *mut i64,
+            len: usize,
+            flags: u32,
+        ) -> isize;
+    }
+
+    const COPY_MAX: usize = (isize::MAX as usize) >> 30 << 30;
+
+    let (fd_in, fd_out) = (input.as_raw_fd(), output.as_raw_fd());
+    let mut copied: u64 = 0;
+    loop {
+        // SAFETY: both descriptors are open for the duration of the call, held
+        // by the `File`s the caller lends us. Both offset pointers are null,
+        // which is the documented "use and advance the file position" form and
+        // means nothing is written through them. `flags` is 0, the only value
+        // Linux accepts.
+        let n = unsafe {
+            copy_file_range(
+                fd_in,
+                core::ptr::null_mut(),
+                fd_out,
+                core::ptr::null_mut(),
+                COPY_MAX,
+                0,
+            )
+        };
+        if n == 0 {
+            // Upstream falls back here rather than declaring success, because
+            // `copy_file_range` wrongly returned 0 when reading from procfs on
+            // Linux through at least 5.6.19 (`copy.c:345`). A zero on the first
+            // call is therefore "empty, or lying"; a zero after real progress is
+            // an honest EOF.
+            return if copied == 0 {
+                Offload::Unsupported
+            } else {
+                Offload::Done
+            };
+        }
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if e.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            if copied == 0 && (is_clone_not_supported(&e) || e.kind() == io::ErrorKind::NotFound) {
+                return Offload::Unsupported;
+            }
+            return Offload::Failed(e);
+        }
+        copied = copied.saturating_add(n.unsigned_abs() as u64);
+    }
+}
+
+/// GNU's second loop (`copy.c:392`): read a buffer, write it whole.
+///
+/// Not cfg-gated, and it is the *whole* of [`copy_bytes`] on a host with no
+/// `copy_file_range`. That is not a degraded mode: `error reading`/`error
+/// writing` are the sentences GNU itself emits on this path, so the development
+/// host gets the same two diagnostics it would get from the reference. The
+/// target OS takes the offload above and can reach the third.
+///
+/// 64 KiB because that is what `cp` used before this function existed and
+/// nothing here is a reason to change it; upstream sizes its buffer from the
+/// destination's `st_blksize`, which is a separate improvement and would move
+/// throughput numbers this stage is not otherwise allowed to move.
+fn read_write_copy(
+    input: &mut fs::File,
+    output: &mut fs::File,
+    src: &Path,
+    dst: &Path,
+) -> Result<(), CopyError> {
+    use io::Read;
+
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = match input.read(&mut buf) {
+            Ok(0) => return Ok(()),
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(CopyError {
+                    what: format!("error reading {}", quoteaf_os(src)),
+                    err,
+                });
+            }
+        };
+        let Some(chunk) = buf.get(..n) else {
+            // Unreachable: `read` returns at most the buffer's length. Handled
+            // rather than indexed so the crate's `indexing_slicing` lint has
+            // nothing to complain about and a broken `Read` cannot panic here.
+            return Ok(());
+        };
+        if let Err(err) = output.write_all(chunk) {
+            return Err(CopyError {
+                what: format!("error writing {}", quoteaf_os(dst)),
+                err,
+            });
+        }
+    }
 }
 
 /// What kind of destination [`preserve_attributes`] is stamping.

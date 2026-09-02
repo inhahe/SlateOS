@@ -9609,6 +9609,7 @@ negative-exit-value ambiguity.
 **Date:** 2026-08-15
 **Decided by:** Operator (Claude proposed this option — it was Claude's revised
 recommendation after measuring the instrumented boot; the operator adopted it)
+**Lane:** A
 
 **In short:** there is a rare bug — a jump through a null pointer inside the
 kernel, `B-KNULLJUMP` — that shows up on roughly **1 boot in 120**. To catch it
@@ -9674,6 +9675,7 @@ rather than writing into Lane A's §200–299 range itself.
 **Date:** 2026-08-15
 **Decided by:** Operator (both halves; on the prover, the operator challenged
 Claude's original framing and was right — see below)
+**Lane:** A
 
 **In short:** two unrelated compiler installs were bundled into one question.
 **Ada/SPARK** is a second programming language whose toolchain can
@@ -9746,6 +9748,7 @@ mapping) has no option "including gnatprove". Relayed as
 
 **Date:** 2026-08-15
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** A program can ask the kernel "list the permissions I hold." It
 passes a buffer — a chunk of its own memory for the kernel to write the list
@@ -9808,6 +9811,7 @@ than the retryable `ERANGE` — annoying, not wrong. Filed in the reply to
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel benchmark suite prints ~90 timing measurements per
 `--bench` boot, but only some of them get filed into `bench/history.jsonl`, which
@@ -9931,6 +9935,7 @@ before being trusted on a passing one.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When a program does something the compiler was told to check for
 — an array read past its end, an integer overflow, a function call redirected
@@ -10045,6 +10050,7 @@ flag set and the three false-negative traps found while verifying it are in
 **Decided by:** Claude (autonomous) — these are the two sub-decisions §201
 explicitly left to Lane A, plus a factual correction to §201 that emerged in
 carrying them out.
+**Lane:** A
 
 **In short:** §201 approved installing Ada and its prover but deliberately left
 two follow-on choices open: *which* Ada compiler to install, and *which*
@@ -10189,6 +10195,7 @@ crate to the kernel build to remove a risk that already announces itself.
 **Decided by:** Claude (autonomous) — in response to lane B's request
 `requests/b-a-waitid-needs-an-explicit-idtype-wait.md`, which asked for three
 specific capabilities; the shape chosen to deliver them is mine.
+**Lane:** A
 
 **In short:** three different syscalls let a program wait for its child process
 to finish — one for programs built for our own system, and two more for
@@ -10418,6 +10425,7 @@ rejected or ignored.
 `requests/b-a-cap-grants-for-312-step3-fixtures.md` and proposed
 `(Process, METADATA)`; Lane A chose a new bit instead. Reversible: the bit is
 one line in `kernel/src/cap/rights.rs` and one predicate in `posix`.
+**Lane:** A
 
 **In short:** Our POSIX layer decides whether a program may call `setuid()` —
 "become a different user" — by looking at what kernel permissions the program
@@ -10521,6 +10529,7 @@ plus a hunt for the fixtures it broke.
 ## §208 — Merge-induced artifact staleness is checked against *history*, by a script lane A owns and every lane runs
 
 **Date:** 2026-08-16. **Decided by:** Claude (autonomous).
+**Lane:** A
 
 **In short:** some compiled programs are checked into git next to a small file
 recording which library they were built from. That record can be perfectly
@@ -10600,6 +10609,7 @@ directory opts out of by not having it.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Where:** `scripts/boot-history.py`, `scripts/test-boot-history.py`,
 `scripts/boot-test.sh` (EXIT trap), `scripts/wedge-soak.sh` (`BOOT_LABEL`),
 `bench/boot-history.jsonl`
@@ -10713,6 +10723,7 @@ the counts stop being something a session has to remember.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Where:** `kernel/src/fs/ntfs/` (`source.rs`, `raw.rs`, `boot.rs`,
 `record.rs`, `attr.rs`, `index.rs`, `mod.rs`, `tests.rs`),
 `kernel/src/fs/mod.rs`, `kernel/src/main.rs` (self-test call site)
@@ -10852,6 +10863,7 @@ that ever measures. The lookup rule is one function — `ntfs::lookup` in
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous), on lane B's request
 (`requests/b-a-the-boot-lock-has-no-queue-so-a-waiting-lane-can-starve.md`)
+**Lane:** A
 
 **In short:** three copies of this project run on one PC, and only one of them
 can run the emulator at a time — two at once slow each other down so much that
@@ -10947,6 +10959,7 @@ property you gave up.
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous), prompted by lane B's
 `requests/b-a-does-resource-id-zero-mean-the-class-or-just-an-unknown-pid.md`
+**Lane:** A
 
 **In short:** A capability in this kernel is a permission slip. Each one names
 what it applies to with a pair: a *kind* of thing (a process, a file) and a
@@ -11015,6 +11028,7 @@ every class-wide grant into authority over one real process.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous) — revisiting §83, which is also mine
+**Lane:** A
 
 **In short:** Changing which user a program runs as is the single most
 security-relevant thing a program can ask for. Until now the kernel granted it
@@ -11115,6 +11129,7 @@ stay useful either way — they describe the ABI, not the policy.
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous), answering lane B's
 `requests/b-a-jobctl-fail-diagnostic-lists-code-bands-that-stop-two-rounds-ago.md`
+**Lane:** A
 
 **In short:** When one of our ring-3 test programs fails, it reports *which*
 check failed by choosing its exit code — check 177 failing means the program
@@ -11201,6 +11216,7 @@ comment and the `exit_code != EXPECTED` branch.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Where:** `kernel/src/fs/btrfs/` (`raw.rs`, `sb.rs`, `chunk.rs`, `btree.rs`,
 `items.rs`, `mod.rs`, `tests.rs`), `kernel/src/fs/blocksrc.rs` (hoisted out of
 `fs::ntfs::source`), `kernel/src/fs/mod.rs`, `kernel/src/main.rs` (self-test
@@ -11357,6 +11373,7 @@ zero would make the suite pass more easily and prove less, which is the point.
 
 **Date:** 2026-08-16
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Where:** `kernel/src/fs/f2fs/` (`raw.rs`, `sb.rs`, `cp.rs`, `node.rs`,
 `dir.rs`, `mod.rs`, `tests.rs`), `kernel/src/fs/mod.rs`,
 `kernel/src/main.rs` (self-test call site), `kernel/src/kshell.rs` and
@@ -11596,6 +11613,7 @@ recorded as a class rather than as three bugs.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The sound-card driver keeps all its state behind one lock. Its
 interrupt handler — the small routine the CPU jumps into when the sound card
@@ -11700,6 +11718,7 @@ renumbering another lane's text, which would conflict on merge. Filed as
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The automated test boots the OS inside a simulated PC. That
 simulated PC had a disk, a network card and two graphics cards — and no sound
@@ -11786,6 +11805,7 @@ Three configuration details are load-bearing and are recorded in
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Virtio devices — the paravirtual disk/network/graphics/sound
 hardware a virtual machine offers — come in two incompatible flavours of "where
@@ -11866,6 +11886,7 @@ way:
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Each kernel task's stack has a known value — a "canary" — written
 at the very bottom, so that a task which uses more stack than it has overwrites
@@ -11967,6 +11988,7 @@ plausible reading of the failure that prompted all of this.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Each network card driver had a "self-test" that checked things
 like "is the MAC address sensible" and "is the transmit-enable bit set". Every
@@ -12068,6 +12090,7 @@ hardware, the test does not test hardware.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When kernel code needs a big chunk of memory on the heap — say a
 4 KiB block for saving a CPU's floating-point registers — the obvious-looking
@@ -12167,6 +12190,7 @@ should not be done for this reason.
 
 **Date:** 2026-08-18
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel has a random-number generator that userspace asks for
 key material — the bytes behind a password, a vault salt, an encryption nonce.
@@ -12343,6 +12367,7 @@ replaced the old entropy-estimator with this accounting.
 
 **Date:** 2026-08-18
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** One of our benchmarks suddenly reported that SHA-256 had got four
 times slower. It had not: the SHA-256 machine code was byte-for-byte the same.
@@ -20251,6 +20276,7 @@ that buffer-less form and is compatible with either outcome.
 
 **Date:** 2026-08-18
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The benchmark suite has a "canary" — a tiny, fixed memory
 operation re-timed every 8 benchmarks, whose cost should never change. When it
@@ -20364,6 +20390,7 @@ its result rather than establishing it.
 
 **Date:** 2026-08-18
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** §229 built a tool that guesses *which* benchmarks were spoiled by
 something else hogging the machine, and left it ungraded. To grade it we
@@ -20495,6 +20522,7 @@ information — which strengthens §229 rather than weakening it.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** C
 
 **In short:** The design spec asks for an AMD graphics driver. The obvious
 reading is a modern one — the GCN/RDNA chips in machines people own today. But
@@ -20574,6 +20602,7 @@ one untestable target for another.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** C
 
 **In short:** A "GEM object" is the kernel's word for a chunk of memory a
 graphics driver hands out to hold an image. Until now every one of them was a
@@ -20654,6 +20683,7 @@ the honest answer.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** C
 
 **In short:** The graphics card's memory was being written to one pixel at a
 time over a slow bus, because the CPU had no way to be told "batch these writes
@@ -20777,6 +20807,7 @@ be allowed to overtake the pixels it publishes.
 
 **Date:** 2026-08-17
 **Decided by:** Claude (autonomous)
+**Lane:** C
 
 **In short:** The kernel now measures whether write-combining — a CPU feature
 that batches many small writes to the graphics card into a few large ones — is
@@ -22698,6 +22729,7 @@ through a `secret`-shaped wrapper rather than calling `next_u64` directly.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** to test a feature that guesses which benchmarks were disturbed, we
 deliberately slow the machine down during part of the benchmark run. We then need
@@ -22783,6 +22815,7 @@ sat far above it.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The benchmark tool needs to answer "did these two measurements come from
 the same kernel?" It used to answer by comparing the git commit each run was labelled
@@ -22856,6 +22889,7 @@ reports.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** KASAN has two halves that have to agree. One half is the compiler:
 built with `scripts/kasan-build.sh`, it inserts a check in front of every read
@@ -23018,6 +23052,7 @@ window — a narrowed window is the state this entry exists to leave behind.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The benchmark harness kept reporting confident, repeatable
 "regressions" that were not code changes at all — they were the *addresses* the
@@ -23218,6 +23253,7 @@ comparison has to.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When the benchmark harness flags a slowdown, it is useful to know
 whether the code change under test even *runs* inside the benchmark that got
@@ -23344,6 +23380,7 @@ signal-to-noise one — where grep is adequate.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel has a check that runs at boot and confirms the layout
 padding landed where the linker script says it should. On 2026-08-19 that check
@@ -23444,6 +23481,7 @@ the cheap thing to grep for next time.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Our benchmarks run inside an emulated PC, and there are two very
 different ways to emulate one: QEMU can interpret every instruction in software
@@ -23589,6 +23627,7 @@ the operator, not settled here.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** We keep a log of every kernel boot — did it work, how long did it
 take — and other parts of the project read it to answer questions like "has this
@@ -23698,6 +23737,7 @@ do.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Every benchmark run includes a tiny self-check — a "canary" — whose
 only job is to answer "was this machine busy doing something else while the
@@ -23779,6 +23819,7 @@ instrument that does not work, and voiding becomes correct.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The benchmark tooling has a function whose job is to decide which
 recorded runs are allowed to be compared against each other. It works. But on
@@ -23901,6 +23942,7 @@ tool selects them."
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The benchmark history judges a boot by comparing it against
 earlier boots on the same machine. It has just been taught that boots produced
@@ -23993,6 +24035,7 @@ one and does not need to be made now.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** Two scripts in `scripts/` need to read the same line out of a
 boot log — the `[hypervisor]` banner that says which emulator ran the kernel.
@@ -24052,6 +24095,7 @@ for itself and the `importlib` load should be replaced by a real import.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** QEMU has two virtio display devices: the plain one
 (`virtio-gpu-pci`) and the GL-accelerated one (`virtio-gpu-gl-pci`). We booted
@@ -24142,6 +24186,7 @@ accelerator override already get.
 
 **Date:** 2026-08-19
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** KASAN is the debug build's memory-error detector: it keeps a
 "shadow" byte for every 8 bytes of memory saying whether that memory is
@@ -24229,6 +24274,7 @@ question from the free path entirely.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** SlateOS can now read a ZFS disk. In ZFS, a file's basic facts —
 its size, its permissions, when it was last modified — are not at fixed
@@ -24293,6 +24339,7 @@ mount — not to stop reading it.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** A ZFS disk records what it currently *is* — in use, cleanly
 unplugged, deleted, or a spare kept in reserve. SlateOS was ignoring that field
@@ -24375,6 +24422,7 @@ outcomes back.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** A "mirror" is two or more disks kept as identical copies of each
 other, so that either one alone still has everything. SlateOS's ZFS reader
@@ -24491,6 +24539,7 @@ deliberately not done here.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** When a ZFS pool gets full enough that there is no longer one
 unbroken run of free space big enough for the file block being written, ZFS
@@ -24600,6 +24649,7 @@ built.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** A debugger can ask the kernel to read or write another running
 program's memory (that is how `process_vm_readv`/`writev`, and hence a debugger's
@@ -24712,6 +24762,7 @@ outright, the single retry has to become a bounded loop.
 
 **Date:** 2026-08-20
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** When you change kernel code, the boot test looks at which files
 you touched and tells you whether you ought to run the benchmark suite. It
@@ -24866,6 +24917,7 @@ regression", the hand-written map should give way to it.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** Four of the kernel's 86 benchmarks were not measuring the kernel.
 Each one had a private copy of the function it claimed to time, written out by
@@ -25053,6 +25105,7 @@ benchmark.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short.** Every network protocol needs the same little "add up all the
 bytes" routine to detect corrupted packets. This code had written it out seven
@@ -29806,6 +29859,7 @@ the middle quad a pixel narrow.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When a thread wants to stop running — because it is waiting for
 something, or because a shell pressed Ctrl-Z on it — it does two things in a
@@ -29936,6 +29990,7 @@ use it examined.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Each `services/ctest-*` test program is checked into git twice —
 once as C source, once as the compiled binary the boot test runs — and a
@@ -30094,6 +30149,7 @@ find; these are the ones it cannot.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the kernel keeps a per-CPU list of pending timers — alarms set by
 code that is waiting for something and wants to give up after a while. The list
@@ -30189,6 +30245,7 @@ soft-threshold warning as its trigger.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the kernel keeps one list of pending alarms per processor core.
 Cancelling an alarm used to mean searching every core's list, one after another,
@@ -30277,6 +30334,7 @@ whoever does that rewrite must decide migration and cancellation together.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** when the scheduler cannot immediately tell a sleeping task "wake
 up", it parks the message in a small queue for the next scheduling pass. That
@@ -30346,6 +30404,7 @@ of service on the very log you need to read.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous) — implementing `requests/b-a-a-service-cannot-find-out-who-is-calling-it.md`
+**Lane:** A
 
 **In short:** A program can connect to a named system service, but until now the
 service had no way to find out *which* program had connected. So a service that
@@ -30453,6 +30512,7 @@ we must then keep meaning the same thing.
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous) — answering the semantics question lane B
 delegated in `requests/b-a-pty-devices-need-the-line-discipline-that-the-console-already-has.md`
+**Lane:** A
 
 **In short:** A pseudo-terminal ("pty") is a fake terminal: a pair of connected
 endpoints where one side — the *master* — is held by a terminal emulator or a
@@ -30535,6 +30595,7 @@ emulator will see one answer from the kernel and a different one from libc.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When kernel code (rather than a user program) hands the
 kernel's "copy from a user pointer" helpers an address, those helpers used to
@@ -30636,6 +30697,7 @@ re-panics the kernel inside a named test rather than a thousand lines later.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude proposed and recommended this option; operator
 agreed)
+**Lane:** A
 
 **In short:** Our shell cannot type, or tab-complete, a filename whose name is
 not valid text — a name containing a stray byte that isn't part of any
@@ -30684,6 +30746,7 @@ in `kernel/src/bytestr.rs` (stage (a), commit `d19372dd4`). Completion emits the
 
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended this option)
+**Lane:** A
 
 **In short:** The plan asks for a driver for modern AMD graphics cards. There is
 no way to run one: the emulator we test in doesn't imitate any recent AMD card,
@@ -30733,6 +30796,7 @@ records the gap rather than a promise.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended A-for-now with D over C; operator
 chose C)
+**Lane:** A
 
 **In short:** Most laptops and many desktops display through Intel graphics
 built into the CPU. We can't test a driver for it in the emulator — but unlike
@@ -30788,6 +30852,7 @@ step. The driver itself is the small half and comes last.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended treating this as a separate later
 call; operator decided it now)
+**Lane:** A
 
 **In short:** Nothing in this OS has ever drawn a 3D image. The missing piece is
 Mesa, the library that turns 3D drawing commands into work for a graphics chip.
@@ -30847,6 +30912,7 @@ by this entry.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended this option; operator: "i'll go
 with your recommendation")
+**Lane:** A
 
 **In short:** We have a tool that watches for the machine getting busy while
 benchmarks run, so that a benchmark slowed by *other work on the PC* isn't
@@ -30888,6 +30954,7 @@ Evidence: `known-issues.md` RESULT P23, RESULT P24.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended this option; operator: "i'll go
 with your recommendation")
+**Lane:** A
 
 **In short:** `CLAUDE.md` says to investigate any benchmark that gets more than
 10% slower. We measured what a *no-op rebuild* does — same code, same machine,
@@ -30934,6 +31001,7 @@ records were taken under — has no band measured at all.
 **Date:** 2026-08-21
 **Decided by:** Operator (Claude recommended this option; operator: "i'll go
 with your recommendation")
+**Lane:** A
 
 **In short:** The emulator we test in has a second, much faster mode (3.5×) that
 would roughly halve the benchmark-noise problem in §266 — but it silently
@@ -30982,6 +31050,7 @@ arithmetic in `known-issues.md` →
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous) — implementation choices under the scope
 `design-decisions.md` §263 already settled with the operator.
+**Lane:** A
 
 **In short:** To run SlateOS on the operator's actual PC we need a file that can
 be copied onto a flash drive and started by the machine's firmware. We had
@@ -31739,6 +31808,7 @@ other` exists to keep the branch from coming back.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The graphics card can hold images for a program to draw into.
 There were already two ways to ask for one — the old "dumb buffer" path and the
@@ -31809,6 +31879,7 @@ would have been invisible if the layouts had been silently conflated now.
 POSIX operations are *projected* from real capabilities rather than refused
 outright — was the operator's (Q48 answer B); what is decided here is only the
 shape of the objects that projection reads.
+**Lane:** A
 
 **In short:** Linux programs ask for a handful of powers that a plain user is
 not supposed to have: setting the wall clock, listening on a low-numbered
@@ -31896,6 +31967,7 @@ otherwise go unnoticed — and lane B mirrors these numbers by hand in
 (`requests/c-a-drm-setcrtc-and-a-page-flip-that-refuses-a-mismatched-framebuffer.md`).
 Lane C described the symptom and named the two options; the choice between them
 was not put to the operator because one of them was not tenable — see below.
+**Lane:** A
 
 **In short:** A program that draws the screen hands the kernel a picture and
 says "show this one now". Until today, if the picture it handed over was a
@@ -33897,6 +33969,7 @@ service the clamp exists to prevent.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Each CPU's list of pending timers ("wake me in 3 milliseconds")
 used to be kept in deadline order in a plain array, so inserting a timer or
@@ -34734,6 +34807,7 @@ of `main.rs` is compiled at all); fmt clean.
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the virtio-gpu screen buffer is stored as 250 separate chunks of
 memory, not one block, but the driver offered callers a single "here is the
@@ -34800,6 +34874,7 @@ with B-KNULLJUMP: `known-issues.md` →
 
 **Date:** 2026-08-21
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the kernel has working keyboard, mouse, graphics and sound device
 files at paths like `/dev/input/event0`. Until now they could be opened only by
@@ -36643,6 +36718,7 @@ assertion is how a defence quietly stops being defended.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel had 41 test functions that no code anywhere could
 call. They compiled, they looked like coverage in commit messages, and not one
@@ -36720,6 +36796,7 @@ useful, and should be read that way rather than as a maintenance chore.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** A kernel lock is a token only one task may hold at a time; a task
 that asks for one it is already holding will wait for itself forever, and the
@@ -36801,6 +36878,7 @@ just what X is called.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When the last thread of a program finishes, the kernel frees the
 "page tables" — the tables the CPU uses to translate the program's memory
@@ -36898,6 +36976,7 @@ use the same step. Here they were two serial prints apart, which was enough.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When the scheduler switches from one task to another, there is a
 short stretch where the CPU has already announced "I am now running task B" but
@@ -36989,6 +37068,7 @@ reclaimer guess when the last use ended.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the boot test used to print a red warning saying "the compiled
 test programs in the disk image are out of date, so treat their results as
@@ -37120,6 +37200,7 @@ unvalidatable evidence.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** there are two ways to start a new program on this system, and they
 were handing the new program wildly different amounts of authority. Starting one
@@ -37851,6 +37932,7 @@ counts so that a zero is read as a structural property and not as a gap.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** §278 fixed a program started with `spawn` receiving *no*
 permissions by giving it *all* of its parent's. That is right for a shell
@@ -37989,6 +38071,7 @@ Fixed in `0b78b6a01`; probe `0x1A` is now the regression test.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When one CPU decides another CPU should run a task, it puts the
 task on that CPU's list and then taps it on the shoulder — an interrupt — so it
@@ -38197,6 +38280,7 @@ covered by tests in `bc.rs` that name the GNU command establishing them.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Several devices share one "please look at me" wire to the CPU.
 That wire is held down until whichever device pulled it lets go, and only that
@@ -38512,6 +38596,7 @@ re-opens the question from the code alone.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Scattered through the kernel were 71 places that said "if this
 step fails, crash the whole machine" — `unwrap()` and `expect()`, Rust's way of
@@ -38627,6 +38712,7 @@ closes one enumerable category and leaves the scanner behind so it stays closed.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** To remove every "crash the machine if this fails" site (§282) we
 first had to *find* them, and only the ones in real code — the same pattern in a
@@ -38702,6 +38788,7 @@ than an approximate one whose every disagreement was resolved by hand.
 `requests/b-a-sysfs-says-mintos-while-procfs-says-linux.md`, whose suggested fix
 ("ideally by calling into one shared helper rather than by copying the literals
 a third time") is the shape adopted here.
+**Lane:** A
 
 **In short:** the kernel answers the question "what system is this?" through
 five different doors — the `uname` system call, two virtual files under
@@ -38916,6 +39003,7 @@ differences were invisible underneath.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel can reach a process's memory two ways: through the
 address the process itself uses, or through a second, kernel-private address for
@@ -39031,6 +39119,7 @@ commit message.
 
 **Date:** 2026-08-22
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Two safety checks in this tree looked like they were running and
 were not. One said in its own documentation "call once at boot" and no boot
@@ -39213,6 +39302,7 @@ answer is "only this", and the correction has quietly deleted a check.
 
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When a program starts another program, it can hand it some
 already-open things — a file, a pipe, a network connection — so the child
@@ -39327,6 +39417,7 @@ blocking; this one was.
 
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Two programs talk to the kernel by putting a number in a CPU
 register and asking for a service. If the service takes no inputs, the calling
@@ -39451,6 +39542,7 @@ emptiness, and is never told there is something to read when there is not.
 
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** two network servers (SSH and TFTP) had a once-a-tick housekeeping
 function that grabbed one big lock at the top and let go at the bottom. That
@@ -39889,6 +39981,7 @@ is how a port acquires undocumented divergence.
 ## §290 — Access control lives in one gate that every path operation must pass, and a build-time checker holds the door rather than a code review
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel had two separate permission checks on files. One of
 them — POSIX ACLs, the thing `setfacl` edits — was never actually consulted by
@@ -40028,6 +40121,7 @@ cannot.
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** `xargs` runs one command many times, and has exactly one number
 to say how it went. It was handing that number to whichever run happened to
@@ -40265,6 +40359,7 @@ though only `coreutils/src/bin` is held at *zero*.
 
 **Date:** 2026-08-23
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Lots of our self-tests contain a section that cannot run
 everywhere -- there is no second CPU to take offline on a one-CPU machine, no
@@ -40378,6 +40473,7 @@ test had to check into one the type system guarantees.
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** SlateOS's self-tests can decline to run a section — "no AC97
 device", "/tmp isn't mounted" — and §270 added a small bookkeeping object, the
@@ -40811,6 +40907,7 @@ its own directory and say so in its header, rather than un-sharing all four.
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel's boot self-tests include ~84 "rungs" that each run a
 small program off a test disk. Any of them may legitimately be missing — the
@@ -40893,6 +40990,7 @@ already implies this; §272 is what it looks like when the skip decision is a
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel has a lock-order checker that warns when two locks are
 taken in opposite orders by different code paths, because that can wedge the
@@ -40981,6 +41079,7 @@ boot script could actually branch on.
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel has a `syshealth` command that prints seven pass/fail
 rows about its own condition. One of them, "page faults", said FAIL on every
@@ -42928,6 +43027,7 @@ the settings without adopting them. Every one compiles.
 
 **Date:** 2026-08-24
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When you run `grep needle myfile` in the shell, it can end in
 three different ways: it found the word, it read the whole file and the word
@@ -43641,6 +43741,7 @@ mattering, the fix is to sort lazily in chunks, not to abandon the order.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When you decode base64, some inputs are technically malformed but
 still decodable. We had to pick how fussy to be. The rule chosen: refuse
@@ -43698,6 +43799,7 @@ self-test rung 40.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** `awk -F', '` means "split each line on comma-space". In real awk
 a separator longer than one character is a *regular expression* — a pattern
@@ -43779,6 +43881,7 @@ limitation, and it says so.
 
 **Date**: 2026-08-25
 **Decided by**: Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel's built-in `awk` only knows how to do one thing —
 print. Faced with anything else it has been quietly skipping that part of the
@@ -44177,6 +44280,7 @@ directory.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Zone:** shell (`kernel/src/kshell.rs`)
 
 **In short:** `tr` is the command that swaps or deletes characters --
@@ -44465,6 +44569,7 @@ out right on all three brace shapes without a special case.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 **Where:** `kernel/src/kshell.rs` — `cmd_comm`, `comm_first_unsorted`; self-test rung 56.
 
 **In short:** `comm` compares two files that must already be in sorted order. If
@@ -44581,6 +44686,7 @@ tail disorder that changes nothing.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** when a shell command is used wrongly it prints `Usage: …`. It is
 supposed to also report failure, so that a script — which reads the exit
@@ -44739,6 +44845,7 @@ recorded in `known-issues.md` as the remaining half.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** dozens of kernel-shell commands end with a catch-all branch that
 prints the command's help. Two quite different things landed there: `nat help`,
@@ -44824,6 +44931,7 @@ bug.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the shell has a build-time check that a command which prints an
 error message must also tell the caller it failed. Applied to a command that
@@ -44892,6 +45000,7 @@ one level below where §296 left it. Tracked as
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the shell has a build-time check that a command which prints an
 error message must also tell the caller it failed. It found those messages by
@@ -44984,6 +45093,7 @@ that costs.
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** nine shell commands used to silently throw away any argument
 starting with `-` that they did not recognise. A misspelled flag therefore did
@@ -45052,6 +45162,7 @@ write-up:
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** §600 said a command must refuse a word it does not understand,
 and left open whether to build a checker. This is that checker, plus the two
@@ -45144,6 +45255,7 @@ Write-ups: `known-issues.md` →
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When a boot test freezes, the single most useful fact is *which
 instruction the frozen CPU is sitting on*. QEMU will tell us, over a small
@@ -46135,6 +46247,7 @@ these terms), `gui/desktop/src/session.rs`
 
 **Date:** 2026-08-25
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel shell has ~700 places that read a number the user
 typed. §600 says each must *refuse* a word it cannot read rather than
@@ -46220,6 +46333,7 @@ third burn-down batch (`cmd_colorpicker`, 23 sites). Commit `f6c59b370`.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel shell's self-test checks commands by running them and
 asserting their output contains, or does not contain, some piece of text. That
@@ -46362,6 +46476,7 @@ belongs to some other command" — not on the word `Usage`.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Dozens of shell settings are switches — `a11y captions on`,
 `a11y motion off`. Typing the word with the switch sets it; leaving the word
@@ -46426,6 +46541,7 @@ proving the query form still answers.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When the shell cannot read a word, it says `` `zz' is not a
 window id ``. The article was a literal `a` in the helper's format string,
@@ -47204,6 +47320,7 @@ the `launches` drain in `dispatch`.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The shell's `splice` commands copy a range of bytes from one file
 into another. You may say where in the destination the bytes should land
@@ -47468,6 +47585,7 @@ into a differently-ordered list activates a window the user was not looking at.
 
 *Date: 2026-08-26*
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** `cgmem list` printed a `swap=` column for every memory cgroup, and
 a `high=` count was tracked internally but printed nowhere. The `swap=` number
@@ -47563,6 +47681,7 @@ gathering severity evidence for the twenty-fifth burn-down batch of
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** A test that borrows state some *other* test built is fragile, so
 each kernel-shell self-test rung should create whatever it acts on and put it
@@ -48696,6 +48815,7 @@ write the consumer here.
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel had a DEFLATE decompressor (the thing that unpacks a
 `.tar.gz` or the pixel data inside a `.png`). The graphics lane needed one too,
@@ -48770,6 +48890,7 @@ which `deflate/` needs for the gzip trailer.
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Section 607 settled how the kernel shell decides whether a missing
 word is an error or gets a default: read the command's own usage line, and if
@@ -48853,6 +48974,7 @@ a key — that judgement is this entry.
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** ~146 little kernel modules each keep a table of numbers for
 `/proc` to print, and each has a `self_test()` that runs during boot to check
@@ -48915,6 +49037,7 @@ the burn-down.
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Two programs lane C is building — a disk imager (writes a
 downloaded `.iso` onto a USB stick) and a partition editor — need to read and
@@ -48993,6 +49116,7 @@ inventing plausible values. See the reply in
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** the kernel keeps a running tally of how many times each interrupt
 has fired. Until now it only tallied CPU *faults* (page faults and the like) and
@@ -49074,6 +49198,7 @@ Tracked as `A-IDT-COUNTS-ONLY-EXCEPTIONS-AND-CALLS-THE-TOTAL-INTERRUPTS`.
 *Date: 2026-08-26*
 
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** A ZIP file states, in its own header, how big each item inside it
 is before you unpack it. The old code ignored that number while unpacking and
@@ -49194,6 +49319,7 @@ and the coarse boot battery.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** `/proc/irqstat` is the file you read to see how many times each
 hardware interrupt has fired. It had its own private table of those numbers,
@@ -49288,6 +49414,7 @@ projection having become disconnected from its counter.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** The kernel keeps two separate records of "a device interrupt
 happened": `irqbalance` flips a per-IRQ *did this line fire* flag, and `idt`
@@ -49359,6 +49486,7 @@ the assertion message names the possibility explicitly.
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** When SlateOS makes a ZIP file, each file inside it has a slot for
 "when was this last changed". We do not know that time — nothing was passing it
@@ -49422,6 +49550,7 @@ on the read side. known-issues.md →
 
 **Date:** 2026-08-26
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** Userspace programs sometimes need to talk to the SlateOS kernel
 directly, and that code must not run when the same program is compiled to run on
@@ -49555,6 +49684,7 @@ comment), `toolchain/x86_64-slateos.json` (`"vendor": "slateos"`), and every
 
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** we added an automatic check that stops the build if a self-test
 compares two separate readings of a counter that is moving on its own — the
@@ -49645,6 +49775,7 @@ thing pointing at the gap.
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous), answering a question lane C left open in
 `requests/c-a-yes-put-dos-datetime-on-zipwriteentry.md`
+**Lane:** A
 
 **In short:** a ZIP file records, for each member, when it was last modified
 and whether it is encrypted. Both arrive as raw numbers. We decided to hand the
@@ -49723,6 +49854,7 @@ by `an_impossible_date_is_stored_verbatim_rather_than_corrected`.
 
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** there are two programs called `cal` in the world. The one on
 Linux comes from a package called util-linux; the one on the BSDs and macOS
@@ -49821,6 +49953,7 @@ behaviour and adds to it, which is the change this decision would not object to.
 
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** our `renice` is a line-by-line copy of the real `renice` from
 util-linux, so that it behaves identically. The real one has a genuine defect:
@@ -49934,6 +50067,7 @@ bugs" list next to `cal`'s.
 
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** our `free` — the command that prints how much memory the machine
 is using — is a line-by-line copy of the real `free` from procps-ng, so that
@@ -50187,6 +50321,7 @@ to its 624 substitution.
 
 **Date:** 2026-08-27
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** `dd` is the tool that copies raw bytes between files and devices —
 the one people use to write a disk image to a USB stick. Ours is now a
@@ -50749,6 +50884,7 @@ information that was missing was the wire/not-wire split, and that is one bit.
 
 **Date:** 2026-08-29
 **Decided by:** Claude (autonomous)
+**Lane:** A
 
 **In short:** We now run a shell-script linter over `scripts/` before the
 kernel build, and refuse to build if it complains. But not every one of the

@@ -229,6 +229,29 @@ def run_checker_labels(text: str) -> list[str]:
     return LABEL_RE.findall("\n".join(code_lines(text)))
 
 
+# Python invocations in a gate that are deliberately NOT checkers, with the
+# reason, keyed by a substring of the line.
+#
+# The rule this list is an exception to is about *verdicts*: `run_checker`
+# exists because a checker's exit status becomes the gate's answer, and 1 means
+# two different things (found something / fell over). An invocation whose status
+# is not an answer about the tree is outside that rule, and routing it through
+# the helper would be actively wrong -- `run_checker` `exit`s the whole hook on
+# a non-1 status, which would turn a recoverable failure into a refused push.
+#
+# A reason per entry, for the same reason `multicall-aliases.py`'s IGNORE table
+# carries one: an unexplained exemption list is indistinguishable from a list of
+# defects somebody wanted to stop seeing. `test_the_exempted_invocations_are_
+# actually_handled` below is what stops the reason being merely asserted.
+NOT_A_CHECKER = {
+    '"$fmt_gittree" materialise':
+        "gate 7's mirror builder. It is asked to *produce files*, not to judge "
+        "the tree, and the gate handles its failure itself by falling back to "
+        "one `git cat-file` per file. Through `run_checker` that fallback "
+        "would be unreachable: a failure would exit the hook.",
+}
+
+
 def stray_direct_invocations(text: str, pattern: str) -> list[str]:
     """Lines that run a checker without going through the helper.
 
@@ -236,12 +259,51 @@ def stray_direct_invocations(text: str, pattern: str) -> list[str]:
     why it is gone, and a structural assertion satisfied by prose tests prose.
     Lines that *do* name `run_checker` are the new shape and carry the
     interpreter as an argument, so they match the old pattern too.
+
+    `NOT_A_CHECKER` lines are excluded too -- see that table for why, and for
+    why the exemption is a named list rather than a looser pattern.
     """
     return [
         li.strip()
         for li in code_lines(text)
         if re.search(pattern, li) and "run_checker" not in li
+        and not any(k in li for k in NOT_A_CHECKER)
     ]
+
+
+def exemption_is_handled(text: str, key: str) -> str:
+    """Why `key`'s invocation may skip `run_checker`, verified rather than asserted.
+
+    The exemption's whole justification is that the gate handles the failure
+    itself. That is a claim about the hook, so it is checked against the hook:
+    the invocation must open an `if`, and that `if` must have an `else` -- the
+    branch that runs when it fails. An exemption whose handler was deleted, or
+    whose line no longer exists at all, is a hole in the rule rather than an
+    exception to it, and reads exactly like one that is still honoured.
+
+    Returns "" when the exemption holds, or a sentence saying what is wrong.
+    """
+    lines = code_lines(text)
+    hits = [i for i, li in enumerate(lines) if key in li]
+    if not hits:
+        return "no such invocation in the hook (a stale exemption)"
+    if len(hits) > 1:
+        return f"{len(hits)} invocations match, so the exemption is not specific"
+    start = hits[0]
+    if not lines[start].strip().startswith("if "):
+        return "the invocation does not open an `if`, so nothing handles a failure"
+    depth = 1
+    for li in lines[start + 1:]:
+        stripped = li.strip()
+        if stripped.startswith("if ") or stripped == "if":
+            depth += 1
+        elif stripped == "fi" or stripped.startswith("fi "):
+            depth -= 1
+            if depth == 0:
+                return "the `if` has no `else`, so a failure is silently ignored"
+        elif depth == 1 and stripped == "else":
+            return ""
+    return "the `if` is never closed"
 
 
 def main() -> int:
@@ -419,6 +481,10 @@ def main() -> int:
         stray = stray_direct_invocations(hook, r'"\$py"\s+"\$')
         check("no pre-push gate invokes a checker directly", not stray,
               "; ".join(stray))
+        for key in sorted(NOT_A_CHECKER):
+            why = exemption_is_handled(hook, key)
+            check(f"the exemption for `{key}` still describes the hook",
+                  why == "", why)
         stray = stray_direct_invocations(boot, r'"\$py"\s+"\$PROJECT_ROOT/scripts/')
         check("no boot-test gate invokes a checker directly", not stray,
               "; ".join(stray))

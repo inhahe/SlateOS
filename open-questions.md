@@ -2502,3 +2502,142 @@ affected, and the shared config that caused the misattribution is repaired, so
 the count cannot grow.
 
 **Status:** OPEN
+
+---
+
+## 2,288 of the 2,756 commands in `userspace/` report success for work they never did. Which ones do we keep? (lane B, 2026-09-02)
+
+**In short:** Most of the commands this OS ships are props. They print a
+convincing-looking answer — a file's duration, a disk's size, `PASS` — and then
+report *success*, while containing no code that could have looked at a file, a
+disk or a network. A script cannot tell them apart from the real thing, so
+`ffmpeg -i in.mov out.mp4 && rm in.mov` deletes your video and creates nothing.
+Making them fail honestly instead is my job and I am doing it; I do not need an
+answer for that. What I need an answer for is the other half: **2,023 of these
+are front-ends for other companies' software** — `photoshop-cli`, `oracle-cli`,
+`kaspersky-cli`, `ableton-cli` — which will never run on this OS. Do we delete
+them, or keep them as commands that exist only to say "no"?
+
+Lane C found and measured this
+(`requests/c-b-2288-userspace-tools-report-success-for-work-they-never-did.md`);
+the tree is mine, so the decision is mine to bring to you.
+
+### What a "fabricating" command is, precisely
+
+The audit (`scripts/audit-cli-fabrication.py`, run by hand) counts a crate only
+when **both** are true: it contains no way of observing anything — no file
+access, no network, no subprocess, no hardware call of any kind — **and** it
+nonetheless prints a statement of fact, such as a measurement, a three-digit
+count, or `PASS`. Commands that only print their own `--help` are not counted,
+because that is a report about the program itself, which the program does know.
+Neither are `echo`, `basename`, `seq` and friends, whose correct output really
+is a pure function of their arguments.
+
+```
+$ python scripts/audit-cli-fabrication.py
+userspace crates with sources : 2756
+assert a fact, do no I/O      : 2288      (83.0%)
+```
+
+### The numbers, since the split is the decision
+
+| Group | Count | Examples |
+|---|---|---|
+| Fabricating, named `*-cli` | **2,023** | `photoshop-cli`, `oracle-cli`, `kaspersky-cli`, `ableton-cli`, `netlify-cli`, `vulkan-cli` |
+| Fabricating, plain tool name | **265** | `bzip2`, `cal`, `docker`, `bat`, `age`, `ab`, `acpid`, `cmake`, `borg` |
+| Honest (or genuinely implemented) | 468 | `cp`, `mv`, `ls`, `chroot`, the coreutils |
+
+The `-cli` suffix turns out to be very nearly a marker for "generated in bulk
+and never implemented" — but not perfectly. `sqlmap-cli`, `arping-cli` and
+`pandoc-cli` are free software that could genuinely be ported one day, while
+`photoshop-cli` cannot be, ever. And the 265 plain-named ones are the more
+dangerous group day-to-day, because those are names a person actually types:
+someone who runs `bzip2 big.log` and sees it succeed has every reason to
+believe the file was compressed.
+
+### What I am doing regardless of your answer
+
+Not asking about this half — it is unambiguous and it is already under way:
+
+> A command that did not do the thing must not report success.
+
+- **Done, committed (`20908d27a`):** `userspace/age` shipped a **private
+  encryption key as a string literal in this public repository** — the same
+  identity handed to every caller on every machine, so anything encrypted to it
+  was readable by anyone with a checkout. Deleted. It also claimed
+  `key written to <path>` and `(binary encrypted data written to <path>)` and
+  exited 0 while containing no filesystem call at all. Both now refuse and exit
+  non-zero. Its test asserted the hardcoded key started with `age1` — a
+  property a constant satisfies forever, so the test certified the bug rather
+  than catching it; replaced with tests that fail against the old code.
+- **Next:** the same treatment for every command whose canned text claims a
+  *write*, because those are the ones that cause data loss rather than merely
+  a wrong answer.
+
+### The question: what happens to the 2,023
+
+**A — Delete the ones that can never work here; make the rest refuse.**
+*What changes:* `photoshop`, `oracle`, `ableton` and ~2,000 similar names stop
+existing as commands. Typing one gives you the shell's "command not found",
+which is true. The tree loses ~2,000 crates and the workspace builds faster.
+Whether a given name "can never work here" needs a judgement call per crate,
+which I would make by hand against a rule you approve, not by regex.
+
+**B — Keep all of them; make every one refuse and exit non-zero.**
+*What changes:* `photoshop` remains a command; running it prints
+`photoshop: not implemented on SlateOS` and fails. Nothing is lost, and the
+name is reserved should someone ever write it. The workspace keeps ~2,000
+crates that will never do anything.
+
+**C — Keep them, print the sample output marked `SIMULATED:`, exit non-zero.**
+*What changes:* same safety as B, and the canned text survives for
+documentation and screenshots. This is lane C's suggestion for the pure
+reporters (`vulkaninfo`, `acpi`, `ab`), where the fabricated text is inert and
+the exit code carries the whole warning.
+
+I would not mix A with C: the same tree should not both delete a name and
+keep a fake demo of it.
+
+### A second, smaller decision that comes with it
+
+`scripts/audit-cli-fabrication.py` currently just prints a number. It could
+become a **ratchet** — a check that pins today's count and fails if the count
+ever rises, the way `scripts/scan-orphan-modules.py` works — which is what
+stops the next bulk generation from putting all of this back. Lane C offered to
+convert it and said the pinning decision is mine because the number is mine. I
+think it should be pinned, but only *after* A/B/C lands, because the answer
+changes the number by two thousand.
+
+### My recommendation
+
+**A**, with the rule "delete it if the thing it drives is somebody else's
+proprietary product, or a cloud service we do not talk to; keep and refuse it
+if it is free software that could genuinely be ported." That deletes
+`photoshop-cli` and `oracle-cli`, keeps `sqlmap-cli` and `pandoc-cli` as
+refusing stubs, and keeps every plain-named tool. Lane C reached the same
+conclusion independently: *"Deleting them is strictly better than making them
+honest."*
+
+The reason I lean to deletion rather than B is that a command's *existence* is
+itself a claim. `command -v photoshop` succeeding is a fact scripts and
+installers test, and it will be wrong forever. B leaves 2,000 permanent wrong
+answers to that question in exchange for reserving names nobody asked us to
+reserve.
+
+But it is your call, because it is a statement about what this OS is for, it
+deletes a visible fraction of the tree, and reversing it a year from now means
+resurrecting 2,000 crates from history rather than editing a file.
+
+### If this is never answered
+
+The dangerous half gets fixed anyway — I will keep working down the
+write-claiming commands, so the data-loss shape goes away on its own schedule.
+What persists without an answer is 2,000-odd commands that exist and refuse,
+which is safe but permanently misleading about the OS's scope, and a fabricated
+`[x]` in `roadmap.md` for each of them (lines 3872, 4882 and 4887 mark
+`vulkan-cli`, `vkbasalt-cli` and `dxvk-cli` complete; lane C left those ticks
+alone as mine to re-scope). It does not get worse with time as long as the
+ratchet lands, and it cannot cause data loss once the write-claiming sweep is
+done. So this is a "decide when you have a moment", not a "decide today".
+
+**Status:** OPEN

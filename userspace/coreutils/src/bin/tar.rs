@@ -2360,7 +2360,7 @@ impl Creator<'_> {
     ///
     /// Returns whether the member reached the archive, which is what decides
     /// whether its name may later be linked to; see the link table in
-    /// [`add_to_archive`](Self::add_to_archive).
+    /// [`Self::add`].
     fn add_link(&mut self, name: &[u8], meta: &fs::Metadata, typeflag: u8, target: &[u8]) -> bool {
         // The order is GNU's: the member name's prefix is reported before the
         // link target's, because `header` runs first.
@@ -2413,7 +2413,7 @@ impl Creator<'_> {
     /// A regular file: a header, then its contents padded out to a block.
     ///
     /// Returns whether the member reached the archive; see
-    /// [`add_to_archive`](Self::add_to_archive).
+    /// [`Self::add`].
     fn add_regular(&mut self, path: &Path, name: &[u8], meta: &fs::Metadata) -> bool {
         // The header commits to a length, so the body must be exactly that
         // many bytes however the read goes. Writing fewer would not merely

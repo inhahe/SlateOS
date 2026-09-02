@@ -455,6 +455,44 @@ def test_a_lane_field_beyond_the_window_does_not_count(mod):
                any("has no '**Lane:** A' field" in e for e in found))
 
 
+def test_a_superseded_banner_does_not_eat_the_window(mod):
+    """A superseded entry puts its banner above its fields, and must still pass.
+
+    Regression cover for a real false positive. Section 741 was superseded the
+    same day it landed, which put an 11-line `> **SUPERSEDED ... by 745.**`
+    blockquote between its heading and its `**Lane:** B` -- deliberately first,
+    because it is what a reader must see before believing anything below it.
+    The field was then at heading+14 and the gate reported it missing. Section
+    30 has the identical shape and escaped only by predating the gate.
+
+    The invariant is "the field is visible in the diff next to the heading",
+    and a banner does not break it: the banner is part of that same diff. What
+    must *not* be skipped is prose, which the sibling test above pins down --
+    the first attempt at this fix skipped any leading run of blank-or-quote
+    lines and thereby let a buried field count, and that test caught it.
+    """
+    banner = "\n".join(f"> line {i} of the supersession notice" for i in range(11))
+    head = f"## 631. a decision\n\n{banner}\n\n**Date:** 2026-09-01\n**Lane:** A\n"
+    found = errs(mod, doc(head), {})
+    check_true("a Lane field below a banner is found",
+               not any("has no '**Lane:** A' field" in e for e in found))
+
+
+def test_a_banner_does_not_let_prose_be_skipped(mod):
+    """The banner exemption ends at the first line that is not part of it."""
+    head = (
+        "## 631. a decision\n\n"
+        "> a one-line supersession notice\n\n"
+        + "\n".join([""] * 20)
+        + "\nbody prose that is not a banner\n"
+        + "\n".join([""] * 20)
+        + "\n**Lane:** A\n"
+    )
+    found = errs(mod, doc(head), {})
+    check_true("a field buried below prose is still not found",
+               any("has no '**Lane:** A' field" in e for e in found))
+
+
 def test_an_inline_lane_field_counts(mod):
     """The one-line header form declares a lane just as well as its own line.
 

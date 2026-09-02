@@ -103,7 +103,7 @@ const LONG_OPTIONS: &[(&str, Takes)] = &[
 ///
 /// Upstream stores this as the raw argument string and switches on its first
 /// byte, which is why `nl -baXYZ` is accepted: only the `a` is ever looked at.
-/// That is reproduced in [`build_type_arg`] rather than in the type, so that
+/// That is reproduced in [`set_style`] rather than in the type, so that
 /// everything downstream sees a decided answer.
 enum Style {
     /// `a` — number every line.

@@ -80,7 +80,7 @@ const QUERY: [u8; 29] = [
     0x00, 0x00, // ARCOUNT
     7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', //
     3, b'c', b'o', b'm', //
-    0, // root label
+    0,    // root label
     0x00, 0x01, // QTYPE = A
     0x00, 0x01, // QCLASS = IN
 ];
@@ -123,15 +123,7 @@ unsafe fn sys3(nr: usize, a: usize, b: usize, c: usize) -> isize {
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-unsafe fn sys6(
-    nr: usize,
-    a: usize,
-    b: usize,
-    c: usize,
-    d: usize,
-    e: usize,
-    f: usize,
-) -> isize {
+unsafe fn sys6(nr: usize, a: usize, b: usize, c: usize, d: usize, e: usize, f: usize) -> isize {
     let r: isize;
     unsafe {
         core::arch::asm!(

@@ -91574,6 +91574,39 @@ detection lane B actually relies on is its own — which argues for lane B runni
 the linux-target check in its own routine rather than treating the tree-wide gate
 as the safety net. (As of `045f603e1` lane B does run it per task, by hand.)
 
+**Update 2026-09-01 (lane B) — the adopted remedy is `cargo check`, and half the
+blind spot is a clippy one.** Everything above prescribes `cargo check
+--workspace --target x86_64-unknown-linux-gnu`, and all three lanes adopted that
+verb. `cargo check` does not run clippy. So the half of this blind spot that is a
+*compile error* is now covered, and the half that is a **`#![deny(clippy::all)]`
+violation** is not — and in these crates a denied lint is a build failure on the
+target, not a warning.
+
+Measured, today: `userspace/coreutils/src/utimecmp.rs:360` truncates with
+`nsec % SYSCALL_RESOLUTION`, and that constant is `1`, so it is `% 1` —
+`clippy::modulo_one`, `deny`-level under the crate's `#![deny(clippy::all)]`. The
+whole module is `cfg(unix)`, so on the Windows host it is not compiled at all and
+`cargo clippy` here has never seen the line. It has been there since the module
+was written. Found by
+
+```
+cargo clippy -p coreutils --target x86_64-unknown-linux-gnu --all-targets
+```
+
+which is the same trick this entry already describes, with `clippy` in place of
+`check`. Fixed in `f107b77cc` with an `#[allow]` and the reasoning for keeping
+the no-op line (it is the line that stops being a no-op the day
+`SYSCALL_RESOLUTION` changes, and gnulib has it).
+
+**So: say `clippy`, not `check`.** `cargo clippy` runs everything `cargo check`
+runs and then the lints, on the same artifacts, so substituting it costs
+essentially nothing and covers both halves. `--all-targets` matters too: without
+it the `#[cfg(test)]` modules — which is where most `cfg(unix)` test code lives
+in `userspace/**` — go unlinted for the target as well. Neither `cargo check` nor
+plain `cargo build` for `x86_64-slateos` would have caught this either, because
+`deny(clippy::…)` is inert outside clippy; the only thing that sees it is a
+clippy run with a unix-family target.
+
 ## `B-POSIX-SEVENTEEN-TESTS-ASSERT-THE-SLATEOS-KERNEL-AND-GET-THE-HOST-KERNEL` (lane B, 2026-08-26) — **CLOSED 2026-08-26, and the diagnosis below was wrong**
 
 **Resolution.** Fixed, but not as this entry proposed — the diagnosis under
@@ -104240,7 +104273,7 @@ our own code would have shown it; only running GNU did.
 
 - **`>2` operands with a non-directory last operand.** GNU calls
   `target_directory_operand`, and on failure with `2 < n_files` reports
-  `mv: target 'c': Not a directory` (`mv.c:490`). We reported a per-source
+  `mv: target 'c': Not a directory` (`mv.c:495`). We reported a per-source
   error. Note the synthesised error is built from an `ErrorKind`, **not** a
   hard-coded `20`: `errmsg::strerror` picks the POSIX text by kind precisely
   because a raw OS code is a Win32 code on the dev host and an errno on the
@@ -105334,10 +105367,10 @@ the directory arm (`:1594`) refuses outright and is its own entry.
 `set_authorized_context`, then `copy_acl`/`set_acl`, then `utimens` from the
 source's `st_atim`/`st_mtim` — in that order, and the order matters, since
 `chown` clears set-user-ID and so must precede the mode. For `mv` the flags that
-select all of this are on unconditionally: `cp_option_init` (`mv.c:100`) sets
-`preserve_timestamps`, `preserve_ownership`, `preserve_mode` and
-`preserve_links`, because a move is supposed to be indistinguishable from a
-rename.
+select all of this are on unconditionally: `cp_option_init` (`mv.c:119`) sets
+`preserve_timestamps` (137), `preserve_ownership` (134), `preserve_mode` (136)
+and `preserve_links` (135), because a move is supposed to be indistinguishable
+from a rename.
 
 **The proper fix.** Replace the two lines with an explicit sequence in the same
 order upstream uses: create the destination, copy the bytes, `fchown` (ignoring
@@ -105425,8 +105458,8 @@ case believe it was already dealt with.
 **In short:** `mv /other/fs/a /other/fs/b dir/` moves two names for one inode
 and produces two independent files. A rename would have kept them one file, and
 `mv` promises to be indistinguishable from a rename: `cp_option_init`
-(`mv.c:129`) sets `preserve_links` unconditionally, with no option to turn it
-off. The bytes are all correct and nothing is lost, so this is invisible until
+(`mv.c:119`) sets `preserve_links` (`mv.c:135`) unconditionally, with no option
+to turn it off. The bytes are all correct and nothing is lost, so this is invisible until
 someone writes to one of the names and the other does not change — or until a
 directory that fitted on the disk because of its links no longer does.
 
@@ -105723,12 +105756,15 @@ Both §22 cases became XPASS on the first run after the fix and are now plain
 because it does the move. It keeps the old wording deliberately — it is a refusal
 of the *operation*, not of a step inside it.
 
-**What is still funnelled.** The bytes. A failure part-way through the copy is
-reported as `error writing %s` whichever end failed, because `io::copy` returns
-one error for both — see
-`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE`, which
-is the residue of this entry and was logged rather than folded into it, since its
-fix trades against `copy_file_range` and this one did not.
+**What is still funnelled — nothing, as of 2026-09-01.** This paragraph used to
+read: "The bytes. A failure part-way through the copy is reported as
+`error writing %s` whichever end failed, because `io::copy` returns one error for
+both." That was the residue of this entry, logged separately as
+`B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE` on the
+belief that its fix "trades against `copy_file_range`". It does not — GNU has a
+third sentence, `error copying SRC to DST`, for exactly the case where the
+offload cannot say which end failed. That issue is now ✅ RESOLVED and both
+programs share `copy::copy_bytes`; there is no funnelled sentence left here.
 
 ---
 
@@ -105811,6 +105847,15 @@ engine is a red `main` for all three lanes:
    struct.
 4. `mv`'s `copy_across_devices` directory arm drives the engine, then `rmdir`s.
 
+**Progress: stages 1 and 2 have landed.** `userspace/coreutils/src/copy.rs`
+holds the leaf helpers, the shared preserve tail (`preserve_attributes` and
+everything it calls), and now the shared byte copy (`copy_bytes`), all of which
+both programs call. The copy-body defect stage 2 predicted was real and is
+closed; see `design-decisions.md` §745, which supersedes §741. Stage 3 —
+opening the destination, which is `cp`'s `create_dest` against `mv`'s
+`create_destination` and where the two genuinely differ — is next, followed by
+the walk and then stage 4.
+
 Each stage is certifiable the same way the `fsattr` moves in this chain were:
 `scripts/cp-diff.sh` and `scripts/mv-diff.sh` must stay byte-identical across
 it. A stage that moves code without changing behaviour and *does* move those
@@ -105891,12 +105936,18 @@ than by assuming:
   `copy_permissions` on the next line already carries. Copying them here as
   well would write the access list twice, and the second write would land
   *before* the mode that has to precede it.
-* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:145`,
+* **The line numbers were a version adrift.** `cp_option_init` is `mv.c:119`,
   not `129`; the `preserve_xattr = true` inside it is `mv.c:145`; `copy_attr`
   is `copy.c:1662`, `copy_acl`'s arm is `copy.c:1672` rather than `1668`, and
   the `S_IWUSR` is `copy.c:1450` rather than `1457`.
   The claim they support is right; the citations were not, and a citation that
   does not resolve is worse than none.
+  (Corrected again 2026-09-01: this bullet itself gave `cp_option_init` as
+  `mv.c:145` — the same line as the `preserve_xattr = true` *inside* it, which
+  is the tell that it was copied from the line below rather than read. Both are
+  now verified against `coreutils-9.4/src/mv.c`, where `cp_option_init` opens at
+  119 and its `preserve_xattr = true` is at 145. A correction is not exempt from
+  the rule it is enforcing.)
 * **`preserve_onto_link` needed one too, which reads like a contradiction of
   mv.rs's own doc and is not.** That doc explains at length that a symlink
   returns early at `copy.c:3285` and so never reaches the mode block. But
@@ -106036,7 +106087,7 @@ applies: mv's cross-device directory default-ACL case waits on the same issue.
 
 ---
 
-## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — OPEN 2026-09-01
+## B-MVS-CROSS-DEVICE-COPY-CANNOT-TELL-A-READ-FAILURE-FROM-A-WRITE-FAILURE — ✅ RESOLVED 2026-09-01
 
 **In short:** if the bytes cannot be moved, ours always blames the destination.
 GNU says `error reading 'src'` when the source medium fails and `error writing
@@ -106116,6 +106167,36 @@ a device that can be made to fail on demand. The reachable version is a
 destination on a filesystem small enough to fill — `/dev/shm` with a size limit,
 or a loopback image — which is a fixture the harness does not have and would be
 the same fixture several other unmeasured cases want.
+
+**✅ RESOLVED 2026-09-01, exactly as the "proper fix" above describes.** Stage 2
+of the copy-engine extraction landed `copy::copy_bytes`
+(`userspace/coreutils/src/copy.rs`), which is GNU's `sparse_copy` minus the hole
+detection this tree does not have yet:
+
+* `copy_file_range` is driven directly, in a loop, with `COPY_MAX` =
+  `MIN(SSIZE_MAX, SIZE_MAX) >> 30 << 30` and null offsets.
+* A failure outside the fallback set emits **`error copying SRC to DST`** — the
+  third sentence, which is what closes this issue.
+* The fallback is entered only while *nothing has been copied* — a correctness
+  precondition, not a tuning knob, since the loop resumes from the file offsets
+  the offload advanced — and only for `is_CLONENOTSUP` errnos or the CIFS
+  `ENOENT`. It emits `error reading SRC` and `error writing DST` from its own
+  two sites.
+* `EINTR` retries at both layers; a zero return with nothing copied falls back,
+  for the procfs bug upstream documents at `copy.c:345`.
+
+Both programs call it. `mv`'s `io::copy` and `cp`'s bespoke 64 KiB loop are both
+gone, so `cp` gained the offload it never had and `mv` gained the two precise
+sentences — the two halves of the same bug, fixed once. See
+`design-decisions.md` §745, which supersedes §741.
+
+**Still not measured.** The "How it would be caught" paragraph above stands
+unchanged: no harness case reaches a mid-byte copy failure, so all three
+sentences are verified by reading against `coreutils-9.4/src/copy.c` and not by
+a diff run. The fixture that would test it — a destination filesystem small
+enough to fill — remains unbuilt and is still wanted by several other cases.
+What *is* mechanically checked is that the change did not disturb the cases that
+do run: cp-diff and mv-diff were taken before and after.
 
 ---
 
@@ -107463,4 +107544,220 @@ voided, never passed) is the precedent for what to do when an instrument cannot
 support a question — void it loudly and count the voids, not pass it quietly.
 
 **Meanwhile:** any lane whose boot test dies here has not found a bug in its own
-change. Re-run; it is load-dependent.
+change. Re-run; it is load-dependent. *(Superseded by the resolution at the head
+of this entry: it is fixed, not merely load-dependent.)*
+
+---
+
+## B-CP-SYMLINK-OWNERSHIP-FAILURE-QUOTED-A-NAME-GNU-LEAVES-BARE — FIXED 2026-09-01
+
+**In short:** when `cp -P -p` could not give a copied symbolic link (a file that
+is just a stored path pointing at another file) the same owner as the original,
+it named the link in quotes — `failed to preserve ownership for './out'` — where
+GNU names it bare: `failed to preserve ownership for ./out`. Same error, same
+exit status, one character pair different. It survived because *no test case in
+either harness could make that sentence print at all*.
+
+**Where.** `userspace/coreutils/src/copy.rs`, the ownership-failure diagnostic,
+which had one form for all three kinds of thing being copied.
+
+**What GNU does, and why it is not an inconsistency on its side.** Upstream
+quotes the name for a regular file and for a directory, and leaves it bare for a
+symlink, because a symlink's ownership is not taken by the same code. Files and
+directories go through `set_owner`, which writes `quoteaf (dst_name)`
+(`copy.c:960`). A symlink's is a separate `lchownat` inlined into
+`copy_internal` (`copy.c:3180`), and whoever wrote it used a plain `%s`. Ours
+had `set_owner`'s form everywhere, so it was uniform where upstream is not.
+
+**Why no test could reach it.** The obvious route is self-cancelling. Make a
+chown fail the ordinary way — an unprivileged `cp -p` of a file owned by someone
+else — and it fails with `EPERM`; but `chown_failure_ok` forgives `EPERM` and
+`EINVAL` *unless the caller has chown privileges*. So the arrangement that makes
+the chown fail is the same one that makes the program say nothing about it. Both
+sides exit 0 in silence and agree, and a divergence in a sentence neither side
+prints is invisible.
+
+**Fixed** in `dfdbaefcf`, keyed on `made`, which already distinguishes the two
+cases for the same underlying reason. The bare form is `escape_os`, not
+`Path::display`: `display` substitutes U+FFFD for every byte that is not valid
+UTF-8, so a link named in Latin-1 would be reported under a name that is not its
+own, and the reader's obvious next move — pasting it into a shell — would find
+nothing. `escape_os` is gnulib's `escape` style, identical to `%s` for every
+name that is text.
+
+**And then made reachable**, in `560a85c23`, because a fix found by reading
+`copy.c` is not a way of finding the next one. A user namespace breaks the
+deadlock and needs both halves: inside `unshare -Ur` the euid is 0, so the
+forgiveness is withdrawn, and only one uid is mapped, so a source owned by
+anyone else has an unmapped owner and the lchown fails `EINVAL` rather than
+`EPERM`. Discovery is in `diff-wsl.sh` and probes by doing the thing, requiring
+the lchown to fail `EINVAL` *specifically* — an `EPERM` would mean the
+arrangement had collapsed back to asserting silence against silence. Verified in
+both directions: with the fix, 581 passed / 0 differed / 30 differ on purpose;
+with the fix reverted, 579 / 2 / 30, and the two are these, reporting `'out'`
+against `out`.
+
+**Only `cp` can reach it.** Every `cp` option that turns ownership on also sets
+`require_preserve` (`cp.c:1018`, `1089`, `1098`), so the error is always fatal
+there. `mv` leaves it false (`mv.c:143`) and would exercise the surviving
+branch, but an `mv` source has to be one we can delete, and a foreign-owned link
+inside a directory we own cannot be created without the privilege whose absence
+is the whole point.
+
+**A correction to `dfdbaefcf`'s own commit message**, recorded here because that
+commit is pushed and cannot be amended: it cites `copy.c:961` for `set_owner`'s
+`quoteaf (dst_name)`. The call is at **960**; 961 is the `if
+(x->require_preserve)` below it. Its other citation, `copy.c:3186` for "a
+separate `lchownat` inlined in `copy_internal`", is not wrong so much as
+ambiguous: `lchownat` is at **3180**, and 3186 is the bare `dst_name` argument —
+the second half of the same sentence. One citation was carrying two claims eight
+lines apart. Noticing that pair is what started the sweep in
+`49c8f277d`, which read all 192 upstream citations in `userspace/coreutils` and
+`scripts/` against the real coreutils-9.4 source and corrected 66 of them.
+
+---
+
+## B-TOOLING-INTERMITTENT-HOST-FAILURES-LOSE-THEIR-OWN-EVIDENCE — OPEN 2026-09-01
+
+**In short:** two different pieces of the build tooling failed once each on
+2026-09-01, and both passed on an immediate retry with no change in between. Both
+were *host-side* failures rather than anything in the code under test. Neither
+left usable evidence, which is the part that makes this an entry rather than a
+shrug: a flake you cannot inspect is indistinguishable from a real bug that only
+fires sometimes, and re-running until green is how the second kind gets shipped.
+
+**Failure 1 — `scripts/test-build-usb-image.py`.** During a full
+`./scripts/boot-test.sh` run it exited non-zero, and the harness correctly
+refused to build:
+
+```
+ERROR: refusing to build.  1 tooling test suite(s) failed:
+    test-build-usb-image.py
+```
+
+Run directly afterwards it passed all 6 groups, including under the exact
+conditions `boot-test.sh` uses (`PYTHONIOENCODING=:replace python -u`, stdout a
+pipe rather than a console).
+
+*Why this should not be able to happen.* The suite is deterministic by
+construction. `scripts/build-usb-image.py` pins every FAT directory entry to a
+fixed epoch (`FIXED_FAT_TIME`/`FIXED_FAT_DATE`) and derives the disk GUID,
+partition GUID and volume serial from a SHA-256 of the staged content, precisely
+so the image is a pure function of its inputs. The test's `make_tree` is entirely
+synthetic — no repo file, no clock, no randomness — and totals about 400 KiB.
+Disk space is not a plausible cause either: the images go to `%TEMP%` on `C:`,
+which had 502 GB free.
+
+*Why the evidence is gone.* `boot-test.sh` does print the whole failing output
+(`--- <name> FAILED (exit N) ---` followed by the captured stdout+stderr, and
+deliberately not a tail, "these suites print one line per assertion and the
+failing one is rarely last"). The harness did its job. The loss was downstream:
+the suites run in alphabetical order, `test-build-usb-image.py` is near the
+front, and the background-task output file this run was read from keeps only the
+last N lines — so the block had scrolled off by the time the run ended. The
+suite's `main` also `rmtree`s its temp directory in a `finally`, so nothing
+survived on disk to inspect.
+
+**Failure 2 — rustc crashed compiling the kernel.**
+`cargo check --workspace --target x86_64-pc-windows-gnu` died with
+
+```
+process didn't exit successfully: `rustc.exe --crate-name kernel ...`
+  (exit code: 0xc0000409, STATUS_STACK_BUFFER_OVERRUN)
+```
+
+An immediate re-run of the same command finished clean in 7m51s. `0xc0000409` is
+a compiler crash, not a diagnostic — the code cannot cause it and cannot fix it.
+
+**Why they are filed together — and the mechanism, now confirmed.** The initial
+guess here was "probably environmental, probably memory pressure", written down
+as a hypothesis. It was confirmed within the hour by a third failure that named
+the cause outright. `cargo test -p coreutils --target x86_64-pc-windows-gnu`,
+run while a `cargo clippy` on the same crate was still going, died with:
+
+```
+error[E0786]: found invalid metadata files for crate `coreutils`
+  = note: failed to mmap file '...\libcoreutils-....rlib':
+          The paging file is too small for this operation to complete. (os error 1455)
+...
+rustc-LLVM ERROR: out of memory
+Allocation failed
+```
+
+So the host exhausts memory when two rustc-heavy jobs overlap, and the failure
+surfaces as whatever the loser happened to be doing: an mmap that cannot be
+backed, an LLVM allocation that returns null, or — failure 2 above —
+`STATUS_STACK_BUFFER_OVERRUN`, which is what a rustc dying of memory exhaustion
+looks like from outside the process. Failure 1 fits the same shape: it builds a
+dozen 384 MiB images while a full workspace build is running.
+
+**The operational rule this yields: do not overlap rustc-heavy jobs on this
+host.** Run `cargo build`, `cargo test`, `cargo clippy` and `boot-test.sh` one
+at a time, even though each is slow and the temptation to background one and
+start the next is constant. Two of the three failures above were caused by
+exactly that temptation, including by the session that wrote this entry. A
+backgrounded `cargo` is not free concurrency here — it is a second job competing
+for a page file that cannot cover both, and it corrupts the result of the job
+you were actually waiting on.
+
+**Failure 4 — `git push` refused by gate 8, and the same tree passed it minutes
+later.** Same day, same session. `git push origin lane-b` was backgrounded
+*while the boot test was still building* — the exact thing the rule above had
+just been written to forbid — and exited 1 with gate 8's refusal:
+
+```
+pre-push: REFUSING to push — a diagnostic above puts a file name straight into
+its message.
+...
+To push anyway:
+    ALLOW_UNQUOTED_NAMES=1 git push origin ...
+```
+
+Run afterwards on the unchanged tree, `scripts/quote-names.py --selftest`
+passed 56/56 and `--check` reported `ok -- 0 known sites in 0 files`; the push
+then succeeded with all ten gates green. Nothing was edited in between.
+
+*The cause could not be determined, and that is the finding.* The background
+task's output file keeps only its tail, so `head -60` and `tail -25` returned
+the same block of boilerplate — the gate's standing explanation of what
+unquoted names are — and the lines that would have said *which file and which
+site* had scrolled off. Two hypotheses remain live and the evidence to separate
+them is gone: either the checker crashed (a `MemoryError` or a failed read under
+the same host pressure as failures 1–3), or it genuinely found a violation in a
+source file that a concurrent process had left half-written when
+`Path.read_text` reached it. The cost was not the lost push: it was two hours
+spent designing a fix for a defect in newly-written `cp` code that, it turned
+out, was never there.
+
+*One real defect did fall out of the post-mortem, independent of which
+hypothesis is right.* Every gate asks its checker `if ! "$py" "$script"
+--check`, and a Python script that dies of an uncaught exception exits 1 —
+the same code it uses for "I found violations." So a checker that **crashes**
+is reported to the operator as a **defect in their code**, in the gate's own
+confident wording, and the only remedy the message offers is the bypass
+(`ALLOW_UNQUOTED_NAMES=1`), which would push with that gate disabled. A gate
+that cannot tell "your code is wrong" from "I fell over" spends its credibility
+on the wrong verdict and trains its reader toward the bypass — which is
+precisely the failure the hook's own comments elsewhere say a gate must not
+have. Fixed by `scripts/hooks/pre-push`'s `run_checker` helper, tested by
+`scripts/test-pre-push-run-checker.py`; see design-decisions.md 746.
+
+**What to do when any of these recurs.** Do *not* re-run until green and move on.
+
+1. Capture the run's output to a file in full rather than reading a truncated
+   background-task tail — `./scripts/boot-test.sh 2>&1 | tee /tmp/boot.log` —
+   so the `--- FAILED ---` block survives.
+2. For the image suite specifically, comment out the `shutil.rmtree` in
+   `main`'s `finally` (`scripts/test-build-usb-image.py`) for the reproducing
+   run and diff the images it left behind. `test_reproducible_and_sensitive`
+   writes `a.img` and `b.img` from one tree; if those two differ, the builder
+   has a nondeterminism the pinning above was supposed to have removed and that
+   is a real bug in `build-usb-image.py`.
+3. Note whether the host was building concurrently, and how much RAM was free.
+
+**Not blocking.** Both retried green, and the boot test's refusal-to-build on a
+tooling failure is the correct behaviour — it is what surfaced this at all,
+rather than letting a run produce numbers from a harness that had just failed
+its own test.
+
+---

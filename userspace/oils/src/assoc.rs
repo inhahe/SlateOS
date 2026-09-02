@@ -16,8 +16,9 @@
 //! * The hash is **FNV-1** — multiply *then* xor — seeded and stepped with the
 //!   32-bit FNV constants, and it xors in a **signed** char, because bash's
 //!   `hash_string` walks a `char *` and `char` is signed on x86.
-//! * A fresh table has [`INITIAL_BUCKETS`] buckets, and the bucket is
-//!   `hash & (nbuckets - 1)`.
+//! * A fresh table's bucket count is the one bash's own `hash_create` call for
+//!   that table passed — 1024, 64 or 256, see [`TableShape::initial_buckets`] —
+//!   and the bucket is `hash & (nbuckets - 1)`.
 //! * A new entry goes at the **head** of its chain, so within one bucket the
 //!   order is the reverse of insertion.
 //! * The table grows when the entry count *reaches* [`LOAD_FACTOR`] per bucket,

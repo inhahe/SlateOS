@@ -102,7 +102,7 @@
 //!      then `chmod`s it to the source's mode, so a 0777 source produced a 0777
 //!      copy. GNU passes the mode to `open` and lets the kernel subtract the
 //!      umask, so under the ordinary 022 the copy is 0755. Measured, both ways,
-//!      across three umasks — see [`mode_of_a_new_file_is_narrowed_by_umask`].
+//!      across three umasks — see `mode_of_a_new_file_is_narrowed_by_umask`.
 //!    * *An existing destination had its mode overwritten.* `cp public private`
 //!      — a 0777 source over somebody's 0600 file — left that file 0777. GNU
 //!      reopens an existing destination **without** a mode argument, so its
@@ -246,26 +246,26 @@
 //! `design-decisions.md` §727. The cases are `scripts/cp-diff.sh` section 16.
 
 use coreutils::backup::{self, BackupType, source_is_dst_backup, src_base_is_dot_or_dotdot};
-use coreutils::copytree::{ModeDebt, make_dir, read_dir_fastread};
+use coreutils::copy::{
+    self, Chowned, Made, ModeDebt, Source, chown_to_source, copy_bytes, current_mode, make_dir,
+    preserve_attributes, read_dir_fastread,
+};
 use coreutils::diag;
 use coreutils::errmsg::strerror;
 use coreutils::fileid::{
     Copied, EntryId, FileId, entry_id, file_id, is_same_file, nlink, same_entry, split_entry,
 };
-use coreutils::fsattr::{
-    self, GroupRetry, Link, On, Ownership, chown_privileges, is_denied_ownership, owner_differs,
-    owner_of, permission_bits, times_of,
-};
+use coreutils::fsattr::{self, Link, On, chown_privileges, permission_bits};
 use coreutils::getopt::{self, Opt, Program, Takes};
 use coreutils::hardlink;
 use coreutils::overwrite::{self, Interactive};
-use coreutils::quote::{os_bytes, quoteaf_os, quotef_os};
+use coreutils::quote::{os_bytes, quoteaf_os};
 use coreutils::stdfd::{self, Stream};
 use coreutils::yesno::{Answers, StdinAnswers};
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -498,7 +498,7 @@ impl Preserve {
 
     /// Add what `-p` asks for, leaving the attributes it does not name alone.
     ///
-    /// **Not `*self = Self::posix()`.** GNU's `case 'p'` (`cp.c:1104`) is three
+    /// **Not `*self = Self::posix()`.** GNU's `case 'p'` (`cp.c:1094`) is three
     /// assignments and no fourth: it never mentions `preserve_links`, so a `-p`
     /// that follows a `-d` still has it. Overwriting the whole value reads the
     /// same in every test that gives one option at a time, and turns `cp -d -p`
@@ -574,7 +574,7 @@ struct CpFlags {
     /// an error rather than a warning.
     ///
     /// Set by `-p` and by any `--preserve=`, and **not** by `--no-preserve=`
-    /// (`cp.c:1085`) — asking to stop preserving something cannot fail. The
+    /// (`cp.c:1077`) — asking to stop preserving something cannot fail. The
     /// distinction is the whole difference between `cp -p a b` exiting 1 when
     /// the times could not be set and `cp --no-preserve=xattr a b` exiting 0,
     /// and it is why this is a flag rather than a constant `true`.
@@ -656,7 +656,7 @@ impl CpFlags {
         self.resolved_deref() == Deref::Always
     }
 
-    /// GNU's `should_dereference` (`copy.c:2148`), which is the same question
+    /// GNU's `should_dereference` (`copy.c:2151`), which is the same question
     /// as the two above asked once with the *place* as a parameter rather than
     /// baked into the name.
     ///
@@ -721,6 +721,7 @@ fn run_main() -> ExitCode {
                     out: &mut out,
                     err: &mut err,
                     answers: &mut answers,
+                    umask: coreutils::umask::current(),
                 };
                 if copy_all(&mut job, &paths) {
                     ExitCode::SUCCESS
@@ -1062,7 +1063,7 @@ fn unimplemented_attribute(word: &str, because: &str) -> getopt::Error {
     ))
 }
 
-/// GNU's `decode_preserve_arg` (`cp.c:872`): apply one comma-separated list of
+/// GNU's `decode_preserve_arg` (`cp.c:876`): apply one comma-separated list of
 /// attribute words, either switching them on (`--preserve=`) or off
 /// (`--no-preserve=`).
 ///
@@ -1185,6 +1186,52 @@ struct Job<'a, O: Write, E: Write> {
     /// `Job`, and none of them but [`overwrite_ok`] cares what the answers come
     /// from. The one indirect call is per *prompt*, which is per human keypress.
     answers: &'a mut dyn Answers,
+    /// The process's file-mode creation mask, read once per run.
+    ///
+    /// GNU keeps this in a function-static cache (`copy.c`'s `cached_umask`)
+    /// because `copy.c` has nowhere better; a `Job` is somewhere better. It is
+    /// read at the two places a `Job` is built and never again, so a `cp -r` of
+    /// a deep tree asks the kernel once — which is what the cache was for — and
+    /// two copies made in one process (which is every `cargo test` run) do not
+    /// share an answer. See [`copy::Opts::umask`].
+    umask: u32,
+}
+
+impl<O: Write, E: Write> Job<'_, O, E> {
+    /// This job as the shared copy engine sees it: the subset of these options
+    /// it reads, plus the stream it reports on.
+    ///
+    /// The narrowing is the point. `CpFlags` has a dozen fields the engine has
+    /// no concept of — `-r`, `-T`, the backup type, the interactive mode — and
+    /// handing it the whole thing would compile and would quietly make a shared
+    /// module `cp`-shaped, leaving `mv` to fabricate a value for every field it
+    /// does not have. [`copy::Opts`] is the answer to "which of them does the
+    /// engine actually depend on", written down.
+    ///
+    /// Built per call rather than stored, and that is not a saving but a
+    /// correctness requirement: [`copy_all`] reborrows itself with *different*
+    /// `flags` when `-b` rewrites the command (see
+    /// [`same_name_backup_rewrite`]), so a copy of the options taken once at
+    /// startup would be the pre-rewrite ones for the rest of the run. Reading
+    /// them at the point of use is what makes the rewrite reach the tail. It
+    /// costs nine `bool`s and a word.
+    fn run(&mut self) -> copy::Run<'_, E> {
+        copy::Run {
+            opts: copy::Opts {
+                prog: "cp",
+                preserve_mode: self.flags.preserve.mode,
+                preserve_timestamps: self.flags.preserve.timestamps,
+                preserve_ownership: self.flags.preserve.ownership,
+                preserve_xattr: self.flags.preserve.xattr,
+                require_preserve: self.flags.require_preserve,
+                require_preserve_xattr: self.flags.require_preserve_xattr,
+                reduce_diagnostics: self.flags.reduce_diagnostics,
+                explicit_no_preserve_mode: self.flags.explicit_no_preserve_mode,
+                umask: self.umask,
+            },
+            err: self.err,
+        }
+    }
 }
 
 /// `--verbose`'s one line about one copy: `'src' -> 'dst'`, and with `-b`
@@ -1214,7 +1261,7 @@ struct Job<'a, O: Write, E: Write> {
 /// actually happening for a directory.
 ///
 /// `backup` is `None` at the directory call site and always will be: `cp` backs
-/// a destination up only when it is *not* a directory (`copy.c:2524`), and a
+/// a destination up only when it is *not* a directory (`copy.c:2526`), and a
 /// directory source onto a non-directory destination is refused earlier with
 /// `cannot overwrite non-directory`. `mv` is the utility for which that
 /// combination exists, and it does not share this function.
@@ -1354,6 +1401,10 @@ fn copy_all<O: Write, E: Write>(job: &mut Job<'_, O, E>, paths: &[OsString]) -> 
         out: &mut *job.out,
         err: &mut *job.err,
         answers: &mut *job.answers,
+        // Carried, not re-read: the mask cannot have changed since the outer
+        // `Job` was built — this process has not called `umask` — and re-asking
+        // would make the rewrite cost a syscall for an answer already held.
+        umask: job.umask,
     };
 
     // Both "named twice" problems need two sources to exist at all, so GNU
@@ -1667,7 +1718,7 @@ fn overwrite_ok<O: Write, E: Write>(
 }
 
 /// The whole of the "is this destination to be left alone" decision — GNU's
-/// one block at `copy.c:2421`, which handles `-n` and `-i` together because
+/// one block at `copy.c:2422`, which handles `-n` and `-i` together because
 /// they are two values of one field.
 ///
 /// Returns `true` when the copy should go ahead. The two refusals differ in
@@ -1706,7 +1757,7 @@ fn overwrite_allowed<O: Write, E: Write>(
         // rather than folded into a catch-all so that adding `cp --update` is a
         // compile error here — and it has to be, because the `bool` this
         // function returns cannot say what `AlwaysSkip` means. Upstream's
-        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2429`) is a
+        // `return_val = x->interactive == I_ALWAYS_SKIP` (`copy.c:2430`) is a
         // *skip that succeeds*, so implementing `cp -u` means widening this
         // return type, exactly as `mv`'s [`Verdict`] was widened. Answering
         // `false` in the meantime would be the same wrong exit status `mv` had
@@ -1732,7 +1783,7 @@ fn overwrite_allowed<O: Write, E: Write>(
 ///
 /// **A destination that `--backup` is about to move aside is left alone.**
 /// Upstream this unlink is not a separate step but the `else if` of the backup
-/// block (`copy.c:2568`), and reading the two as independent removes the very
+/// block (`copy.c:2570`), and reading the two as independent removes the very
 /// file the backup exists to keep: `cp --remove-destination -b a b` would
 /// delete `b`, find nothing to rename, and report a plain copy — which is
 /// `--backup` silently doing nothing at all. See [`backup_takes_destination`],
@@ -1970,8 +2021,8 @@ fn copy_one<O: Write, E: Write>(
     }
 
     // `--remove-destination`, at GNU's point in the order: after the
-    // just-created *file* guard above (`copy.c:2470`) and before the
-    // just-created *symlink* one below (`copy.c:2591`). Which is observable —
+    // just-created *file* guard above (`copy.c:2473`) and before the
+    // just-created *symlink* one below (`copy.c:2592`). Which is observable —
     // the symlink guard re-`lstat`s, so a link this command created and then
     // unlinked here is not there to be complained about.
     if !remove_destination_first(src_path, &target, &mut dest_state, job) {
@@ -2113,21 +2164,6 @@ fn place_source<O: Write, E: Write>(
     place_entity(src_path, metadata, target, dest, true, job)
 }
 
-/// What kind of destination [`preserve_attributes`] is stamping.
-///
-/// Three kinds and not a `bool`, because all three answer the two questions
-/// differently: a symlink takes neither an ownership step (it was chowned where
-/// it was made) nor a mode at all, and a directory settles its withheld
-/// permissions by a different formula from a regular file's. See
-/// [`settle_mode`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(Debug))]
-enum Made {
-    Regular,
-    Directory,
-    Symlink,
-}
-
 /// What [`copy_tree`] achieved.
 ///
 /// The distinction the caller needs is not "did everything work" but "is there
@@ -2155,7 +2191,7 @@ enum TreeResult {
 /// `Linked` is not a variety of `Copied` that the caller may round off, and the
 /// reason is a measured GNU behaviour rather than a tidiness argument: a
 /// destination reached by hard-linking is **not** recorded in GNU's `dest_info`,
-/// because its `earlier_file` branch returns at `copy.c:2748`, well before the
+/// because its `earlier_file` branch returns at `copy.c:2751`, well before the
 /// `record_file` at `copy.c:3217`. The consequence is visible —
 ///
 /// ```text
@@ -2473,14 +2509,19 @@ fn place_bytes<O: Write, E: Write>(
         // the link was made a line ago, so it is new by construction, and GNU's
         // guard is `new_dst || …` in the first place.
         let src = Source::new(On::Path(src_path, Link::NoFollow), src_path, metadata);
-        if job.flags.preserve.ownership
+        // Read before `run` borrows the job, not because the value is expensive
+        // but because `run` holds `job` mutably for both calls below and this
+        // is the one thing outside the engine's own options they need.
+        let preserve_ownership = job.flags.preserve.ownership;
+        let run = &mut job.run();
+        if preserve_ownership
             && chown_to_source(
                 src,
                 On::Path(target, Link::NoFollow),
                 target,
                 Made::Symlink,
                 true,
-                job,
+                run,
             ) == Chowned::Failed
         {
             return false;
@@ -2492,7 +2533,7 @@ fn place_bytes<O: Write, E: Write>(
             Made::Symlink,
             true,
             &mut debt,
-            job,
+            run,
         );
     }
 
@@ -2513,7 +2554,7 @@ fn place_bytes<O: Write, E: Write>(
             Made::Directory,
             new,
             &mut debt,
-            job,
+            &mut job.run(),
         );
         return contents_ok && stamped;
     }
@@ -2964,31 +3005,20 @@ fn copy_regular_file<O: Write, E: Write>(
         }
     };
 
-    let mut buf = vec![0u8; 64 * 1024];
-    loop {
-        let n = match input.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => n,
-            // A signal arriving mid-read is not a read failure, and reporting
-            // it as one would make `cp` unreliable under any job control.
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: error reading {}: {why}", quoteaf_os(src));
-                return false;
-            }
-        };
-        let Some(chunk) = buf.get(..n) else {
-            // Unreachable: `read` returns at most the buffer's length. Handled
-            // rather than indexed so the crate's `indexing_slicing` lint has
-            // nothing to complain about and a broken `Read` cannot panic here.
-            break;
-        };
-        if let Err(e) = output.write_all(chunk) {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: error writing {}: {why}", quoteaf_os(dst));
-            return false;
-        }
+    // The engine's body rather than a loop here, which is what makes this arm
+    // and `mv`'s cross-device arm the same code. The gain is not only the
+    // de-duplication: the loop that used to live here never offloaded, so it
+    // pushed every byte of every copy through userspace where GNU hands the
+    // work to the kernel. See [`copy::copy_bytes`].
+    //
+    // The sentence comes back rather than being printed there because `mv` has
+    // a backup to undo before it can print; `cp` has nothing to undo, so it
+    // prints immediately and gives up on this operand — which is what the
+    // `false` says, and it is the same `false` the loop returned.
+    if let Err(copy::CopyError { what, err }) = copy_bytes(&mut input, &mut output, src, dst) {
+        let why = strerror(&err);
+        let _ = writeln!(job.err, "cp: {what}: {why}");
+        return false;
     }
 
     // Through the descriptor the bytes were just written through, and not
@@ -3007,545 +3037,8 @@ fn copy_regular_file<O: Write, E: Write>(
         Made::Regular,
         new_dst,
         &mut debt,
-        job,
+        &mut job.run(),
     )
-}
-
-// ------------------------------------------------------------ preserving ---
-
-/// The source of a copy, as the tail that puts its attributes back needs it.
-///
-/// Four things that always travel together and always describe the same file:
-/// what to read its attributes *through*, what to call it in a diagnostic that
-/// blames it, the `stat` the copy has already taken of it, and the mode the
-/// destination is meant to end with.
-///
-/// The last is here rather than as a parameter beside it because it starts as
-/// the source's mode and is then narrowed in one place — a `chown` that could
-/// not be done takes the set-user-ID, set-group-ID and sticky bits off it, see
-/// [`Chowned`] — and every step after that must see the narrowed value. GNU
-/// keeps it in one `src_mode` local through the same run of steps, for the same
-/// reason.
-#[derive(Clone, Copy)]
-struct Source<'a> {
-    /// A **descriptor** for a regular file — the one its bytes were read
-    /// through — and a *path* for a directory or a symlink, which have none
-    /// here. See [`fsattr::On`].
-    on: On<'a>,
-    /// What to call it in a diagnostic. Only the extended-attribute steps blame
-    /// the source by name; every other sentence in the tail names the
-    /// destination, because every other step writes to it.
-    name: &'a Path,
-    /// The `stat` the copy already took. Its timestamps and owner are what the
-    /// tail writes; its mode seeded [`Self::mode`].
-    meta: &'a fs::Metadata,
-    /// The permission bits the destination is to end with — the source's, less
-    /// whatever an impossible `chown` has since taken off them.
-    mode: u32,
-}
-
-impl<'a> Source<'a> {
-    /// A source about to have its attributes copied, before anything has
-    /// narrowed the mode.
-    fn new(on: On<'a>, name: &'a Path, meta: &'a fs::Metadata) -> Self {
-        Source {
-            on,
-            name,
-            meta,
-            mode: permission_bits(meta),
-        }
-    }
-}
-
-/// Put back onto the finished destination whatever `-p` asked to keep: the
-/// timestamps, then the ownership, then the extended attributes, then the mode.
-///
-/// **The order is correctness, not arrangement**, and GNU leaves the reason for
-/// each step in a line above it. Two reasons, and they point the same way:
-///
-/// * `copy.c:3211` — "chown turns off set[ug]id bits for non-root, so do the
-///   chmod last". A `chmod` written before the `chown` compiles, runs, and
-///   quietly drops the set-user-ID bit off every copy a non-root user makes.
-/// * `copy.c:3244` — "Set xattrs after ownership as changing owners will clear
-///   capabilities". A `setxattr` written before the `chown` loses
-///   `security.capability`, which the kernel strips when a file changes hands.
-///
-/// `on` is the destination in the matching form: a descriptor for a regular
-/// file, a path for a directory or a symlink. That is GNU's own split, and it
-/// is a security property rather than a saved syscall; see [`fsattr::On`].
-///
-/// Returns `false` only for a failure that is fatal, which is what
-/// [`CpFlags::require_preserve`] and [`CpFlags::require_preserve_xattr`] decide:
-/// the diagnostic is printed either way, but only an attribute the user asked
-/// for *by name* turns a copy that happened into an exit status of 1.
-fn preserve_attributes<O: Write, E: Write>(
-    mut src: Source<'_>,
-    on: On<'_>,
-    dst: &Path,
-    made: Made,
-    new_dst: bool,
-    debt: &mut ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    if job.flags.preserve.timestamps {
-        // `and_then` because a source whose timestamps cannot even be read is
-        // the same failure to the user as one whose copy cannot be stamped:
-        // the destination has the wrong times either way, and `preserving
-        // times for` is the sentence for that.
-        if let Err(e) = times_of(src.meta).and_then(|times| fsattr::set_times(on, times)) {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: preserving times for {}: {why}",
-                quoteaf_os(dst)
-            );
-            if job.flags.require_preserve {
-                return false;
-            }
-        }
-    }
-
-    // A symlink's owner was set where the link was made, so GNU's ownership
-    // step is guarded by `!dest_is_symlink` and this one is guarded the same
-    // way. Note that the guard is *here* rather than an early return above:
-    // the extended-attribute step below applies to a symlink destination and
-    // GNU runs it for one.
-    //
-    // The `new_dst ||` is GNU's `copy_internal` guard (`copy.c:3265`) and *not*
-    // its `copy_reg` one, which is `!SAME_OWNER_AND_GROUP` alone
-    // (`copy.c:1645`) — so this one expression stands where upstream has two
-    // that differ. They differ for a reason that does not survive the merge:
-    // `copy_reg` has just `fstat`ed the destination descriptor, unconditionally
-    // whenever ownership is being preserved (`copy.c:1529`), so its comparison
-    // is against a fresh `stat` and is always meaningful; `copy_internal`'s
-    // `dst_sb` was taken before the destination existed, so for a new one there
-    // is nothing to compare against and the `new_dst ||` is what stops it
-    // comparing against a stale reading. Ours takes the reading inside
-    // [`owner_differs`], so neither problem applies and the wider guard is
-    // safe — it costs at most a `chown` that changes nothing.
-    //
-    // That "at most" was measured rather than assumed, because the obvious
-    // worry is that a no-op `chown` is still a write that can be refused, and a
-    // refusal here is not free: it would take the set-user-ID bit off the copy
-    // ([`Chowned::Disowned`] below). The sharpest case that can be built —
-    // a source owned by you with a group you are *not* in, copied into a
-    // set-group-ID directory carrying that same group, so the new destination
-    // is born already owner-and-group-identical to the source and GNU skips the
-    // `chown` we perform — was run against both binaries and produced `4755
-    // inhahe:daemon` on each. It cannot fail: Linux checks group membership
-    // only when the group is actually changing (`setattr_prepare`'s
-    // `!vfsgid_eq_kgid(…) && !in_group_or_capable(…)`), so a `chown` to the
-    // values already in place is permitted to anyone. GNU's own comment calls
-    // its guard an optimisation — "Avoid calling chown if we know it's not
-    // necessary" — which is exactly what it is.
-    if made != Made::Symlink
-        && job.flags.preserve.ownership
-        && (new_dst || owner_differs(on, src.meta))
-    {
-        match chown_to_source(src, on, dst, made, new_dst, job) {
-            Chowned::Done => {}
-            // GNU's `case 0`: the copy continues, but *narrower* than its
-            // source. A user who could not be given the file cannot be handed
-            // its set-user-ID bit either — that would be a privilege nobody
-            // granted, on a file that is now theirs.
-            Chowned::Disowned => src.mode &= !0o7000,
-            Chowned::Failed => return false,
-        }
-    }
-
-    // A failure here is only *fatal* if the user named `xattr` — GNU's two call
-    // sites both write `! copy_attr (…) && x->require_preserve_xattr`
-    // (`copy.c:1657` and `copy.c:3246`). Under `--preserve=all` the diagnostic
-    // is printed and the copy still succeeds, which is the whole difference
-    // between asking for everything and asking for this.
-    let fatal = job.flags.preserve.xattr
-        && !copy_xattrs(src, on, dst, fsattr::Xattrs::Ordinary, job)
-        && job.flags.require_preserve_xattr;
-
-    // Where the two call sites *do* differ is what a fatal one does next, and
-    // this reproduces the difference rather than tidying it. `copy_internal`
-    // returns out of the function, so a directory whose attributes could not be
-    // carried does not get its mode preserved either; `copy_reg` sets
-    // `return_val = false` and carries on to the mode step, so a regular file
-    // does. That is observable in `ls -l`, and matching only one of the two
-    // would change what one of the kinds comes out as.
-    if fatal && made != Made::Regular {
-        return false;
-    }
-
-    // "The operations beyond this point may dereference a symlink"
-    // (`copy.c:3251`), and nothing portable can set a symlink's mode in any
-    // case — Linux has no working `lchmod` at all.
-    if made == Made::Symlink {
-        return true;
-    }
-
-    settle_mode(src, on, dst, made, new_dst, debt, job) && !fatal
-}
-
-/// Carry the extended attributes of one class from the source to the copy, and
-/// say as much about the ones that would not go as the options asked for.
-///
-/// gnulib decides how loud to be by picking one of three error callbacks
-/// (`copy.c:3700`), which reads as two booleans and is three behaviours:
-///
-/// | Asked for | Printed | Exit status |
-/// |---|---|---|
-/// | `--preserve=xattr` | every failure | 1 |
-/// | `--preserve=all` | all but "this filesystem has none" | 0 |
-/// | `-a` | nothing at all | 0 |
-///
-/// The middle row's exception is gnulib's `errno_unsupported`, `ENOTSUP ||
-/// ENODATA` — not the same test as [`fsattr`]'s, which decides whether there is
-/// a failure at all rather than whether to mention one.
-///
-/// Returns `false` if anything at all failed, printed or not, which is what
-/// gnulib's `copy_attr` returns; the caller turns that into an exit status only
-/// under `--preserve=xattr`.
-fn copy_xattrs<O: Write, E: Write>(
-    src: Source<'_>,
-    on: On<'_>,
-    dst: &Path,
-    which: fsattr::Xattrs,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    // libattr's path form is `l*` throughout, so the source and the destination
-    // are both named without following a link. Handed to [`fsattr`] explicitly
-    // rather than left to the caller: for a symlink destination the difference
-    // is the whole meaning of the call, and for the two other kinds the two
-    // forms name the same file, so nothing else in the tail has had to care.
-    let failures = fsattr::copy_xattrs(nofollow(src.on), nofollow(on), which);
-    if failures.is_empty() {
-        return true;
-    }
-
-    let all_errors = job.flags.require_preserve_xattr;
-    let some_errors = !all_errors && !job.flags.reduce_diagnostics;
-    for failure in &failures {
-        if all_errors || (some_errors && !fsattr::errno_unsupported(&failure.err)) {
-            let why = strerror(&failure.err);
-            let what = failure.at.sentence(src.name, dst);
-            let _ = writeln!(job.err, "cp: {what}: {why}");
-        }
-    }
-    false
-}
-
-/// Name a file without following it, whatever form the rest of the tail is
-/// using. A descriptor already names one file and cannot be redirected.
-fn nofollow(on: On<'_>) -> On<'_> {
-    match on {
-        On::Path(path, _) => On::Path(path, Link::NoFollow),
-        On::File(file) => On::File(file),
-    }
-}
-
-/// GNU's `set_owner` (`copy.c:889`), whose three outcomes are three different
-/// things rather than a success and a failure.
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(test, derive(Debug))]
-enum Chowned {
-    /// The owner and group are the source's now.
-    Done,
-    /// They are not, and the caller must drop the set-user-ID, set-group-ID and
-    /// sticky bits from the mode it is about to restore.
-    ///
-    /// **Not a failure.** An ordinary user copying a root-owned file cannot
-    /// give the copy away, and this is the overwhelmingly common outcome of
-    /// `cp -p`; a set-user-ID bit on a file that is now *theirs* would be a
-    /// privilege nobody granted. That is why GNU makes it a third return value
-    /// rather than an error — the copy succeeds, narrower than its source, and
-    /// says nothing.
-    Disowned,
-    /// It failed for a reason worth reporting, it has been reported, and
-    /// [`CpFlags::require_preserve`] says that ends the copy.
-    Failed,
-}
-
-/// Give `on` the source's owner and group. See [`Chowned`] for the outcomes.
-fn chown_to_source<O: Write, E: Write>(
-    src: Source<'_>,
-    on: On<'_>,
-    dst: &Path,
-    made: Made,
-    new_dst: bool,
-    job: &mut Job<'_, O, E>,
-) -> Chowned {
-    let fatal = if job.flags.require_preserve {
-        Chowned::Failed
-    } else {
-        Chowned::Disowned
-    };
-
-    // Narrowing an *existing* destination first, because changing its owner
-    // while it still wears its old mode is a window in which the new owner
-    // holds permissions the copy will never have. GNU calls it exactly that —
-    // "a window of vulnerability" — and closes it here (`copy.c:900`).
-    if !new_dst && job.flags.preserve.mode && !narrow_before_chown(src, on, dst, job) {
-        return fatal;
-    }
-
-    // The retry after a refusal, the `EPERM`-or-`EINVAL` test and the root check
-    // are [`fsattr::take_ownership`]; what stays here is the sentence and
-    // whether it ends the copy, which is the half `mv` does differently.
-    //
-    // A symlink gets no retry, which is GNU's asymmetry rather than ours: its
-    // symlink arm (`copy.c:3178`) is a bare `lchownat`, while `copy_reg` and the
-    // shared tail both retry. Matching it matters because the difference is
-    // visible in `ls -l` on the copied link.
-    let retry = if made == Made::Symlink {
-        GroupRetry::No
-    } else {
-        GroupRetry::Yes
-    };
-    match fsattr::take_ownership(on, owner_of(src.meta), retry) {
-        Ownership::Taken => Chowned::Done,
-        Ownership::Denied => Chowned::Disowned,
-        Ownership::Failed(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: failed to preserve ownership for {}: {why}",
-                quoteaf_os(dst)
-            );
-            fatal
-        }
-    }
-}
-
-/// Narrow an existing destination's mode to something its incoming owner cannot
-/// be harmed by, before the `chown` that hands it over.
-///
-/// The window this closes is not subtle. `cp -p src dst` over an existing `dst`
-/// of mode 0666 sets `dst`'s owner to `src`'s and *then* narrows it to `src`'s
-/// 0600 — so between the two calls the file belongs to somebody who did not ask
-/// for it and is writable by everybody. A `dst` carrying a set-user-ID bit is
-/// worse: for that instant it is a setuid program, owned by the new owner,
-/// containing whatever `dst` held.
-///
-/// The temporary mode is `old & new & S_IRWXU`: only bits that *both* the old
-/// and the new mode already grant, and only to the owner. So it can take away
-/// nothing the final `chmod` will not put back, and it cannot fail for asking
-/// for a permission the caller did not already have.
-///
-/// Returns `false` when the narrowing failed, in which case the caller must not
-/// chown at all.
-fn narrow_before_chown<O: Write, E: Write>(
-    src: Source<'_>,
-    on: On<'_>,
-    dst: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let old = match current_mode(on) {
-        Ok(mode) => mode,
-        Err(e) => {
-            let why = strerror(&e);
-            let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(dst));
-            return false;
-        }
-    };
-    let new = src.mode;
-    // GNU's condition is `USE_ACL || (old & CHMOD_MODE_BITS & (~new | special))`
-    // (`copy.c:917`), and this kernel has access-control lists, so the first
-    // half is true and the second is never consulted. Narrowing unconditionally
-    // is not belt-and-braces: the mode-bit test asks "does the old mode grant
-    // anything the new one does not?", and an ACL can grant what no mode bit
-    // shows. A destination at 0600 that also carries `user:mallory:rw` passes
-    // the test against a 0600 source and would be handed to the new owner with
-    // mallory's entry intact.
-    //
-    // The narrowing is `qset_acl`, not a chmod, for the same reason — see
-    // `fsattr::set_mode_exactly`, which is that call: a chmod leaves named
-    // entries standing, so a chmod-only narrowing closes the mode-bit half of
-    // the window and leaves the ACL half open.
-    let Err(e) = fsattr::set_mode_exactly(on, old & new & 0o700) else {
-        return true;
-    };
-    // GNU's `owner_failure_ok`, which is `chown_failure_ok` for this step: a
-    // non-root user who may not chmod the file was never going to manage the
-    // chown either, and saying so twice helps nobody.
-    if !is_denied_ownership(&e) || chown_privileges() {
-        let why = strerror(&e);
-        let _ = writeln!(
-            job.err,
-            "cp: clearing permissions for {}: {why}",
-            quoteaf_os(dst)
-        );
-    }
-    false
-}
-
-/// The last step: give the destination the mode it is meant to end with.
-///
-/// Three branches, and they are GNU's three — at `copy.c:3289` for a directory
-/// and at `copy.c:1669` for a regular file, which is the same decision written
-/// twice because the two live in different functions:
-///
-/// * **`--preserve=mode`** copies the source's whole `07777`, special bits
-///   included, and does *not* apply the umask. That is the point of the option:
-///   a preserved mode is the source's mode, not a fresh file's.
-/// * **`--no-preserve=mode` on a destination this run created** gives it the
-///   mode it would have had if nobody had asked — 0666 for a file, 0777 for a
-///   directory, each less the umask. See [`CpFlags::explicit_no_preserve_mode`]
-///   for why this is not the same as "no `-p` was given".
-/// * **Otherwise**, settle the [`ModeDebt`]: put back what was withheld at
-///   creation, less the umask.
-///
-/// The third branch is spelled differently for the two kinds, and that is GNU's
-/// doing rather than an accident of this port. A directory's mode after `mkdir`
-/// is not predictable — POSIX leaves the special bits implementation-defined —
-/// so GNU reads it back and ORs the withheld bits into what it finds. A regular
-/// file's is predictable, and `copy_reg`, holding a descriptor, simply writes
-/// `src_mode & 0o777 & ~umask` without a stat. The two agree on the answer.
-fn settle_mode<O: Write, E: Write>(
-    src: Source<'_>,
-    on: On<'_>,
-    dst: &Path,
-    made: Made,
-    new_dst: bool,
-    debt: &mut ModeDebt,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    if job.flags.preserve.mode {
-        // GNU's `copy_acl (…, src_mode)` — the mode *and* the access-control
-        // lists, because on this kernel the two are one thing: an ACL entry
-        // grants access no mode bit shows, so a `--preserve=mode` that copied
-        // only the bits would produce a copy the kernel treats differently from
-        // its source. See `fsattr::copy_permissions`, which is that call.
-        //
-        // Its diagnostic is the one place in `cp` that uses the *unquoted*
-        // style, `quotef`, for a name. Matched rather than tidied: a utility
-        // that differs from GNU only in the punctuation of a diagnostic is
-        // still one whose output a script cannot match on.
-        if let Err(e) = fsattr::copy_permissions(src.on, on, src.mode) {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: preserving permissions for {}: {why}",
-                quotef_os(dst)
-            );
-            return !job.flags.require_preserve;
-        }
-        return true;
-    }
-
-    if job.flags.explicit_no_preserve_mode && new_dst {
-        // GNU's `MODE_RW_UGO` for a file and `S_IRWXUGO` for a directory
-        // (`copy.c:3302`). A socket gets the directory's answer there too; this
-        // `cp` copies neither sockets nor devices, so the two kinds below are
-        // all of them.
-        let default = if made == Made::Directory {
-            0o777
-        } else {
-            0o666
-        };
-        // `set_acl`, not a chmod: GNU's line here is `set_acl (dst_name,
-        // dest_desc, MODE_RW_UGO & ~cached_umask ())` (`copy.c:1685`). The
-        // destination is one this run created, so it has no access ACL of its
-        // own — but it may have *inherited* one from a parent directory's
-        // default ACL, and `--no-preserve=mode` asking for 0666 & ~umask means
-        // 0666 & ~umask and not "plus whatever the parent grants". The
-        // inherited *default* ACL on a new directory is left alone, which is
-        // also GNU's behaviour: it is the parent's policy for what comes next,
-        // and this option says nothing about it.
-        if let Err(e) = fsattr::set_mode_exactly(on, default & !cached_umask()) {
-            let why = strerror(&e);
-            let _ = writeln!(
-                job.err,
-                "cp: setting permissions for {}: {why}",
-                quotef_os(dst)
-            );
-            // GNU returns `false` outright here, without consulting
-            // `require_preserve`: `--no-preserve=mode` never sets it, so a
-            // check would read as if the flag mattered when it cannot.
-            return false;
-        }
-        return true;
-    }
-
-    // What was withheld goes back on, less the umask — the subtraction the
-    // kernel would have made had the mode gone to `mkdir`/`open` outright, and
-    // why a 1777 source directory produces a 1755 copy under the ordinary 022.
-    // Skipping it would publish group-write on every copy of a 0775 directory
-    // made by a process whose umask says otherwise.
-    debt.omitted &= !cached_umask();
-
-    if made == Made::Regular {
-        // `copy_reg`'s form, and its condition is GNU's `omitted_permissions |
-        // extra_permissions` (`copy.c:1688`) — the two are settled by one chmod
-        // because the mode they are both measured against is the same one. A
-        // regular file acquires a *debt* only under `--preserve=ownership`, and
-        // an *extra* only under `--preserve=xattr` on a new destination, so
-        // either alone is reason enough to write the mode. It never carries a
-        // forced mode, because nothing has to be opened through it.
-        if debt.omitted == 0 && debt.extra == 0 {
-            return true;
-        }
-        return chmod_settling(on, src.mode & 0o777 & !cached_umask(), dst, job);
-    }
-
-    // The stat is what a *debt* needs; the chmod below is what a *forced* mode
-    // needs, and the two are separate conditions. GNU's `if (restore_dst_mode)`
-    // sits outside its `if (omitted_permissions)` (`copy.c:3327`) for exactly
-    // this case: a 0500 source directory owes nothing — 0500 withholds no
-    // group or other bit — but was still forced to 0700 so it could be filled,
-    // and returning early on "no debt" would leave every copy of a read-only
-    // directory writable by its owner.
-    if debt.omitted != 0 && debt.forced.is_none() {
-        // Deducing the mode the directory actually got is not worth attempting
-        // — `mkdir` applies implementation-defined rules to the special bits —
-        // so it is read back. GNU says the same in the same place.
-        match current_mode(on) {
-            Ok(now) => {
-                if debt.omitted & !now != 0 {
-                    debt.forced = Some(now);
-                }
-            }
-            Err(e) => {
-                let why = strerror(&e);
-                let _ = writeln!(job.err, "cp: cannot stat {}: {why}", quoteaf_os(dst));
-                return false;
-            }
-        }
-    }
-    match debt.forced {
-        Some(mode) => chmod_settling(on, mode | debt.omitted, dst, job),
-        None => true,
-    }
-}
-
-/// The settle-up chmod and its diagnostic, which is `quoteaf`'s where
-/// [`settle_mode`]'s preserve branch is `quotef`'s. See there.
-fn chmod_settling<O: Write, E: Write>(
-    on: On<'_>,
-    mode: u32,
-    dst: &Path,
-    job: &mut Job<'_, O, E>,
-) -> bool {
-    let Err(e) = fsattr::set_mode(on, mode) else {
-        return true;
-    };
-    let why = strerror(&e);
-    let _ = writeln!(
-        job.err,
-        "cp: preserving permissions for {}: {why}",
-        quoteaf_os(dst)
-    );
-    !job.flags.require_preserve
-}
-
-/// The permission bits currently on whatever `on` names.
-///
-/// # Errors
-///
-/// Whatever the `stat` said.
-fn current_mode(on: On<'_>) -> io::Result<u32> {
-    let meta = match on {
-        On::File(f) => f.metadata()?,
-        On::Path(path, Link::Follow) => fs::metadata(path)?,
-        On::Path(path, Link::NoFollow) => fs::symlink_metadata(path)?,
-    };
-    Ok(permission_bits(&meta))
 }
 
 /// Why a destination could not be opened for writing.
@@ -3565,7 +3058,7 @@ enum DestError {
 /// Open `dst` for writing, creating it with the source's mode if it is new and
 /// leaving its mode entirely alone if it is not.
 ///
-/// This is GNU's `copy_reg` (`copy.c:1280`–`1348`) and the shape is load-bearing
+/// This is GNU's `copy_reg` (`copy.c:1287`–`1349`) and the shape is load-bearing
 /// in three places, all of which are `-f`:
 ///
 /// * **Which open is tried first is decided by `dest_exists`, not by what the
@@ -3757,39 +3250,6 @@ fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
 #[cfg(not(unix))]
 fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
     Ok(())
-}
-
-/// The process's file-mode creation mask, remembered, as GNU remembers it: a
-/// deep `cp -r` should not go and ask the kernel once per directory.
-///
-/// A real `cp` is one process with one umask for its whole life, so caching
-/// changes no answer. The **test build does not cache** — `cargo test` runs
-/// dozens of copies inside one process, and the mode tests set the umask around
-/// each one, so a value remembered from the first would make every later row
-/// assert against the wrong mask. That is the cache being wrong about the test
-/// harness, not the tests being wrong about `cp`.
-///
-/// Not asking for it inline is the point of [`coreutils::umask`]: GNU's own
-/// `cached_umask` reads the value by *setting* it, and repeating that here —
-/// uncached, on every copy, with an all-denying probe value — is what made two
-/// of the tests below fail intermittently. See that module's docs.
-#[cfg(all(unix, not(test)))]
-fn cached_umask() -> u32 {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<u32> = OnceLock::new();
-    *CACHE.get_or_init(coreutils::umask::current)
-}
-
-/// See the caching note above.
-#[cfg(all(unix, test))]
-fn cached_umask() -> u32 {
-    coreutils::umask::current()
-}
-
-/// Windows has no umask. Zero makes [`copy_tree`]'s subtraction a no-op.
-#[cfg(not(unix))]
-fn cached_umask() -> u32 {
-    coreutils::umask::current()
 }
 
 /// Reproduce the symlink at `src` as a symlink at `at`.
@@ -4174,7 +3634,7 @@ mod tests {
 
     /// `-p` names three attributes; it does not un-name a fourth.
     ///
-    /// GNU's `case 'p'` is three assignments (`cp.c:1104`) and never mentions
+    /// GNU's `case 'p'` is three assignments (`cp.c:1094`) and never mentions
     /// `preserve_links`, so the two halves of `cp -d -p` do not fight. An
     /// assignment of the whole [`Preserve`] passes every test above — each
     /// gives one option — and fails only here, where the observable difference
@@ -5021,6 +4481,11 @@ mod tests {
                 out: &mut out,
                 err: &mut err,
                 answers: &mut canned,
+                // Read here, once per `cp(…)` and not once per process, which
+                // is what lets `with_umask` below wrap a copy and have the mask
+                // it installs actually reach the mode arithmetic. A cache with
+                // the lifetime of the test binary could not.
+                umask: coreutils::umask::current(),
             };
             copy_all(&mut job, &owned)
         };
@@ -5726,7 +5191,7 @@ mod tests {
 
     /// The same-file guard keys on the policy and not on `-r`, which is what
     /// changed when `-P` arrived: two distinct links to one file are two
-    /// distinct things to copy, so this is allowed. Under [`PLAIN`] — where
+    /// distinct things to copy, so this is allowed. Under [`plain`] — where
     /// both are followed — the identical command is refused, and the test
     /// above this one in the file pins that half.
     #[cfg(unix)]
@@ -6977,8 +6442,8 @@ mod tests {
     // `cargo test` catches a regression without a GNU userland to compare
     // against.
 
-    /// `--preserve=links` and nothing else. Not folded into the `..OFF` family
-    /// near [`PLAIN`] because it and its two variants are `#[cfg(unix)]`, and an
+    /// `--preserve=links` and nothing else. Not folded into the `..off()` family
+    /// near [`plain`] because it and its two variants are `#[cfg(unix)]`, and an
     /// unused constant is a warning on the development host.
     #[cfg(unix)]
     fn links() -> CpFlags {

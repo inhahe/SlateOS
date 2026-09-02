@@ -157,7 +157,7 @@ pub fn nlink(_meta: &fs::Metadata) -> u64 {
 }
 
 /// "Have I copied this inode already, and where to?" — GNU's one `src_to_dest`
-/// table (`copy.c:1997`), with its `remember_copied` and `src_to_dest_lookup`.
+/// table (`cp-hash.c:45`), with its `remember_copied` and `src_to_dest_lookup`.
 ///
 /// Two rules read it, and they look unrelated until you notice that both are
 /// asking what a *second* appearance of one inode should become:

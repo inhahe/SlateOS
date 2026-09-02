@@ -4978,7 +4978,7 @@ fn run(argv: &[Vec<u8>], tree: &dyn Tree) -> i32 {
 /// [`run`], with somewhere to put the bytes `-print` would have sent to stdout.
 ///
 /// `capture` is `None` for the real program and `Some` under test; when it is
-/// `Some` the stdout sink is swapped for [`Sink::Capture`] and its buffer is
+/// `Some` the stdout sink is swapped for `Sink::Capture` and its buffer is
 /// moved out at the end. Nothing else differs, deliberately: a test that took a
 /// different path through the parser would not be testing this program.
 #[allow(clippy::too_many_lines)]

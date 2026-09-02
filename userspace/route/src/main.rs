@@ -40,7 +40,7 @@ const NET_IF_INFO_SIZE: usize = 24;
 /// IP/mask/gateway/DNS/up to apply (read-modify-write against the live
 /// config). The kernel models a single default gateway on the primary
 /// interface (no general routing table yet), so `route` can only represent the
-/// default route by writing this gateway field. See [`build_config_record`].
+/// default route by writing this gateway field. See [`build_gateway_record`].
 const SYS_NET_IF_CONFIG: u64 = 856;
 
 /// Routing-table write/read syscalls (`kernel/src/syscall/number.rs`). These

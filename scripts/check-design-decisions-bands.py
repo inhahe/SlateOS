@@ -264,6 +264,29 @@ def parse_headings(lines):
 def find_lane_field(lines, heading):
     """The lane letter declared under ``heading``, or None."""
     start = heading.lineno  # lines[] is 0-based, so this is the line *after*
+
+    # A superseded entry carries a `> **SUPERSEDED ... by section N.**` banner
+    # between its heading and its fields -- deliberately first, because it is
+    # the thing a reader must see before believing anything below it. Those
+    # lines are not body text and must not eat the window: section 741 declared
+    # its lane correctly and was failed anyway, purely because an 11-line
+    # banner had pushed the field to heading+14. The invariant is "next to the
+    # heading, visible in the diff", and a banner does not break it -- the
+    # banner is itself part of that same diff. Section 30 has the identical
+    # shape and predates this gate, so it was never caught.
+    # Only a banner is skipped -- never plain blank lines, and never body text.
+    # An earlier attempt skipped any leading run of blanks-or-quotes, which also
+    # let a field buried below prose count, and the suite caught it.
+    probe = start
+    while probe < len(lines) and not lines[probe].strip():
+        probe += 1
+    if probe < len(lines) and lines[probe].lstrip().startswith(">"):
+        while probe < len(lines) and (
+            lines[probe].lstrip().startswith(">") or not lines[probe].strip()
+        ):
+            probe += 1
+        start = probe
+
     for line in lines[start:start + LANE_FIELD_WINDOW]:
         if line.startswith("## "):
             break  # ran into the next section

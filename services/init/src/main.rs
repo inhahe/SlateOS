@@ -176,11 +176,7 @@ fn syscall4(nr: u64, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
 
 /// Write a byte slice to the console.
 fn console_write(msg: &[u8]) -> i64 {
-    syscall2(
-        SYS_CONSOLE_WRITE,
-        msg.as_ptr() as u64,
-        msg.len() as u64,
-    )
+    syscall2(SYS_CONSOLE_WRITE, msg.as_ptr() as u64, msg.len() as u64)
 }
 
 /// Write a string to the console.
@@ -215,7 +211,9 @@ fn exit(code: i64) -> ! {
     syscall1(SYS_EXIT, code as u64);
     // The kernel should never return from SYS_EXIT, but just in case:
     loop {
-        unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nomem, nostack));
+        }
     }
 }
 
@@ -269,11 +267,7 @@ fn fs_write_file(path: &[u8], data: &[u8]) -> i64 {
 
 /// Delete a file.  Returns 0 or negative error.
 fn fs_delete(path: &[u8]) -> i64 {
-    syscall2(
-        SYS_FS_DELETE,
-        path.as_ptr() as u64,
-        path.len() as u64,
-    )
+    syscall2(SYS_FS_DELETE, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// List directory entries into a buffer.  Returns entry count or error.
@@ -289,20 +283,12 @@ fn fs_list_dir(path: &[u8], buf: &mut [u8]) -> i64 {
 
 /// Create a directory.  Returns 0 or negative error.
 fn fs_mkdir(path: &[u8]) -> i64 {
-    syscall2(
-        SYS_FS_MKDIR,
-        path.as_ptr() as u64,
-        path.len() as u64,
-    )
+    syscall2(SYS_FS_MKDIR, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// Remove an empty directory.  Returns 0 or negative error.
 fn fs_rmdir(path: &[u8]) -> i64 {
-    syscall2(
-        SYS_FS_RMDIR,
-        path.as_ptr() as u64,
-        path.len() as u64,
-    )
+    syscall2(SYS_FS_RMDIR, path.as_ptr() as u64, path.len() as u64)
 }
 
 /// Spawn a new process from ELF data in memory (simple variant).
@@ -733,10 +719,22 @@ impl ServiceRegistry {
     const fn new() -> Self {
         Self {
             services: [
-                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
-                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
-                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
-                Service::empty(), Service::empty(), Service::empty(), Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
+                Service::empty(),
             ],
             count: 0,
         }
@@ -764,7 +762,11 @@ impl ServiceRegistry {
         let svc = &mut self.services[idx];
 
         // Copy path.
-        let plen = if path.len() > MAX_SVC_PATH { MAX_SVC_PATH } else { path.len() };
+        let plen = if path.len() > MAX_SVC_PATH {
+            MAX_SVC_PATH
+        } else {
+            path.len()
+        };
         svc.path[..plen].copy_from_slice(&path[..plen]);
         svc.path_len = plen;
 
@@ -778,7 +780,11 @@ impl ServiceRegistry {
             j += 1;
         }
         let name_src = &path[last_slash..plen];
-        let nlen = if name_src.len() > MAX_SVC_NAME { MAX_SVC_NAME } else { name_src.len() };
+        let nlen = if name_src.len() > MAX_SVC_NAME {
+            MAX_SVC_NAME
+        } else {
+            name_src.len()
+        };
         svc.name[..nlen].copy_from_slice(&name_src[..nlen]);
         svc.name_len = nlen;
 
@@ -996,15 +1002,11 @@ impl ServiceRegistry {
         // borrowing `self` across the mutable update below.
         let mut path_buf = [0u8; MAX_SVC_PATH];
         let path_len = self.services[idx].path_len;
-        path_buf[..path_len].copy_from_slice(
-            &self.services[idx].path[..path_len],
-        );
+        path_buf[..path_len].copy_from_slice(&self.services[idx].path[..path_len]);
 
         let mut name_buf = [0u8; MAX_SVC_NAME];
         let name_len = self.services[idx].name_len;
-        name_buf[..name_len].copy_from_slice(
-            &self.services[idx].name[..name_len],
-        );
+        name_buf[..name_len].copy_from_slice(&self.services[idx].name[..name_len]);
 
         // Snapshot service args and env before releasing the borrow.
         let arg_count = self.services[idx].svc_arg_count;
@@ -1013,9 +1015,7 @@ impl ServiceRegistry {
         let mut a = 0;
         while a < arg_count {
             let alen = self.services[idx].svc_arg_lens[a];
-            args_copy[a][..alen].copy_from_slice(
-                &self.services[idx].svc_args[a][..alen],
-            );
+            args_copy[a][..alen].copy_from_slice(&self.services[idx].svc_args[a][..alen]);
             arg_lens_copy[a] = alen;
             a += 1;
         }
@@ -1026,9 +1026,7 @@ impl ServiceRegistry {
         let mut e = 0;
         while e < env_count {
             let elen = self.services[idx].svc_env_lens[e];
-            env_copy[e][..elen].copy_from_slice(
-                &self.services[idx].svc_env[e][..elen],
-            );
+            env_copy[e][..elen].copy_from_slice(&self.services[idx].svc_env[e][..elen]);
             env_lens_copy[e] = elen;
             e += 1;
         }
@@ -1048,8 +1046,14 @@ impl ServiceRegistry {
             return stat_ret;
         }
         let file_size = u64::from_le_bytes([
-            stat_out[0], stat_out[1], stat_out[2], stat_out[3],
-            stat_out[4], stat_out[5], stat_out[6], stat_out[7],
+            stat_out[0],
+            stat_out[1],
+            stat_out[2],
+            stat_out[3],
+            stat_out[4],
+            stat_out[5],
+            stat_out[6],
+            stat_out[7],
         ]) as usize;
 
         if file_size == 0 {
@@ -1092,9 +1096,7 @@ impl ServiceRegistry {
             let addr = mapped as u64;
             // SAFETY: mmap returned a valid writable buffer of at least
             // `file_size` bytes.  We use it as a &mut [u8] for reading.
-            let buf = unsafe {
-                core::slice::from_raw_parts_mut(addr as *mut u8, file_size)
-            };
+            let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
             let result = fs_read_file(path, buf);
             if result < 0 {
                 munmap(addr, file_size as u64);
@@ -1112,9 +1114,7 @@ impl ServiceRegistry {
 
         // SAFETY: elf_ptr points to `file_size` valid bytes (either
         // stack_buf or mmap'd region).
-        let elf_data = unsafe {
-            core::slice::from_raw_parts(elf_ptr, file_size)
-        };
+        let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
 
         // Build packed argv: [path\0arg1\0arg2\0...]
         let mut argv_buf = [0u8; MAX_PACKED_ARGS];
@@ -1132,9 +1132,7 @@ impl ServiceRegistry {
         while a < arg_count {
             let alen = arg_lens_copy[a];
             if argv_pos + alen < MAX_PACKED_ARGS {
-                argv_buf[argv_pos..argv_pos + alen].copy_from_slice(
-                    &args_copy[a][..alen],
-                );
+                argv_buf[argv_pos..argv_pos + alen].copy_from_slice(&args_copy[a][..alen]);
                 argv_pos += alen;
                 argv_buf[argv_pos] = 0;
                 argv_pos += 1;
@@ -1160,9 +1158,7 @@ impl ServiceRegistry {
         while e < env_count {
             let elen = env_lens_copy[e];
             if envp_pos + elen < MAX_PACKED_ARGS {
-                envp_buf[envp_pos..envp_pos + elen].copy_from_slice(
-                    &env_copy[e][..elen],
-                );
+                envp_buf[envp_pos..envp_pos + elen].copy_from_slice(&env_copy[e][..elen]);
                 envp_pos += elen;
                 envp_buf[envp_pos] = 0;
                 envp_pos += 1;
@@ -1172,9 +1168,12 @@ impl ServiceRegistry {
         }
 
         let pid = process_spawn_ex(
-            elf_data, name,
-            &argv_buf[..argv_pos], argc,
-            &envp_buf[..envp_pos], envc,
+            elf_data,
+            name,
+            &argv_buf[..argv_pos],
+            argc,
+            &envp_buf[..envp_pos],
+            envc,
         );
 
         // Free mmap'd buffer now that spawn has copied the ELF data.
@@ -1268,9 +1267,7 @@ impl ServiceRegistry {
                 {
                     let name_len = self.services[i].name_len;
                     let mut name = [0u8; MAX_SVC_NAME];
-                    name[..name_len].copy_from_slice(
-                        &self.services[i].name[..name_len],
-                    );
+                    name[..name_len].copy_from_slice(&self.services[i].name[..name_len]);
                     print("[svc] Dependencies satisfied for ");
                     console_write(&name[..name_len]);
                     print(" — starting\n");
@@ -1326,8 +1323,7 @@ impl ServiceRegistry {
                 // leave the child alone.
                 let name_len = self.services[i].name_len;
                 let mut name_copy = [0u8; MAX_SVC_NAME];
-                name_copy[..name_len]
-                    .copy_from_slice(&self.services[i].name[..name_len]);
+                name_copy[..name_len].copy_from_slice(&self.services[i].name[..name_len]);
 
                 let svc = &mut self.services[i];
                 svc.wait_err_count = svc.wait_err_count.saturating_add(1);
@@ -1377,9 +1373,7 @@ impl ServiceRegistry {
             self.services[i].wait_err_count = 0;
             let name_len = self.services[i].name_len;
             let mut name_copy = [0u8; MAX_SVC_NAME];
-            name_copy[..name_len].copy_from_slice(
-                &self.services[i].name[..name_len],
-            );
+            name_copy[..name_len].copy_from_slice(&self.services[i].name[..name_len]);
 
             let svc = &mut self.services[i];
             let runtime_ns = now_ns.saturating_sub(svc.started_at_ns);
@@ -1412,7 +1406,9 @@ impl ServiceRegistry {
                 print("s\n");
 
                 // Increase backoff for next time (exponential, capped).
-                svc.backoff_ns = svc.backoff_ns.checked_shl(BACKOFF_MULTIPLIER)
+                svc.backoff_ns = svc
+                    .backoff_ns
+                    .checked_shl(BACKOFF_MULTIPLIER)
                     .unwrap_or(BACKOFF_MAX_NS);
                 if svc.backoff_ns > BACKOFF_MAX_NS {
                     svc.backoff_ns = BACKOFF_MAX_NS;
@@ -1560,8 +1556,7 @@ fn cmd_stat(args: &[u8]) {
 
     // Parse the 16-byte FsStatResult.
     let size = u64::from_le_bytes([
-        out[0], out[1], out[2], out[3],
-        out[4], out[5], out[6], out[7],
+        out[0], out[1], out[2], out[3], out[4], out[5], out[6], out[7],
     ]);
     let entry_type = out[8];
 
@@ -1645,8 +1640,14 @@ fn cmd_spawn(args: &[u8]) {
         return;
     }
     let file_size = u64::from_le_bytes([
-        stat_out[0], stat_out[1], stat_out[2], stat_out[3],
-        stat_out[4], stat_out[5], stat_out[6], stat_out[7],
+        stat_out[0],
+        stat_out[1],
+        stat_out[2],
+        stat_out[3],
+        stat_out[4],
+        stat_out[5],
+        stat_out[6],
+        stat_out[7],
     ]) as usize;
     if file_size == 0 {
         print("spawn: empty file\n");
@@ -1681,9 +1682,7 @@ fn cmd_spawn(args: &[u8]) {
         #[allow(clippy::cast_sign_loss)]
         let addr = mapped as u64;
         // SAFETY: mmap returned a valid writable buffer.
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(addr as *mut u8, file_size)
-        };
+        let buf = unsafe { core::slice::from_raw_parts_mut(addr as *mut u8, file_size) };
         let result = fs_read_file(path, buf);
         if result < 0 {
             munmap(addr, file_size as u64);
@@ -1700,9 +1699,7 @@ fn cmd_spawn(args: &[u8]) {
     }
 
     // SAFETY: elf_ptr points to file_size valid bytes.
-    let elf_data = unsafe {
-        core::slice::from_raw_parts(elf_ptr, file_size)
-    };
+    let elf_data = unsafe { core::slice::from_raw_parts(elf_ptr, file_size) };
 
     // Extract filename from path for the process name.
     let name = {
@@ -1740,7 +1737,9 @@ fn cmd_spawn(args: &[u8]) {
         }
         if argv_pos + word.len() + 1 > MAX_PACKED_ARGS {
             print("spawn: argument list too long\n");
-            if elf_mmap_addr != 0 { munmap(elf_mmap_addr, elf_mmap_size); }
+            if elf_mmap_addr != 0 {
+                munmap(elf_mmap_addr, elf_mmap_size);
+            }
             return;
         }
         argv_data[argv_pos..argv_pos + word.len()].copy_from_slice(word);
@@ -1765,9 +1764,12 @@ fn cmd_spawn(args: &[u8]) {
     print(" bytes)...\n");
 
     let pid = process_spawn_ex(
-        elf_data, name,
-        &argv_data[..argv_pos], argc,
-        DEFAULT_ENVP, DEFAULT_ENVP_COUNT,
+        elf_data,
+        name,
+        &argv_data[..argv_pos],
+        argc,
+        DEFAULT_ENVP,
+        DEFAULT_ENVP_COUNT,
     );
 
     // Free mmap'd buffer after spawn has copied the ELF.
@@ -1895,9 +1897,7 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
             Some(idx) => {
                 let name_len = registry.services[idx].name_len;
                 let mut name = [0u8; MAX_SVC_NAME];
-                name[..name_len].copy_from_slice(
-                    &registry.services[idx].name[..name_len],
-                );
+                name[..name_len].copy_from_slice(&registry.services[idx].name[..name_len]);
                 registry.unregister(idx);
                 print("[svc] Removed ");
                 console_write(&name[..name_len]);
@@ -1968,14 +1968,20 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                     print("(not running)");
                 }
                 print("\n  Ready:    ");
-                if svc.ready { print("yes"); } else { print("no"); }
+                if svc.ready {
+                    print("yes");
+                } else {
+                    print("no");
+                }
                 print("\n  Deps:     ");
                 if svc.dep_count == 0 {
                     print("(none)");
                 } else {
                     let mut d = 0;
                     while d < svc.dep_count {
-                        if d > 0 { print(", "); }
+                        if d > 0 {
+                            print(", ");
+                        }
                         console_write(&svc.dep_names[d][..svc.dep_name_lens[d]]);
                         d += 1;
                     }
@@ -1989,7 +1995,9 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 } else {
                     let mut a = 0;
                     while a < svc.svc_arg_count {
-                        if a > 0 { print(" "); }
+                        if a > 0 {
+                            print(" ");
+                        }
                         console_write(&svc.svc_args[a][..svc.svc_arg_lens[a]]);
                         a += 1;
                     }
@@ -2000,13 +2008,19 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
                 } else {
                     let mut e = 0;
                     while e < svc.svc_env_count {
-                        if e > 0 { print(", "); }
+                        if e > 0 {
+                            print(", ");
+                        }
                         console_write(&svc.svc_env[e][..svc.svc_env_lens[e]]);
                         e += 1;
                     }
                 }
                 print("\n  Restart:  ");
-                if svc.auto_restart { print("yes"); } else { print("no"); }
+                if svc.auto_restart {
+                    print("yes");
+                } else {
+                    print("no");
+                }
                 print("\n  Crashes:  ");
                 print_u64(svc.crash_count);
                 print("\n  Backoff:  ");
@@ -2109,8 +2123,12 @@ fn execute(line: &[u8], registry: &mut ServiceRegistry) {
             print_u64(secs);
             print(".");
             // Zero-pad ms to 3 digits.
-            if ms < 100 { print("0"); }
-            if ms < 10 { print("0"); }
+            if ms < 100 {
+                print("0");
+            }
+            if ms < 10 {
+                print("0");
+            }
             print_u64(ms);
             print("s\n");
         }
@@ -2252,10 +2270,7 @@ fn find_keyword<'a>(line: &'a [u8], keyword: &[u8]) -> (Option<&'a [u8]>, &'a [u
             // Find end of value (next space or end of line).
             let val_start = i + kw_len;
             let mut val_end = val_start;
-            while val_end < line.len()
-                && line[val_end] != b' '
-                && line[val_end] != b'\t'
-            {
+            while val_end < line.len() && line[val_end] != b' ' && line[val_end] != b'\t' {
                 val_end += 1;
             }
             let value = trim(&line[val_start..val_end]);
@@ -2317,7 +2332,12 @@ fn parse_service_line(line: &[u8]) -> ServiceLine<'_> {
     // What's left (trimmed) is the path.
     let path = trim(remaining);
 
-    ServiceLine { path, args, env, deps }
+    ServiceLine {
+        path,
+        args,
+        env,
+        deps,
+    }
 }
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.

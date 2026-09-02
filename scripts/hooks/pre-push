@@ -1,5 +1,5 @@
 #!/bin/sh
-# Ten gates at the push boundary. Any one of them aborts the push.
+# Eleven gates at the push boundary. Any one of them aborts the push.
 #
 #   1. Refuse to publish the operator's private files (`todo2.txt`).
 #   2. Refuse to publish a command name that nothing can produce an executable
@@ -12,6 +12,7 @@
 #   8. Refuse to publish a diagnostic that names a file without quoting it.
 #   9. Refuse to publish the deletion of a file under `requests/`.
 #  10. Refuse to publish a commit authored by a test fixture's identity.
+#  11. Refuse to publish a doc comment whose `[`link`]` names nothing.
 #
 # (This count was wrong before gate 9 was added: it read "Seven" while eight
 # were implemented. A list in a comment beside the code it lists is a second
@@ -85,8 +86,8 @@ fi
 # every path-gated check legitimately skips. Silence therefore cannot be read
 # either way, and "no news is good news" is precisely the reading that failed.
 #
-# A tally the hook had to compute fixes that: `10 ran, 0 skipped` and
-# `0 ran, 10 skipped` are different lines, and *no line at all* means the hook
+# A tally the hook had to compute fixes that: `11 ran, 0 skipped` and
+# `0 ran, 11 skipped` are different lines, and *no line at all* means the hook
 # did not execute. It also makes an over-narrow `touches` pattern visible —
 # a gate that skips on a push it should have judged now says so by name,
 # instead of being silently absent.
@@ -231,6 +232,64 @@ touches() {
     [ -n "$(git rev-list HEAD --not --remotes="$remote_name" -- "$@" 2>/dev/null | head -n 1)" ]
 }
 
+# Where run_checker parks a failing checker's output. Inside the git dir, which
+# for a worktree is that worktree's own, so three lanes pushing at once do not
+# overwrite each other's evidence. A fixed, derivable path on purpose: see the
+# "kept, not streamed away" note in scripts/run-checker.sh.
+CHECKER_LOGDIR=$(git rev-parse --absolute-git-dir 2>/dev/null) || CHECKER_LOGDIR=""
+[ -n "$CHECKER_LOGDIR" ] && [ -d "$CHECKER_LOGDIR" ] || CHECKER_LOGDIR="${TMPDIR:-/tmp}"
+CHECKER_PROG=pre-push
+CHECKER_REFUSING=push
+# Why the bypass is the wrong reaction to a crash, said where a blocked author
+# will actually read it: every gate's refusal text ends by naming its ALLOW_*
+# variable, so without this paragraph the nearest offered remedy to "the checker
+# fell over" is "switch the checker off".
+CHECKER_NOTE="
+The gate's bypass is the wrong reaction to it: the bypass turns the gate off,
+and the question the gate asks is still unanswered."
+export CHECKER_LOGDIR CHECKER_PROG CHECKER_REFUSING CHECKER_NOTE
+
+# The one implementation of "did that checker reach a verdict?", shared with
+# scripts/boot-test.sh. It lived here first, and was moved out the day the same
+# defect surfaced at the other boundary — see the file's header.
+#
+# WHY IT IS NOT FOUND FROM `repo_root` ALONE. `repo_root` is empty whenever
+# `git rev-parse` failed, and that is precisely the case in which a missing
+# `run_checker` would be worst. An undefined function is not a `set -u` error —
+# it is "command not found", which exits non-zero, which every gate reads as
+# "the checker found something". So the hook would answer a *missing library*
+# with eleven false accusations.
+#
+# WHY IT IS NOT FOUND FROM `$0` ALONE EITHER, WHICH IS WHAT IT DID FIRST AND WAS
+# WRONG. The trampoline `exec sh "$root/scripts/hooks/pre-push"`, so under a
+# normal install `$0` is that path and two `dirname`s reach `scripts/`. But this
+# hook deliberately keeps working when it has been installed as a *copy* — the
+# warning a few lines below says so in as many words, and downgrades that state
+# to an advisory rather than refusing. A copy sits at `.git/hooks/pre-push`, so
+# the same two `dirname`s reach `.git`, and the lookup went to
+# `.git/run-checker.sh`. The result was not a degraded hook but a dead one: it
+# refused every push, with a sentence naming a path nobody had ever put a file
+# at. Caught by `test-pre-push-identity-gate.py`, whose fixture installs the
+# hook the copied way for exactly this reason — all ten of its cases came back
+# as the same refusal.
+#
+# So: `$0` first, because it is the only one that needs no `git` to have
+# succeeded, and `repo_root` second, because a copy has no path back to the tree
+# except through it. A refusal now means both failed, which is a checkout with
+# no `scripts/run-checker.sh` in it.
+hook_lib=$(dirname "$(dirname "$0")")/run-checker.sh
+if [ ! -f "$hook_lib" ] && [ -n "${repo_root:-}" ]; then
+    hook_lib="$repo_root/scripts/run-checker.sh"
+fi
+if [ ! -f "$hook_lib" ]; then
+    echo "pre-push: cannot find $hook_lib — refusing to push." >&2
+    echo "pre-push: without it no gate below can tell a finding from a crash." >&2
+    echo "pre-push: run ./scripts/install-hooks.sh from a checkout that has it." >&2
+    exit 1
+fi
+# shellcheck source=../run-checker.sh
+. "$hook_lib"
+
 if [ "${ALLOW_UNREACHABLE_ALIAS:-0}" = "1" ]; then
     echo "pre-push: ALLOW_UNREACHABLE_ALIAS=1 set — alias check skipped." >&2
     skip_alias=1
@@ -245,7 +304,7 @@ touches userspace/ || skip_alias=1
 note_gate unreachable-command "$skip_alias"
 
 alias_failed=0
-if [ "$skip_alias" != "1" ] && ! "$py" "$checker" --check; then
+if [ "$skip_alias" != "1" ] && ! run_checker unreachable-command "$py" "$checker" --check; then
     alias_failed=1
 fi
 
@@ -324,10 +383,10 @@ if [ "$skip_raced" != "1" ]; then
     # tree, and each is a regex a future edit can break silently. A broken
     # detector does not report a broken tree -- it reports a clean one, so
     # --check passing means nothing unless --selftest passed first.
-    if ! "$py" "$raced" --selftest; then
+    if ! run_checker raced-global-selftest "$py" "$raced" --selftest; then
         echo "pre-push: raced-globals.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         raced_failed=1
-    elif ! "$py" "$raced" --check; then
+    elif ! run_checker raced-global "$py" "$raced" --check; then
         raced_failed=1
     fi
 fi
@@ -410,10 +469,10 @@ if [ "$skip_argv" != "1" ]; then
     # and more sharply here, because this defect cannot be reproduced on the
     # development host at all. Nothing but --selftest stands between a broken
     # regex and a permanently green gate.
-    if ! "$py" "$argv" --selftest; then
+    if ! run_checker argv-utf8-selftest "$py" "$argv" --selftest; then
         echo "pre-push: argv-utf8.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         argv_failed=1
-    elif ! "$py" "$argv" --check; then
+    elif ! run_checker argv-utf8 "$py" "$argv" --check; then
         argv_failed=1
     fi
 fi
@@ -563,20 +622,20 @@ if [ "$skip_getopt_eff" != "1" ]; then
     # That path cannot be exercised by the sweep: `ed` agrees with GNU today,
     # and a broken comparison would look exactly like that agreement.
     # --selftest is the only thing that tells the two apart.
-    if ! "$py" "$gopt" --selftest; then
+    if ! run_checker getopt-table-selftest "$py" "$gopt" --selftest; then
         echo "pre-push: getopt-ambiguity-check.py --selftest failed" >&2
         exit 1
     fi
 fi
 if [ "$skip_getopt" != "1" ]; then
     if [ "$run_all" = "1" ]; then
-        "$py" "$gopt" || getopt_failed=1
+        run_checker getopt-table "$py" "$gopt" || getopt_failed=1
     elif [ -n "$bins" ]; then
         # Deliberately unquoted: `$bins` is a list of utility names to pass as
         # separate arguments, and they are shell-safe by construction (they are
         # Rust source file stems).
         # shellcheck disable=SC2086
-        "$py" "$gopt" $bins || getopt_failed=1
+        run_checker getopt-table "$py" "$gopt" $bins || getopt_failed=1
     fi
 fi
 
@@ -669,10 +728,10 @@ if [ "$skip_errmsg" != "1" ]; then
     # of the three to failing silently: its signal lives *inside* a string
     # literal, so the obvious Rust lexer to reach for -- the one the other gates
     # share, which blanks literals -- would make every file look clean.
-    if ! "$py" "$errmsg" --selftest; then
+    if ! run_checker host-errmsg-selftest "$py" "$errmsg" --selftest; then
         echo "pre-push: host-errmsg.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         errmsg_failed=1
-    elif ! "$py" "$errmsg" --check; then
+    elif ! run_checker host-errmsg "$py" "$errmsg" --check; then
         errmsg_failed=1
     fi
 fi
@@ -976,10 +1035,10 @@ if [ "$skip_quote" != "1" ]; then
     # As with gate 6, check the checker first: this detector's signal is also
     # inside a string literal, so a rewrite that reached for a Rust lexer would
     # blank out the very text it searches and report a clean tree.
-    if ! "$py" "$quote" --selftest; then
+    if ! run_checker quote-names-selftest "$py" "$quote" --selftest; then
         echo "pre-push: quote-names.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
         quote_failed=1
-    elif ! "$py" "$quote" --check; then
+    elif ! run_checker quote-names "$py" "$quote" --check; then
         quote_failed=1
     fi
 fi
@@ -1080,13 +1139,22 @@ note_gate request-deletion "$skip_reqdel"
 
 reqdel_failed=0
 if [ "$skip_reqdel" != "1" ]; then
-    if ! "$py" "$reqdel" --selftest >/dev/null; then
+    # Unlike its neighbours this self-test used to run twice — once with stdout
+    # discarded, then again to stderr if the first had failed — to keep a
+    # passing self-test quiet. The second run is gone, for a reason that
+    # outweighs the quiet: a checker that fails *intermittently* passes the
+    # retry, so the operator was shown a clean self-test underneath the line
+    # saying it had failed. Its one line of chatter now prints on success, which
+    # is what every other gate here already does.
+    if ! run_checker request-deletion-selftest "$py" "$reqdel" --selftest; then
         echo "pre-push: check-requests-not-deleted.py FAILED ITS OWN SELF-TEST — its result is not trustworthy." >&2
-        "$py" "$reqdel" --selftest >&2
         reqdel_failed=1
     else
         for sha in $pushed_shas; do
-            if ! "$py" "$reqdel" --head "$sha"; then
+            # Per-sha gate name: this is the one gate that calls its checker
+            # more than once, and a shared name would let a later clean sha
+            # delete the kept log of an earlier failing one.
+            if ! run_checker "request-deletion-$sha" "$py" "$reqdel" --head "$sha"; then
                 reqdel_failed=1
             fi
         done
@@ -1259,11 +1327,141 @@ EOF
 fi
 
 # ---------------------------------------------------------------------------
+# Gate 11: refuse to publish a doc comment whose `[`link`]` names nothing.
+#
+# The defect is "a rename left the prose behind". `Shell::read_all_bytes` became
+# `Shell::read_records`; the four call sites were updated because they are code,
+# and the six doc comments pointing at it were not, because they are not. What
+# remains is a link that renders as plain text and a sentence naming a function
+# the reader cannot find. Twenty-two of these were live in this tree when the
+# checker was written, all of them from real renames, one of them hiding a doc
+# block that had been fused onto the wrong function by a bad insertion.
+#
+# Nothing catches it. It is not a compile error, and it is not a test failure.
+# `cargo doc` does warn — but only for *public* items by default, never for
+# `#[cfg(test)]` code, and only for the target it is built for, so a
+# `#[cfg(unix)]` item is invisible from this Windows host. It also takes minutes
+# and needs every dependency to build, which is not a push-boundary budget.
+# scripts/check-doc-links.py reads the text instead: it collects every name the
+# crate defines (including the ones its own `macro_rules!` generate, which no
+# keyword scan can see) and reports links that match none of them.
+#
+# Deliberately one-sided. A link is reported only when the checker is confident
+# the name is absent from the crate, and anything it cannot resolve — a path
+# into a dependency, a primitive, a method on a foreign type — is passed. It is
+# a detector for a specific mistake, not a rustdoc reimplementation, so its
+# false-positive rate matters far more than its recall.
+#
+# SCOPE: the crates owning the .rs files this push adds or modifies, passed as
+# arguments. Same ratchet as gate 7, and for the same reason — a gate that
+# fails on someone else's file gets bypassed by habit. It is also what makes
+# this affordable: a whole-tree run reads 61 MB of Rust and takes ~30s, a
+# one-crate run about 5.
+#
+# Bypass: ALLOW_DEAD_DOC_LINKS=1 git push origin <branch>
+# ---------------------------------------------------------------------------
+
+if [ "${ALLOW_DEAD_DOC_LINKS:-0}" = "1" ]; then
+    echo "pre-push: ALLOW_DEAD_DOC_LINKS=1 set — doc-link check skipped." >&2
+    skip_doclinks=1
+else
+    skip_doclinks=$skip
+fi
+
+doclinks="${repo_root:-.}/scripts/check-doc-links.py"
+[ -f "$doclinks" ] || skip_doclinks=1
+
+# The crates to scan, derived from the pushed .rs files exactly as gate 7
+# derives its file list. Reduced to directories first: a push landing 200 files
+# in `coreutils/src/bin` names one directory, and the checker maps a directory
+# to its crate by the same walk it uses for a file. An empty list is the skip —
+# a push with no Rust in it has nothing here to judge.
+doclink_dirs=""
+if [ "$skip_doclinks" != "1" ]; then
+    doclink_old_ifs=$IFS
+    IFS='
+'
+    for dl_file in $(git -c core.quotePath=false log --name-only --pretty=format: \
+                         --diff-filter=ACMR HEAD --not --remotes="$remote_name" \
+                         -- '*.rs' 2>/dev/null \
+                     | sed 's|/[^/]*$||' | sort -u); do
+        [ -d "$repo_root/$dl_file" ] || continue
+        doclink_dirs="$doclink_dirs
+$dl_file"
+    done
+    IFS=$doclink_old_ifs
+    [ -n "${doclink_dirs#
+}" ] || skip_doclinks=1
+fi
+note_gate doc-links "$skip_doclinks"
+
+doclinks_failed=0
+if [ "$skip_doclinks" != "1" ]; then
+    # As with gates 6 and 8, check the checker first. This one parses Rust with
+    # regexes; a rule that stops matching definitions does not fail loudly, it
+    # reports every link in the crate as dead, and a rule that matches too much
+    # reports nothing at all. Neither is distinguishable from a correct run by
+    # looking at the exit code, so the self-test runs first and its failure
+    # disqualifies the verdict rather than being reported alongside it.
+    if ! run_checker doc-links-selftest "$py" "$doclinks" --selftest; then
+        echo "pre-push: check-doc-links.py FAILED ITS OWN SELF-TEST — its --check result is not trustworthy." >&2
+        doclinks_failed=1
+    else
+        doclink_old_ifs=$IFS
+        IFS='
+'
+        # Word-splitting is wanted here and the paths cannot contain a newline
+        # (git reports them one per line, and the loop above already dropped
+        # anything that is not an existing directory).
+        # shellcheck disable=SC2086
+        run_checker doc-links "$py" "$doclinks" --check $doclink_dirs || doclinks_failed=1
+        IFS=$doclink_old_ifs
+    fi
+fi
+
+if [ "$doclinks_failed" = "1" ]; then
+    cat >&2 <<EOF
+
+pre-push: REFUSING to push — a doc comment above links to a name that does not
+exist in its crate.
+
+    /// See [\`Shell::read_all_bytes\`] for the buffering rule.
+
+renders as literal text once \`read_all_bytes\` is renamed, and the sentence now
+sends the reader after a function they will not find. The compiler does not care
+— a doc comment is a string — so nothing else in this tree notices.
+
+The fix is to find out what the name became and say that, NOT to delete the
+brackets:
+
+    git log -S read_all_bytes --oneline -- <the crate>
+
+and read the diff that removed it. A rename gets the new name; a deleted helper
+gets the sentence rewritten around what replaced it. Turning the link into plain
+\`code\` keeps a claim that may no longer be true, which is the worse outcome of
+the two: a dead link is at least visibly dead.
+
+Only the crates this push touches are scanned, so this is never complaining
+about someone else's prose. Findings are printed above as
+\`file:line: [\`name\`] names nothing in crate \`c\`\`.
+
+If the name is real and the checker cannot see it — generated by an imported
+macro, say — the fix belongs in scripts/check-doc-links.py with a comment
+recording why, next to the \`MACRO_CALL\` rule that covers the crate-local case.
+
+To push anyway:
+    ALLOW_DEAD_DOC_LINKS=1 git push $remote_name ...
+
+EOF
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # The tally. Unconditional, and on stderr with the rest of the hook's output.
 #
 # This is the line whose absence means "the hook did not run" — the one reading
 # that silence could never carry. It is deliberately printed even when every
-# gate skipped, because `0 ran, 10 skipped` is the interesting case, not the
+# gate skipped, because `0 ran, 11 skipped` is the interesting case, not the
 # boring one: it says the push was judged by nothing, which for a push that
 # edits only documentation is correct, and for a push that edits a utility is a
 # bug in a `touches` pattern. Naming the skipped gates is what makes the second

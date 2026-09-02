@@ -22,7 +22,7 @@
 //! `DU_BLOCK_SIZE`/`BLOCK_SIZE`/`BLOCKSIZE` chain all run through gnulib's
 //! `humblock`, which decides *both* the divisor and the rendering flags from
 //! one string: `-B K` prints `3080K` while `-B 1K` prints `3080`, because a
-//! spec with no digit in it also turns the unit suffix on. See [`humblock`].
+//! spec with no digit in it also turns the unit suffix on. See [`coreutils::human::humblock`].
 //!
 //! **A size is counted once per inode, not once per name.** Without `-l`, the
 //! second and later encounters of a `(st_dev, st_ino)` pair are skipped
@@ -46,7 +46,7 @@
 //!
 //! Built only on unix-family targets — our `x86_64-slateos` presents as
 //! `linux-musl`, so `cfg(unix)` matches. On a non-unix host the walk is still
-//! compiled and unit-tested against [`FakeTree`]; only [`RealTree`], which
+//! compiled and unit-tested against `FakeTree`; only [`RealTree`], which
 //! needs `st_dev`/`st_ino`/`st_blocks`, is gated out.
 
 #![cfg_attr(not(unix), allow(dead_code))]

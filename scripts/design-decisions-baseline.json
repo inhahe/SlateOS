@@ -5,7 +5,7 @@
     "Regenerate with: python scripts/check-design-decisions-bands.py --update-baseline -- and only when the change was deliberate. A count that DROPS means a section was deleted or renumbered in a file that three lanes cite."
   ],
   "file": "design-decisions.md",
-  "total_headings": 527,
+  "total_headings": 533,
   "grandfathered_duplicates": [
     268,
     269,
@@ -504,6 +504,12 @@
     "571": 1,
     "572": 1,
     "573": 1,
+    "574": 1,
+    "575": 1,
+    "576": 1,
+    "577": 1,
+    "578": 1,
+    "579": 1,
     "600": 1,
     "601": 1,
     "602": 1,

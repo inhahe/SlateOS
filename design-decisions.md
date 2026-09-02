@@ -48,9 +48,10 @@ than silently believing there are no bands.
 | §200–§299 | **lane A** | closed — full at §299 | after the history |
 | §300–§399 | **lane B** | closed — full at §360 | after A's first band |
 | §400–§499 | **lane C** | closed — full at §498 | after B's first band |
-| §500–§599 | **lane C** | **open** | interleaved with A's §600s; C's own run ascends |
+| §500–§599 | **lane C** | closed early at §579 — 20 numbers unused | interleaved with A's §600s |
 | §600–§699 | **lane A** | **open** | interleaved with C's §500s; A's own run ascends |
 | §700–§799 | **lane B** | **open** | the tail — B alone still appends at EOF |
+| §800–§899 | **lane C** | **open** | immediately after §579; C's own run ascends |
 
 Bands 200–499 are closed but **not free**: every number in them is spent, and
 spent numbers are never reissued (see §217–§220 and §626 below). A new entry
@@ -117,6 +118,39 @@ numbers on the §217–§220 precedent — they are cited from source comments a
 from each other (626 cites 622 and 623), so renumbering would trade a cosmetic
 inconsistency for dangling citations. Every number below 700 that exists is
 spent, by whichever lane wrote it, and is never reissued.
+
+**Lane C closed §500–§599 early, at §579, and opened §800–§899 (2026-09-02).**
+This is the first band changed *before* it ran out rather than after, which is
+the whole point: the three previous exhaustions were each discovered by a lane
+having no number to write, and each cost a round of cross-lane requests to
+settle while the work waited. The gate's 80% warning (described below) exists
+to make that happen once and never again, and this is it firing and being
+obeyed — §579 left 20 numbers unspent.
+
+Twenty numbers are the price and they are worth it, because the alternative is
+not "use all 100" but "flip bands at exactly §599". A band cannot be reserved
+in advance: the gate rejects a lane holding two open bands, on the grounds that
+two open bands are two insertion points with no rule for choosing between them.
+So the flip is necessarily a single indivisible edit — close one row, open
+another — and deferring it only fixes *when* it must happen, which is in the
+middle of whichever task happens to write §599, discovered by a gate failure.
+Doing it now costs an afternoon's numbers and nothing else. There is precedent
+either way: §300–§399 closed at §360 with 39 numbers unused, and nothing has
+ever needed them.
+
+Lane A allotted §800–§899 to lane C unprompted, in
+`requests/a-bc-design-decisions-numbering-c-is-right-b-is-withdrawn-and-i-will-gate-the-bands.md`
+— *"Allot §800–§899 to yourself now, while it costs nothing — I won't take
+it."* So no request was needed to take it, only one to say it had been taken:
+`requests/c-ab-lane-c-closed-500-599-at-579-and-opened-800-899.md`.
+
+**§800 sits immediately after §579, not at end of file**, so lane C's region of
+this file does not move. That is legal because the ascending-order rule is
+*per band* — a band's entries must ascend among themselves, and the bands
+themselves are already thoroughly interleaved (the §500s and §600s have been
+since August). Placing §800 at EOF would put lane C's insertion point inside
+lane B's, which is the one outcome the bands exist to prevent. Lanes A and B:
+your insertion points do not move either.
 
 **The gate landed 2026-08-29: `scripts/check-design-decisions-bands.py`,** run
 by `scripts/boot-test.sh` before it builds anything. It requires each *new*
@@ -14623,6 +14657,7 @@ known one rather than a surprise.
 ## §400 — Every GUI process finds its own UI font, lazily, from a compiled-in fallback list
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -14721,6 +14756,7 @@ different files for it.
 ## §401 — Kerning reads GPOS in preference to the legacy `kern` table, and reads both
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -14817,6 +14853,7 @@ measurement and drawing), `gui/compositor/src/main.rs`
 ## §402 — Text is shaped once into a run; ligatures are `liga` + `rlig` only, in a single pass
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Decision.** Every consumer of a string's layout — measuring, drawing,
@@ -14914,6 +14951,7 @@ oracle list as "at least one of these" rather than "all of these".
 ## §403 — Combining marks: attach from GPOS anchors, zero their advance, and decide mark-ness from GDEF ∪ coverage
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Kerning (§401) and ligatures (§402) are refinements: get them
@@ -15005,6 +15043,7 @@ with GSUB and kerning), `gui/font/src/sfnt.rs` (`Face::is_mark`,
 ## §404 — Configuration is edited as text, not serialized: a format-preserving YAML document with a line index
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `design.txt` mandates YAML for configuration, "processed with a
@@ -15103,6 +15142,7 @@ file" section of `gui/desktop/src/appearance_settings.rs`
 ## §405 — The accent is a role with two values, and it is chosen for contrast rather than fidelity to Catppuccin
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Wiring the saved appearance settings into the shell meant the
@@ -15184,6 +15224,7 @@ from_settings}`, `readable_on`, `emphasized`, `taskbar_alpha` and
 ## §406 — GSUB is an ordered list of lookups, not a bag of subtables; single substitution and `ccmp` before contextual (GSUB 5/6)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §402 read GSUB for one purpose — find LookupType 4 anywhere in
@@ -15276,6 +15317,7 @@ apply_single, single_at, apply_ligature}` in `gui/font/src/gsub.rs`;
 ## §407 — A cluster is a boundary, not an index: `ShapedRun` works in whole clusters, and GSUB LookupType 2 (Multiple Substitution)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §406 left LookupType 2 out with a reason and a plan: one glyph
@@ -15362,6 +15404,7 @@ fit_end, offset_at}` and the `ShapedGlyph::cluster` doc in
 ## §408 — A lookup type is a rule about one position; the pass belongs to a shared driver (GSUB 5/6)
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### Context
@@ -15470,6 +15513,7 @@ the faces taking the contextual route.
 ## §409 — Shape every installed face against HarfBuzz, and set limits from what that measures
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### Context
@@ -15567,6 +15611,7 @@ protects against and what it must clear.
 ## §410 — Normalize to NFC before shaping, as a layer that knows nothing about the font
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Shaping used to ask `cmap` for exactly the characters the caller typed. So
@@ -15672,6 +15717,7 @@ tracked as a defect:
 ## §411 — Choose `GSUB` features by the run's script; decode them once per face
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 An OpenType feature tag is not unique. A face that supports both Arabic and
@@ -15795,6 +15841,7 @@ which is what UAX #24 says and what any real itemizer does.
 ## §412 — A positional feature is gated by a per-glyph mask, not by its tag; and the mask belongs to the (script, lookup) pair
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 ### The problem
@@ -15929,6 +15976,7 @@ Checked by `installed_fonts_join_arabic_letters` in
 ## §413 — One skipping iterator for every matcher: skipping is not the same as not matching, and the feature mask gates the input only
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** Every GSUB lookup carries a `lookupFlag` naming glyph classes it
@@ -16020,6 +16068,7 @@ walkers in `gui/font/src/gsub.rs`, the `Substitutions::parse` call in
 ## §414 — Kerning reads across a mark by being told what stood between the pair, not by becoming run-aware
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** §413 gave GSUB a skipping iterator, but GPOS was left alone.
@@ -16102,6 +16151,7 @@ in `gui/font/src/kern.rs`; `Face::kern_across` in `gui/font/src/sfnt.rs`; the
 ## §415 — Bidi belongs inside the shaper: glyphs stay in logical order and carry a permutation beside them
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `gui/font/src/bidi.rs` implements UAX #9 and passes all 91,707
@@ -16202,6 +16252,7 @@ accumulated *ink positions* and the total width, not raw advances.
 ## §416 — Place a mark by measurement when the face has no `GPOS` at all, reimplementing HarfBuzz bug-for-bug, and refuse the scripts whose clusters need a shaper we do not have
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `tools/harfbuzz_sweep.py` compares this crate against HarfBuzz
@@ -16306,6 +16357,7 @@ changed by substitution; `gui/font/src/scaled.rs` — `synthesize_marks`, the
 ## §417 — One `GPOS` pass over a segmentation shared with `GSUB`; and a `GPOS` kern is not moved when the run reverses
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `GPOS` has eight lookup types. This crate read three of them, and
@@ -16395,6 +16447,7 @@ the `recharge_kerns` gate, and the deleted `attach_marks`;
 ## §418 — Ligature component numbers are carried on the glyph run, not inferred at positioning time
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **Context.** `GPOS` type 5, mark-to-ligature attachment, is the lookup that
@@ -16484,6 +16537,7 @@ corpus string that can see the difference.
 ## §419 — Marks are sorted twice: once into canonical order, once into the order they are drawn
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Unicode's canonical combining classes are an *ordering*, chosen so that two
@@ -16558,6 +16612,7 @@ whose doc records why matching real classes still selects the right characters.
 ## §420 — The HarfBuzz sweep reports mixed-script strings apart from its verdict
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 `gui/font/tools/harfbuzz_sweep.py` shapes a 23-string corpus with both this
@@ -16614,6 +16669,7 @@ it in `main`, and the `mixed` line in the report.
 ## §421 — Transcribe HarfBuzz's Indic shaper, not the Universal Shaping Engine it superseded
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 `TD-FONT-HAS-NO-JOINING-OR-REORDERING-SHAPER` proposed "a Universal Shaping
@@ -16666,6 +16722,7 @@ needs all three and none of them assumes Indic.
 ## §422 — The face chooses the shaper, not the character
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 Which shaper a run gets looked like a property of the text: Devanagari
@@ -16803,6 +16860,7 @@ because it would invert this same layering for a different script.
 ## §424 — A program may request a default fold depth for its own activity log, as a hint the user overrides
 
 **Date:** 2026-08-14
+**Lane:** C
 **Decided by:** Operator (Claude proposed this option and recommended it)
 
 `roadmap-detailed.md` §4.14 gives every process an activity stream whose
@@ -16871,6 +16929,7 @@ call-tree view.
 ## §425 — A monospace face is a *scoped render-tree state*, not a field on every text command
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** gui-toolkit / gui-core / apps
 
@@ -16952,6 +17011,7 @@ preserve the appearance.
 ## §426 — On-disk records store paths percent-encoded from their bytes, behind a format version marker
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** apps
 
@@ -17026,6 +17086,7 @@ that can be asserted on a non-Unix test host.
 ## §427 — Text that does not fit carries an overflow policy on the draw command, and the compositor draws the ellipsis
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Operator (answering `open-questions.md` Q45 — "q45: a."; Claude
 raised the question and recommended A)
 **Zone:** gui-core, gui-toolkit, apps
@@ -17113,6 +17174,7 @@ in `gui/**` and `apps/**`. Closes `known-issues.md` →
 ## §428 — Normalization stays font-blind; the font-fitting stage decomposes what the face cannot draw
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Operator (answering `open-questions.md` C-Q1 — "c-q1: c.";
 Claude raised the question and recommended C)
 **Zone:** gui-core
@@ -17200,6 +17262,7 @@ HarfBuzz `src/hb-ot-shape-normalize.cc`,
 ## §429 — A required field on a shared type is added and filled in one commit, across lane boundaries
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** The project is worked by three agents who each own a slice of the
@@ -17320,6 +17383,7 @@ this is the answer for it.
 ## §430 — A language is a *list* of OpenType tags generated from HarfBuzz, and the first one the font registers wins
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A font can hold rules that apply to one language and not another
@@ -17407,6 +17471,7 @@ unit tests could not see.
 ## §431 — When the host cannot falsify a shaping pass, synthesize a font that can
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Everything the font crate does is checked by shaping the same
@@ -17481,6 +17546,7 @@ own strings instead of bloating the built-in corpus.
 ## §432 — The Thai SARA AM pass runs between decomposition and the mark sort, not after normalization
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Thai has one letter, SARA AM, that is drawn as two separate
@@ -17542,6 +17608,7 @@ precedent), `known-issues.md` →
 ## §433 — A feature belongs to exactly one stage, enforced where the stages are built rather than where they are applied
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A font's shaping rules are grouped into named "features"
@@ -17622,6 +17689,7 @@ tests), `gui/font/src/indic_shape.rs` (the same four), `gui/font/src/gsub.rs`
 ## §434 — What a lookup wants at a position travels *into* the skip walk, and the never-drawn characters get a third answer
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some characters are typed to instruct the text engine and are
@@ -17753,6 +17821,7 @@ transparency of an erased glyph), `gui/font/src/gpos.rs` and `kern.rs` (the
 ## §435 — Mark-advance zeroing is a three-valued question, not a boolean, because *when* it happens changes the width
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A combining mark — an accent, a vowel sign, a dot under a
@@ -17800,6 +17869,7 @@ HarfBuzz's shaper table, not guessed, and the sweep pins them.
 ## §436 — The two mark-zeroing routes are modelled separately, and the fallback owns the marks it places
 
 **Date:** 2026-08-15
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** There are two entirely separate reasons a combining mark's width
@@ -17874,6 +17944,7 @@ sweep 58/58; full sweep back to its recorded `misplaced 170` baseline with
 ## §437 — The shared documents are lane-*partitioned*, not append-only, because append-only does not prevent the conflict it was adopted to prevent
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Operator (operator's own challenge to the rule; Claude proposed this replacement)
 
 **In short:** Four documents that all three lanes write — the bug list, the
@@ -17966,6 +18037,7 @@ EOF-appenders into three disjoint insertion points.
 ## §438 — The font engine — own the bytes, reject CFF loudly, no hinting, signed-area rasterization
 
 **Date:** 2026-08-13
+**Lane:** C
 
 **Decided by:** Claude (autonomous)
 
@@ -18073,6 +18145,7 @@ above both), `gui/font/tests/host_fonts.rs` (the 556-font sweep that measured
 ## §439 — A two-part vowel is never recomposed on the drawing path, and is put back together only when the face cannot draw the halves
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 **Zone:** gui-core
 
@@ -18198,6 +18271,7 @@ Sinhala lines that measure it.
 ## §440 — Device corrections are folded into the value at read time, against a size the face itself does not have
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** OpenType lets a font say "this accent sits a bit lower when
@@ -18280,6 +18354,7 @@ measure any of it.
 ## §441 — Script runs resolve through `Script_Extensions`, one row per OpenType tag pair, with direction cut in afterwards
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some characters are shared between writing systems. The Arabic
@@ -18362,6 +18437,7 @@ generated, `SCRIPT_EXT_RANGES` / `SCRIPT_EXT_POOL` / `WIDEST_EXTENSION`;
 ## §442 — A caret is a position on the screen with an affinity, and the run carries its bidi levels to answer for one
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When a line mixes English and Hebrew, one place in the *text* can
@@ -18437,6 +18513,7 @@ same on both sides of a boundary.
 ## §443 — A base direction is a third argument to one full `shape_with`, and it switches off the left-to-right fast path
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Which way a line of text runs is usually decided by the text
@@ -18516,6 +18593,7 @@ is that each answer is self-consistent, drawn width equal to measured width.
 ## §444 — A selection is a set of boxes, not a box
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you drag across text to highlight it, the highlight was
@@ -18585,6 +18663,7 @@ checks all 28 sub-ranges of a six-character bidi string);
 ## §445 — Syntax state entering a line is memoized per line and invalidated from the first edited line
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A block comment opened near the top of a file colours everything
@@ -18651,6 +18730,7 @@ not part of the document's value, it is a derived fact about it, and
 ## §446 — An undo entry records what the lines were, not what the edit was
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The editor's undo used to store a description of each edit —
@@ -18715,6 +18795,7 @@ and the `undo_tests` module.
 ## §447 — One shared `randrange` crate, with the generator's output permuted as well as its reduction fixed
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Twenty-seven of this tree's applications each contained a
@@ -18823,6 +18904,7 @@ rationale as `yamldoc`), `no_std` with no `alloc`.
 ## §448 — A variable font's chosen instance belongs to the scaled font, and the number it is chosen with is HarfBuzz's
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some fonts are adjustable — one file can draw at any weight from
@@ -18945,6 +19027,7 @@ implementations of the same misunderstanding are one implementation.
 ## §449 — `gvar` hands back a delta per point, spaces glyphs at the default width, and is proved by a font we wrote ourselves
 
 **Date:** 2026-08-16
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** An adjustable font (§448) stores its *shapes* as a base outline
@@ -19065,6 +19148,7 @@ test needs a liveness assertion, or the null implementation passes it.
 ## §450 — One table owns each varying number: `HVAR` the advance, `MVAR` the line box, and the outline itself the cap-height
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** an adjustable ("variable") font stores several numbers *twice*.
@@ -19158,6 +19242,7 @@ synthetic stores in `varstore.rs`'s own test module instead:
 ## §451 — Size and instance are two arguments, not one: `Ppem` answers device tables, `Corrections` answers both
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** fonts can ship hand-written nudges that say "at *this* size, move
@@ -19255,6 +19340,7 @@ called proved.
 ## §452 — A caret slot is named by the character just crossed, so pixels round-trip and byte offsets need not
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** when text on one line runs both ways -- an English sentence with
@@ -19361,6 +19447,7 @@ above and C-Q2.
 ## §453 — A performance guard asserts a *ratio* against an in-process control, not a wall-clock figure
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** text shaping was ~1400x slower than it should be, and after
@@ -19456,6 +19543,7 @@ that produced the numbers quoted here.
 ## §454 — A benchmark reports its *fastest* sample, because the noise is one-sided
 
 **Date:** 2026-08-17. **Decided by:** Claude (autonomous).
+**Lane:** C
 
 **In short:** When you time the same piece of code many times, you get many
 different answers, and you have to pick one number to report. The obvious pick
@@ -19567,6 +19655,7 @@ believed on this one).
 ## §455 — Multi-coloured text crosses the wire as byte-ranged spans, not as positioned glyphs
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the text editor colours its keywords, strings and comments by
@@ -20743,6 +20832,7 @@ failing, it is unmeasurable.
 ## §456 — Scancodes become key names in the compositor, and the raw code rides along anyway
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you press a key, the hardware reports *which switch closed* —
@@ -20826,6 +20916,7 @@ would be additive rather than a break.
 ## §457 — One connection carries every window, and a draw frame says which one it is for
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A program can have several windows open at once — a text editor
@@ -20959,6 +21050,7 @@ correct and could simply become redundant.
 ## §458 — A connection owns the windows opened over it, and that set is both the address book and the permission check
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you press a key, the compositor (the program that draws the
@@ -21063,6 +21155,7 @@ rather than substitute for it.
 ## §459 — The fake compositor ships in the library, unconditionally
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** To test a graphical program you have to pretend there is a
@@ -21130,6 +21223,7 @@ if the harness grows enough that it wants its own crate. Neither is true at
 ## §460 — The first transport is a TCP socket, because this protocol was always a remote one
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Applications draw pictures and the compositor (the program that
@@ -21218,6 +21312,7 @@ and a real authentication step (or option 2's mode bits) has to arrive.
 ## §461 — The compositor draws through a `Present` trait, and the first implementation is raw Win32
 
 **Date:** 2026-08-17
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor assembled a complete picture of the desktop every
@@ -22508,6 +22603,7 @@ enough to reach exponent 2 and both sides of the 999500 boundary.
 ## §462 — A generator that cannot reach the kernel CSPRNG refuses to generate
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The password generator needs real randomness, which on this
@@ -25042,6 +25138,7 @@ at once.
 ## §463 — Two shared RNG crates merge into the dependency-free one
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lane C had grown *two* shared "stop hand-rolling random number
@@ -25137,6 +25234,7 @@ fine.
 ## §464 — A vault's salt is drawn from the kernel at creation, and a vault cannot be created without one
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the credential manager mixed a fixed word — the same word on
@@ -25249,6 +25347,7 @@ change that adds a fallback fails the suite rather than passing it quietly.
 ## §465 — Randomness has two tiers: a secret refuses without entropy, novelty falls back
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Programs want unpredictable numbers for two very different
@@ -25346,6 +25445,7 @@ readable ASCII, which makes a copied one look wrong on sight.
 ## §466 — One password derivation, in its own crate, extracted before the two callers were wired together
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** two different programs in this tree each turned a password into
@@ -25903,6 +26003,7 @@ list does not move as the list grows.
 ## §471 — The kanban board scrolls as one, not one column at a time
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A kanban board is a row of columns ("To Do", "Doing", "Done"),
@@ -25967,6 +26068,7 @@ this should be revisited rather than defended.
 ## §472 — The podcast sidebar scrolls as one; only its title is pinned
 
 **Date:** 2026-08-18
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The podcast app's sidebar is a single column holding a library
@@ -26024,6 +26126,7 @@ behaviour and this should be reversed rather than defended.
 ## §473 — A collapsed panel keeps its scroll position, measured against the size it has when open
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The partition manager has a "Pending Operations" panel at the
@@ -26078,6 +26181,7 @@ than a compile-time one. The shape of the decision is unchanged — it is still
 ## §474 — Space *around* a row belongs to that row; space *between* cards belongs to neither
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lists in this OS leave a few blank pixels around each row so the
@@ -26161,6 +26265,7 @@ than a flag on one of these.
 ## §475 — A settings page is described once and interpreted twice: drawing and hit-testing are two readings of one walk
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app used to say where each row went in two separate
@@ -26282,6 +26387,7 @@ tests fail.
 ## §476 — A slider is one mapping read in two directions, measured from the track the page says it drew
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** all eight sliders in the Settings app painted their value
@@ -26396,6 +26502,7 @@ recomputing row positions.
 ## §477 — A pane's grid is its drawn rectangle, converted once
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** every terminal pane in the tmux app was a fixed 80 columns by 24
@@ -26509,6 +26616,7 @@ because it cost real mutation-testing time to rediscover.
 ## §478 — A control that cannot act is drawn from the fact that it cannot act
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app drew seven push buttons that looked completely
@@ -26601,6 +26709,7 @@ part.**
 ## §479 — A control drawn inside a closure has nowhere to hang a click band
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the Settings app offered six little pictures to choose an account
@@ -26690,6 +26799,7 @@ companion to any single-expression collapse.
 ## §480 — A test that only ever uses the input that works proves the code works on that input
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the emoji picker stapled the chosen skin tone onto every emoji,
@@ -26771,6 +26881,7 @@ number, and all five were the same test.
 ## §481 — A control's click cell is the space it owns, not the ink it draws
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the emoji picker draws six skin-tone swatches as 18-pixel circles
@@ -26849,6 +26960,7 @@ sweeps the whole window now.
 ## §482 — A convention the code invents for itself is a convention nothing can contradict
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the checkers board was built mirror-image — the bottom-left
@@ -26935,6 +27047,7 @@ paints light.
 ## §483 — An inverse tells you which cell a point is in, never where in the cell it is
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** chess drew its board and hit-tested clicks from the same
@@ -27019,6 +27132,7 @@ that `CLAUDE.md` prescribes for `#[cfg(test)]`, clearing its remaining three.
 ## §484 — A hit test that rejects an out-of-range index has two edges; one that clamps has one
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** in gomoku a click slightly *outside* the board still lands on a
@@ -27142,6 +27256,7 @@ asserts the stone count is zero (§480 again).
 ## §485 — A board that numbers its rows the other way, and the geometry checklist that is now reusable
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** reversi is the fourth board game in `apps/` to have its screen
@@ -27242,6 +27357,7 @@ then asserted only that *some* move had been played; it now clicks
 ## §486 — A test that measures a twin of the shipped code is worse than no test
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** sudoku is the fifth board game in `apps/` whose screen geometry
@@ -27357,6 +27473,7 @@ binary clippy unchanged at 95.
 ## §487 — "Inside the window" is not a constraint: measure the frame, not the containment
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** when a test checks that a game board is drawn *inside* its window,
@@ -27639,6 +27756,7 @@ mechanism rather than the shared one.
 ## §488 — The compositor's rendering seam is cut at the primitive, not at the pixel and not at the scene
 
 **Date:** 2026-08-20
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor draws every pixel with the CPU. To ever use the
@@ -27727,6 +27845,7 @@ is filed as `requests/c-a-virtgpu-render-ioctl-dispatch-blocks-compositor-gpu.md
 ## §489 — Binary units are the house convention, and the base travels with the name
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** SlateOS shows file and disk sizes to people, and until now every
@@ -27814,6 +27933,7 @@ described as `4096.00 GB`.
 ## §490 — A duration has several honest shapes, but only one of each; and the shape says how the number was obtained
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lots of Slate's programs show you a length of time — how long a
@@ -27918,6 +28038,7 @@ could not count past their largest unit.
 ## §491 — An instant is rendered where the zone is known, and the zone is an argument that is never defaulted
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** All over Slate, programs show you *when* something happened — when
@@ -28537,6 +28658,7 @@ definition, and they are rebuilt in the same change.
 ## §492 — The taskbar clock abbreviates the date the calendar popup spells out
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Date & Time settings page has two switches, "show day of
@@ -29012,6 +29134,7 @@ console prompt without ever having had root.
 ## §493 — The extra clocks surface in the calendar popup, not stacked in the tray
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Date & Time settings page lets you add up to four extra
@@ -29088,6 +29211,7 @@ way.
 ## §494 — Stacking is three named bands, not a depth number, and a raise never leaves its band
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A desktop has three kinds of surface: a wallpaper that belongs
@@ -29160,6 +29284,7 @@ the concept exists.
 ## §495 — A shell learns the desktop by subscribing to a pushed snapshot, and the compositor decides it is stale by comparing bytes rather than counting changes
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A taskbar has to show a button per open window, but until now a
@@ -29254,6 +29379,7 @@ receives one.
 ## §496 — A remembered "allow" expires after eight hours; a remembered "deny" never does
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When the desktop asks "may this program use your microphone?",
@@ -29335,6 +29461,7 @@ replacing `saturating_sub` with `-` panics the backwards-clock test with
 ## §497 — Window decorations are scaled per-window from the display the window mostly sits on, and the scale is re-derived every frame rather than maintained on every move
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A "scale factor" is how a computer copes with a screen whose
@@ -29486,6 +29613,7 @@ raw `SHADOW_SIZE`.
 ## §498 — Rounded rectangles are rasterized as scanline spans inside the compositor, with coverage carried on the existing opacity channel rather than a new backend primitive
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Lots of things on screen are supposed to have rounded corners —
@@ -30956,6 +31084,7 @@ in `bare-metal-boot.md` §6 so they are not rediscovered as bugs.
 ## 499. The compositor reads the user's appearance settings from the shared model, and reads the whole of it
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings app has a switch for how round window corners should
@@ -31135,6 +31264,7 @@ distinguishes that from the correct shape. It is a real property with no guard.
 ## 500. A settings change reaches a running compositor as a notification that carries nothing
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** After §499 the compositor finally drew window corners and drop
@@ -31263,6 +31393,7 @@ settings live or what a missing file means.
 ## 501. The window frame's colours are resolved once, in the settings crate
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two programs draw the title bar at the top of every window — the
@@ -31393,6 +31524,7 @@ what the old hardcoded palette would also have passed.
 ## 502. Double-click-to-maximize moves to the compositor rather than dying with the shell's decorator
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Clicking a window's title bar twice quickly makes it fill the
@@ -31511,6 +31643,7 @@ desktop and pass for the wrong reason.
 ## 503. A shell surface's screen offset is applied in both directions by one type, with the outbound half expressed as a translation command rather than rewritten coordinates
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell works out where things are in whole-screen
@@ -32109,6 +32242,7 @@ went first. Tracked in known-issues.md as
 ## 504. Snapping a window is a named edge sent to the compositor, not a rectangle computed by the shell
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** pressing Super+Left should tile the focused window to the left
@@ -32159,6 +32293,7 @@ build.
 ## 505. A keyboard shortcut returns a *list* of requests, and the shell's two input paths converge on one request type
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop's keyboard shortcuts (Alt+F4, Super+D, Super+Left…)
@@ -32201,6 +32336,7 @@ sweep, failing four tests.
 ## 506. The shell's private window manager is deleted rather than fixed, and `snap.rs` is kept as a library with no caller
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell used to keep its own copy of where every window
@@ -33203,6 +33339,7 @@ then would be to look at what moved before changing anything.
 ## 507. The zone *shapes* move into the protocol crate; the shell keeps only the chooser, and pulls its work area on use
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** The desktop has a "snap layouts" feature — press Super+Z and a
@@ -33296,6 +33433,7 @@ Nothing on the roadmap implies such a program.
 ## 508. Edge-drag tiling lives in the compositor; the shell's copy was deleted rather than connected
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** Dragging a window to the edge of the screen and letting go should
@@ -33387,6 +33525,7 @@ here, and it keeps the preview local either way.
 ## 509. A tiling drop follows the monitor under the *pointer*, not the one under the window
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** When you drag a window to the edge of a screen and let go, the
@@ -33480,6 +33619,7 @@ does.
 ## 510. A panel reserves screen edge space by naming its own window, and a greedy claim is clamped rather than refused
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous) — lane C
 
 **In short:** A taskbar needs a way to tell the compositor "keep the bottom 40
@@ -33602,6 +33742,7 @@ undone to be extended.
 ## 511. The compositor's scanout is split in three, so that the two-thirds that can be wrong is testable on a machine with no graphics card
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor can now put pixels on a real screen. Talking to a
@@ -33831,6 +33972,7 @@ beyond 4096, which is what bounds the memory.
 ## 512. A display resize re-derives everything placed by a rule, and rescues only what the user could no longer reach
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When the screen resolution changes, the desktop has to be put back
@@ -33931,6 +34073,7 @@ not a guard.
 ## 513. A window is never placed where it cannot be reached, and "reachable" is a question about the whole desktop
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** §512 stopped a *resize* from leaving a window off the screen. It
@@ -34011,6 +34154,7 @@ nobody knows what they cover.
 ## 514. The composited surface *is* the virtual desktop; a monitor is a viewport onto it, and fullscreen covers one monitor rather than the surface
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** SlateOS's compositor already believed it could drive two monitors —
@@ -34163,6 +34307,7 @@ model first.
 ## 515. A CRTC drives at most one monitor, each monitor copies out its own rectangle of the one composited frame, and a monitor that fails is dropped rather than fatal
 
 **Date:** 2026-08-21
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** §514 taught the compositor that a second monitor exists; this
@@ -34332,6 +34477,7 @@ pipeline instead of one.
 
 ## 516. A monitor leaving is a monitor arriving in reverse, but the order is inverted and the survivors do not move
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** unplugging one of two monitors used to do nothing to the desktop's
@@ -34432,6 +34578,7 @@ fmt clean.
 
 ## 517. Monitor hotplug is a polled whole-set reconciliation keyed on the connector id
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the compositor could add a monitor (§514) and drop one (§516), and
@@ -34695,6 +34842,7 @@ every `match` in the tree must answer for, and its presence would tell the next
 reader that block device nodes exist somewhere in this system. They do not.
 ## 518. A virtual desktop is a number on a window that the compositor reads, not a filter the taskbar applies
 
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop had four "virtual desktops" — four separate screenfuls
@@ -34994,6 +35142,7 @@ compositor's `main.rs` is compiled at all); fmt clean.
 
 ## 519. The window list reports each window's rectangle; nothing lets a shell set one
 
+**Lane:** C
 **Decided by:** Claude (autonomous) — flagged to the operator before starting; see
 "Flagged, and proceeded on the default" below.
 
@@ -35152,6 +35301,7 @@ commit backed out and the overview left filed as dead code.
 ## 520. The overview is a fullscreen modal that takes input before the shell does, and one layout pass answers both "where is it drawn" and "what did I click"
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop has an Exposé screen — press a key, see a card for
@@ -35333,6 +35483,7 @@ module.*
 ## 521. The frame clock is a local, one-shot deadline on the loop's own park — not a compositor callback, not a fixed-rate timer
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Nothing on the desktop could move by itself. A menu could not
@@ -35621,6 +35772,7 @@ is *derived*.
 ## 522. An animation counts milliseconds, and its resting state is *finished* — so a caller with no clock still gets a working screen
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shell had an animation module (fades, slides, window
@@ -36081,6 +36233,7 @@ precisely so it stays cheap to reverse.
 ## 523. Settings tells the compositor the *file changed*, not that an *event was consumed* — and the change is in force before anyone is told
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Settings had a complete user interface and no way to run: no
@@ -36311,6 +36464,7 @@ the underlying process hazard is logged as
 ## 524. One crate owns the double-click numbers, `ReloadInput` is its own verb, and the Mouse page offers exactly the settings something consumes
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop had a Mouse settings panel whose double-click slider
@@ -37097,6 +37251,7 @@ other.
 ## 525. One resolved `Palette`, with roles rather than colours — and the five judgement calls inside it
 
 **Date:** 2026-08-22
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop's settings page lets a user pick light or dark mode,
@@ -37310,6 +37465,7 @@ on the same side.
 ## 526. A window's sampled colour is an `Option`, because "nobody has looked yet" is not a colour, and the placeholder for it belongs to the renderer
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Hovering a taskbar button pops up a small preview of that
@@ -37379,6 +37535,7 @@ frame *marked* as stale, or it gets nothing.
 ## 527. The logo is the product's colour and the tab strip is the user's, so two sites that drew the same blue now mean different things
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The About dialog draws blue in two places: the square logo tile
@@ -37426,6 +37583,7 @@ because the stock accent *is* `blue`.
 ## 528. A calendar event's colour is an `Option`, because a parser that reads the theme lets a display setting edit the user's file
 
 **Date:** 2026-08-23
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Each event in the calendar can have a colour you picked, saved in
@@ -37499,6 +37657,7 @@ to accept it, and a membership test cannot check a value it was told to accept.
 ## 529. A selection highlight may be a raised `surface0` only if everything drawn on it is full-strength text; otherwise it recedes to `mantle`
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** When you pick an item in a list, the shell marks it by painting a
@@ -37572,6 +37731,7 @@ finding it afterwards means redoing the fixture that pins the row.
 ## 530. A contrast test reads its ink-on-fill pairings out of the rendered output, not out of a table written by hand
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Several shell modules carry a test that checks their text is dark
@@ -40902,6 +41062,7 @@ boot-only version and is fixed, and `AddressBusy` is the tripwire if it recurs.
 ## 531. Blur tint weights are anchored at the most-transparent setting and interpolated up to opaque, rather than being independent of the setting
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop blurs what is behind a taskbar, a menu or a
@@ -40970,6 +41131,7 @@ produce and no one has approved.
 ## 532. `readable_on` ink is declared per module, not exempted globally, in the palette-conversion sweep
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The automated check that proves a shell module was converted off
@@ -41441,6 +41603,7 @@ comment on `before_diagnostic`, which says so in as many words, and by
 ## 533. The screen magnifier's lens is opaque, and does not follow the transparency setting
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The screen magnifier draws a lens that follows the pointer and
@@ -41507,6 +41670,7 @@ the crosshairs used to be white at alpha 128, which over Latte `base` measures
 ## 534. A repeated control gets a module that draws it, and the ink is chosen for whatever the shape's outline is read against
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two controls in the desktop shell — the on/off switch and the
@@ -41618,6 +41782,7 @@ beside it.
 ## 535. A refactor that deletes call sites must resolve the reintroduction defects it strands, splitting them into re-targeted and retired-by-construction
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** We keep a harness that proves our tests are real, by putting each
@@ -41740,6 +41905,7 @@ and inverted both — and their successors are proved.
 ## 536. `readable_on` measures the contrast ratio rather than estimating brightness, and so guarantees a floor for colours nobody chose in advance
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The shell picks black-ish or white-ish lettering for anything drawn on a coloured fill — a switch knob, a title bar, the label on a selected chip. It used to guess which one by adding up the red, green and blue of the fill and comparing that sum against a fixed number. That guess is close enough for the fourteen accent colours the settings page offers, but the user can also pick *any* colour with a custom-accent picker, and for some of those the guess is badly wrong: a bright green gets pale lettering that is nearly invisible on it. The fix is to stop guessing. Ask the actual legibility ratio — the same number the accessibility standards and all our own tests are stated in — and use whichever of the two inks scores higher.
@@ -41814,6 +41980,7 @@ In all three the repair was the same shape, and it is the rule this decision lea
 ## 537. The contrast arithmetic moves down into the toolkit, so the crate every widget depends on holds the only copy
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Two different parts of the desktop were each working out, on their own, whether to write on a coloured button in dark ink or light ink. The appearance settings had a correct method as of §536; the widget toolkit had its own, and the toolkit's was wrong for nearly half of all colours — on a plain red button it chose white lettering when black is noticeably easier to read. The toolkit could not simply call the good one, because the good one lived in a crate that sits *above* it. So the good one moved down into the toolkit, and the appearance crate now points at it instead of keeping a copy. There is one implementation in the tree again.
@@ -41883,6 +42050,7 @@ The `known-issues.md` entry filed the day before had predicted "a run of pinned-
 ## 538. Lanes publish to `main` with a fast-forward push from their own worktree, not by merging inside the shared `os` checkout
 
 **Date:** 2026-08-21 (answered), written up 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q3, answered `b`
 
 **In short:** The three agents each work in their own private copy of the source tree, which is what stops them overwriting one another. But the last step of every finished task used to send all three into **one shared copy** — the `os` folder — to publish. Two agents were in there at the same moment on 2026-08-21 and their publish steps tangled. From now on nobody enters that folder to publish: each lane publishes with a single server-side command that needs no folder at all, and if another lane got there first the command is simply refused, so you pull their work in, re-test, and try again.
@@ -41920,6 +42088,7 @@ The ability to resolve a genuine merge conflict *during* publication. That was n
 ## 539. Cryptographic primitives are ported from vetted implementations; the format and plumbing around them stay ours
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q5, answered `c`
 
 **In short:** the code that protects saved passwords, login and the lock screen is cryptography this project wrote itself — including eleven separate hand-written copies of the same hash function. From now on, the *primitives* (the hash, the cipher, the password hash) are ported from implementations that other people have already spent twenty years attacking and repairing. Everything built on top of them — the vault file format, the credential service, the login flow — stays ours. The reason for the split is that hand-written crypto fails in a way this project's usual defence does not catch: the code computes the right answer and still leaks the secret, through how long it took to compute it. No test we can write notices that.
@@ -41959,6 +42128,7 @@ So: borrow where testing cannot reach, write where it can. That is also what pro
 ## 540. Printing is a background service applications submit jobs to, not a library they link
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended B, the shared library; operator chose C) — `open-questions.md` → C-Q4, answered `c`: *"let's do c since we should do it eventually anyway, no point putting it off with a stop-gap solution in its place"*
 
 **In short:** nothing in this OS can print. Two halves of a printing system exist and have never been introduced to each other — the PDF viewer knows how to work out *which pages* to print, and the desktop knows about *printers*, paper sizes, copies and a job queue. The connection between them will be a **background service**: an application hands a print job to a running system service and is then done with it. The job survives the application closing, and it can be cancelled from anywhere. This is more work than either shorter path, and it was chosen on the grounds that it is where printing has to end up anyway, so a stop-gap would be built only to be thrown away.
@@ -42010,6 +42180,7 @@ Recorded because the estimate was not wrong and the conclusion still was: **"che
 ## 541. Arrow keys move the caret by what is on the screen, not by position in the sentence
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended this option) — `open-questions.md` → C-Q2, answered `b` (visual)
 
 **In short:** Hebrew and Arabic are written right to left, and one line can mix them with English — *"I said שלום to him"*. On such a line the order the characters are stored in is not the order they are drawn in, so the Right arrow key has two possible meanings that disagree. It now means **one step to the right on the screen**. Previously it meant "the next character in reading order", which made the caret occasionally jump a whole word sideways between two presses of the same key. The cost of the new rule is that the caret's *position in the sentence* can move backwards while it moves rightwards on screen.
@@ -42058,6 +42229,7 @@ So a half-implemented "visual" — switching the arrow keys without also making 
 ## 542. The installer refuses an ambiguous size suffix rather than guessing which one the author meant
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Operator (Claude recommended B weakly, and named C the honest option; operator chose C) — `open-questions.md` → Q55, answered `c`
 
 **In short:** an unattended-install config file describes each disk partition with a size like `"100 GB"` or `"32 GiB"`. The installer treated both spellings as the same number — the binary one — so a config asking for `500 GB` on a 500 GB drive actually asked for 537 GB and the install failed to fit. It now **refuses `GB` outright**, with an error naming both alternatives, and accepts only the unambiguous `GiB` and bare `G`. A config using `GB` stops installing until someone edits it. Nothing is ever silently resized.
@@ -42092,6 +42264,7 @@ This generalises past the installer: when an input has two established meanings 
 ## 543. Moving the caret follows the screen; editing and masking still follow the string
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (operator-approved scope) — §541 is the operator's decision; which *other* keys follow it is mine
 
 **In short:** §541 says the Left and Right arrow keys move the caret by what is
@@ -42184,6 +42357,7 @@ the only two such tests in the tree.
 ## 544. Reading the keyboard and mouse: six decisions the kernel's device nodes left to us
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The kernel now offers the keyboard and mouse as files the
@@ -42376,6 +42550,7 @@ skimmed.
 ## 545. The lock screen asks someone else whether the password was right, and gets a one-shot ticket back
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous), except the passwordless-account policy, which is deferred to the operator (`open-questions.md`)
 
 **In short:** The lock screen used to check the typed password itself, against a
@@ -42438,6 +42613,7 @@ so answering it is a one-line change either way.
 ## 546. The toolkit gets a focus, because without one every keystroke went to the last text field in the window
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The widget toolkit had no idea which control the user was typing
@@ -42521,6 +42697,7 @@ nothing — indistinguishable, to the user, from the bug this entry is about.
 ## 547. A dialog learns where it is by being drawn, so the only thing you can click is the thing that was drawn
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Every button on every pop-up dialog in the toolkit — the alert's
@@ -42614,6 +42791,7 @@ recomputed from a guess again, and every one of them a defect that compiles.
 ## 548. The compositor carries the user's input settings but does not own the pointer, so the display loop asks once a tick rather than being told
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings → Mouse page lets you change how fast the pointer
@@ -42830,6 +43008,7 @@ strictly a refinement of the non-zero space.
 ## 549. The keyboard layout is one table in a leaf crate, because the shell was drawing a keyboard nobody could type on
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Choosing a keyboard layout in the desktop shell used to change
@@ -42933,6 +43112,7 @@ absent one — the user has no way to tell a wrong table from a broken keyboard.
 ## 550. A keystroke carries a string, not a character, and a composition that fails types both keys
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** On a French, German or Spanish keyboard some keys type nothing on
@@ -43058,6 +43238,7 @@ machine would make both harder to review and impossible to bisect.
 ## 551. What a dead key does with the *next* keystroke: three rules the design files did not decide
 
 **Date:** 2026-08-24
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** A dead key is one that types nothing when you press it and
@@ -43171,6 +43352,7 @@ none is visible to a client — the client sees only the resulting text.
 ## 552. A mode-set the kernel refuses does not decline the display; the page-flip that follows decides
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** To put a picture on a monitor the compositor has to tell the
@@ -43743,6 +43925,7 @@ here for three reasons that are specific to this crate.
 ## 553. An application announces a rewritten config file after every event, not once per batch of them
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Some settings live in files that a *different* program reads. When
@@ -45019,6 +45202,7 @@ next occurrence must produce a RIP, and today's could not."*
 ## 554. A render command with no backend is a command that draws nothing; the compositor now owns an image store
 
 **Date:** 2026-08-25
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The GUI toolkit has always let a program say "draw picture number
@@ -45133,6 +45317,7 @@ and is logged in `known-issues.md`.
 ## 555. One glob matcher for the two search tools, two dialects for the desktop
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop shipped with four separate pieces of code that each
@@ -45239,6 +45424,7 @@ The defect inventory and the measurement method are in `known-issues.md` →
 ## 556. A program in another process can hand the compositor a picture, and is refused rather than throttled when it hands over too many
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The compositor could draw pictures, but the only way to give it
@@ -45369,6 +45555,7 @@ documented overflow past it.
 ## 557. A wallpaper that cannot be shown costs a wallpaper, not a desktop — and the shell, not the wallpaper model, is what opens the file
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop can now actually display a picture as the wallpaper.
@@ -45482,6 +45669,7 @@ documented overflow past it.
 ## 558. Every application gets one route for pixels, and the image viewer is the first to use it: one id reused, a queue that supersedes, and a window that opens even when the file will not
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the image viewer now actually shows the photograph you opened.
@@ -45641,6 +45829,7 @@ documented overflow past it.
 ## 559. The file manager's picture cache is also its eviction policy: what falls out of the cache is what the display server is told to forget
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the file manager makes small previews ("thumbnails") of the files
@@ -45710,6 +45899,7 @@ changes the other. That is written at `take_evicted_image_ids`.
 ## 560. A preview's number is keyed on the same three facts as the cache entry it belongs to
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** each preview picture is given a number, and the display server
@@ -45765,6 +45955,7 @@ or storing them on every thumbnail.
 ## 561. "ARGB" names two opposite byte orders, so the conversion is named after the wire format and lives in exactly one place
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** a colour is four bytes — red, green, blue, and transparency — and
@@ -45831,6 +46022,7 @@ tests), `apps/explorer/src/thumbs.rs` (`Thumbnail::to_wire_bytes`),
 ## 562. A panel that slides open must be fully open for a caller with no clock, and rewound into the slide by one that has
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop's notification panel slides in from the right edge of
@@ -46265,6 +46457,7 @@ the kernel could only produce `` a element id ``.
 ## 563. A panel opened from a button stops short of that button, so the second press closes it
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop grew a bell in the system tray — the little clock
@@ -46348,6 +46541,7 @@ them is the thing being avoided.
 ## 564. Do Not Disturb hides the interruption, never the record — and the two switches that spell it are views of one mode
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop has a "Do Not Disturb" switch. Until now it moved
@@ -46490,6 +46684,7 @@ wrappers around `handle_mouse` / `handle_hotkey`.
 ## 565. A shortcut belongs to the shell even while another window has the keyboard, and the key that *ends* the gesture is owed to both of them
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Until now, every keyboard shortcut the desktop defines — Alt+Tab,
@@ -46628,6 +46823,7 @@ close — the same harm the conditional grab exists to avoid, inverted.
 ## 566. A window can be told to be invisible to the mouse, and that is a different fact from being see-through
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop wants to flash a volume indicator over the middle of
@@ -46761,6 +46957,7 @@ version bump. `gui/compositor/src/lib.rs` — `Window::input_transparent`,
 ## 567. The volume keys act, on their own surface, off a clock the shell keeps itself
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** pressing the volume key on a keyboard now actually changes the
@@ -46871,6 +47068,7 @@ needed three more frames to retire whatever its own clock said. It now advances
 ## 568. The keyboard gets its own way to say "start this program", and the Run box is what needed one
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop now has a Run box — press the Windows key and R, type
@@ -47061,6 +47259,7 @@ omitted-offset form still copies to the start.
 ## 569. A window says which program it belongs to, once, in one field — and that is what a window rule matches
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The Settings panel has always let you write rules like *"the
@@ -47164,6 +47363,7 @@ executable's stem, lower-cased), `gui/compositor/src/lib.rs` (`Window::app_id`),
 ## 570. A window rule fires once, when the window arrives — and the shell hands the requests back rather than sending them
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** Window rules say things like *"open the editor maximised"*. The
@@ -47397,6 +47597,7 @@ twenty-sixth and twenty-seventh burn-down batches of
 ## 571. One shortcut table, not two: the configurable registry became the live one
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The desktop had *two* lists of keyboard shortcuts. One was live
@@ -47509,6 +47710,7 @@ grab loop and `reconcile_escape_grab`.
 ## 572. The shortcut card grows sideways: columns rather than a taller card or a scrollbar
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** the desktop can show a card listing every keyboard shortcut. Until
@@ -47594,6 +47796,7 @@ there is no division by a count a later edit could let reach zero.
 ## 573. A dialog button carries its own label: the closed four-variant enum became an open struct
 
 **Date:** 2026-08-26
+**Lane:** C
 **Decided by:** Claude (autonomous)
 
 **In short:** The toolkit has a ready-made dialog box (`AlertDialog`), fully
@@ -48009,6 +48212,460 @@ character — the type refuses to let the caller be careless:**
 repeated in the module docs, since that is where a driver author will read
 it, and in `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
 since the driver is the code that performs the install.
+
+---
+
+## 577. The Vulkan loader's two ABI rules are encoded as types that refuse the wrong answer, not as integers the caller compares
+
+**Date:** 2026-09-02
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** A Vulkan loader is the library an application calls instead of
+calling a graphics driver directly; it finds the drivers on the machine and
+stands between them and the app. Two of the rules it has to obey are the kind
+where getting it wrong corrupts memory rather than producing an error message.
+The decision is to express both rules as small types whose method names *are*
+the rule — you ask "may this driver manage surfaces?" rather than comparing a
+number against 3 — and to give the dangerous one no unchecked escape hatch at
+all, so that the mistake cannot be written.
+
+**The two rules.** Khronos's Loader–Driver Interface says (a) the loader and
+each driver agree on an *interface version* between 0 and 7, and each version
+number entitles either side to assume specific things; and (b) the handles
+Vulkan hands out for instances, devices, queues and command buffers are
+pointers whose **first machine word** is reserved for a dispatch-table
+pointer. The driver stamps a magic value (`0x01CDC0DE`) into that word; the
+loader checks the magic and then overwrites the word with its own table
+pointer.
+
+**Decision 1 — `InterfaceVersion` has no public integer.** The version is a
+newtype with a private `u32` and seven predicates:
+`exports_icd_get_instance_proc_addr` (≥1), `negotiates` (≥2),
+`may_manage_surfaces` (≥3), `has_physical_device_proc_addr` (≥4),
+`loader_validates_api_version` (≥5), `enumerates_adapters` (≥6),
+`entry_points_may_be_unexported` (≥7).
+
+*Alternative:* a plain `u32`, compared at each site — which is what the
+reference loader does.
+
+*For the newtype:* the boundary is written down once per capability instead
+of at every call site, so a `>` where `>=` was meant is a single-line fix in a
+single place rather than a hunt. The names also carry the knowledge: I had
+memorised `vk_icdGetPhysicalDeviceProcAddr` as arriving at version 3, and the
+spec says 4 — a plain `if v >= 3` at a call site would have shipped that
+error silently, whereas `has_physical_device_proc_addr()` is a claim the test
+`each_capability_appears_at_the_version_the_specification_says` can check on
+both sides of every boundary. (That test exists specifically because of this
+near-miss, and says so.)
+
+*Against:* an extra layer between the loader and a number that is, after all,
+just a number; and a caller who genuinely needs the integer — to log it, or
+to pass it back over FFI — has to call `.get()`.
+
+**Decision 2 — the dispatch word can only be written through a checked
+function.** `dispatch::adopt` reads the word, returns
+`Err(NotDispatchable { found })` if the magic is absent, and writes only
+otherwise. There is deliberately **no `set_dispatch_unchecked`**.
+
+*Alternative:* provide both, and use the unchecked one on the paths where the
+object provably came from a driver that already stamped it.
+
+*For check-only:* the failure mode of the unchecked version is not a wrong
+value, it is a write of a pointer into the first eight bytes of whatever the
+object actually is — usually a driver's private struct — which surfaces
+arbitrarily far away, inside a stripped third-party shared library, as a
+crash with no relationship to the loader. Every loader bug of this shape in
+the wild is a *missing* check rather than a wrongly-failing one, so the
+asymmetry is real: the cost of the check is a load and a compare on a path
+that already performed a store, and the cost of skipping it is unbounded.
+There is no hot loop here — handles are stamped at creation, not per frame.
+
+*Against:* it forces an `unwrap`-shaped decision on callers who know the
+magic is present, and it makes the loader marginally slower at handle
+creation.
+
+**Decision 3 — policy is separated from FFI.** `icd::settle` takes a
+`DriverReply` value and returns a `Negotiation` value; it never calls a
+function pointer. The actual call into a driver's
+`vk_icdNegotiateLoaderICDInterfaceVersion` is a thin `unsafe` wrapper that
+produces a `DriverReply`. This is what lets the clamping rules be tested at
+all: `settle` is exercised with a driver that reports 9 (clamped to the
+loader's offer), one that returns `VK_ERROR_INCOMPATIBLE_DRIVER` (skipped,
+*not* surfaced to the application), and one that fails with some other code
+(kept distinguishable from incompatibility). None of those cases can be
+produced by a real driver on demand.
+
+**Decision 4 — a driver's entry points are never handed out ungated.**
+`registry::Driver` stores the `Entry` it was given but does not expose it.
+Callers get `instance_proc_addr()` and `physical_device_proc_addr()`, which
+consult the settled version first: a driver that *offered*
+`vk_icdGetInstanceProcAddr` but settled at 0 is still called through the plain
+one, because a version-0 driver exporting that name is a coincidence of
+spelling rather than the version-1 contract, and the loader has no promise
+about what it does.
+
+*Alternative:* expose the `Entry` and let each call site check the version.
+
+*For gating at the accessor:* this is the same argument as decision 1 one
+level up. The check is the sort that is correct in every place it appears and
+catastrophic in the one place it is forgotten, and forgetting it is a jump
+through a pointer the driver never exported. A call site that cannot obtain
+the ungated pointer cannot forget. The cost is that a future caller with a
+legitimate reason to inspect the raw offer — a diagnostic dump, say — has to
+have an accessor added for it, which is a good moment to ask why.
+
+**A related note on fixtures.** The stub `GetProcAddr`s in the registry's
+tests first answered unconditionally, and clippy's `unnecessary_wraps` flagged
+the resulting always-`Some` return. Its suggested fix — drop the `Option` —
+would have put the stub out of ABI agreement with `GetInstanceProcAddrFn`,
+which is what makes it tempting to read the lint as a false positive and
+silence it. It was not: a `GetProcAddr` that cannot fail does not model the
+null return that is the whole reason `VoidFn` is an `Option`, so the lint was
+describing a defect in the fixture. The stubs now match a name and answer null
+otherwise. Recorded because "the lint's suggested fix is wrong" and "the lint
+is wrong" look identical at the call site and are not the same thing.
+
+**Where it lives:** `gui/vulkan/` — crate `vkloader`, modules `icd`,
+`dispatch`, `registry` and `vk`. 70 tests across the crate. *(At the time this
+entry was written no Vulkan entry points were exported at all, on purpose: a
+loader that exports `vkCreateInstance` before it can dispatch it is a tool
+that reports success for work it never did, which is the defect lane C spent
+this same day filing against `userspace/` — see
+`requests/c-b-2288-userspace-tools-report-success-for-work-they-never-did.md`.
+Later that day the instance-level commands became dispatchable and were
+exported; the same reasoning still keeps the three `vkEnumerateInstance*`
+commands out of the library entirely. See §578, decision 4.)*
+
+**Why drivers are registered statically rather than discovered.** A
+conventional loader finds drivers by reading JSON manifests and `dlopen`ing
+the library each names. `posix/src/dlfcn.rs`'s `dlopen` is a stub returning
+null with the error `"dynamic linking not supported"`, so a loader built
+around it would find nothing on every machine while looking like it worked.
+Drivers therefore hand the loader their entry points directly. This is not a
+placeholder: discovery answers only *which* drivers exist, and everything
+after that — negotiating, stamping, dispatching — is identical either way,
+which is why it can be built and tested now. When dynamic loading lands, the
+addition is a discovery step producing the same registration records, plus a
+manifest parser that belongs in `textfmt` rather than here (`apps/jsonviewer`
+already carries a private JSON parser, and a second private copy is the
+duplication `textfmt` exists to prevent).
+
+---
+
+
+## 578. The Vulkan loader believes a driver's handle over its return code, wraps physical devices but adopts instances, and does not export the three commands it cannot answer
+
+**Date:** 2026-09-02
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous)
+
+**In short:** §577 built the Vulkan loader's *decisions* — which driver
+version to settle on, and when it is safe to write to a handle. This entry
+covers the layer that actually calls drivers: what happens when several
+graphics drivers are installed and one of them misbehaves. Four choices,
+each with a real case against it: a driver that says "I succeeded" but hands
+back nothing is disbelieved; one driver returning a malformed object aborts
+the whole call rather than being skipped; the loader puts its own small
+object around each graphics card rather than writing into the driver's; and
+three Vulkan functions the loader cannot yet answer honestly are left out of
+the library entirely, so a program needing one fails to *build* instead of
+being told there is nothing available.
+
+**Background.** `vkCreateInstance` is the call an application makes to start
+using Vulkan. With several drivers registered the loader has to make it once
+per driver and then present the results as a single object. Khronos's
+Loader–Driver Interface has exactly one normative rule about that fan-out:
+
+> A loader **must** return **VK_ERROR_INCOMPATIBLE_DRIVER** if it fails to
+> find and load a valid Vulkan driver on the system.
+
+Everything else below is loader policy, and is labelled as such in the code,
+because the document is silent on it — there is no stated rule for what to do
+when one driver of three fails, and no stated error precedence.
+
+**Decision 1 — a success code with a null handle is not believed.** A driver
+that returns `>= VK_SUCCESS` and leaves the out-parameter null is recorded as
+having failed with `VK_ERROR_INITIALIZATION_FAILED`.
+
+*Alternative:* believe the return code, and put the null in the fan-out list.
+
+*For disbelieving:* the two halves of the answer contradict each other and
+one of them has to be discarded. Believing the code costs a null pointer in
+the list of instances the loader calls through on every subsequent command —
+a crash on the first use, in the loader, attributed to the loader.
+Disbelieving costs at worst one usable driver on a machine whose driver is
+already broken. The asymmetry is not close.
+
+*Against:* a driver could in principle have a legitimate reason to report
+success without a handle; none is described in the specification, and no such
+driver is known.
+
+**Decision 2 — one unstamped instance sinks the whole call.** If any driver
+returns a `VkInstance` whose first word does not carry `ICD_LOADER_MAGIC`,
+the loader destroys every instance it created and fails the call, rather than
+dropping that one driver and continuing.
+
+*Alternative:* skip the offending driver, keep the rest.
+
+*For sinking:* the check is the only evidence the loader will ever have that
+this driver understands the dispatchable-handle contract at all (§577,
+decision 2). A driver that got the first word wrong is a driver whose objects
+the loader must not write to — and it is about to be asked for physical
+devices, queues and command buffers, every one of which needs the same
+stamp. Continuing means trusting, for the rest of the process's life, a
+driver that has already failed the one check the loader can perform.
+
+*Against:* this is strictly harsher than the specification requires, and on a
+machine with a good discrete GPU and one broken software rasteriser it turns
+a working Vulkan into no Vulkan. That is the real cost, and it is accepted
+because the alternative failure is a silent write into a stranger's struct.
+
+**Decision 3 — instances are adopted, physical devices are wrapped.** The
+`VkInstance` each driver returns has its dispatch word overwritten with the
+loader's table, which is what the LDI describes:
+
+> The loader will replace the first entry with a pointer to the dispatch
+> table which is owned by the loader.
+
+A `VkPhysicalDevice`, by contrast, is not touched: the loader allocates its
+own small object holding the driver index and the driver's handle, and hands
+*that* to the application.
+
+*Alternative:* treat both the same way — adopt both, or wrap both.
+
+*For the split:* they are asked different questions. An instance arrives back
+at a loader entry point as the receiver of a call the loader is about to
+forward, and the LDI sentence above says plainly what to do with it; adopting
+also gives the loader its one opportunity to notice a driver that never
+stamped, which is decision 2. A physical device arrives as an *argument*, and
+with several drivers registered a bare `VkPhysicalDevice` is
+un-attributable — nothing in it says who made it, and asking each driver in
+turn is both a fan-out and a guess. The wrapper makes that a field read.
+Wrapping also leaves the driver's own object entirely alone, so a driver that
+keeps state in the word ahead of its physical devices is not disturbed.
+
+*Against:* two mechanisms where one would do, and an allocation per physical
+device. The allocation happens once per instance, not per frame.
+
+**Decision 4 — `vkEnumerateInstanceExtensionProperties`,
+`vkEnumerateInstanceLayerProperties` and `vkEnumerateInstanceVersion` are not
+exported at all.** Not stubs returning empty lists — absent symbols. An
+application that calls one fails to link, naming it.
+
+*Alternative:* export all three, returning an empty extension list, an empty
+layer list, and version 1.0.
+
+*For omitting:* the extension enumeration's honest answer is the
+de-duplicated union of every registered driver's list, which is real work
+this loader has not done yet; layers need `dlopen`, which does not exist
+here; and the version depends on both. An empty list is not a smaller
+version of that answer, it is a different and false one — and it is false in
+the direction applications act on, because "no extensions" is a legitimate
+reply that a well-written program handles by degrading rather than by
+reporting a problem. The resulting bug report is about the *driver*, filed by
+a user whose machine has a perfectly good driver. This is the same defect
+lane C spent 2026-09-01 filing against `userspace/`
+(`requests/c-b-2288-userspace-tools-report-success-for-work-they-never-did.md`):
+a tool reporting success for work it never did. A link error names the
+missing thing at build time, to the one person who can act on it.
+
+*Against:* it makes the loader unusable by any application that calls those
+functions unconditionally — which is most of them — so the loader is not yet
+a drop-in. That is accurate: it is not.
+
+*Note on the boundary:* `vkGetInstanceProcAddr` returning null for a command
+it does not implement is **not** the same thing and is done freely. Null is
+the C API's defined answer to "do you have this?", so a null is information,
+whereas an empty extension list is an assertion.
+
+**A note on `clippy::vec_box`, and why it is suppressed here.** The physical
+devices are held as `Vec<Box<PhysicalDevice>>`, and clippy rejects that as an
+unnecessary indirection — `Vec<T>` is already on the heap. For an ordinary
+collection it would be right. It is wrong here for a reason that is not
+visible in the type: the *address* of each `PhysicalDevice` is the
+`VkPhysicalDevice` handle the application is given, and Vulkan requires an
+instance to report the same handles for its whole life. In a
+`Vec<PhysicalDevice>` every handle is an interior pointer into one buffer, so
+the next `push` — GPU hot-plug being the obvious future one — reallocates and
+every handle the application still holds dangles. The `Box` decouples each
+device's lifetime from the spine, which is what the C API already promises.
+
+This is the same shape as §577's note about `unnecessary_wraps`: the lint's
+suggested fix and the lint's premise are different claims, and here the
+premise ("the extra allocation buys nothing") is false because what it buys
+is address stability rather than storage. Suppressed at the three sites with
+the reasoning in-line rather than crate-wide, so that a fourth
+`Vec<Box<...>>` with no such contract behind it still gets caught. The
+stub driver in the tests boxes for the same reason and says so: an unboxed
+one would model a driver that relocates its physical devices, which no
+conforming driver may do, and the loader would then be tested against a
+driver it must never meet.
+
+**Where it lives:** `gui/vulkan/src/entry.rs` (the exported symbols, the
+process-wide registry and its spin lock, and the private `*_across` helpers
+that take a `&Registry` so every one of these cases is reachable from a
+registry a test builds) and `gui/vulkan/src/instance.rs` (`Instance`,
+`PhysicalDevice`, `array_query`, `outcome`).
+
+---
+
+
+## 579. The WiFi association loop lives in `net80211` behind a `Transceiver` trait, has no clock in it, and reports a link "established" without claiming it is encrypted
+
+**Date:** 2026-09-02
+
+**Lane:** C
+
+**Decided by:** Claude (autonomous), answering a fork lane A raised in
+`requests/a-c-hwsim-exists-but-the-glue-you-planned-lands-in-my-tree.md`
+
+**In short:** Connecting to a WiFi network is a fixed sequence — tune the
+radio, say hello, ask to join, then run the four-message exchange that proves
+both sides know the password and hands each side its keys. `net80211` already
+knew how to build and read every one of those messages, but not what order to
+send them in, and it has no way to reach a radio. Lane A built a fake radio in
+the kernel for testing and asked where the ordering code should go: in their
+tree, written against their fake radio, or in mine, written against an
+interface any radio can implement. It went in mine, as `net80211/src/assoc.rs`.
+
+### The fork
+
+Lane A's `kernel::net::hwsim` is a simulated radio: two virtual stations in
+one process, frames handed from one to the other in memory, with a real
+802.11 header check on the way through. It exists so the association can be
+tested without hardware. The question was who writes the ~50 lines that call
+`net80211` in the right order:
+
+- **Option 1 — lane A writes the loop** against `hwsim` directly, in
+  `kernel/`. Nothing new in `net80211`; the loop is written once, quickly, by
+  the person holding the radio.
+- **Option 2 — `net80211` grows a `Transceiver` trait** (a list of the five
+  things the loop needs from a radio: send, receive, install two kinds of key,
+  change channel), the loop stays in `net80211` written against the trait, and
+  lane A's tree gains an implementation of it for `hwsim` plus one call site.
+
+Option 2, for two reasons — the second of which is the one that actually
+settles it.
+
+**The loop is not glue.** It is the association state machine's outer half:
+which frame is legal in which phase, when a key becomes safe to install, what
+a deauthentication means. Behind a boundary lane C cannot cross, every change
+to the state machine's shape becomes a cross-lane request round trip. The
+trait costs one round trip once; option 1 costs one per change.
+
+**A real chipset driver has to do exactly what `hwsim` does.** Hand frames up,
+take frames down, install a pairwise and a group key, change channel. Under
+option 1 that driver would arrive to find the association logic already
+written against a *simulator*, in a file it is not, and would reimplement it —
+and the second implementation would drift from the first, which is how two
+radios end up disagreeing about when it is safe to install a key. Under option
+2 it is one more `impl` of a trait that already has a working implementation
+to copy from.
+
+*Against:* a trait is an indirection the simulator did not need, and the
+`impl` is work in a tree that would otherwise have needed none. Both are real
+and both are small; neither is recurring, which is the property that decides
+it.
+
+### Four deviations from lane A's sketched trait
+
+Lane A sketched the five methods and read the state machine correctly. Four
+things changed, each because the sketch made two different answers look alike:
+
+1. **`receive` returns `Result<Option<usize>, Self::Error>`, not
+   `Option<usize>`.** `hwsim`'s receive cannot fail, so its implementation is
+   `Ok(self.pop())` and nothing is lost — but a real radio can fail a read,
+   and *"no frame is waiting"* and *"the read failed"* are the two answers a
+   retry loop has to tell apart. Collapsed into one `None`, a radio that has
+   died is indistinguishable from a quiet channel, and the caller waits
+   forever.
+
+2. **A frame too large for the buffer is a named error, not a truncation.**
+   `Transceiver::Error` is required to be constructible `From<Oversized>`, so
+   every driver spells the condition the same way rather than each inventing
+   its own. The reason it must not truncate is specific: **a truncated 802.11
+   frame parses as a different, shorter, still-well-formed frame.** It is not
+   detectably damaged; it is a valid frame that nobody sent. That is the worst
+   available failure mode, and it is what a `receive` that copies `buf.len()`
+   octets produces.
+
+   *Alternative:* drop the oversized frame and return `Ok(None)`. *Against:*
+   a flood of oversized frames then looks exactly like an idle channel.
+
+3. **The driver is a step function, not a loop with a clock in it.**
+   `net80211` has no time source and is not given one: `Association::poll`
+   does at most one thing and says what it did, and the caller owns the loop
+   and its bound. Retransmission is a separate `retransmit` call, because
+   deciding that a request has gone unanswered *long enough* is a timing
+   decision and belongs to whoever has a timer.
+
+   *For:* the whole association is testable here with no timer and no
+   scheduler — the 25 tests in `assoc.rs` drive a complete association, a
+   group rekey, a deauthentication and a replay by calling `poll` in a loop.
+   *Against:* the caller writes three more lines than it would if an
+   `associate()` that blocked were offered instead. That is the correct place
+   for those three lines: only the caller knows whether it may block at all.
+
+4. **Buffers are the caller's, not the association's.** About eight kilobytes
+   across four arrays — too much for a kernel stack, and *where* it lives is a
+   decision this crate should not make. They are four separate fields rather
+   than one arena because three are live at once (a received frame is
+   decapsulated into the second while the reply is built in the third and
+   framed in the fourth), and overlapping them would be an aliasing bug that
+   only appears on the one frame long enough to reach across.
+
+`install_pairwise_key`, `install_group_key` and `set_channel` are exactly as
+lane A sketched them, including `set_channel` returning the channel it
+actually landed on rather than `()`. That return value is load-bearing:
+regulatory rules can forbid a channel the AP is legally using elsewhere, and
+some radios silently retune to the nearest permitted one. `Association::tune`
+compares it and fails with `Error::WrongChannel` rather than spending the
+caller's whole retry budget on frames nobody can hear.
+
+### What "established" claims, and what it does not
+
+`hwsim` does not encrypt — deliberately; lane A's §677 gives the reason, which
+is that a simulated medium implementing CCMP would be checking `net80211`'s
+cipher against itself and proving nothing. So a green run of this driver over
+`hwsim` proves **the frame exchange and the key schedule**: both ends derived
+the same PTK, the handshake reached `Complete`, and both keys were handed to
+the radio. It does **not** prove confidentiality.
+
+That distinction is written into the API rather than left to whoever reports
+the result: `Association::is_established` is documented as saying the keys are
+installed and explicitly not saying traffic is encrypted, and the module doc
+says the same. It must be honoured wherever the result is reported, including
+in `roadmap.md`.
+
+### Two smaller calls inside the same design
+
+- **A frame that is not ours is discarded, not an error.** A beacon from a
+  neighbouring BSS, a data frame for another station, an unparseable header —
+  all return `Step::Progressed`. On a shared medium those are the *expected*
+  case, and an association that failed on the first one would never complete
+  in a room with two access points. The check that makes this safe is the
+  narrow one: a management frame must be addressed to us **and** come from our
+  BSSID, or a neighbouring AP's association response would advance our state
+  machine.
+- **Any real failure is terminal and latched.** `poll` returns the error once
+  and moves to `Phase::Failed`; every later poll returns `Error::Aborted`.
+  The alternative — attempting recovery in place — would mean continuing to
+  talk to a peer that has discarded its side of the state, which after a
+  deauthentication is exactly what the AP has done. Starting again is a new
+  `Association`, which is also the only way to get a fresh SNonce, and reusing
+  an SNonce derives the same PTK twice.
+
+**Where it lives:** `net80211/src/assoc.rs` — the `Transceiver` trait,
+`Oversized`, `Buffers` and the `Association` step function. 25 tests, none of
+which touch hardware or a clock. `net80211/src/supplicant.rs` came off
+`scripts/orphan-modules-baseline.txt` as a result: it had been pinned as
+"the consumer is outside this tree", and the right answer turned out to be to
+write the consumer here.
 
 ---
 
@@ -60415,3 +61072,346 @@ would still pass if someone later collapsed the two codes back together at the
 asserts the SQE still *completes* — a ring that silently dropped an unknown
 opcode would hang a caller waiting on the completion, a worse failure than the
 ambiguity being fixed.
+
+---
+
+## §677 — the first wireless device is a simulated one, it does not encrypt, and it refuses a key reinstall
+
+**Date:** 2026-09-02
+**Lane:** A
+**Decided by:** Claude (autonomous), answering
+`requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`
+
+**In short:** WiFi is being built in four pieces and two of them are finished —
+the 802.11 wire format with its crypto, and the state machine that drives a
+station's join. Neither has ever run, because a *radio* is the third piece and
+there is no wireless hardware in QEMU to write a driver for. So the first
+wireless device in this OS is a **fake** one: a set of virtual radios with a
+shared "air" between them, which carries frames from one to another with no
+hardware anywhere. Linux has exactly this and calls it `mac80211_hwsim`. Three
+choices inside it are worth writing down: that it is a simulation rather than a
+chipset driver, that it deliberately does **not** encrypt, and that it
+deliberately **does** refuse to install the same key twice.
+
+### 1. A simulated radio before a real one
+
+**Alternatives:** (a) write a driver for a real chipset — Intel `iwlwifi`,
+Atheros `ath9k`, Realtek — and merge it untested; (b) wait for hardware and
+leave `net80211` unexercised; (c) build a simulated device now.
+
+(a) is forbidden by this project's own rules and rightly: QEMU emulates no
+wireless part and no PCI passthrough is set up here, so a chipset driver could
+be *written* but not *run*, and 3,000 lines of never-executed driver is not
+progress. (b) is what has been happening; the cost is that the boot test cannot
+exercise a single line of the 1,700 that landed for WiFi this week, and that
+lane B's supplicant service is blocked behind the same wall.
+
+(c) wins on a point that is easy to miss: a simulated device is not scaffolding
+to be thrown away when real hardware arrives. Linux keeps `mac80211_hwsim`
+permanently, because it is the only way to run *both ends* of a link on one
+machine — a real driver can never test the AP side, and can never run in CI.
+
+**Why lane A took it rather than handing it back.** The request offered: "say so
+and lane C will take it." Anything registering a network *device* is lane A's
+under the ownership map, and the module sits beside `net::veth`, which is the
+same shape (a virtual device with a bounded queue and no hardware) and whose
+conventions it reuses. Handing it back would have put a device driver in the
+graphics-and-apps lane to save lane A an hour.
+
+### 2. It does not encrypt — and says so loudly
+
+CCMP is performed by the radio on real hardware, which is exactly why the
+driver has to be *told* the key rather than handed encrypted frames. A
+simulated radio could either implement CCMP or record the key and pass frames
+through in the clear.
+
+**It records and passes through.** The reason is not effort — the AES and CMAC
+primitives are already in-tree from lane C. It is that implementing CCMP here
+would make a green run *look* like evidence of confidentiality while actually
+testing this module's own cipher against itself, on both ends of the same
+medium, with no independent implementation anywhere in the loop. That is a
+guard reporting a fact it has not checked.
+
+The honest boundary is stated in the module documentation and repeated here: a
+green association over this medium is evidence about the **frame exchange** and
+the **key schedule** — that both ends derive the same PTK and that the
+handshake reaches `Complete` — and is *not* evidence about confidentiality.
+When a real driver lands, its hardware does the encrypting and the question
+becomes answerable for real.
+
+**Cost accepted:** anyone reading "WiFi association passes" must read the
+caveat with it. Mitigated by putting the caveat in the module's first screen,
+not in a footnote.
+
+### 3. It refuses to install the same key twice
+
+Installing a key resets the packet number that CCMP uses as a nonce. Installing
+the *same* key again therefore rewinds the nonce space and leaks keystream —
+this is KRACK (Vanhoef & Piessens, CCS 2017), and it is a *driver* bug class,
+not a protocol one: the 4-way handshake is fine, and implementations broke by
+installing on a retransmitted message 3.
+
+Real hardware does as it is told, so a faithful simulation would too.
+**This one does not**: an install of byte-identical key material into the same
+slot returns `AlreadyExists`, counts the refusal, and leaves the packet number
+where it was.
+
+**Alternatives:** (a) faithfully permit it, and put the check in the
+supplicant; (b) permit it but log; (c) refuse.
+
+(a) is where the check belongs in production — and `net80211::supplicant`
+already has it, by construction: only `Outcome::Complete` means "install", and
+a retransmission yields `Outcome::Retransmission`. But a check that exists only
+in the caller is a check that the *next* caller will not have. A simulated
+radio is a test instrument, and a test instrument that quietly reproduces a
+known vulnerability when misdriven is worth less than one that stops.
+
+(b) was rejected because a log line in a 47,000-line boot log is not a failure.
+
+The property is pinned by a self-test that asserts all three halves separately —
+the error code, the refusal count, **and** that the packet number did not move.
+The third is the one that matters: a guard that refuses and rewinds anyway
+would pass a test that only checked the error code, and would still leak
+keystream.
+
+### 4. A full RX queue drops the newest frame, not the oldest
+
+A bounded queue must drop something. Dropping the *oldest* (head drop) keeps the
+most recent state, which is right for telemetry; dropping the *newest* (tail
+drop) preserves order, which is right for a protocol. A handshake whose message
+2 was silently discarded to make room for message 3 is a failure that looks like
+a state-machine bug and is not one, and it would be near-impossible to read from
+the far end. Tail drop, counted in `rx_dropped_full`, and the self-test walks one
+frame past the bound and checks that the frames kept are the first N *in order*.
+
+---
+
+## §678 — the `cfg(unix)` gate runs `clippy`, not `check`, at a measured ~2 min per boot test
+
+**Date:** 2026-09-02
+**Lane:** A
+**Decided by:** Claude (autonomous), answering
+`requests/b-a-cfg-unix-gate-should-lint-as-well-as-compile.md` (lane B filed it,
+measured it in situ, and explicitly left the call to lane A because lane A owns
+`scripts/boot-test.sh` and its time budget)
+
+**In short:** we all develop on Windows and ship on a Unix-like system, so code
+marked "Unix only" is deleted by the compiler on our machines and can be broken
+for months while every check here says green. A gate added three days ago closes
+that by compiling such code for Linux during the boot test. But several parts of
+this project declare style violations to be *fatal errors*, and a plain compile
+does not run the style checker — so the gate was reporting "the Unix-only code
+is fine" when all it had established was that it compiles. The gate now runs the
+style checker too. It costs about two extra minutes on every boot test, in all
+three lanes, and lane A pays that out of its own budget deliberately.
+
+### The decision
+
+One word in `check_cfg_unix`: `"$CARGO" check` → `"$CARGO" clippy`. Taken.
+
+### Why the half-gate was worse than it looks
+
+`#![deny(clippy::all)]` appears in several crates here. Nothing outside clippy
+reads that attribute, so a `cargo check` over a `cfg(unix)` arm containing a
+denied lint exits 0. The gate then printed
+
+    cfg(unix) OK (Ns, every cfg(unix) arm compiles).
+
+which is true, and which every reader of a boot log takes to mean *the cfg(unix)
+arms are checked*. That is the same class of error the gate was built to catch,
+one level up: a green light standing for a check that was not performed. The
+existing instance — `utimecmp.rs:370:32`'s `#[allow(clippy::modulo_one)]`, whose
+removal makes `cargo clippy -p coreutils` exit 101 — is lane B's demonstration
+that the residue is reachable, and that no `--all-targets` is needed to reach it.
+
+### The cost, and why I re-measured a number lane B had already measured
+
+Lane B measured `clippy` in situ in a full boot test at **236 s** and offered it
+as the decisive figure. It is the right figure for "what does the gate cost", but
+it is the wrong figure for "what does the *change* cost", because the gate
+already spent time on `cargo check` — historically 9–416 s in situ, from this
+tree's own boot logs. The quantity that matters is the delta, and nobody had it.
+
+Measured in `os-lane-a` on 2026-09-02, all three exit 0:
+
+| Run | Time |
+|---|---|
+| `cargo clippy --workspace --target x86_64-unknown-linux-gnu`, cold | 793 s |
+| the same, immediately again | 156 s |
+| `cargo check --workspace --target x86_64-unknown-linux-gnu`, run *after* both | 336 s |
+
+The third row is the one worth pausing on. It ran third, after two full clippy
+passes over the identical workspace and target, and it still took 336 s — because
+clippy sets `RUSTC_WORKSPACE_WRAPPER`, which is hashed into every workspace
+unit's fingerprint, so the two commands maintain parallel artifact sets that
+never reuse or invalidate each other. This is lane B's explanation, and the
+measurement is what turns it from an explanation into an observation.
+
+So: **~+2 min steady-state per boot test** (lane B's 236 s against a ~100 s
+median in-situ `check`), plus a **one-time ~13 min** in each lane's worktree the
+first time the new artifact set is populated. Against a boot test whose QEMU
+window alone is 400–900 s, that is roughly a 10–15 % addition.
+
+Two further facts made the call easy rather than close:
+
+- **It exits 0 in lane A's tree today**, measured here and not merely reported.
+  Adopting it does not turn anything red on contact, so the cross-lane objection
+  is answered empirically for the current tree rather than by argument.
+- **Reversal is one word.** Nothing accumulates; there is no migration to undo.
+
+### Alternatives
+
+- **Decline, keep `check`.** *What changes:* boot tests stay ~2 min shorter and a
+  denied lint in a `cfg(unix)` arm remains invisible to every check in the tree.
+  Rejected: the saving is small next to what the gate is for, and a gate that
+  overstates its own coverage is worse than no gate, because it stops anyone
+  looking.
+- **`clippy --all-targets`.** Would additionally lint `cfg(unix)` code inside
+  `#[cfg(test)]` modules, where a good deal of `userspace/**`'s lives. Rejected
+  and not attempted: lane B measured it exiting 101 after 218 s having linted
+  nothing, because it builds a test harness for `kernel`, which is `no_std` with
+  its own `#[panic_handler]` — `E0152: found duplicate lang item panic_impl`.
+- **A per-crate sweep excluding the `no_std` crates.** Would close that residue.
+  Rejected for the reason lane B gave and I agree with: it needs a crate list, a
+  crate list drifts, and this gate's whole value is being one command with
+  nothing in it to go stale.
+- **`-p kernel` only, matching `check_kernel_clippy`'s "each lane gates its own
+  code" principle.** Rejected: the gate was `--workspace` from the day it was
+  written, so the verb does not introduce the coupling; and scoping it to
+  `kernel` would gate the one crate that has almost no `cfg(unix)` code while
+  skipping `userspace/**`, where all of it lives.
+
+### The risk accepted, which lane B did not name
+
+Lane B's three arguments against the cross-lane objection are that the coupling
+already exists, that the verb adds no warnings, and — the one they found
+decisive, and so do I — that a green boot test gates every merge to `main`, so
+the lane introducing a denied lint hits it first.
+
+That covers lint failures *someone introduces*. It does not cover the case where
+nobody changes anything: **a toolchain update can add a lint to `clippy::all` and
+turn all three lanes red simultaneously.** `check` has a weaker version of this
+hazard, but rustc's error set is far more stable than clippy's lint set, so this
+is a genuinely new failure mode and not merely a louder one. I am accepting it
+because the blast radius is one word of revert and because the alternative is to
+keep a gate that lies about its coverage — but it is accepted, not absent, and it
+is written up in `known-issues.md` so that whoever meets it recognises it in one
+read instead of bisecting a toolchain.
+
+### Also changed
+
+The failure message, at lane B's request and for a real reason: the log's
+character changes. A *passing* run now prints on the order of 18,000
+pedantic-level warnings, so a reader who greps for trouble and finds "warning"
+everywhere will conclude the gate misfired. The message now says explicitly that
+warnings are not why it failed, and separates the two failure kinds —
+`error[E0433]`-style codes are compile failures, a bare `error: <lint text>` is a
+clippy denial that is fatal only because the crate says `#![deny(clippy::all)]`.
+
+---
+
+## §679 — a cgroup charge reference carries the slot's generation, and a stale uncharge is dropped rather than applied
+
+**Date:** 2026-09-02. **Decided by:** Claude (autonomous). **Lane:** A.
+
+**In short:** Memory pages remember which resource group paid for them, so the
+right group gets credited when the page is freed. But a group can be deleted
+while pages it paid for are still in use, and its slot number is then handed to
+a *different* group — so the credit went to a group that never allocated the
+page. That group's accounting then read lower than its real usage and its
+memory cap quietly stopped being enforced. The fix pairs the slot number with a
+counter that ticks every time the slot is reused, so a credit aimed at a group
+that no longer exists is recognised and thrown away instead of landing on a
+stranger. Closes the known-issue
+`TD-A-FRAMES-OUTLIVE-THEIR-CGROUP-AND-UNCHARGE-A-RECYCLED-SLOT`.
+
+### The decision
+
+`mm::frame`'s per-frame charge record changes from a bare `u8` cgroup id to a
+`u32` **charge tag**: the low 8 bits are the id, the upper 24 the slot's
+generation, which `CgroupNode::init` bumps on every create.
+`cgroup::mem_uncharge_tag` redeems a tag and drops the uncharge when the
+generations disagree, counting the drop in `stale_uncharges_dropped()`.
+
+### The charge and its tag come from one lock acquisition
+
+The obvious API — charge with `mem_charge`, then ask `tag_for` what to record —
+is wrong here, and the reason generalises past this fix. `mem_charge` uses
+`try_lock` and returns `Ok(())` **without charging** when contended, because
+frame allocation can run in interrupt context and blocking there would
+deadlock. So "did the charge happen?" is not something the caller can infer,
+and a second lock acquisition to fetch the tag can disagree with the first in
+*both* directions: a charge that succeeded gets recorded with no tag and is
+never released (a permanent over-count that tightens a live limit), and a
+charge that silently no-opped gets recorded with a valid tag and is uncharged
+anyway (an under-count that loosens one). The second is the very failure this
+entry is about, reintroduced by the fix for it.
+
+The fix is `mem_charge_tagged`, which performs the charge and mints the tag
+under one acquisition and returns `TAG_NONE` for every path that did not
+charge — so the answer to "was it charged?" and the answer to "what do I store
+to release it?" are the same value and cannot drift apart. `mem_charge` is now
+a thin wrapper over it, and `tag_for` survives only for callers that want to
+*predict* or compare a tag with no charge attached, which in practice means the
+self-tests. This is the general shape for any two-call API sitting behind a
+`try_lock` that can succeed without doing the work.
+
+### Why dropping is the right answer, and not a lesser one
+
+Dropping looks like losing information, so it is worth being explicit that it
+is not. The group that owed the charge is gone and its counters went with it,
+so there is no correct account left to credit. The group holding the slot now
+never allocated the frame. Debiting it is not "approximately right" — it is
+strictly worse than doing nothing, because it drives that group's `mem_usage`
+*below* its true usage, and an under-count is the one direction that makes a
+`MemLimit` admit allocations it should reject. A limit that fails open is a
+worse failure than a charge that goes unrecorded on a group that no longer
+exists.
+
+### Why 24 bits of generation, and why the array got four times bigger
+
+The tag has to be wide enough that it cannot alias. With 24 bits, two tags
+collide only if one slot is reused 2^24 = 16.7 million times — roughly 4.3
+billion cgroup creations, given round-robin over 255 usable slots — while a
+frame charged before the turn is still unfreed.
+
+The cost is real and was weighed: the per-frame array goes from 1 byte to 4 per
+16 KiB frame, i.e. from 1/16384th of RAM to 1/4096th. On 8 GiB that is 512 KiB
+→ 2 MiB. A `u16` tag (8 bits of generation) would have cost only 1 MiB, and was
+rejected: 256 reuses per slot is about 65,000 cgroup creations, which a
+long-running container host reaches, and the failure it would reintroduce is
+the same silent accounting drift — but now needing 65,000 creations to
+reproduce, which is far harder to diagnose than the bug being fixed. Spending
+1 MiB to retire the failure class outright, rather than to move it somewhere
+harder to find, is the better trade.
+
+### The two cheaper fixes that were rejected
+
+Both were named in the known-issue and both are worse:
+
+- **Refuse to delete a group while `mem_usage > 0`.** This makes deletion
+  depend on unrelated tasks' page lifetimes: a group could stay undeletable
+  indefinitely because some other process is sitting on a page it once
+  charged. It converts an accounting bug into a liveness bug.
+- **Walk the per-frame array on delete and clear stale entries.** Correct, but
+  O(all RAM) per delete — on 8 GiB that is half a million entries scanned every
+  time a container goes away.
+
+### On testing a bug with no known trigger
+
+The known-issue recorded that nothing during boot deletes a memory-charged
+cgroup, which is why this was latent debt rather than a live fault. A fix for an
+untriggerable bug is easy to get wrong and impossible to notice, so the
+self-test drives the **real** reuse path rather than simulating it: it charges a
+frame to a group, deletes the group while the frame is live, then walks
+`next_id` all the way around the ring with create/delete until `create` hands
+back that very slot, and only then frees the frame. It asserts three things —
+the heir's usage is untouched, the drop was counted, and the per-frame record
+was still cleared — plus that the two tags actually differ, which is what would
+catch the guard being inert because the generation never advanced.
+
+`stale_uncharges_dropped()` is deliberately a counter rather than a silent
+correction. A non-zero value is the fix working, but a climbing one means
+something upstream is holding frames past the lifetime of the group that paid
+for them, and that is worth being able to see even though the accounting is now
+correct either way.

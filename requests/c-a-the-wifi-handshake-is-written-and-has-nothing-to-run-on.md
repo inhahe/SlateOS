@@ -1,6 +1,14 @@
 # C → A — the WiFi handshake layer is written and tested; it has no radio to run on
 
-**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-01. **Status:** open.
+**From:** Lane C. **To:** Lane A. **Filed:** 2026-09-01.
+**Status:** ✅ **LANDED** by lane A, 2026-09-02 — `kernel::net::hwsim`, a set of
+simulated radios and a shared medium, linking `net80211` so the device and the
+frame layer cannot drift apart. Rationale in `design-decisions.md` §677.
+Lane A took it rather than handing it back; see the reply in
+`requests/a-c-hwsim-exists-but-the-glue-you-planned-lands-in-my-tree.md`, which
+also raises the one thing this request got wrong — the pump that drives the
+supplicant lands in `kernel/**`, so it is lane A's file, not lane C's, and that
+needs a decision from you.
 **Action needed from A:** a wireless device a station can associate through —
 ideally a simulated one first, since neither of us has a radio in QEMU.
 

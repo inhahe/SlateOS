@@ -1373,14 +1373,35 @@ Roadmap:
   `hmac/` (HMAC, PBKDF2), and `net80211::supplicant` — the station-side state
   machine that drives scan → auth → assoc → 4-way handshake → group rekey →
   data encapsulation, with the KRACK key-reinstallation defence expressed as
-  an `Outcome` variant rather than a comment. 194 tests against the published
-  vectors, including IEEE 802.11-2020 Annex J. One piece remains and it is
-  hardware-gated: a **wireless driver** (lane A — there is no radio in QEMU
-  and no `mac80211_hwsim` equivalent, so nothing can carry these frames
-  anywhere). Requested in
-  `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`,
-  which asks for a *simulated* device first so the join can be run end to end;
-  it also offers to let lane C build it if lane A would rather not.
+  an `Outcome` variant rather than a comment. 194 tests across the three
+  crates against the published vectors, including IEEE 802.11-2020 Annex J.
+
+  `net80211::assoc` now closes the loop above it: a `Transceiver` trait (the
+  five things the association needs from a radio — transmit, receive, install
+  a pairwise key, install a group key, set the channel) and an `Association`
+  **step function** that owns the frame ordering from tuning the radio to
+  installing both keys. It has no clock in it — `poll` does at most one thing
+  and says what it did, and `retransmit` is separate, because deciding that a
+  request has gone unanswered *long enough* belongs to whoever holds a timer.
+  25 tests drive a complete association, a group rekey, a deauthentication and
+  a deliberate replay of message 3 (which re-sends message 4 and does **not**
+  reinstall the key) with no hardware and no scheduler. See **§579**.
+
+  Remaining: an `impl Transceiver` in lane A's tree over their
+  `kernel::net::hwsim` simulated radio, plus one call site in the boot test —
+  agreed in `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`
+  and specified in `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`.
+  After that, a real wireless driver, which is one more `impl` of the same
+  trait rather than a second copy of the loop.
+
+  **What a green hwsim run will prove, stated exactly:** the frame exchange
+  and the key schedule — both ends derived the same PTK, the handshake reached
+  `Complete`, and both keys were handed to the radio. It will **not** prove
+  confidentiality: `hwsim` does not encrypt, deliberately (lane A's §677 — a
+  simulated medium implementing CCMP would be checking `net80211`'s cipher
+  against itself). `Association::is_established` is documented to make the
+  narrower claim, and it must not be reported as the wider one here or
+  anywhere else.
 - `[C]` Port FreeRDP (line ~5058)
 - `[C]` Container runtime / Docker equivalent (lines ~5253, ~5315)
 - `[C]` System web app framework (line ~5045) — after Chromium
@@ -2641,13 +2662,38 @@ _Port ext4 first. Don't write a custom filesystem._
     only `Complete` authorises installing a key, and a retransmitted M3
     returns `Retransmission`, so a caller that matches on the enum cannot
     reinstall a key — and so replay a CCMP nonce — by accident. 32 tests
-  - [ ] Wireless driver — **blocked on lane A.** There is no radio and no
-    `mac80211_hwsim` equivalent, so nothing yet carries these frames.
-    Requested in
-    `requests/c-a-the-wifi-handshake-is-written-and-has-nothing-to-run-on.md`
-  - [ ] End-to-end association in the boot test — lane C's, and gated purely
-    on the line above: with a simulated device, scan → join → handshake →
-    an ARP exchange over the encapsulated data path becomes testable
+  - [x] `net80211::assoc`: the outer half of that state machine — the
+    `Transceiver` trait (transmit, receive, install a pairwise key, install a
+    group key, set the channel) and an `Association` **step function** that
+    owns the frame ordering: tune → auth → assoc → the AP-driven handshake →
+    both keys installed → data. No clock in it — `poll` does at most one
+    thing and reports what it did, and `retransmit` is a separate call
+    because "long enough to have been lost" is a timing decision that belongs
+    to whoever holds a timer. `receive` returns `Result<Option<usize>, _>` so
+    "nothing waiting" and "the read failed" cannot arrive as one value, and
+    an oversized frame is a named `Oversized` error rather than a truncation,
+    because a truncated 802.11 frame parses as a different, shorter,
+    still-well-formed frame. A frame that is merely not ours is discarded,
+    not failed; any real failure is terminal and latched. 25 tests drive a
+    complete association, a group rekey, a deauthentication and a deliberate
+    replay of message 3 — which re-sends message 4 and does *not* reinstall
+    the key — with no hardware and no scheduler. See **§579**
+  - [ ] `impl Transceiver for HwsimRadio` — **lane A's**, over their
+    `kernel::net::hwsim` simulated radio, plus one call site in the boot
+    test. Agreed in
+    `requests/c-a-option-2-the-transceiver-trait-is-mine-and-i-am-writing-it-now.md`;
+    the landed signatures are in
+    `requests/c-a-the-transceiver-trait-has-landed-here-are-the-signatures.md`
+  - [ ] End-to-end association in the boot test — gated purely on the line
+    above: scan → join → handshake → an ARP exchange over the encapsulated
+    data path. **What a green run will prove, stated exactly:** the frame
+    exchange and the key schedule — both ends derived the same PTK, the
+    handshake reached `Complete`, both keys were handed to the radio. It will
+    **not** prove confidentiality; `hwsim` does not encrypt, deliberately
+    (lane A's §677), and `Association::is_established` is documented to make
+    only the narrower claim
+  - [ ] Real wireless driver — one more `impl Transceiver`, not a second copy
+    of the association loop. Still hardware-gated: there is no radio in QEMU
 
 ### 2.5 POSIX compatibility layer
 - [-] `[B]` Enough of POSIX libc for: gcc, coreutils, bash, Python (CPython)
@@ -6211,6 +6257,9 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
   - [x] `[A]` **Scanout works on the GL-capable device too** (`SLATE_GPU=virtio-gpu-gl-pci ./scripts/boot-test.sh`, which also switches the display backend to `egl-headless` and marks the run an experiment). On a device offering `VIRTIO_GPU_F_VIRGL` the framebuffer is created with `RESOURCE_CREATE_3D` + the `SCANOUT` bind, because QEMU's `RESOURCE_CREATE_2D` hardcodes `bind = RENDER_TARGET` and virglrenderer will not give a non-`SCANOUT` resource the shared D3D11 texture that `SET_SCANOUT` requires on Windows — previously `ERR_INVALID_RESOURCE_ID` (0x1203) and no primary display. design-decisions.md §243; known-issues.md 2026-08-19 RESOLVED. The default device is unchanged.
   - [x] `/dev/dri/card0` + `renderD128` bound to the primary GPU device (`drm::primary_device`), so a libdrm/Mesa client's render node targets the GPU rather than the fallback dumb framebuffer.
   - [~] **Acceleration payoff gated on Q18** (open-questions.md): real 3D/virgl needs a virgl-capable test env (`virtio-gpu-gl` + host GL/display + virglrenderer — ~~the headless CI is 2D-only~~ **no longer true as of 2026-08-19: `SLATE_GPU=virtio-gpu-gl-pci` boots the GL device green under `egl-headless`, see the entry two lines above**) **and** the Mesa port (§4583, a large external C port needing operator go-ahead). So only the Mesa half of this gate is still standing. Next kernel-side step (render-ioctl dispatch with honest no-3D reporting) is option B in Q18, available on request. Note the driver still issues no `CTX_CREATE`/`SUBMIT_3D` — it uses one 3D command to allocate a scannable framebuffer and nothing else, so "the GL device boots" is not "3D renders".
+  - [-] **`gui/vulkan/` — crate `vkloader`, the loader's userspace half.** Started 2026-09-02. The two Loader–Driver Interface rules whose failure mode is memory corruption rather than an error, written against the Khronos spec text and `vk_icd.h` rather than from memory (which had `vk_icdGetPhysicalDeviceProcAddr` at version 3; it is 4). `icd`: `InterfaceVersion` — a newtype with seven capability predicates and no public integer — plus the pure `settle()` that resolves a driver's handshake reply, clamping a driver that over-claims down to the loader's offer and distinguishing `VK_ERROR_INCOMPATIBLE_DRIVER` ("skip this driver") from a real failure. `dispatch`: the dispatchable-handle layout, `ICD_LOADER_MAGIC` with the mandatory 32-bit mask, and `adopt()` — the only way to write a handle's dispatch word, and it checks the magic first; there is deliberately no unchecked counterpart. 70 tests. design-decisions.md §577, §578. Instance-level Vulkan is exported as of the same day (see the fan-out child below); **the three `vkEnumerateInstance*` commands are still not exported, on purpose** — a loader that exports one before it can answer it honestly reports success for work it never did. Device-level Vulkan (`vkCreateDevice` and everything a `VkDevice` dispatches) is the next layer and needs a per-driver *device* dispatch table rather than the one instance-level table `entry` has today. Drivers are registered statically because `posix/src/dlfcn.rs`'s `dlopen` returns null; manifest/JSON discovery is deferred to when dynamic linking exists, and its parser belongs in `textfmt`.
+    - [x] **ICD registry** (`registry`, `vk`): `handshake()` — the loader's whole FFI surface for negotiation, which decides nothing and returns a `DriverReply` — plus `Registry::admit`, which decides everything and needs no driver, so the interesting cases (over-claims, refuses, fails with an unrecognised code, succeeds *without writing* the in/out word) are all testable. **The version gate is enforced by construction**: `Driver` never exposes the entry points it was given, only `instance_proc_addr()` and `physical_device_proc_addr()`, which apply the settled version first — a driver that offers `vk_icdGetInstanceProcAddr` but settles at 0 does not get called through it, and the version-4 gate is tested at 3 *and* 4. Rejections are kept rather than discarded, because "no devices found" from a driver that refused, from one that failed with a code only the loader saw, and from nothing being registered are three different problems with the same symptom. `vk` declares only the six Vulkan C types the loader's own signatures cannot avoid; `VkResult` is a plain `i32`, not an enum, because a driver may return an extension code this loader has never heard of.
+    - [x] **`vkCreateInstance` fan-out across the registry, and physical-device aggregation** (`entry`, `instance`) — done 2026-09-02, verified against stub ICDs written to the spec rather than to this loader (one refusing, one with no `vkCreateInstance`, one reporting success while writing nothing, one returning an unstamped instance, one that creates instances but cannot list devices). `entry` is the composition root: the only module naming a `static`, holding the process-wide `Registry` behind a private spin lock (the crate has no dependencies, and no reusable lock exists in the tree). **Exported:** `vkGetInstanceProcAddr`, `vkCreateInstance`, `vkDestroyInstance`, `vkEnumeratePhysicalDevices`, plus SlateOS's own `vk_slateosRegisterDriver`. **Deliberately absent symbols** — not empty-list stubs — are `vkEnumerateInstanceExtensionProperties` (its honest answer is the de-duplicated union of every driver's list), `vkEnumerateInstanceLayerProperties` (loading a layer needs `dlopen`) and `vkEnumerateInstanceVersion` (depends on both): an application that calls one fails to *link*, naming it, rather than being told there is nothing available and filing a bug against the driver. Three policy positions, each argued in-code because the LDI is silent on all three (its only normative fan-out rule is `LDP_LOADER_1`): a driver returning `>= VK_SUCCESS` with a null handle is disbelieved and recorded as `VK_ERROR_INITIALIZATION_FAILED`; one driver returning an instance without `ICD_LOADER_MAGIC` sinks the whole call after every created instance is destroyed, rather than being skipped; and physical devices are *wrapped* in a loader-owned object carrying the driver index — because a bare `VkPhysicalDevice` arriving at an entry point is un-attributable across several drivers — while instances are *adopted*, which is what the LDI describes and is the loader's only chance to catch a driver that never stamped. The `create_across`/`destroy_across`/`enumerate_across` helpers take a `&Registry`, so every one of those cases is reachable from a registry a test builds, with no global state and no real driver. design-decisions.md §578.
 - [ ] `[C]` OpenGL via Mesa (port Mesa's Vulkan and OpenGL drivers)
 - [-] `[C]` 2D drawing library: Vello (Rust-native, GPU compute shaders) + HarfBuzz via FFI for complex text shaping
   - [x] **Font engine** (`gui/font/src/{sfnt,raster,scaled}.rs`) — the GPU-independent half. sfnt/TrueType container parser (`head`/`hhea`/`maxp`/`hmtx`/`loca`/`glyf`/`cmap` formats 0/4/12, composite glyphs), anti-aliased signed-area rasterizer (analytic coverage, non-zero winding, bounds-clipped because font files are untrusted input), and `ScaledFont` — glyph cache, derived metrics, `measure`/`wrap`/`draw_text` plus an 8-bit-coverage blitter. Replaces the single procedural 8x16 bitmap face the entire UI was capped at. Verified three ways: synthetic fixture, 556 host fonts (538 opened, 18 CFF rejected cleanly, 563k outlines walked, 68k glyphs rasterized at two sizes, zero panics), and ASCII-art rendering that proves letters look like letters (an ink count cannot tell a correct 'o' from a scrambled one). Tradeoffs in design-decisions.md §438.

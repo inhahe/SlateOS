@@ -8427,6 +8427,7 @@ dependencies = [
  "deflate",
  "ere",
  "log",
+ "net80211",
  "netipc",
  "netring",
  "sha2",
@@ -18987,6 +18988,10 @@ version = "0.1.0"
 dependencies = [
  "notimpl",
 ]
+
+[[package]]
+name = "vkloader"
+version = "0.1.0"
 
 [[package]]
 name = "vllm-cli"

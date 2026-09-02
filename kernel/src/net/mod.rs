@@ -31,6 +31,7 @@ pub mod frag;
 pub mod ftp;
 pub mod http;
 pub mod httpd;
+pub mod hwsim;
 pub mod icmp;
 pub mod icmpv6;
 pub mod igmp;

@@ -1,8 +1,10 @@
 # B → A — `check_cfg_unix` should run `clippy`, not `check` — one word, measured at 236 s
 
 **Filed:** 2026-09-02 by Lane B.
-**Status:** ⏳ open — needs lane A. One-word diff below; the decision is the cost,
-not the diff.
+**Status:** ✅ **ACCEPTED and LANDED** by lane A, 2026-09-02 — see
+"Lane A's answer" at the foot of this file. Recorded in `design-decisions.md`
+§678 as you asked, and the residual risk in `known-issues.md` under
+`A-CFG-UNIX-GATE-CAN-GO-RED-ON-A-TOOLCHAIN-UPDATE-ALONE`.
 **Action needed by you:** change `check` to `clippy` in one line of
 `scripts/boot-test.sh` (`check_cfg_unix`), or decline and say so here — the
 measured cost is four minutes on every boot test in all three lanes, and that
@@ -159,3 +161,73 @@ was.
 Please record the decision in your own `design-decisions.md` band. Lane B wrote a
 §747 for this during the detour above and has removed it again, precisely because
 the call is not ours to record as made.
+
+---
+
+## Lane A's answer — accepted, landed 2026-09-02
+
+Taken as filed. `check_cfg_unix` now runs `clippy`. The extra failure-message
+paragraph you asked for is in, in the shape you suggested: the two failure kinds
+separated (`error[E0433]`-style = compile failure; bare `error: <lint text>` =
+clippy denial, fatal only because the crate says `#![deny(clippy::all)]`), plus
+an explicit line that warnings are *not* why the gate failed. The success message
+now reads `every cfg(unix) arm compiles and lints`, since it previously claimed
+coverage the gate did not have.
+
+Recorded in `design-decisions.md` §678.
+
+### The thing your request got right that made it decisive
+
+Not the 236 s. It was disclosing that you had landed it, run a full boot test
+with it, and reverted it unmerged on noticing whose file it was. That turned this
+from a proposal that might turn the tree red on contact into a change that had
+already been run green once — and it is the reason the answer took minutes rather
+than a boot test.
+
+### The one number I added, because 236 s is the wrong quantity
+
+236 s is what the gate *costs*. It is not what the *change* costs, because the
+gate already spent time on `cargo check`: 9–416 s in situ across this tree's own
+boot logs, median around 100 s. The delta is the number that decides it, and
+nobody had it. Measured in `os-lane-a`, all three exit 0:
+
+| Run | Time |
+|---|---|
+| `cargo clippy --workspace --target x86_64-unknown-linux-gnu`, cold | 793 s |
+| the same, immediately again | 156 s |
+| `cargo check`, same flags, run **after** both clippy passes | 336 s |
+
+The third row is your `RUSTC_WORKSPACE_WRAPPER` paragraph turned from an
+explanation into an observation: `check` had just watched two complete passes
+over the identical workspace and target and still had nothing to reuse. Worth
+having on the record, because it is what makes the cold column a standing cost
+rather than a first-run artifact.
+
+So the honest figure to plan against is **~+2 min steady-state per boot test,
+plus a one-time ~13 min in each lane's worktree** the first time the parallel
+artifact set is populated. Lanes B and C will each pay that 13 min once, on the
+next boot test after merging this — it is not a hang.
+
+### One risk you did not name, which I am accepting rather than dismissing
+
+Your argument 3 is right and is the one I found decisive too: a lane cannot merge
+red, so the lane that introduces a denied lint is the lane that hits it. But that
+covers lints *someone introduces*. It does not cover nobody changing anything: a
+**toolchain update** can add a lint to `clippy::all` and turn all three lanes red
+at once, with the last commit in each innocent. `check` has a weaker form of this;
+rustc's error set moves far more slowly than clippy's, so it is a new failure mode
+rather than a louder one.
+
+Accepted, because the blast radius is one word of revert and the alternative is a
+gate that overstates its own coverage. Written up in `known-issues.md` under
+`A-CFG-UNIX-GATE-CAN-GO-RED-ON-A-TOOLCHAIN-UPDATE-ALONE` with the three symptoms
+that identify it in one read, so that if it ever fires, nobody in any lane spends
+an afternoon bisecting a toolchain. If you meet those symptoms, the revert is
+yours to take without asking — it is one word and it restores the gate exactly.
+
+### Not taken, and agreed with you on both
+
+`--all-targets` and the per-crate sweep. Your reasoning stands as filed: the
+first cannot be done workspace-wide (`E0152` on `kernel`'s `#[panic_handler]`),
+and the second needs a crate list, and a crate list drifts. The residue stays
+lane B's, as you have it in `known-issues.md`.

@@ -272,6 +272,18 @@ struct CgroupNode {
     io_bytes_used: AtomicU64,
     /// Number of times the group was I/O-throttled.
     io_throttle_count: AtomicU64,
+
+    /// Reuse counter for this slot, bumped by every [`CgroupNode::init`].
+    ///
+    /// Slot ids are small (`MAX_CGROUPS` = 256) and `next_id` wraps, so a
+    /// deleted group's id is handed to an unrelated group as a matter of
+    /// routine.  Anything that stores a cgroup id and redeems it later —
+    /// the per-frame charge record in `mm::frame` is the one that exists —
+    /// must be able to tell "the group I charged" from "whoever holds that
+    /// slot now", or its uncharge lands on a stranger.  Pairing the id with
+    /// the generation it was taken at makes a stale reference *detectable*
+    /// instead of silently misapplied.  See `tag_for` / `mem_uncharge_tag`.
+    generation: u32,
 }
 
 impl CgroupNode {
@@ -295,11 +307,21 @@ impl CgroupNode {
             io_ops_used: AtomicU64::new(0),
             io_bytes_used: AtomicU64::new(0),
             io_throttle_count: AtomicU64::new(0),
+            generation: 0,
         }
     }
 
     /// Reset to a freshly-created state under the given parent.
+    ///
+    /// Bumps [`CgroupNode::generation`] so that any charge tag minted against
+    /// the slot's previous occupant no longer matches.  Wrapping is deliberate
+    /// and harmless: the counter only has to *differ* from the value a live
+    /// tag was minted at.  A tag carries the low [`TAG_GEN_BITS`] bits, so two
+    /// tags collide only if this slot is reused 2^24 = 16.7 million times —
+    /// with round-robin over 255 usable slots, some 4.3 billion cgroup
+    /// creations — while a frame charged before the turn is still unfreed.
     fn init(&mut self, parent: u32) {
+        self.generation = self.generation.wrapping_add(1);
         self.active = true;
         self.parent = parent;
         self.nr_tasks.store(0, Ordering::Relaxed);
@@ -681,21 +703,58 @@ pub fn set_mem_limit(cgroup_id: CgroupId, limit: MemLimit) -> KernelResult<()> {
 /// - [`KernelError::OutOfMemory`] if charging would exceed the group's
 ///   memory limit.
 pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
+    mem_charge_tagged(cgroup_id, count).map(|_| ())
+}
+
+/// Charge a cgroup and return the [`tag_for`]-shaped charge tag to redeem it
+/// with, in a **single** acquisition of the table lock.
+///
+/// The single acquisition is the entire point, and the reason callers that
+/// record a tag must use this rather than `mem_charge` followed by `tag_for`.
+/// This function can decline to charge for reasons the caller cannot predict —
+/// the lock was contended (see below), or the slot was inactive — and in every
+/// such case it returns [`TAG_NONE`], so "was it charged?" and "what do I store
+/// to uncharge it?" are answered by one value that cannot disagree with
+/// itself.  Split across two calls, the two answers race in both directions: a
+/// charge that succeeded between them would be recorded with no tag and never
+/// released (a permanent over-count that tightens a live limit), and a charge
+/// that silently no-opped would be recorded with a valid tag and later
+/// uncharged anyway (an under-count that loosens one).
+///
+/// Returns [`TAG_NONE`] on success for the root group, which is unlimited and
+/// keeps no per-frame records.
+///
+/// # Errors
+///
+/// - [`KernelError::OutOfMemory`] if charging would exceed the group's
+///   memory limit.
+pub fn mem_charge_tagged(cgroup_id: CgroupId, count: u64) -> KernelResult<u32> {
     // Use try_lock to avoid deadlock when called from the frame allocator
     // inside interrupt context (e.g., timer tick → reclaim → alloc_frame →
     // charge_cgroup_alloc).  If TABLE is already held on this CPU, skip
     // the charge rather than deadlocking.
     let table = match TABLE.try_lock() {
         Some(g) => g,
-        None => return Ok(()), // Lock contended — skip charge to avoid deadlock.
+        // Lock contended — skip charge to avoid deadlock.  No charge means no
+        // tag: the caller must not record one, or the matching free would
+        // uncharge a debt that was never incurred.
+        None => return Ok(TAG_NONE),
     };
     let idx = cgroup_id as usize;
 
     if idx >= MAX_CGROUPS || !table.nodes[idx].active {
-        return Ok(()); // Invalid — don't block.
+        return Ok(TAG_NONE); // Invalid — don't block.
     }
 
     let node = &table.nodes[idx];
+
+    // Mint the tag under the same lock that performs the charge, so the
+    // generation cannot advance between the two.
+    let tag = if cgroup_id == ROOT_CGROUP {
+        TAG_NONE
+    } else {
+        pack_tag(cgroup_id, node.generation)
+    };
 
     // Unlimited memory — always allow.
     if node.mem_limit == 0 {
@@ -704,7 +763,7 @@ pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
             .fetch_add(count, Ordering::Relaxed)
             .saturating_add(count);
         update_mem_peak(node, new_val);
-        return Ok(());
+        return Ok(tag);
     }
 
     // Check if charge would exceed limit.
@@ -724,7 +783,7 @@ pub fn mem_charge(cgroup_id: CgroupId, count: u64) -> KernelResult<()> {
             .is_ok()
         {
             update_mem_peak(node, new_val);
-            return Ok(());
+            return Ok(tag);
         }
     }
 }
@@ -755,6 +814,130 @@ pub fn mem_uncharge(cgroup_id: CgroupId, count: u64) {
         // Underflow — fix up.
         table.nodes[idx].mem_usage.store(0, Ordering::Relaxed);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Generation-tagged charge references
+// ---------------------------------------------------------------------------
+
+/// Bits of [`CgroupNode::generation`] carried in a charge tag.
+///
+/// The low 8 bits of a tag hold the cgroup id (`MAX_CGROUPS` = 256 fits
+/// exactly), the upper 24 the generation.
+pub const TAG_GEN_BITS: u32 = 24;
+
+/// A tag value meaning "this frame is not charged to any non-root cgroup".
+///
+/// Zero is unambiguous: a tag is only ever minted for a *non-root* group, so
+/// its low byte — the id — is never zero for a real charge.
+pub const TAG_NONE: u32 = 0;
+
+/// Number of uncharges dropped because the group that was charged had been
+/// deleted and its slot reissued to an unrelated group.
+///
+/// This is the counter for the bug the tags exist to prevent, so a non-zero
+/// value is *the fix working*, not a fault: every increment is a frame whose
+/// credit would otherwise have been taken from a group that never allocated
+/// it.  A steadily climbing count does mean something upstream is holding
+/// frames past the lifetime of the group that paid for them, which is worth
+/// knowing about even though the accounting is now correct either way.
+static STALE_UNCHARGES_DROPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Combine a cgroup id and a slot generation into a charge tag.
+#[inline]
+fn pack_tag(cgroup_id: CgroupId, generation: u32) -> u32 {
+    let gen_bits = generation & ((1u32 << TAG_GEN_BITS) - 1);
+    #[allow(clippy::arithmetic_side_effects)] // gen_bits < 2^24, so << 8 fits
+    {
+        (gen_bits << 8) | (cgroup_id & 0xff)
+    }
+}
+
+/// Mint a charge tag naming `cgroup_id` *at its current generation*, without
+/// charging anything.
+///
+/// Returns [`TAG_NONE`] for the root group, an out-of-range id, or an
+/// inactive slot — none of which carry a memory charge worth redeeming.
+///
+/// **To record a charge, use [`mem_charge_tagged`] instead**, which mints the
+/// tag under the same lock acquisition that performs the charge. This function
+/// exists for callers that need to *predict* or compare a tag — the self-tests
+/// asserting which group a frame was charged to — where there is no charge for
+/// the tag to get out of step with.
+#[must_use]
+pub fn tag_for(cgroup_id: CgroupId) -> u32 {
+    if cgroup_id == ROOT_CGROUP {
+        return TAG_NONE;
+    }
+    let idx = cgroup_id as usize;
+    if idx >= MAX_CGROUPS {
+        return TAG_NONE;
+    }
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return TAG_NONE,
+    };
+    if !table.nodes[idx].active {
+        return TAG_NONE;
+    }
+    pack_tag(cgroup_id, table.nodes[idx].generation)
+}
+
+/// Uncharge `count` frames against a tag minted earlier by [`tag_for`].
+///
+/// This is [`mem_uncharge`] plus the staleness check that gives the tag its
+/// point: if the slot named by the tag has been deleted and reissued since
+/// the tag was minted, the generations differ, the uncharge is **dropped**
+/// rather than applied, and [`stale_uncharges_dropped`] counts it.
+///
+/// Dropping is the correct outcome, not a lesser one.  The group that owed
+/// this charge is gone, and its counters went with it; the group holding the
+/// slot now never allocated the frame, so debiting it would push its
+/// `mem_usage` below its real usage and make its `MemLimit` admit
+/// allocations it should reject.  Losing a charge that no longer has an
+/// owner costs nothing.
+pub fn mem_uncharge_tag(tag: u32, count: u64) {
+    if tag == TAG_NONE {
+        return;
+    }
+    let cgroup_id = tag & 0xff;
+    let tag_gen = tag >> 8;
+    let idx = cgroup_id as usize;
+
+    // Same try_lock discipline as `mem_uncharge`: frame-free paths can run in
+    // interrupt context, and a lost uncharge over-counts, which is the safe
+    // direction.
+    let table = match TABLE.try_lock() {
+        Some(g) => g,
+        None => return,
+    };
+
+    if idx >= MAX_CGROUPS || !table.nodes[idx].active {
+        // Deleted and not yet reissued.  Nothing to debit and nobody to
+        // debit it to; not stale in the dangerous sense, since no innocent
+        // group is holding the slot.
+        return;
+    }
+
+    if table.nodes[idx].generation & ((1u32 << TAG_GEN_BITS) - 1) != tag_gen {
+        STALE_UNCHARGES_DROPPED.fetch_add(count, Ordering::Relaxed);
+        return;
+    }
+
+    let old = table.nodes[idx]
+        .mem_usage
+        .fetch_sub(count, Ordering::Relaxed);
+    if old < count {
+        // Underflow — fix up.
+        table.nodes[idx].mem_usage.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Number of uncharges dropped because the charged group's slot had been
+/// reissued.  See [`STALE_UNCHARGES_DROPPED`].
+#[must_use]
+pub fn stale_uncharges_dropped() -> u64 {
+    STALE_UNCHARGES_DROPPED.load(Ordering::Relaxed)
 }
 
 /// Update the peak (high-water mark) for memory usage.

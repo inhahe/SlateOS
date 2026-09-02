@@ -1304,7 +1304,16 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
 - [x] ICMP echo request/reply with RTT measurement, checksum verification, Destination Unreachable/Time Exceeded handling
 - [x] IPv4/TCP/UDP checksum verification on all incoming packets
 - [x] UPnP / NAT-PMP port forwarding (detect and configure router) _(upnp.rs: NAT-PMP RFC 6886 packet building/parsing, UPnP IGD SSDP discovery + SOAP control, mapping lifecycle with renewal/expiry, duplicate detection)_
-- [ ] Later: WiFi (requires wireless driver + wpa_supplicant port)
+- [-] Later: WiFi (requires wireless driver + wpa_supplicant port) — everything
+  that needs no hardware is done and green: `net80211` (802.11 wire format, RSN,
+  EAPOL-Key, LLC/SNAP, clause-12 key derivation), `aes`, `hmac`,
+  `net80211::supplicant` (the 4-way handshake with the KRACK defence as an
+  `Outcome` variant), and `net80211::assoc` (the `Transceiver` trait and the
+  clockless `Association` step function that owns the frame ordering; 25 tests,
+  no hardware, no scheduler — see design-decisions.md §579). Blocked on: an
+  `impl Transceiver` over lane A's `kernel::net::hwsim`, then a real wireless
+  driver. Note that a green hwsim run will prove the frame exchange and the key
+  schedule, **not** confidentiality — hwsim does not encrypt, deliberately.
 
 ### 2.5 POSIX Compatibility Layer
 
@@ -1545,7 +1554,7 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 ### 3.2 Graphics Stack
 
 - [ ] DRM/KMS equivalent (kernel mode setting, GPU memory management)
-- [ ] Vulkan loader and basic GPU command submission
+- [-] Vulkan loader and basic GPU command submission — loader started 2026-09-02 in `gui/vulkan/` (crate `vkloader`): the interface-version handshake and the dispatchable-handle ABI, both against the Khronos Loader–Driver Interface, then the instance-level entry points on top of them. `vkGetInstanceProcAddr`, `vkCreateInstance`, `vkDestroyInstance` and `vkEnumeratePhysicalDevices` are exported and fan out across every registered driver; the three `vkEnumerateInstance*` commands are deliberately absent symbols rather than empty-list stubs. Device-level Vulkan and command submission untouched. See `roadmap.md` and design-decisions.md §577, §578.
 - [ ] OpenGL via Mesa port
 - [ ] 2D drawing library for application UI
 - [ ] OS-level image codec support (all common formats apps can decode/encode via system API):

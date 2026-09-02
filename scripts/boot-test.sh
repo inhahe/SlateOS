@@ -16,6 +16,11 @@
 #       kernel was built but never booted, so this says nothing at all about the
 #       code under test — it is the one status where retrying unchanged is the
 #       right response.
+#   5 — Gave up waiting for the host's *commit charge* to fall far enough to
+#       run (see check_commit_headroom).  Nothing was built and nothing was
+#       booted.  Like 4 it says nothing about the code under test, and like 4
+#       the right response is to retry later: the cause is another lane's
+#       build, and it clears on its own.
 #
 # 2 and 3 are listed here because they were not: exit 2 has existed since the
 # stall detector landed and this header still claimed the script only ever
@@ -1860,6 +1865,149 @@ check_free_space() {
     local phase="$1"
     check_tree_free_space "$phase"
     check_temp_free_space "$phase"
+}
+
+# --- Commit charge: the other resource a boot runs out of ---------------------
+#
+# The disk checks above guard the wrong resource for the failure that actually
+# keeps happening.  Windows' *commit limit* is RAM plus pagefile, and when it is
+# reached the kernel refuses to back new private pages -- so `fork()` fails and
+# nothing new can start, while free *physical* memory still reads healthy.  With
+# three lanes compiling at once this machine sits at 96-97% of a ~262 GB limit,
+# and 20 GB of free RAM alongside it is the normal shape, not a contradiction.
+# Watching free RAM does not predict it; only the commit number does.
+#
+# It has cost two boot runs.  On 2026-09-02 one died at 395s with
+# `dofork: child -1 ... 0xC000012D` (STATUS_COMMIT_LIMIT) -- after the build,
+# deep into the self-tests, with the whole run discarded.  See known-issues.md
+# "Three lanes building at once exhausts the Windows commit limit".
+#
+# WAITING RATHER THAN REFUSING.  Unlike a full disk, this condition clears by
+# itself: the builds causing it finish.  Refusing on sight would stop an
+# autonomous lane for something that resolves in minutes, so this mirrors the
+# boot lock -- wait for a bounded budget, then give up with a status that says
+# nothing was booted.
+#
+# AN ABSOLUTE FLOOR, NOT A PERCENTAGE.  What a run needs is a fixed quantity --
+# a 3 GiB guest, QEMU's own mappings, and room for the dozens of short-lived
+# helpers the harness forks while polling -- not a share of the machine.  A
+# percentage would demand more on a big host and less on a small one, which is
+# backwards.
+#
+# NEVER BLOCKS ON A FAILED PROBE.  No PowerShell, or an unparseable answer,
+# means "unknown", and unknown proceeds.  A gate that fails closed on its own
+# measurement error would stop every boot on a non-Windows host, and a boot not
+# run is a regression not caught.
+# WHERE 12 GiB COMES FROM, AND HOW FIRM IT IS.  Not from adding up what a boot
+# needs -- that sum says ~4 GiB (a 3 GiB guest plus QEMU's own mappings) and it
+# is demonstrably too low.  It comes from the failure: readings taken minutes
+# either side of the 2026-09-02 fork failure showed 8.0 and 9.7 GiB of commit
+# still free, so a run died at a headroom that a naive floor would have called
+# ample.  Cygwin's fork reserves the parent's whole address space, and another
+# lane's rustc can take several GiB in a spike, so the margin has to cover a
+# transient neither process reports.
+#
+# So this is an empirical floor anchored to one observation, deliberately set
+# above the highest reading associated with a failure rather than at it.  That
+# makes it a lower bound on what is safe, not a measurement of it.  If a boot
+# ever dies of STATUS_COMMIT_LIMIT while this gate passed it, the number is
+# still too low and the evidence for raising it is that run -- record the
+# reading in known-issues.md rather than adjusting by feel.
+MIN_COMMIT_FREE_MB="${BOOT_TEST_MIN_COMMIT_FREE_MB:-12288}"
+COMMIT_WAIT="${BOOT_TEST_COMMIT_WAIT:-900}"
+
+# Free commit charge in MiB on stdout, or a non-zero status if it cannot be had.
+#
+# `TotalVirtualMemorySize` and `FreeVirtualMemory` are Win32_OperatingSystem's
+# names for the commit limit and the unused part of it, both in KiB.  They are
+# the same pair Task Manager shows as "Committed"; there is no `df`-like
+# equivalent, which is why this reaches for PowerShell at all.
+measure_commit_free_mb() {
+    command -v powershell &>/dev/null || return 1
+    local out
+    out="$(powershell -NoProfile -NonInteractive -Command \
+        '[int]((Get-CimInstance Win32_OperatingSystem).FreeVirtualMemory/1KB)' \
+        2>/dev/null | tr -cd '0-9')" || return 1
+    [ -n "$out" ] || return 1
+    echo "$out"
+}
+
+# Wait until the host can afford this run, or give up with exit 5.
+#
+# `phase` is echoed so a run that waits twice says which wait it is in; the
+# second one is the interesting one, because it means our own build is what
+# consumed the margin.
+check_commit_headroom() {
+    local phase="$1"
+    [ "$MIN_COMMIT_FREE_MB" -gt 0 ] 2>/dev/null || return 0
+
+    local free_mb
+    if ! free_mb="$(measure_commit_free_mb)"; then
+        # Said once per run and not per poll: on a host without PowerShell this
+        # is the normal case, and a warning repeated every 20 seconds trains the
+        # reader to skip the block it is printed in.
+        if [ "${_COMMIT_PROBE_WARNED:-0}" = 0 ]; then
+            _COMMIT_PROBE_WARNED=1
+            echo "NOTE: cannot read the host's commit charge; the" \
+                 "${MIN_COMMIT_FREE_MB} MiB floor is NOT being enforced."
+        fi
+        return 0
+    fi
+
+    if [ "$free_mb" -ge "$MIN_COMMIT_FREE_MB" ]; then
+        echo "Commit headroom OK: ${free_mb} MiB free (floor ${MIN_COMMIT_FREE_MB} MiB, ${phase})."
+        return 0
+    fi
+
+    echo "=== Waiting for commit headroom (${free_mb} MiB free, need ${MIN_COMMIT_FREE_MB} MiB, ${phase}) ==="
+    echo "    Another lane is probably building.  This clears on its own; nothing is wrong with the tree."
+    local waited=0
+    local nap
+    while [ "$waited" -lt "$COMMIT_WAIT" ]; do
+        # Never sleep past the budget.  A fixed 20s tick would make
+        # BOOT_TEST_COMMIT_WAIT=5 wait twenty seconds, so the knob would not
+        # mean what it says -- and it is the knob a test, or an operator in a
+        # hurry, would reach for first.
+        nap=$((COMMIT_WAIT - waited))
+        [ "$nap" -gt 20 ] && nap=20
+        sleep "$nap"
+        waited=$((waited + nap))
+        if ! free_mb="$(measure_commit_free_mb)"; then
+            # The probe worked a moment ago and does not now.  Proceeding is the
+            # right default for the same reason it is above -- we decline to
+            # block on our own inability to measure -- but it is said out loud,
+            # because a silent transition from "gated" to "not gated" is the
+            # shape of a check that has quietly stopped checking.
+            echo "NOTE: the commit-charge probe stopped answering after ${waited}s; proceeding ungated."
+            return 0
+        fi
+        if [ "$free_mb" -ge "$MIN_COMMIT_FREE_MB" ]; then
+            echo "Commit headroom OK after ${waited}s: ${free_mb} MiB free (floor ${MIN_COMMIT_FREE_MB} MiB)."
+            return 0
+        fi
+        echo "    still ${free_mb} MiB free after ${waited}s of ${COMMIT_WAIT}s..."
+    done
+
+    echo "" >&2
+    echo "ERROR: gave up after ${COMMIT_WAIT}s waiting for commit headroom (${free_mb} MiB free, floor ${MIN_COMMIT_FREE_MB} MiB, ${phase})." >&2
+    echo "" >&2
+    echo "NOTHING WAS BUILT AND NOTHING WAS BOOTED — this says nothing about the code under test." >&2
+    echo "" >&2
+    echo "Windows' commit limit is RAM plus pagefile.  At the limit, no process can start:" >&2
+    echo "fork() returns STATUS_COMMIT_LIMIT (0xC000012D) and the run dies wherever it happens" >&2
+    echo "to be, which on 2026-09-02 was 395 seconds into a boot whose build had already cost" >&2
+    echo "twenty minutes.  Refusing now costs seconds instead." >&2
+    echo "" >&2
+    echo "The usual cause is another lane's cargo build.  Do NOT kill it — it is another" >&2
+    echo "agent's in-flight work.  Wait for it, or do work that does not need to boot." >&2
+    echo "" >&2
+    echo "To override for one run:  BOOT_TEST_MIN_COMMIT_FREE_MB=0  (0 disables the floor)" >&2
+    echo "To wait longer:           BOOT_TEST_COMMIT_WAIT=<seconds>" >&2
+    # Same reasoning as exit 4's cleanup: take the previous run's artefacts with
+    # us, so "nothing was booted" is self-evident to a caller that greps the
+    # serial log without having heard of this status.
+    rm -f "${SERIAL_FILE:-}" "${SERIAL_FILE:+${SERIAL_FILE%.txt}-regs.txt}" 2>/dev/null || true
+    exit 5
 }
 
 # Validated here rather than passed through, so a typo ("--host-load=quiet")
@@ -4380,6 +4528,11 @@ check_cfg_unix
 # Step 1: Build
 if [ "$NO_BUILD" -eq 0 ]; then
     check_free_space "before building"
+    # Before the build, not only before QEMU.  A build started against an
+    # exhausted commit limit is the thing most likely to *fail* to fork -- rustc
+    # spawns dozens of processes -- and it is also twenty minutes we would spend
+    # before discovering the boot cannot run either.
+    check_commit_headroom "before building"
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
@@ -4725,6 +4878,22 @@ fi
 # went in unlabelled, three reading ~8085 ns for `crypto_sha256_64B` and two
 # ~1936 for identical source, which between them would have stretched that
 # benchmark's outlier fence past 4x and blinded the detector for it.
+
+# Checked a second time here, and the placement is the decision.
+#
+# It has to be *after* the build, because our own build is a large consumer of
+# commit charge and the margin that existed before it may not exist after --
+# checking only up front would gate on a number the build then invalidates.
+#
+# It has to be *before* the boot lock, because this call can wait fifteen
+# minutes, and waiting inside the lock would idle while holding the one resource
+# the other two lanes queue for -- stalling them for a condition their own
+# builds caused, which is the worst possible place to put a sleep.
+#
+# What that ordering gives up: pressure arriving during the lock wait itself is
+# not caught.  That is the residual, and it is the right one to accept -- the
+# alternative trades a rare miss for a certain stall.
+check_commit_headroom "after building, before queueing to boot"
 
 # --- Cross-worktree boot lock -------------------------------------------------
 #

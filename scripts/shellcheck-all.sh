@@ -114,13 +114,119 @@ list_scripts() {
 # so `for f in $(...)` is not an option either.)
 mapfile -t scripts < <(list_scripts | sed 's|^\./||' | sort)
 
+# RUN IN PARALLEL, REPORT IN SERIES.  This gate is pure analysis of 103
+# independent files with no shared state, which is the textbook case for it, and
+# it was running them one at a time.  Measured 2026-09-02 on this tree, the two
+# shapes run back to back twice each on 12 cores: **124.5 s / 119.6 s serial
+# against 33.4 s / 27.7 s here**, with the report `diff`-identical between them.
+# Note the spread within each shape -- run-to-run variance on this machine is
+# around +/-25%, so treat any two figures closer than that as equal.
+#
+# Batching instead (`shellcheck f1 f2 ... f103`, one process) was measured and
+# is the wrong lever: 93 s against 121 s serial, only 23% off, because the cost
+# here is *not* process startup.  It is analysis -- `-x` makes the tool follow
+# and re-parse every sourced preamble once per sourcer, and `diff-wsl.sh` alone
+# is sourced by most of the harnesses.  Batching also merges the per-file output
+# that the tally below is built from, so it would cost the report to buy a fifth
+# of what parallelism buys.
+#
+# The two phases are separate on purpose.  Findings are written to one file per
+# script and read back *in the original sorted order*, so the output is
+# byte-identical to the serial version -- a gate whose report reorders itself
+# run to run cannot be diffed against a previous run, which is the first thing
+# anyone does with one.  Interleaving the children's stdout directly would also
+# tear individual lines, since nothing guarantees a whole finding is one write.
+#
+# `xargs -P` and not a hand-rolled bash pool.  The bash version was written
+# first and is a trap worth recording, because it *looks* right and its output
+# is correct -- only its speed is wrong, so nothing fails:
+#
+#     running=$((running + 1))
+#     if [ "$running" -ge "$jobs_max" ]; then wait -n; running=$((running - 1)); fi
+#
+# `running` counts children that have not been *reaped*, which is not the same
+# as children that are still *alive*.  `wait -n` returns immediately when any
+# finished-but-unreaped child exists, so once a few jobs finish in a burst the
+# backlog of zombies never drains: each iteration reaps exactly one and launches
+# exactly one, and the live count settles wherever the burst left it.  Probed
+# with 60 uneven sleeps at `jobs_max`=12, the counter read 11-12 throughout
+# while `jobs -r` showed **2 to 6** actually running.  Measured on this tree it
+# was ~2x slower than `xargs -P12`.  Fixing it needs the live count, which in
+# bash means `jobs -r | wc -l` -- two forks per file to re-derive what xargs
+# already tracks correctly.
+#
+# Not a fixed batch of N-then-wait-for-all either: analysis times here range
+# from ~0.2 s to ~4 s, so a batching scheme spends most of its time with one
+# straggler running and the other eleven cores idle.
+#
+# The `sh -c` wrapper exists to give each child its own output file, and is
+# handed the index and the path as `$0` and `$1` -- an index rather than a
+# mangled form of the path, because paths here contain `/` and spaces and any
+# encoding of them into a filename is a second thing to get wrong.  `|| :`
+# because shellcheck exits non-zero on findings and xargs would otherwise return
+# 123 and, at 255, abort the whole run; the findings are read from the files.
+jobs_max=$(nproc 2>/dev/null || echo 4)
+outdir=$(mktemp -d) || exit 1
+# Cleaned on interrupt as well as on exit: a Ctrl-C during a 30 s run otherwise
+# leaves a directory of temporary files behind every time.
+trap 'rm -rf "$outdir"' EXIT INT TERM
+
+kept=()
+for f in "${scripts[@]}"; do
+  [ -e "$f" ] || continue
+  kept+=("$f")
+done
+
+i=0
+# The single quotes on the `sh -c` body are the point, not an oversight: `$SC`,
+# `$SEV`, `$OUTDIR`, `$0` and `$1` must reach the child *unexpanded* and be
+# resolved there, per child, from the environment and the two arguments xargs
+# appends.  Double quotes would expand them in this shell, so every child would
+# be handed the same already-substituted string and `$0`/`$1` would be this
+# script's own name and first argument.  SC2016 cannot tell the two cases apart.
+# shellcheck disable=SC2016
+for f in "${kept[@]}"; do
+  printf '%s\0%s\0' "$i" "$f"
+  i=$((i + 1))
+done | SC="$sc" SEV="$severity" OUTDIR="$outdir" \
+  xargs -0 -n 2 -P "$jobs_max" \
+    sh -c '"$SC" -x -S "$SEV" "$1" > "$OUTDIR/$0.out" 2>&1 || :'
+
+# COUNT THE OUTPUTS BEFORE TRUSTING THEM.  Splitting analysis from reporting
+# introduces a failure this script did not previously have: the report is now
+# built from files rather than from the tool's exit status, and a *missing* file
+# reads as an *empty* one -- that is, as "no findings".  So anything that stops
+# the children from running at all (xargs absent, `sh` unable to exec, the temp
+# directory gone, a full disk) would produce the words "0 finding(s) total" and
+# exit 0.  That is the same false green the exit-2 skip in boot-test.sh's
+# `check_shellcheck` was rewritten to stop being: a gate that cannot see must
+# never report what a clean tree reports.
+#
+# One file per script is created by the redirection itself, before shellcheck is
+# even exec'd, so the count is a true test of "did every child start".
+produced=$(find "$outdir" -maxdepth 1 -type f -name '*.out' | wc -l)
+if [ "$produced" -ne "${#kept[@]}" ]; then
+  echo "shellcheck-all.sh: internal error -- the parallel analysis phase produced" >&2
+  echo "  $produced output file(s) for ${#kept[@]} script(s), so some of them never ran." >&2
+  echo "  Refusing to report a result: a missing output is indistinguishable from" >&2
+  echo "  a clean one, and reporting it as clean is exactly the failure this gate" >&2
+  echo "  exists to prevent.  Check that xargs(1) is present and that $outdir is" >&2
+  echo "  writable." >&2
+  exit 3
+fi
+
 total=0
 flagged=0
 findings=0
-for f in "${scripts[@]}"; do
-  [ -e "$f" ] || continue
+i=-1
+for f in "${kept[@]}"; do
+  i=$((i + 1))
   total=$((total + 1))
-  out=$("$sc" -x -S "$severity" "$f" 2>&1)
+  # `$(<file)` and not `$(cat file)`: bash reads the file itself, with no fork.
+  # At one `cat` per script that is 103 processes to read 103 mostly-empty
+  # files, which measured ~6 s of the run -- a fifth of what the parallel
+  # analysis phase above now costs in total.
+  out=$(<"$outdir/$i.out")
   if [ -n "$out" ]; then
     flagged=$((flagged + 1))
     n=$(printf '%s\n' "$out" | grep -cE '^In .* line [0-9]+:')

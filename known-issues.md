@@ -107231,7 +107231,16 @@ is only about the *attribution* warning that follows it.
 
 ---
 
-### A-KILL-QEMU-PRINTS-A-BARE-NO-SUCH-FILE-AFTER-A-PASSING-RUN. The `[ -f ]` guard on the pidfile does not make the read that follows it safe, and the read's own `2>/dev/null` cannot suppress the message — 2026-09-02 — **Status: OPEN** (lane A; diagnosed in full, fix known and written out below; not applied yet only because a boot test was in flight and editing `scripts/` mid-run invalidates the harness's source digest)
+### A-KILL-QEMU-PRINTS-A-BARE-NO-SUCH-FILE-AFTER-A-PASSING-RUN. The `[ -f ]` guard on the pidfile does not make the read that follows it safe, and the read's own `2>/dev/null` cannot suppress the message — 2026-09-02 — **Status: ✅ FIXED 2026-09-02** (lane A; the fix below was applied verbatim once the in-flight boot test released `scripts/`. `bash -n` and `shellcheck --severity=warning` both clean.)
+
+**Fixed as described.** The `[ -f ]` wrapper is gone, the read is attempted
+unconditionally, and the stderr redirect moved to the group so it covers the
+shell's own diagnostic. One thing was added beyond the plan: the stale docblock
+claimed a kill-by-image-name fallback that no longer exists, and rather than
+just deleting the sentence the replacement records *why* there must never be
+one again — with three lanes live, killing `qemu-system-x86_64.exe` by image
+name would take down another lane's boot test along with ours. A removed
+fallback that is only deleted invites its own reintroduction.
 
 **In short:** after a *successful* boot test, the harness sometimes prints one
 stray line — `./scripts/boot-test.sh: line 1329: .../build/qemu.pid: No such

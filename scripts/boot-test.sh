@@ -1308,8 +1308,13 @@ PIDFILE_WIN="$(to_win_path "$PIDFILE")"
 # $1 = the MSYS/Cygwin PID from `$!` (used for the `wait` and a first,
 # best-effort Cygwin-side kill).  We then read the OS PID that qemu wrote to
 # its -pidfile and `taskkill //F //PID` it, which is the only thing that
-# reliably kills a native Windows qemu from MSYS.  Falls back to killing by
-# image name only if the pidfile is missing (should not happen).  Idempotent.
+# reliably kills a native Windows qemu from MSYS.  Idempotent.
+#
+# A missing pidfile is the NORMAL case on a clean exit, not an anomaly: qemu
+# unlinks it on the way out.  There is deliberately no kill-by-image-name
+# fallback -- this file may run while another lane's boot test has its own qemu
+# alive, and killing by image name would take theirs down with ours.  Losing
+# the pid means the process we wanted to kill has already gone.
 kill_qemu() {
     local cyg_pid="${1:-}"
     # Stamp the end of the QEMU window at the FIRST teardown, not the last.
@@ -1324,12 +1329,25 @@ kill_qemu() {
     # Best-effort Cygwin-side signal first (harmless if it does nothing).
     [ -n "$cyg_pid" ] && kill "$cyg_pid" 2>/dev/null || true
     # Authoritative kill via the OS PID qemu recorded in its pidfile.
-    if [ -f "$PIDFILE" ]; then
-        local win_pid
-        win_pid="$(tr -cd '0-9' < "$PIDFILE" 2>/dev/null || true)"
-        if [ -n "$win_pid" ]; then
-            taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
-        fi
+    #
+    # Read it unconditionally rather than testing for it first.  QEMU unlinks
+    # its own -pidfile as it exits, so a test-then-read races the very teardown
+    # this function performs -- and loses most often on the *happy* path, where
+    # the guest reached BOOT_OK and qemu is already on its way out under its own
+    # power.  An absent file yields an empty pid, which the `-n` below already
+    # handles, so the test bought nothing and only read as though it made the
+    # line beneath it safe.
+    #
+    # The redirect is on the group, not on `tr`.  A failed input redirection is
+    # diagnosed by the shell, which never execs `tr` at all -- so `tr`'s own
+    # `2>/dev/null` is not in effect when the message is produced, and it went
+    # to the script's stderr while `|| true` swallowed the status.  That is how
+    # this printed a bare "line 1329: build/qemu.pid: No such file or directory"
+    # on runs that passed, with nothing else wrong to explain it.
+    local win_pid
+    win_pid="$( { tr -cd '0-9' < "$PIDFILE"; } 2>/dev/null || true)"
+    if [ -n "$win_pid" ]; then
+        taskkill //F //PID "$win_pid" >/dev/null 2>&1 || true
     fi
     # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
     [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true

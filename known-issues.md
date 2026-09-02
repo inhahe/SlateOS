@@ -108332,7 +108332,13 @@ the regression test all exist. The work is:
    are also run by hand and by the boot test, where the working tree is right).
    **In progress.** Gate 2's `multicall-aliases.py` converted 2026-09-02;
    output on the working tree is byte-identical to before in both its modes.
-   Six to go: gates 3, 4, 5, 6, 8, 11.
+   Gate 3's `raced-globals.py` converted 2026-09-02 the same way — the
+   pre-conversion script was checked out *in place* and its `--check`, `--all`
+   and `--selftest` output diffed byte-for-byte against the converted one, and
+   then `--check --head HEAD` was diffed against the clean working-tree run:
+   two independent code paths agreeing over ~14k files. It is also **faster**,
+   not a tax: 6m18s before, 4m55s on the disk after, 3m49s against a revision.
+   Five to go: gates 4, 5, 6, 8, 11.
 3. Pass `--head` from the hook, and extend `test-pre-push-gates.py`'s existing
    assertion to all eight gates instead of just gate 9. **In progress.** The
    assertion is now a table (`HEAD_GATES`) rather than a gate-9 special case,
@@ -108341,7 +108347,7 @@ the regression test all exist. The work is:
    A second assertion pairs with it: a gate looping over `$pushed_shas` must
    also guard on that list being non-empty, because a loop over nothing runs
    the checker zero times while `note_gate` has already reported the gate as
-   having run.
+   having run. Gate 3 joined both assertions 2026-09-02.
 4. Behavioural coverage, per `test-pre-push-fmt-gate.py`: for each gate, the
    false-pass and false-fail cases specifically. **Baseline cases are worthless
    here** — committed-clean-passes and committed-dirty-is-refused are green
@@ -108388,6 +108394,43 @@ the regression test all exist. The work is:
    review: `--head HEAD` survived every end-to-end case, and the reason it did
    was that no case could push a branch it was not standing on — because
    `touches` would have skipped the gate.
+
+6. **Gate 3 converted, 2026-09-02.** `raced-globals.py` now takes `--head` and
+   reads *four* inputs through the seam, each of which decides its verdict on
+   its own: the `.rs` source, the baseline that forgives, the `Cargo.toml` that
+   says whether the crate's tests can run at all, and the set of files that
+   exist. The manifest is the dangerous one — a crate with no test target is
+   silenced *entirely*, races and all, so an uncommitted `test = false` read off
+   the disk would drop a committed race on the floor without mentioning it.
+   Twelve gate-3 cases and four end-to-end pushes in
+   `test-checkers-honour-head.py` (23 cases, 68 assertions overall), and the
+   conversion was mutation-verified with sixteen mutants: every way of reading
+   one of those four inputs off the disk, each of the five short-circuiting
+   probes inside `crate_has_test_target` separately (they cannot share a
+   fixture — the first that finds a target answers and the rest are never
+   reached), exit 1 instead of 2 on an unreadable revision, the checker's skip
+   list not reaching the seam, and three wiring mutants. Two things the run
+   found that review had not:
+
+   * **A `for sha in $pushed_shas` loop cannot be distinguished from
+     `git rev-parse HEAD` by any case that pushes the branch it is standing
+     on** — which was every case at first. This is the same blind spot that hid
+     the `touches` defect in step 5, and it is per-gate: gate 2's off-branch
+     case says nothing about gate 3's loop. Every converted gate therefore needs
+     its own off-branch push case, and gate 3 now has one.
+   * **Gate 3's `[ -n "${pushed_shas# }" ]` guard is currently unobservable.**
+     Now that `touches` is scoped by `$pushed_shas`, an empty list already makes
+     `touches` false and skips the gate, so removing the guard changes no
+     outcome and no behavioural case can kill that mutant. It is kept rather
+     than deleted as dead code, and the reasoning is recorded in the suite: the
+     redundancy is exactly one edit deep, since `touches` was HEAD-scoped until
+     this same day and under that spelling a branch-deletion push reached the
+     loop with nothing in it. It stays pinned statically by
+     `test-pre-push-gates.py`. The push shape that would exercise it — deleting
+     a remote branch — now has an end-to-end case anyway, asserting the two
+     things that must hold however they are delivered: the deletion is allowed
+     however broken the working tree is, and the tally reports the gate
+     `skipped` rather than `ran`.
 
 ### Why it is not done yet
 
